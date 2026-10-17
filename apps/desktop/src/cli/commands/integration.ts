@@ -5,6 +5,10 @@ import { ScoutCliError } from "../errors.ts";
 import { resolveScoutBrokerUrl } from "../../core/broker/service.ts";
 
 export const INTEGRATION_HELP = [
+  "scout integration t3 inspect --connection <id>",
+  "scout integration t3 board|refresh --connection <id> --project <t3-project-id>",
+  "scout integration t3 attach --connection <id> --thread <t3-thread-id>",
+  "scout integration t3 run --connection <id> --project <t3-project-id> --card <t3-card-id> --request-id <id>",
   "scout integration setup slack --project <path> [--agent <id>] [--name <name>] [--workspace <team-id>] [--idempotency-key <key>]",
   "scout integration status <operation>",
   "scout integration rebind <operation> --if-revision <n> --project <path> [--agent <id>]",
@@ -19,10 +23,46 @@ export const INTEGRATION_HELP = [
   "Local pilot setup. Uses an existing registered project agent; does not create or install a Slack app.",
   "Authority confirmation records the human operator's confirmation; agents must not infer it.",
   "Never pass credentials here. Status reports the next setup action, not a connected integration.",
+  "T3 connections are configured on the broker through OPENSCOUT_T3_CONNECTIONS=[{id,url,tokenEnv}].",
+  "T3 commands return JSON; attach returns a Scout session for normal scout ask --to session:<id> continuation.",
+  "T3 project/thread IDs are opaque source IDs. Refresh records board observations in Scout work items.",
 ].join("\n");
+
+function parseT3IntegrationCommand(args: string[]): { path: string; body: unknown } {
+  const [command, ...rest] = args;
+  if (!["inspect", "board", "attach", "refresh", "run"].includes(command ?? "")) {
+    throw new ScoutCliError("Use scout integration t3 inspect, board, attach, refresh, or run. See scout integration --help.");
+  }
+  const allowed = ["--connection", ...(command === "attach" ? ["--thread"] : command !== "inspect" ? ["--project"] : []), ...(command === "run" ? ["--card", "--request-id"] : [])];
+  const flags: Record<string, string> = {};
+  for (let i = 0; i < rest.length; i++) {
+    const flag = rest[i]!;
+    if (!allowed.includes(flag) || flags[flag] !== undefined) {
+      throw new ScoutCliError("Unknown or duplicate T3 option. Use scout integration --help.");
+    }
+    const value = rest[++i];
+    if (!value?.trim() || value.startsWith("--")) throw new ScoutCliError(`${flag} requires a value`);
+    flags[flag] = value;
+  }
+  if (!flags["--connection"]) throw new ScoutCliError("T3 commands require --connection with a broker-configured connection ID.");
+  if (command === "attach" && !flags["--thread"]) throw new ScoutCliError("T3 attach requires --thread with an exact T3 thread ID.");
+  if (["board", "refresh", "run"].includes(command!) && !flags["--project"]) throw new ScoutCliError(`T3 ${command} requires --project with an exact T3 project ID.`);
+  if (command === "run" && (!flags["--card"] || !flags["--request-id"])) throw new ScoutCliError("T3 run requires --card and --request-id. Reuse the request ID only to recover the same Scout receipt.");
+  return {
+    path: `/v1/integrations/t3/${command}`,
+    body: {
+      connectionId: flags["--connection"],
+      ...(flags["--project"] ? { projectId: flags["--project"] } : {}),
+      ...(flags["--thread"] ? { threadId: flags["--thread"] } : {}),
+      ...(flags["--card"] ? { cardId: flags["--card"] } : {}),
+      ...(flags["--request-id"] ? { requestId: flags["--request-id"] } : {}),
+    },
+  };
+}
 
 export function parseIntegrationCommand(args: string[], cwd: string): { path: string; body?: unknown } {
   const [command, target, ...rest] = args;
+  if (command === "t3") return parseT3IntegrationCommand([target, ...rest].filter((value): value is string => value !== undefined));
   const allowed = command === "setup"
     ? ["--project", "--agent", "--name", "--workspace", "--idempotency-key"]
     : command === "rebind" ? ["--if-revision", "--project", "--agent"]
@@ -92,7 +132,7 @@ export async function runIntegrationCommand(context: ScoutCommandContext, args: 
   });
   const payload = await response.json() as SlackSetupReceipt & { error?: string; detail?: string };
   if (!response.ok) throw new ScoutCliError(payload.detail ?? payload.error ?? `Broker returned HTTP ${response.status}`);
-  if (args[0] === "manifest") { context.output.writeValue(payload, value => JSON.stringify(value, null, 2)); return; }
+  if (["manifest", "t3"].includes(args[0] ?? "")) { context.output.writeValue(payload, value => JSON.stringify(value, null, 2)); return; }
   context.output.writeValue(payload, (receipt) => [
     `${receipt.operation.displayName}: ${receipt.operation.state} (${receipt.readiness})`,
     `Operation: ${receipt.operation.id}; revision: ${receipt.operation.revision}`,

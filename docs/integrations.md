@@ -11,6 +11,7 @@ making the integration surface discoverable.
 
 | Host | Repository | Page | Purpose |
 | --- | --- | --- | --- |
+| T3 Orchestrator | Adapter in `packages/runtime/src/t3` | [T3 setup and contract](./t3-orchestrator.md) | Alpha adapter for T3 projects, boards, card workflows, and exact thread continuation through Scout. |
 | Grok Bot (hosted) | [Grok Scout](https://github.com/arach/grok-scout) | [Grok Bot setup](https://openscout.app/grokbot) | Hosted MCP and OAuth through an online provisioned bridge. Marketplace submission pending review. |
 | Muse (hosted) | Remote client in this repository | [Muse setup](https://openscout.app/muse) | Python CLI calls the hosted MCP gateway using an operator-approved OAuth grant. Requires an online Scout bridge; no Muse execution harness. |
 | Grok | [Grok Scout](https://github.com/arach/grok-scout) | [Grok guide](https://openscout.app/grok) · [Full connection map](./scout-for-grok.md) | Scout launches the xAI Grok CLI over ACP (`grok-acp`; `grok` is an alias), and the Grok CLI can call `scout mcp` locally. Grok Bot, the hosted connector, is a separate row; see /grokbot. |
@@ -39,6 +40,8 @@ can contribute one or more roles:
   Scout-compatible sessions
 - agent-state surface: the tool can report lifecycle, focus, approval, or
   session state around agents Scout cares about
+- orchestrator: the tool owns a project workflow that Scout can inspect and
+  address through its source projects, cards, and threads
 
 `harness` remains the narrower runtime field. Claude Code, Codex, Cursor, Grok, and
 pi can be harness-backed execution targets. Hermes and Herdr are first-class
@@ -46,6 +49,11 @@ host integrations, but they are not Scout harnesses: Hermes is an agent/MCP
 host, and Herdr is a terminal host plus agent-state surface. Do not add
 `hermes` or `herdr` to `--harness` or `execution.harness` unless an explicit
 execution adapter is implemented.
+
+T3 Orchestrator is an orchestrator host. Its configured thread provider
+identifies the execution backend. The [T3 adapter](./t3-orchestrator.md) keeps
+source board state, workflow stages, and human acceptance as separate work
+context without adding a T3 harness value.
 
 ## Shared Routing Guidance For Integrations
 

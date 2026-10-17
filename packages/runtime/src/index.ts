@@ -95,4 +95,7 @@ export {
   scoutBrokerInvocationLifecyclePath,
 } from "@openscout/protocol";
 export * from "./runtime-session-address.js";
+export * from "./t3/rpc-client.js";
+export * from "./t3/adapter.js";
+export * from "./t3/broker-service.js";
 export { runtimeSessionHandleForEndpoint } from "./runtime-session-handle.js";

@@ -5,6 +5,7 @@ export type ScoutHostIntegrationRole =
   | "agent_host"
   | "mcp_host"
   | "terminal_host"
+  | "orchestrator"
   | "agent_state_surface";
 
 export type ScoutHostIntegrationId =
@@ -14,7 +15,8 @@ export type ScoutHostIntegrationId =
   | "pi"
   | "hermes"
   | "herdr"
-  | "orca";
+  | "orca"
+  | "t3-orchestrator";
 
 export interface ScoutHostIntegration {
   id: ScoutHostIntegrationId;
@@ -97,6 +99,14 @@ export const SCOUT_HOST_INTEGRATIONS: readonly ScoutHostIntegration[] = [
     repositoryUrl: "https://github.com/stablyai/orca",
     installHint: "Install Orca (brew install --cask stablyai/orca/orca); its agent hooks report state for the sessions it runs.",
     summary: "Orca runs agent CLIs in terminals inside git worktrees; Scout reads its agent state and types into its terminals. It is not a Scout harness.",
+  },
+  {
+    id: "t3-orchestrator",
+    label: "T3 Orchestrator",
+    roles: ["agent_host", "agent_state_surface", "orchestrator"],
+    repositoryUrl: "https://github.com/leonaaardob/t3-orchestrator",
+    installHint: "Configure a T3 connection on the Scout broker, then inspect or attach a T3 thread with scout integration t3.",
+    summary: "T3 owns project boards, card workflows, and agent threads; Scout links that context and routes work through the thread's execution provider.",
   },
 ] as const;
 

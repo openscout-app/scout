@@ -15,11 +15,86 @@ import {
   isWorkItem,
   isQuestion,
   collaborationRequesterId,
+  validateExternalWorkContext,
+  type ExternalWorkContext,
   type CollaborationRecord,
   type CollaborationEvent,
   type WorkItemRecord,
   type QuestionRecord,
 } from "./collaboration.js";
+
+function makeExternalContext(): ExternalWorkContext {
+  return {
+    source: { adapterId: "t3-orchestrator", instanceId: "local", projectId: "project-1", workItemId: "card-1" },
+    observedAt: 1_700_000_000_000,
+    sourceState: "review",
+    board: { id: "board-1", title: "Development", column: { id: "in-review", title: "Review" } },
+    workflow: {
+      activeStageId: "review-1",
+      executionState: "idle",
+      stages: [
+        { id: "implementation-1", kind: "implementation", state: "completed", threadId: "thread-1", provider: "codex", model: "source-model" },
+        { id: "review-1", kind: "review", state: "completed", threadId: "thread-2", provider: "claudeCode" },
+      ],
+      humanAcceptance: { required: true, state: "pending", sourceState: "awaiting-acceptance" },
+    },
+  };
+}
+
+describe("external work context", () => {
+  test("preserves source workflow and review completion while human acceptance is pending", () => {
+    const work = makeWorkItem({
+      state: "review", requestedById: "operator", acceptanceState: "pending", externalContext: makeExternalContext(),
+    });
+    expect(validateCollaborationRecord(work)).toEqual([]);
+    expect(isCollaborationTerminalState(work)).toBe(false);
+    expect(work.externalContext?.workflow?.stages?.every((stage) => stage.state === "completed")).toBe(true);
+    expect(work.externalContext?.workflow?.humanAcceptance?.state).toBe("pending");
+    expect(JSON.parse(JSON.stringify(work)).externalContext).toEqual(work.externalContext);
+  });
+
+  test("keeps source state independent of Scout execution state and allows source-specific vocabulary", () => {
+    const context = makeExternalContext();
+    context.sourceState = "custom-column:blocked-for-design";
+    context.workflow!.stages![0]!.state = "provider-specific-failure";
+    expect(validateCollaborationRecord(makeWorkItem({ state: "working", externalContext: context }))).toEqual([]);
+  });
+
+  test("accepts minimal scoped source references and existing work without an external context", () => {
+    expect(validateExternalWorkContext({ source: { adapterId: "other", instanceId: "remote", workItemId: "1" }, observedAt: 0 })).toEqual([]);
+    expect(validateCollaborationRecord(makeWorkItem())).toEqual([]);
+  });
+
+  test("rejects malformed nested JSON without throwing", () => {
+    for (const context of [null, [], "context", { source: null, observedAt: "now", board: { column: [] }, workflow: { stages: [null], humanAcceptance: null } }]) {
+      expect(() => validateExternalWorkContext(context)).not.toThrow();
+      expect(validateExternalWorkContext(context).length).toBeGreaterThan(0);
+    }
+    const malformed = { source: { adapterId: 1, instanceId: "", workItemId: false }, observedAt: Number.NaN };
+    const work = makeWorkItem({ externalContext: malformed as unknown as ExternalWorkContext });
+    expect(validateCollaborationRecord(work)).toContain("externalContext.source.instanceId must be a non-empty string");
+  });
+
+  test("requires scoped identity and valid observation time", () => {
+    const context = makeExternalContext();
+    context.source.instanceId = " ";
+    context.observedAt = Number.POSITIVE_INFINITY;
+    expect(validateExternalWorkContext(context)).toEqual([
+      "externalContext.observedAt must be a non-negative finite timestamp",
+      "externalContext.source.instanceId must be a non-empty string",
+    ]);
+  });
+
+  test("rejects duplicate stages, dangling active stages, and invalid acceptance states", () => {
+    const context = makeExternalContext();
+    context.workflow!.stages![1]!.id = "implementation-1";
+    context.workflow!.humanAcceptance!.state = "complete" as never;
+    const errors = validateExternalWorkContext(context);
+    expect(errors).toContain("externalContext.workflow.stages[1].id must be unique within the workflow");
+    expect(errors).toContain("externalContext.workflow.activeStageId must reference a supplied stage");
+    expect(errors).toContain("externalContext.workflow.humanAcceptance.state must be pending, accepted, rejected, or unknown");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Helpers

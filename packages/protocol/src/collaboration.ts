@@ -26,6 +26,7 @@ export type QuestionState =
 
 export type CollaborationRelationKind =
   | "blocks"
+  | "depends_on"
   | "spawns"
   | "relates_to"
   | "references";
@@ -49,6 +50,67 @@ export interface CollaborationProgress {
   checkpoint?: string;
   summary?: string;
   percent?: number;
+}
+
+/**
+ * Identity in an external work system. Together, adapterId, instanceId,
+ * projectId (when present), and workItemId form the source namespace. Source
+ * ids remain opaque; none of these fields grant authority or identify a Scout
+ * actor. The external system remains the writer of its board and workflow.
+ */
+export interface ExternalWorkSource {
+  adapterId: string;
+  instanceId: string;
+  projectId?: string;
+  workItemId: string;
+  url?: string;
+}
+
+export interface ExternalWorkBoard {
+  id: string;
+  title?: string;
+  column?: { id: string; title?: string };
+}
+
+/** A source-owned stage, which may have its own execution thread/provider. */
+export interface ExternalWorkflowStage {
+  id: string;
+  kind?: string;
+  title?: string;
+  state: string;
+  threadId?: string;
+  provider?: string;
+  model?: string;
+}
+
+/** Human acceptance is independent of a stage or provider turn completing. */
+export interface ExternalHumanAcceptance {
+  required: boolean;
+  state: "pending" | "accepted" | "rejected" | "unknown";
+  sourceState?: string;
+  decidedById?: string;
+  decidedAt?: number;
+}
+
+export interface ExternalWorkWorkflow {
+  stages?: ExternalWorkflowStage[];
+  activeStageId?: string;
+  executionState?: string;
+  humanAcceptance?: ExternalHumanAcceptance;
+}
+
+/**
+ * An observation attached to Scout-owned work, rather than a replacement for
+ * its state or acceptanceState. Columns, card status, execution, and human
+ * decisions retain their separate source meanings. Adapters can refresh this
+ * context without importing external transcripts into Scout messages.
+ */
+export interface ExternalWorkContext {
+  source: ExternalWorkSource;
+  observedAt: number;
+  sourceState?: string;
+  board?: ExternalWorkBoard;
+  workflow?: ExternalWorkWorkflow;
 }
 
 export interface CollaborationRecordBase {
@@ -79,6 +141,110 @@ export interface WorkItemRecord extends CollaborationRecordBase {
   startedAt?: number;
   reviewRequestedAt?: number;
   completedAt?: number;
+  externalContext?: ExternalWorkContext;
+}
+
+function isExternalContextObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Validate nested adapter input before it enters the broker's durable work. */
+export function validateExternalWorkContext(context: unknown): string[] {
+  const errors: string[] = [];
+  const requiredString = (value: unknown, path: string): void => {
+    if (typeof value !== "string" || !value.trim()) {
+      errors.push(`${path} must be a non-empty string`);
+    }
+  };
+  const optionalString = (value: unknown, path: string): void => {
+    if (value !== undefined) requiredString(value, path);
+  };
+  const timestamp = (value: unknown, path: string): void => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      errors.push(`${path} must be a non-negative finite timestamp`);
+    }
+  };
+  if (!isExternalContextObject(context)) {
+    return ["externalContext must be an object"];
+  }
+  timestamp(context.observedAt, "externalContext.observedAt");
+  optionalString(context.sourceState, "externalContext.sourceState");
+  if (!isExternalContextObject(context.source)) {
+    errors.push("externalContext.source must be an object");
+  } else {
+    for (const key of ["adapterId", "instanceId", "workItemId"] as const) {
+      requiredString(context.source[key], `externalContext.source.${key}`);
+    }
+    for (const key of ["projectId", "url"] as const) {
+      optionalString(context.source[key], `externalContext.source.${key}`);
+    }
+  }
+  if (context.board !== undefined) {
+    if (!isExternalContextObject(context.board)) {
+      errors.push("externalContext.board must be an object");
+    } else {
+      requiredString(context.board.id, "externalContext.board.id");
+      optionalString(context.board.title, "externalContext.board.title");
+      if (context.board.column !== undefined) {
+        if (!isExternalContextObject(context.board.column)) {
+          errors.push("externalContext.board.column must be an object");
+        } else {
+          requiredString(context.board.column.id, "externalContext.board.column.id");
+          optionalString(context.board.column.title, "externalContext.board.column.title");
+        }
+      }
+    }
+  }
+  if (context.workflow === undefined) return errors;
+  if (!isExternalContextObject(context.workflow)) {
+    errors.push("externalContext.workflow must be an object");
+    return errors;
+  }
+  const workflow = context.workflow;
+  optionalString(workflow.activeStageId, "externalContext.workflow.activeStageId");
+  optionalString(workflow.executionState, "externalContext.workflow.executionState");
+  if (workflow.stages !== undefined) {
+    if (!Array.isArray(workflow.stages)) {
+      errors.push("externalContext.workflow.stages must be an array");
+    } else {
+      const stageIds = new Set<string>();
+      for (const [index, stage] of workflow.stages.entries()) {
+        const path = `externalContext.workflow.stages[${index}]`;
+        if (!isExternalContextObject(stage)) {
+          errors.push(`${path} must be an object`);
+          continue;
+        }
+        requiredString(stage.id, `${path}.id`);
+        requiredString(stage.state, `${path}.state`);
+        for (const key of ["kind", "title", "threadId", "provider", "model"] as const) {
+          optionalString(stage[key], `${path}.${key}`);
+        }
+        if (typeof stage.id === "string") {
+          if (stageIds.has(stage.id)) errors.push(`${path}.id must be unique within the workflow`);
+          stageIds.add(stage.id);
+        }
+      }
+      if (typeof workflow.activeStageId === "string" && !stageIds.has(workflow.activeStageId)) {
+        errors.push("externalContext.workflow.activeStageId must reference a supplied stage");
+      }
+    }
+  }
+  if (workflow.humanAcceptance !== undefined) {
+    const acceptance = workflow.humanAcceptance;
+    if (!isExternalContextObject(acceptance)) {
+      errors.push("externalContext.workflow.humanAcceptance must be an object");
+    } else {
+      const path = "externalContext.workflow.humanAcceptance";
+      if (typeof acceptance.required !== "boolean") errors.push(`${path}.required must be a boolean`);
+      if (!["pending", "accepted", "rejected", "unknown"].includes(acceptance.state as string)) {
+        errors.push(`${path}.state must be pending, accepted, rejected, or unknown`);
+      }
+      optionalString(acceptance.sourceState, `${path}.sourceState`);
+      optionalString(acceptance.decidedById, `${path}.decidedById`);
+      if (acceptance.decidedAt !== undefined) timestamp(acceptance.decidedAt, `${path}.decidedAt`);
+    }
+  }
+  return errors;
 }
 
 /**
@@ -237,6 +403,10 @@ export function validateCollaborationRecord(record: CollaborationRecord): string
 
   if (record.acceptanceState !== "none" && !collaborationRequiresAcceptance(record)) {
     errors.push("acceptanceState requires the corresponding requester and reviewer identities");
+  }
+
+  if (record.kind === "work_item" && record.externalContext !== undefined) {
+    errors.push(...validateExternalWorkContext(record.externalContext));
   }
 
   return errors;

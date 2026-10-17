@@ -16,7 +16,7 @@ export interface ExternalSessionTransport {
   send(nativeSessionId: string, body: string): Promise<{ nativeSessionId: string; state: string }>;
 }
 export function isExternalSessionEndpoint(endpoint: AgentEndpoint | null | undefined): boolean {
-  return (endpoint?.transport === "http" || endpoint?.transport === "mcp_poll" || endpoint?.transport === "devin_cloud_cli") && endpoint.metadata?.externalSession === true;
+  return (endpoint?.transport === "http" || endpoint?.transport === "mcp_poll" || endpoint?.transport === "devin_cloud_cli") && endpoint.metadata?.externalSession === true && endpoint.metadata?.t3Session !== true;
 }
 export function externalSessionConnections(env: NodeJS.ProcessEnv): ExternalSessionConnection[] {
   const parsed: unknown = JSON.parse(env.OPENSCOUT_EXTERNAL_SESSION_CONNECTIONS || "[]");

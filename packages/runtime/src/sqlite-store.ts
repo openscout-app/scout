@@ -36,6 +36,7 @@ import type {
   CollaborationPriority,
   CollaborationWaitingOn,
   CollaborationProgress,
+  ExternalWorkContext,
   WorkItemState,
   QuestionState,
   ControlEvent,
@@ -1531,6 +1532,7 @@ function buildCollaborationRecord(row: CollaborationRecordRow): CollaborationRec
     startedAt: detail.startedAt as number | undefined,
     reviewRequestedAt: detail.reviewRequestedAt as number | undefined,
     completedAt: detail.completedAt as number | undefined,
+    externalContext: detail.externalContext as ExternalWorkContext | undefined,
   };
 }
 
@@ -3838,6 +3840,7 @@ export class SQLiteControlPlaneStore {
       detail.startedAt = record.startedAt;
       detail.reviewRequestedAt = record.reviewRequestedAt;
       detail.completedAt = record.completedAt;
+      detail.externalContext = record.externalContext;
     }
 
     this.db.query(

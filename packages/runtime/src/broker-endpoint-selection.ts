@@ -130,6 +130,7 @@ export function classifyEndpoint(
         || endpoint.transport === "claude_channel"
         || isA2AHttpEndpoint(endpoint)
         || isExternalSessionEndpoint(endpoint)
+        || (endpoint.transport === "http" && endpoint.metadata?.t3Session === true)
         || isBrokerRunnableLocalAgentTransport(endpoint.transport)
       ),
   );

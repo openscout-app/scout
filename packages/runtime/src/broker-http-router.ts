@@ -17,6 +17,8 @@ import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } fr
 import { ChatQuestionError } from "./chat-question-transition.js";
 import { ChatMessageCorrectionError } from "@openscout/protocol";
 import type { BrokerExternalSessionService } from "./broker-external-session-service.js";
+import type { BrokerT3Service } from "./t3/broker-service.js";
+import { T3RpcError } from "./t3/rpc-client.js";
 import { writeBrokerSnapshot } from "./broker-snapshot-response.js";
 import type { RuntimeHttpRequestLike, RuntimeHttpResponseLike } from "./portable-types.js";
 import { performance } from "node:perf_hooks";
@@ -283,6 +285,7 @@ export type BrokerHttpRouterDeps = {
   deliveryAcceptanceService: BrokerDeliveryAcceptanceService;
   rendezvousService: BrokerRendezvousService;
   externalSessionService?: BrokerExternalSessionService;
+  t3Service?: BrokerT3Service;
   routeAliasService?: BrokerRouteAliasService;
   integrationSetupService?: BrokerIntegrationSetupService;
   integrationSlackDelivery?: IntegrationSlackDeliveryService;
@@ -597,6 +600,37 @@ export function createBrokerHttpRouter(
       }
       return badRequest(response, "Invalid Deck action or text");
     } catch (error) { return badRequest(response, error instanceof Error ? error.message : String(error)); }
+  }
+
+  if (method === "POST" && url.pathname.startsWith("/v1/integrations/t3/")) {
+    if (denyRemoteMutation()) return;
+    if (forwardedNodeId) { json(response, 403, { error: "t3_local_only" }); return; }
+    if (!deps.t3Service) { json(response, 503, { error: "t3_unavailable" }); return; }
+    try {
+      const input = await readRequestBody<Record<string, unknown>>(request);
+      const string = (key: string) => {
+        const value = input?.[key];
+        if (typeof value !== "string" || !value.trim() || value.length > 512) throw new Error(`t3_${key}_required`);
+        return value;
+      };
+      const connectionId = string("connectionId");
+      const action = url.pathname.slice("/v1/integrations/t3/".length);
+      const service = deps.t3Service;
+      const result = action === "inspect" ? await service.inspect(connectionId)
+        : action === "board" ? await service.board(connectionId, string("projectId"))
+        : action === "refresh" ? await service.refresh(connectionId, string("projectId"))
+        : action === "attach" ? await service.attach(connectionId, string("threadId"))
+        : action === "run" ? await service.runCard(connectionId, string("projectId"), string("cardId"), string("requestId"))
+        : undefined;
+      if (result === undefined) { notFound(response); return; }
+      json(response, 200, result);
+    } catch (error) {
+      // Only adapter error codes cross this boundary; source bodies/credentials do not.
+      const message = error instanceof T3RpcError ? `t3_${error.code.replace(/-/g, "_")}`
+        : error instanceof Error && /^t3_[a-zA-Z0-9_]+$/.test(error.message) ? error.message : "t3_request_failed";
+      json(response, 400, { error: message });
+    }
+    return;
   }
 
   if (method === "POST" && (url.pathname === "/v1/external-sessions/ack" || url.pathname === "/v1/external-sessions/poll" || url.pathname === "/v1/external-sessions/attach" || url.pathname === "/v1/external-sessions/get" || url.pathname === "/v1/external-sessions/reply")) {

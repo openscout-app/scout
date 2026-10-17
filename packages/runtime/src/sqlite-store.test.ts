@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Database } from "bun:sqlite";
+import type { WorkItemRecord } from "@openscout/protocol";
 
 import { applyControlPlaneSchemaMigrations } from "./control-plane-migrations.ts";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "./schema.ts";
@@ -114,6 +115,39 @@ async function expectPromptResolution(promise: Promise<void>): Promise<void> {
 }
 
 describe("SQLiteControlPlaneStore", () => {
+  test("retains external board, workflow, and human acceptance context after reopening durable work", () => {
+    const fixture = createStoreWithPath();
+    const work: WorkItemRecord = {
+      id: "external-work", kind: "work_item", title: "Implement board card", state: "review",
+      acceptanceState: "pending", createdById: "agent-1", ownerId: "agent-1",
+      nextMoveOwnerId: "operator", requestedById: "operator", createdAt: 100, updatedAt: 200,
+      externalContext: {
+        source: { adapterId: "t3-orchestrator", instanceId: "local", projectId: "project-1", workItemId: "card-1" },
+        observedAt: 200, sourceState: "Review",
+        board: { id: "project-1", column: { id: "Review", title: "Review" } },
+        workflow: {
+          stages: [{ id: "review", kind: "review", state: "completed", threadId: "thread-1", provider: "codex" }],
+          executionState: "idle", humanAcceptance: { required: true, state: "pending" },
+        },
+      },
+    };
+    seedAgent(fixture.store);
+    fixture.store.upsertActor({ id: "operator", kind: "person", displayName: "Operator" });
+    fixture.store.recordCollaborationRecord(work);
+    fixture.store.recordCollaborationRecord({ ...work, id: "local-work", externalContext: undefined });
+    fixture.store.close();
+    const reopened = new SQLiteControlPlaneStore(fixture.dbPath);
+    try {
+      const observed = reopened.listCollaborationRecords().find(record => record.id === work.id);
+      expect(observed).toMatchObject(work);
+      expect(observed?.kind === "work_item" && observed.externalContext).toEqual(work.externalContext);
+      expect(observed?.acceptanceState).toBe("pending");
+      expect(reopened.loadSnapshot().collaborationRecords[work.id]).toMatchObject(work);
+      const local = reopened.listCollaborationRecords().find(record => record.id === "local-work");
+      expect(local?.kind === "work_item" && local.externalContext).toBeUndefined();
+    } finally { reopened.close(); }
+  });
+
   test("restores its normal reader when a replay transaction throws", () => {
     const store = createStore();
     const normalReader = store.readerDb;
