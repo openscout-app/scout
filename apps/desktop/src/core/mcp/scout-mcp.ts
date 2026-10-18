@@ -1,3 +1,5 @@
+import { registerFlightCancelTool } from "./flight-cancel.ts";
+import { cancelScoutFlight } from "../broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
 import { loadScoutMeshOverview, renderScoutMeshOverviewLines, type ScoutMeshMachine, type ScoutMeshOverview } from "../mesh/overview.ts";
 import {
@@ -3279,6 +3281,7 @@ export function createScoutMcpServer(options: {
   registerSessionDiscoveryTools(server, sessionDiscoveryDependencies(resolveScoutWebOrigin(env), { env }));
   registerHerdrWorkspaceTools(server, herdrWorkspacesDependencies(resolveScoutWebOrigin(env), { env }));
   registerSessionSendTool(server, sessionSendDependencies(env));
+  registerFlightCancelTool(server, id => cancelScoutFlight(deps.resolveBrokerUrl(), id));
   registerAttachmentReaderTool(server, {
     currentContext: () => parseScoutReplyContextFromEnv(env),
     message: async (id) => (await loadScoutBrokerContext(deps.resolveBrokerUrl()))?.snapshot.messages?.[id] ?? null,

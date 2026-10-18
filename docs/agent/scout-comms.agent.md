@@ -332,3 +332,11 @@ refuses before typing. This header is not a broker reply context; receivers use
 `session_send`, with `mode: "draft"` for native Codex app replies. Requests typed
 outside Scout cannot retroactively acquire provenance: ask the requester for
 its exact thread id instead of guessing from transcript text.
+
+### Cancel a queued reply
+
+Before drafting a reply that was already queued for app release, cancel its
+flight to avoid a duplicate later: `scout flight cancel <flight-id>` or MCP
+`flight_cancel { flightId }`. The broker refuses once submission has started.
+Only `state: cancelled` confirms cancellation; completed/failed means it already
+finished, and an error means do not assume the queued reply was removed.
