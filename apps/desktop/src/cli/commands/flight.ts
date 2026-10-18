@@ -3,6 +3,7 @@ import { resolveHost, resolveWebPort } from "@openscout/runtime/local-config";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import {
+  cancelScoutFlight,
   loadScoutFlight,
   resolveScoutBrokerUrl,
   waitForScoutFlight,
@@ -13,7 +14,7 @@ const HELP_FLAGS = new Set(["--help", "-h"]);
 const DEFAULT_FLIGHT_WAIT_TIMEOUT_SECONDS = 30;
 const MAX_FLIGHT_WAIT_TIMEOUT_SECONDS = 3600;
 
-type FlightSubcommand = "get" | "wait";
+type FlightSubcommand = "get" | "wait" | "cancel";
 
 type ScoutFlightCommandOptions =
   | { command: "help" }
@@ -59,6 +60,7 @@ export function renderFlightCommandHelp(): string {
     "Follow an existing Scout ask flight.",
     "",
     "Commands:",
+    "  cancel <flightId>                  Cancel queued, not-yet-submitted work",
     "  get <flightId>                     Show current state without waiting",
     `  wait <flightId> [--timeout <sec>]  Wait for completion, failed, or cancelled (default ${DEFAULT_FLIGHT_WAIT_TIMEOUT_SECONDS}s)`,
     "",
@@ -88,15 +90,15 @@ export function renderFlightWaitCommandHelp(): string {
 
 export function parseFlightCommandOptions(args: string[]): ScoutFlightCommandOptions {
   if (args.length === 0 || args.some((arg) => HELP_FLAGS.has(arg))) {
-    const subcommand = args.find((arg) => arg === "get" || arg === "wait");
-    if (subcommand === "get" || subcommand === "wait") {
+    const subcommand = args.find((arg) => arg === "get" || arg === "wait" || arg === "cancel");
+    if (subcommand === "get" || subcommand === "wait" || subcommand === "cancel") {
       return { command: subcommand, flightId: "" };
     }
     return { command: "help" };
   }
 
   const [command, ...rest] = args;
-  if (command !== "get" && command !== "wait") {
+  if (command !== "get" && command !== "wait" && command !== "cancel") {
     throw new ScoutCliError(`unknown flight command: ${command ?? ""}`);
   }
 
@@ -129,8 +131,8 @@ export function parseFlightCommandOptions(args: string[]): ScoutFlightCommandOpt
   if (!flightId?.trim()) {
     throw new ScoutCliError(`flight ${command} requires <flightId>`);
   }
-  if (command === "get" && timeoutSeconds !== undefined) {
-    throw new ScoutCliError("flight get does not accept --timeout");
+  if (command !== "wait" && timeoutSeconds !== undefined) {
+    throw new ScoutCliError(`flight ${command} does not accept --timeout`);
   }
 
   return {
@@ -151,7 +153,9 @@ export async function runFlightCommand(
   }
   if (!options.flightId) {
     context.output.writeText(
-      options.command === "get"
+      options.command === "cancel"
+        ? "Usage: scout flight cancel <flightId> (only before submission)"
+        : options.command === "get"
         ? renderFlightGetCommandHelp()
         : renderFlightWaitCommandHelp(),
     );
@@ -159,6 +163,12 @@ export async function runFlightCommand(
   }
 
   const brokerUrl = resolveScoutBrokerUrl();
+  if (options.command === "cancel") {
+    const result = await cancelScoutFlight(brokerUrl, options.flightId);
+    context.output.writeValue(result, value => value.ok ? `Flight ${value.flightId}: ${value.state}` : value.detail);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
   if (options.command === "get") {
     const flight = await loadScoutFlight(brokerUrl, options.flightId);
     context.output.writeValue(

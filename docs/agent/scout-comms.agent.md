@@ -299,3 +299,11 @@ event for semantic completion.
 | reply context | `packages/protocol/src/scout-reply-context.ts` |
 | broker | `packages/runtime/src/scout-broker.ts` |
 | prompt projection | `packages/runtime/src/local-agents.ts` |
+
+### Cancel a queued reply
+
+Before drafting a reply that was already queued for app release, cancel its
+flight to avoid a duplicate later: `scout flight cancel <flight-id>` or MCP
+`flight_cancel { flightId }`. The broker refuses once submission has started.
+Only `state: cancelled` confirms cancellation; completed/failed means it already
+finished, and an error means do not assume the queued reply was removed.

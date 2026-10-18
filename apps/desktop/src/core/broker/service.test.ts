@@ -23,6 +23,7 @@ import { createRuntimeRegistrySnapshot } from "@openscout/runtime/registry";
 import { SUPPORTED_LOCAL_AGENT_HARNESSES } from "@openscout/runtime/local-agents";
 
 import {
+  cancelScoutFlight,
   askScoutAgentById,
   askScoutQuestion,
   askScoutSessionById,
@@ -4314,5 +4315,21 @@ describe("scoutAskHandler preflight diagnostics", () => {
       body: "hi",
       currentDirectory: "/tmp",
     })).rejects.toThrow("connection refused");
+  });
+});
+
+describe("queued flight cancellation", () => {
+  test.each([
+    [{ result: { status: { state: "TASK_STATE_CANCELED" } } }, { ok: true, state: "cancelled" }],
+    [{ result: { status: { state: "TASK_STATE_COMPLETED" } } }, { ok: true, state: "completed" }],
+    [{ error: { code: -32004 } }, { ok: false, code: "already_started" }],
+    [{ error: { code: -32001 } }, { ok: false, code: "not_found" }],
+    [{ result: {} }, { ok: false, code: "unconfirmed" }],
+  ])("maps broker lifecycle evidence without local writes: %j", async (response, expected) => {
+    globalThis.fetch = (async (_input, init) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ method: "CancelTask", params: { id: "queued-flight" } });
+      return Response.json(response);
+    }) as typeof fetch;
+    expect(await cancelScoutFlight("http://broker.test", "queued-flight")).toMatchObject({ ...expected, flightId: "queued-flight" });
   });
 });
