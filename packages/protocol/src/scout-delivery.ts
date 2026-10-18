@@ -1,3 +1,4 @@
+import type { ScoutCompletionRequest, ScoutCompletionRelation } from "./completion.js";
 import type { ConversationDefinition } from "./conversations.js";
 import type { MetadataMap, ScoutId } from "./common.js";
 import type {
@@ -110,6 +111,8 @@ export interface ScoutSessionInputReceipt {
 }
 
 export interface ScoutDeliverRequest {
+  completion?: ScoutCompletionRequest;
+  relation?: ScoutCompletionRelation;
   /** Caller-supplied, requester-scoped idempotency key. */
   requestId?: string;
   id?: ScoutId;
@@ -156,7 +159,7 @@ export interface ScoutDeliverRequest {
  * The current boundary normalizes session_input to the consult command above.
  */
 export type ScoutDeliverHttpRequest = Omit<ScoutDeliverRequest, "intent"> & {
-  intent: ScoutDeliverIntent | "session_input";
+  intent: ScoutDeliverIntent | "session_input" | "explicit_consult";
 };
 
 export interface ScoutDeliveryReceipt {

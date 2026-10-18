@@ -1,3 +1,4 @@
+import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { acceptSessionInput, recoverSessionInputDelivery, validateSessionInputRequest, type SessionInputDeliveryOptions } from "./broker-session-input-delivery.js";
 import { BrokerCommandAdmission } from "./broker-storage-pressure.js";
 import { acceptedDeliveryResponse, deliveryRequestMessageId, deliveryRequestInvocationId, recoverAcceptedInvocation, recoverAcceptedDelivery, type DeliveryAcceptanceEnvelope } from "./broker-delivery-receipt-recovery.js";
@@ -48,7 +49,7 @@ import {
   type RuntimeSnapshot,
 } from "./scout-dispatcher.js";
 import { sessionActorAlias } from "./session-alias.js";
-import { runtimeSessionAddressForSessionId } from "./runtime-session-address.js";
+import { endpointMatchesTargetSessionAddress, runtimeSessionAddressForSessionId } from "./runtime-session-address.js";
 import type { BrokerRequestReceipts } from "./broker-request-receipts.js";
 
 type EnsureBrokerDeliveryConversationInput = {
@@ -391,6 +392,31 @@ export class BrokerDeliveryAcceptanceService {
       if (submitted) return submitted;
     }
     const initialSnapshot = this.options.runtimeSnapshot();
+    let completionEndpointId: string | undefined;
+    if (payload.completion || payload.relation) {
+      // Before resolution can wake/start any session. The first version accepts
+      // only exact known local identities, never aliases, fresh projects or mesh.
+      const target = payload.target;
+      const agentId = target?.kind === "agent_id" ? target.agentId : payload.targetAgentId;
+      const sessionId = target?.kind === "session_id" ? target.sessionId : payload.targetSessionId;
+      const sessionSelector = target?.kind === "session_id" && target.host ? `${sessionId}@${target.host}` : sessionId;
+      const matches = sessionSelector ? Object.values(initialSnapshot.endpoints).filter(item =>
+        endpointMatchesTargetSessionAddress(initialSnapshot, item, sessionSelector) && (!agentId || item.agentId === agentId)) : [];
+      const endpoint = sessionId ? matches.length === 1 ? matches[0] : undefined
+        : agentId ? this.options.homeEndpointForAgent(initialSnapshot, agentId) : null;
+      if (payload.intent !== "consult" || !payload.requestId?.trim() || requesterNodeId !== this.options.nodeId
+        || payload.channel || payload.sessionDelivery || payload.execution?.session === "fork"
+        || payload.execution?.harness || payload.execution?.model || payload.execution?.reasoningEffort
+        || payload.execution?.placement || payload.projectAgent
+        || payload.execution?.forkFromSessionId || payload.execution?.forkFromStateId
+        || (payload.completion && payload.completion.mode !== "explicit") || (target && target.kind !== "agent_id" && target.kind !== "session_id")
+        || (target?.kind === "session_id" && target.forkIfLive)
+        || !endpoint || endpoint.nodeId !== this.options.nodeId || isExternalSessionEndpoint(endpoint)
+        || ["http", "mcp_poll", "pairing_bridge", "devin_cloud_cli"].includes(endpoint.transport)) {
+        throw new Error("completion_route_unsupported: use a stable requestId and an exact existing local agent id or session");
+      }
+      completionEndpointId = endpoint.id;
+    }
     const clientMessageId = this.options.metadataStringValue(
       payload.messageMetadata,
       "clientMessageId",
@@ -1041,6 +1067,10 @@ export class BrokerDeliveryAcceptanceService {
       targetAgentId: target.actorId,
       channel: deliveryChannel,
     });
+    if ((payload.completion || payload.relation) && conversation.authorityNodeId !== this.options.nodeId) {
+      throw new Error("completion_remote_conversation_unsupported");
+    }
+
     const workResolution = payload.intent === "consult"
       ? await (this.options.prepareDeliveryWorkItemIfNeeded ?? this.options.recordDeliveryWorkItemIfNeeded)({
           payload: aliasResolution && payload.workItem
@@ -1204,6 +1234,7 @@ export class BrokerDeliveryAcceptanceService {
       requesterId,
       requesterNodeId,
       targetAgentId: target.actorId,
+      ...((payload.completion || payload.relation) ? { targetNodeId: this.options.nodeId } : {}),
       action: payload.intent === "tell" ? "wake" : "consult",
       task: payload.body.trim(),
       ...(collaborationRecordId ? { collaborationRecordId } : {}),
@@ -1217,6 +1248,10 @@ export class BrokerDeliveryAcceptanceService {
       ...(labels.length ? { labels } : {}),
       metadata: {
         ...invocationMetadata,
+        completion: payload.completion,
+        completionRelation: payload.relation,
+        completionLocalNodeId: payload.completion || payload.relation ? this.options.nodeId : undefined,
+        completionEndpointId,
         ...(labels.length ? { labels } : {}),
         ...(receiptSessionId ? { targetSessionId: receiptSessionId } : {}),
         ...(aliasResolution ? { aliasResolution } : {}),
@@ -1254,6 +1289,7 @@ export class BrokerDeliveryAcceptanceService {
     // atomic journal frame, even if the process dies before receipt-file save.
     throwIfAborted(options.signal);
     const flight = await this.options.acceptInvocation(invocation, message, workResolution.pendingCreation);
+    if (payload.completion) invocation.metadata = { ...invocation.metadata, completionFlightId: flight.id };
     this.options.dispatchAcceptedInvocation(invocation).catch((error) => {
       this.options.warn?.(`[openscout-runtime] background dispatch failed for invocation ${invocation.id}:`, error);
     });

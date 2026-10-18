@@ -1,5 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
 import { deliverInPlace } from "./in-place/deliver.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
@@ -225,6 +226,7 @@ import { BrokerManagedSessionService } from "./broker-managed-session-service.js
 import { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
 import { BrokerLocalEndpointResolver } from "./broker-local-endpoint-resolver.js";
 import { BrokerLocalInvocationService } from "./broker-local-invocation-service.js";
+import { BrokerTerminalReportDeliveryService, prepareTerminalReport, matchesPendingTerminalReport } from "./broker-terminal-report-delivery-service.js";
 import { BrokerInvocationResultDeliveryService, matchesPendingInvocationResultReply } from "./broker-invocation-result-delivery-service.js";
 import {
   buildCardlessSessionEndpoint,
@@ -829,6 +831,9 @@ const controlStreams = new BrokerControlStreamService({
 const operatorActorId = "operator";
 const durableRecords = new BrokerDurableRecordStore({
   localNodeId: nodeId,
+  completionCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
+  completionFlight: id => journal.getFlight(id),
+  completionInvocation: id => journal.getInvocation(id),
   runtime,
   durableStore,
   knownInvocations,
@@ -925,11 +930,21 @@ const durableActionHttpService = new BrokerDurableActionHttpService({
 const workItemStore = new BrokerWorkItemStore({
   runtime,
   durableStore,
+  durableFlight: (flightId) => journal.getFlight(flightId),
+  durableWorkItem: (workId) => journal.getCollaborationRecord(workId),
   createId: createRuntimeId,
+  warn: (message, error) => console.warn(message, error),
 });
 const recordDeliveryWorkItemIfNeeded = workItemStore.recordDeliveryWorkItemIfNeeded;
 const deliveryWorkItemResolutionForTell = workItemStore.deliveryWorkItemResolutionForTell;
 const promoteInvocationFlightToWork = workItemStore.promoteInvocationFlightToWork;
+let workPromotionRecovery: Promise<void> | undefined;
+function recoverTerminalWorkPromotions(): void {
+  if (workPromotionRecovery) return;
+  workPromotionRecovery = workItemStore.recoverTerminalWorkPromotions(journal.listPendingWorkPromotionFlights())
+    .catch((error) => console.warn("[openscout-runtime] work promotion recovery failed:", error))
+    .finally(() => { workPromotionRecovery = undefined; });
+}
 const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalSessionWakeResult> =>
   wakeLocalHarnessSession({
     nodeId,
@@ -1215,7 +1230,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: ["broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
+  capabilities: [SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
@@ -1403,9 +1418,15 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
   updateDeliveryStatus: updateDeliveryStatusDurably,
   updateDeliveryStatusIf: deliveryStore.updateDeliveryStatusIf,
+  prepareWorkPromotion: workItemStore.prepareTerminalWorkPromotion,
   promoteInvocationFlightToWork,
+  prepareTerminalReport: (flight, invocation) => prepareTerminalReport(flight, invocation, {
+    nodeId, systemActorId: systemActor.id, conversation: (id) => runtime.conversation(id), now: Date.now,
+  }),
+  deliverTerminalReport: (flightId) => terminalReportDeliveryService.deliver(flightId),
   maybeForwardFlightToAuthority: (flight) => meshForwardingService.maybeForwardFlightToAuthority(flight),
-  isInvocationActive: (invocationId) => replyCompletionRecovery.isPending(invocationId)
+  isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
+    || replyCompletionRecovery.isPending(invocationId)
     || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId),
   onTerminalFlight: async ({ flight, invocation }) => {
     if (invocation) void externalSessionService.forwardResult(invocation, flight)
@@ -1960,6 +1981,8 @@ const messageService = new BrokerMessageService({
     const flight = { ...current, metadata: { ...current.metadata, acceptedReply: receipt } };
     await commitDurableEntries({ kind: "flight.record", flight }, async () => { await runtime.upsertFlight(flight); });
   }),
+  completionCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
+  completionFlight: id => journal.getFlight(id),
   authorizeReplyCompletion: (invocation, reply) => externalSessionService.authorizesReplyCompletion(invocation, reply),
   activeLocalEndpointForAgent: (agentId) => localEndpointResolver.activeLocalEndpointForAgent(agentId),
 });
@@ -2004,6 +2027,36 @@ const externalSessionService = new BrokerExternalSessionService({
   recordFlight: recordFlightDurably,
   postMessage: postConversationMessage,
 });
+
+const terminalReportDeliveryService = new BrokerTerminalReportDeliveryService({
+  nodeId,
+  flightById: (id) => journal.getFlight(id),
+  quarantineRecord: (entry, reason) => projection.quarantineRecord(entry, reason),
+  postMessage: postConversationMessage,
+  markDelivered: (flightId, expected) => durableStore.runWrite(async () => {
+    const current = journal.getFlight(flightId);
+    if (!current || !matchesPendingTerminalReport(current, expected)) return false;
+    const flight: FlightRecord = { ...current, metadata: { ...current.metadata,
+      terminalReport: { ...expected, status: "delivered", deliveredAt: Date.now() },
+    } };
+    await durableStore.commitEntries({ kind: "flight.record", flight, preserveCurrent: true }, async () => {
+      await runtime.upsertFlight(flight, { preserveCurrent: true });
+    });
+    return true;
+  }),
+  warn: (message, error) => console.warn(message, error),
+});
+let terminalReportRecoveryFlights: Iterator<FlightRecord> | undefined;
+function recoverTerminalReports(): void {
+  terminalReportRecoveryFlights ??= journal.pendingTerminalReports();
+  let scanned = 0;
+  while (scanned < 256 && terminalReportDeliveryService.availableCapacity > 0) {
+    const next = terminalReportRecoveryFlights.next();
+    if (next.done) { terminalReportRecoveryFlights = undefined; break; }
+    scanned++;
+    void terminalReportDeliveryService.deliver(next.value.id);
+  }
+}
 
 const invocationResultDeliveryService = new BrokerInvocationResultDeliveryService({
   flightForInvocation: (id) => runtime.flightForInvocation(id),
@@ -2529,6 +2582,15 @@ async function postInvocationStatusMessage(
     error?: string;
   },
 ): Promise<void> {
+  // Terminal reports are already journaled with the outcome. Every legacy
+  // failure callsite joins that outbox; it must not mint a second status message.
+  if (flight.id) {
+    const current = runtime.flight(flight.id);
+    if (current?.state === "failed" || current?.state === "cancelled") {
+      await terminalReportDeliveryService.deliver(current.id);
+      return;
+    }
+  }
   await messageService.postInvocationStatusMessage(invocation, flight);
 }
 
@@ -2672,7 +2734,8 @@ const dispatchRecoveryService = new BrokerDispatchRecoveryService({
   dispatchJobs: () => journal.listRecoverableInvocationDispatchJobs({ limit: 5000 }),
   dispatchJobForInvocation: (invocationId) => journal.getInvocationDispatchJobForInvocation(invocationId),
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
-  isInvocationActive: (invocationId) => replyCompletionRecovery.isPending(invocationId)
+  isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
+    || replyCompletionRecovery.isPending(invocationId)
     || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId),
   runDispatchJob: (job, invocation) => invocationDispatchService.runDispatchJob(job, invocation),
   requeueDispatchJob: (job, invocation, flight) => invocationDispatchService.requeueDispatchJob(job, invocation, flight),
@@ -3473,6 +3536,8 @@ const otlpReceiver = localAdminKey ? undefined : await startBrokerOtlpReceiver(c
 setTimeout(() => {
   if (!startupTrafficGate.snapshot().mutationsAdmitted) return;
   recoverInvocationResultReplies();
+  recoverTerminalReports();
+  recoverTerminalWorkPromotions();
   // Reconcile persisted external attempts without repeating a provider send.
   void externalSessionService.recover([...knownInvocations.values()])
     .then((failed) => { if (failed.length) console.error("[openscout-runtime] external session recovery incomplete", failed); })
@@ -3596,6 +3661,8 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
   // missed. Deferrals gate per-invocation cadence inside the recovery service.
   setInterval(() => {
     recoverInvocationResultReplies();
+    recoverTerminalReports();
+    recoverTerminalWorkPromotions();
     replyCompletionRecovery.recover()
       .then(() => dispatchRecoveryService.recoverQueuedFlights({ reason: "queued_retry_sweep" })).catch((error) => {
       console.error("[openscout-runtime] queued dispatch retry sweep failed:", error);

@@ -681,13 +681,13 @@ export class InMemoryControlRuntime implements ControlRuntime {
     });
   }
 
-  async upsertFlight(flight: FlightRecord): Promise<void> {
+  async upsertFlight(flight: FlightRecord, options: { preserveCurrent?: boolean } = {}): Promise<void> {
     const previous = this.registry.flights[flight.id];
-    if (previous && this.flightIdByInvocationId.get(previous.invocationId) === previous.id) {
+    if (!options.preserveCurrent && previous && this.flightIdByInvocationId.get(previous.invocationId) === previous.id) {
       this.flightIdByInvocationId.delete(previous.invocationId);
     }
     this.registry.flights[flight.id] = flight;
-    this.flightIdByInvocationId.set(flight.invocationId, flight.id);
+    if (!options.preserveCurrent) this.flightIdByInvocationId.set(flight.invocationId, flight.id);
     this.emit({
       id: createRuntimeId("evt"),
       kind: "flight.updated",

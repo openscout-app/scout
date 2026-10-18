@@ -124,6 +124,35 @@ function snapshot(input: {
 }
 
 describe("rotateHistoryInSnapshot dependency closure", () => {
+  test("pending failure reports and anchors survive rotation, compaction and reopen until delivered", async () => {
+    const root = mkdtempSync(join(tmpdir(), "terminal-report-rotation-")); roots.add(root);
+    const path = join(root, "journal.jsonl");
+    let journal = new FileBackedBrokerJournal(path); await journal.load();
+    const reportFlight = flight("f", "i", { state: "failed", metadata: { terminalReport: {
+      version: 1, status: "pending", message: { id: "report", replyToMessageId: "m" },
+    } } });
+    await journal.appendEntries([
+      { kind: "message.record", message: message("m") }, { kind: "message.record", message: message("report") },
+      { kind: "invocation.record", invocation: invocation("i", { messageId: "m" }) },
+      { kind: "flight.record", flight: reportFlight },
+    ]);
+    const plan = planHistoryRotation(journal.snapshot(), CUTOFF);
+    expect(plan.flightIds.size).toBe(0); expect(plan.invocationIds.size).toBe(0); expect(plan.messageIds.size).toBe(0);
+    await journal.appendEntries({ kind: "message.record", message: message("unreferenced") });
+    await journal.appendEntries({ kind: "history.rotate", cutoff: CUTOFF, rotatedAt: NEW });
+    journal = new FileBackedBrokerJournal(path, { compactionPolicy: { minimumReclaimBytes: 1, minimumReclaimRatio: 0 } });
+    await journal.load();
+    expect((await journal.readEntries()).some(entry => entry.kind === "message.record" && entry.message.id === "unreferenced")).toBe(false);
+    expect(journal.snapshot().flights.f).toEqual(reportFlight);
+    expect([...journal.pendingTerminalReports()].map(f => f.id)).toEqual(["f"]);
+    expect(await readMessageRecord(journal.snapshot().messages, "m")).toBeDefined();
+    await journal.appendEntries({ kind: "flight.record", preserveCurrent: true, flight: { ...reportFlight,
+      metadata: { terminalReport: { version: 1, status: "delivered" } } } });
+    const deliveredPlan = planHistoryRotation(journal.snapshot(), CUTOFF);
+    expect([...deliveredPlan.flightIds]).toEqual(["f"]);
+    expect([...deliveredPlan.invocationIds]).toEqual(["i"]);
+    expect([...deliveredPlan.messageIds]).toEqual(["m", "report"]);
+  });
   test("an undelivered result protects terminal output and original context until its reply is durably posted", () => {
     const resultFlight = flight("f", "i", { metadata: { resultReply: {
       version: 1, status: "pending", message: { id: "reply", replyToMessageId: "m" },

@@ -1510,3 +1510,30 @@ test("operator permission is durably recorded before its push is queued", async 
   expect(harness.operatorNeeds[0]?.metadata?.operatorSignal).toMatchObject({ requestKind: "permission" });
   expect(harness.operatorSignals).toHaveLength(1);
 });
+
+describe("explicit completion local rollout", () => {
+  const payload: ScoutDeliverRequest = { requestId: "explicit-1", requesterId: "operator", requesterNodeId: "node-1", intent: "consult", body: "inspect",
+    target: { kind: "agent_id", agentId: "agent-1" }, completion: { mode: "explicit" } };
+  test("passes typed local ask and accepted flight identity to execution", async () => {
+    const h = createHarness(); await h.service.accept(payload);
+    expect(h.acceptedInvocations[0]).toMatchObject({ targetNodeId: "node-1", metadata: { completion: { mode: "explicit" }, completionLocalNodeId: "node-1", completionEndpointId: "endpoint-1" } });
+    expect(h.dispatchedInvocations[0]?.metadata?.completionFlightId).toBe("flight-1");
+  });
+  test.each([
+    { target: { kind: "project_path", projectPath: "/tmp/project" } },
+    { target: { kind: "route_alias", alias: "other", scope: { nodeId: "remote" } } },
+    { target: { kind: "session_id", sessionId: "session-1", host: "remote" } },
+    { requestId: undefined }, { requesterNodeId: "remote" }, { execution: { session: "fork" } },
+    { execution: { harness: "codex" } }, { execution: { model: "model" } }, { execution: { reasoningEffort: "high" } },
+    { execution: { placement: "foreground" } }, { projectAgent: { persistence: "one_time" } },
+  ])("unsupported route rejects before launching or accepting: %j", async override => {
+    const h = createHarness(); await expect(h.service.accept({ ...payload, ...override } as ScoutDeliverRequest)).rejects.toThrow("completion_route_unsupported");
+    expect(h.cardlessProjectSessionCalls).toEqual([]); expect(h.acceptedInvocations).toEqual([]); expect(h.dispatchedInvocations).toEqual([]);
+  });
+  test("remote or external endpoint fails before command acceptance", async () => {
+    for (const endpoint of [testEndpoint({ nodeId: "remote" }), testEndpoint({ transport: "http", metadata: { externalSession: true } })]) {
+      const h = createHarness({ snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint } }) });
+      await expect(h.service.accept(payload)).rejects.toThrow("completion_route_unsupported"); expect(h.acceptedInvocations).toEqual([]);
+    }
+  });
+});

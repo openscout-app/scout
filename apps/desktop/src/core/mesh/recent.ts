@@ -139,6 +139,15 @@ function requireNodeState(value: unknown, nodeId: string): MeshNodeStateReport {
   return report;
 }
 
+function isTimeoutError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; current = (current as { cause?: unknown }).cause, depth += 1) {
+    const name = (current as { name?: unknown }).name;
+    if (name === "TimeoutError") return true;
+    if (current instanceof Error && /^no answer in \d/.test(current.message)) return true;
+  }
+  return false;
+}
+
 /** Bound the whole machine read, including card probes, URL retries and JSON. */
 async function withinDeadline<T>(timeoutMs: number, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
@@ -253,7 +262,10 @@ export async function loadMachineNodeStates(
       });
       return { ...identity, status: "ok", report };
     } catch (error) {
-      return { ...identity, status: "unavailable", error: (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 240) };
+      // An inner timeout (card probe, route candidate) is still this machine's
+      // deadline. Report one stable message, not whichever timer fired first.
+      const reported = isTimeoutError(error) ? new Error(`no answer in ${timeoutMs / 1_000}s`) : error;
+      return { ...identity, status: "unavailable", error: (reported instanceof Error ? reported.message : String(reported)).replace(/\s+/g, " ").slice(0, 240) };
     }
   }));
   return { localNodeId: localNode.id, machines };

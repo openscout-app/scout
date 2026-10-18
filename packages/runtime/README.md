@@ -188,6 +188,54 @@ This option accepts plain text and exact local session continuation. Attachments
 work items, remote targets, project launches, and runtime overrides are rejected
 before submission. Ordinary asks retain their existing delivery behavior.
 
+## Explicit completion and joined work
+
+The optional `explicit-completion/1` contract separates progress from the final
+answer. Existing untagged asks keep their current behavior. Start an explicit
+ask through the normal CLI or MCP `ask` surface with a stable request id:
+
+```bash
+scout ask --to id:<local-agent-id> --request-id review-42 --completion explicit "Review this change"
+```
+
+This first version supports exact existing local agent or session identities.
+Project/profile launches, aliases, remote targets, external endpoints, forks,
+and the session-input delivery option are unsupported. Clients and the broker refuse
+explicit runtime overrides for this contract. A local agent ask may create its
+normal fresh execution session. Clients require the capability on `/v1/node`
+and send `intent: "explicit_consult"` to `/v1/deliver`; an older broker rejects
+that discriminant before execution. The current broker normalizes it to the
+existing consult command.
+
+The receiver calls `current_reply_context` for the current invocation, flight,
+and revision. `messages_reply` accepts a stable `requestId` and a `completion`
+object containing `kind: "progress" | "final"`, `invocationId`, `flightId`, and
+`revision`. The client posts this as `metadata.completionReply` through
+`/v1/messages/reply`. That endpoint fails closed on older brokers. Typed
+progress never completes an invocation, including a legacy invocation. Untagged
+output or normal process exit cannot complete an explicit ask: its flight waits
+for the explicit final. A real failure or cancellation remains terminal.
+
+A worker can opt a child ask into its parent with
+`relation: { parentFlightId, kind: "joined" }` (CLI `--join-to <flight>`).
+A requester or worker can admit an exact same-session continuation with
+`kind: "continuation"` (CLI `--continue-for <flight>`). Admission requires a
+stable child request id and a current nonterminal explicit parent. The broker
+commits the child and the parent's new obligation/revision together; retries
+reuse that child and never increment the revision twice. Each parent accepts
+at most 64 obligations. Work without a relation stays independent.
+
+Each obligation pins the child invocation and flight accepted in that write.
+A completed, failed, or cancelled child settles that obligation; missing or
+unknown child state does not. Settling a child does not complete the parent.
+An early final fails with `completion_obligations_pending` before becoming a
+stored completion candidate. After observing the children, the parent obtains
+its current reply context and submits a new final. New admissions invalidate
+older revisions, even if the new child finishes immediately. A stale revision
+fails with `completion_revision_stale`. A final's durable message and completion
+can recover after restart without rerunning execution, and later cancellation
+or replacement of the current flight wins over delayed replies.
+
 ## Local development
 
 From the repo root:

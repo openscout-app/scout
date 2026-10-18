@@ -688,6 +688,13 @@ const sessionRouter = t.router({
 // -- Mobile -----------------------------------------------------------------
 
 const mobileRouter = t.router({
+  // This legacy bridge has no receipt-owned native-session input adapter.
+  // Keep the versioned method fail-closed rather than falling back to typing.
+  askSessionDurable: procedure
+    .input(z.object({ sessionId: z.string().min(1), harness: z.string().nullable().optional(),
+      cwd: z.string().nullable().optional(), body: z.string(), clientMessageId: z.string().optional() }))
+    .mutation(() => ({ ok: false as const, code: "session_input_receipts_unsupported",
+      message: "This Scout bridge cannot safely retry session input. Upgrade Scout on this Mac." })),
   runtimeCapabilities: procedure
     .input(z.object({ projectRoot: z.string().optional() }).optional())
     .query(({ input }) => getScoutMobileRuntimeCapabilities(input?.projectRoot)),

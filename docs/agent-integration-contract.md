@@ -245,6 +245,13 @@ Agents connected through Scout's MCP server should prefer:
 - future `sessions_*` tools for explicit harness session start, attach, inspect,
   and stop operations
 
+The broker saves a pending terminal report with each new failed or cancelled
+flight at the request origin. The report has a stable identity derived from the
+flight and outcome; restart recovery retries that same message without invoking
+an executor. A delivery failure leaves the report pending and does not replace
+the terminal outcome. Successful result replies retain their separate validation
+and delivery path. Existing terminal history without an intent is not backfilled.
+
 Use `ask` for requested work. It returns a compact receipt and lets Scout resolve, route,
 and wake the target when possible. If the caller knows the project/capability
 but not the concrete agent/session, pass `projectPath` and optional `harness`

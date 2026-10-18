@@ -111,6 +111,7 @@ describe("Scoutbot read-only session tools", () => {
 
   test("an entirely unavailable inventory is not an empty successful lookup", async () => {
     const client = await clientFor(sessionDiscoveryDependencies("http://localhost:43120", {
+      readNativeApp: async () => ({ threads: [], available: false, truncated: false }),
       env: {}, fetchImpl: (async () => new Response("offline", { status: 503 })) as unknown as typeof fetch,
     }));
     const result = await client.callTool({ name: "sessions_inventory", arguments: { query: "devon-2" } });
@@ -314,3 +315,11 @@ describe("Scoutbot read-only session tools", () => {
   });
 
 });
+
+ test("live native inventory bypasses stale search coverage and advertises draft versus submit", async () => {
+  const client = await clientFor(dependencies({ readInventory: async () => ({ sessions: [], terminals: [], nativeApp: {
+    available: true, truncated: false, threads: [{ sessionId: "native-app-1", harness: "codex", title: "Native review", cwd: "/work", location: "native_codex_app", deliveryModes: ["draft", "submit"] }],
+  } }) }));
+  const result = await client.callTool({ name: "sessions_inventory", arguments: { query: "native-app-1" } });
+  expect(result.structuredContent).toMatchObject({ candidateCount: 1, results: [{ sessionId: "native-app-1", reachable: true, deliveryModes: ["draft", "submit"] }] });
+ });

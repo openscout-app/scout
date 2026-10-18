@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { MessageRecord } from "@openscout/protocol";
 
 function clientMessageId(message: MessageRecord): string | null {
@@ -17,6 +18,7 @@ export function isIdempotentMessageRetry(
     && existing.actorId === incoming.actorId
     && existing.class === incoming.class
     && existing.body === incoming.body
+    && isDeepStrictEqual(existing.metadata?.completionReply ?? null, incoming.metadata?.completionReply ?? null)
     && (existing.replyToMessageId ?? null) === (incoming.replyToMessageId ?? null)
     && (existing.threadConversationId ?? null) === (incoming.threadConversationId ?? null)
     && JSON.stringify(existing.mentions ?? []) === JSON.stringify(incoming.mentions ?? [])

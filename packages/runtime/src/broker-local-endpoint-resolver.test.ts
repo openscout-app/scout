@@ -1043,6 +1043,22 @@ describe("BrokerLocalEndpointResolver", () => {
     }))).rejects.toThrow("session_runtime_unobserved");
   });
 
+  test("harness alone filters an exact session without requiring model evidence", async () => {
+    const harness = createResolver();
+    await harness.runtime.upsertEndpoint(testEndpoint({
+      id: "native-endpoint", sessionId: "native-session", metadata: { alive: true },
+    }));
+    const resolved = await harness.resolver.resolveLocalEndpointForInvocation(testInvocation({
+      execution: { harness: "codex", targetSessionId: "native-session" },
+    }));
+    expect(resolved?.id).toBe("native-endpoint");
+    const mismatch = await harness.resolver.resolveLocalEndpointForInvocation(testInvocation({
+      execution: { harness: "claude", targetSessionId: "native-session" },
+    }));
+    expect(mismatch).toBeUndefined();
+    expect(harness.isolatedInvocations).toHaveLength(0);
+  });
+
   test("fails closed when an exact existing session is unobserved or mismatched", async () => {
     const harness = createResolver();
     await harness.runtime.upsertEndpoint(testEndpoint({

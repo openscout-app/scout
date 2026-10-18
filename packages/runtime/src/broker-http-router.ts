@@ -1,3 +1,4 @@
+import { completionReply } from "@openscout/protocol";
 import { PermissionDeliveryUnconfirmedError, type BrokerPermissionService } from "./broker-permission-service.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
@@ -2364,9 +2365,12 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  if (method === "POST" && url.pathname === "/v1/messages") {
+  if (method === "POST" && (url.pathname === "/v1/messages" || url.pathname === "/v1/messages/reply")) {
     try {
       let message = await readRequestBody<MessageRecord>(request);
+      if (url.pathname === "/v1/messages/reply" && (!message.requestId || !completionReply(message))) {
+        throw new Error("explicit reply requires requestId and completionReply identity");
+      }
       if (message.requestId) {
         if (!message.requestId.trim() || message.requestId.length > 256) throw new Error("invalid message requestId");
         const id = `msg.request.${createHash("sha256").update(JSON.stringify([message.actorId, message.requestId])).digest("hex")}`;
@@ -2450,6 +2454,10 @@ export function createBrokerHttpRouter(
     const signal = requestAbortSignal(request, response);
     try {
       const payload = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      if ((payload.completion || payload.relation) && payload.target
+        && payload.target.kind !== "agent_id" && payload.target.kind !== "session_id") {
+        throw new Error("completion_route_unsupported");
+      }
       if (
         !payload.requestId && payload.target?.kind === "route_alias"
         && await forwardAliasIfRemote(payload.target.scope?.nodeId, url.pathname, "POST", payload)
