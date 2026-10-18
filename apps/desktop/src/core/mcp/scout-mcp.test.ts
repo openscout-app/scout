@@ -123,6 +123,7 @@ describe("createScoutMcpServer", () => {
       "sessions_search",
       "herdr_workspaces",
       "session_send",
+      "flight_cancel",
       "attachments_read",
       "integrations_setup",
       "integrations_get",

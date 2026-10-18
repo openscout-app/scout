@@ -5582,3 +5582,22 @@ export async function speakScoutText(
 export function defaultScoutAgentNameForPath(projectPath: string): string {
   return basename(projectPath);
 }
+
+
+export type CancelScoutFlightResult =
+  | { ok: true; flightId: string; state: "cancelled" | "completed" | "failed" }
+  | { ok: false; flightId: string; code: "already_started" | "not_found" | "unconfirmed"; detail: string };
+
+/** Broker lifecycle guard owns cancellation; never patch the flight row locally. */
+export async function cancelScoutFlight(baseUrl: string, flightId: string): Promise<CancelScoutFlightResult> {
+  const response = await brokerPostJson<{ result?: { status?: { state?: string } }; error?: { code?: number; message?: string } }>(baseUrl, "/a2a", {
+    jsonrpc: "2.0", id: `scout-cancel:${flightId}`, method: "CancelTask", params: { id: flightId },
+  });
+  if (response.error?.code === -32004) return { ok: false, flightId, code: "already_started", detail: "This flight has started or is being submitted; nothing was cancelled. Wait for its result; do not send a duplicate." };
+  if (response.error?.code === -32001) return { ok: false, flightId, code: "not_found", detail: "Flight not found on this broker. Check the receipt's flight id and machine." };
+  const state = response.result?.status?.state;
+  if (state === "TASK_STATE_CANCELED") return { ok: true, flightId, state: "cancelled" };
+  if (state === "TASK_STATE_COMPLETED") return { ok: true, flightId, state: "completed" };
+  if (state === "TASK_STATE_FAILED") return { ok: true, flightId, state: "failed" };
+  return { ok: false, flightId, code: "unconfirmed", detail: "Cancellation was not confirmed. Read flight get before retrying; do not dispatch a duplicate." };
+}
