@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
+import { codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
 import { parseOrcaWorktreeAgents } from "./orca.js";
 import { innermostProcessHost, parseProcessHostEnv, processHostLocations } from "./process-host.js";
 
@@ -266,4 +266,29 @@ describe("native app drafts", () => {
       draftCodexApp: async () => { throw new Error("URL handler unavailable"); },
     }))).toMatchObject({ ok: false, code: "in_place_failed", detail: "URL handler unavailable" });
   });
+});
+
+describe("native app submission activity guard", () => {
+  test.each(["busy", "unknown"] as const)("never opens or submits a %s thread", async activity => {
+    let submitted = false;
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({ codexHeldByApp: async () => true, codexActivity: async () => activity, typeIntoCodexApp: async () => { submitted = true; } }));
+    expect(result).toMatchObject({ ok: false, code: activity === "busy" ? "busy" : "activity_unknown" });
+    expect(submitted).toBe(false);
+  });
+  test("falls back only when Scout.app is unavailable", async () => {
+    let submitted = false;
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({ codexHeldByApp: async () => true, codexActivity: async () => "idle", askScoutApp: async () => ({ ok: false, code: "unavailable", message: "offline" }), latticesCall: async () => ({ ok: true }), typeIntoCodexApp: async () => { submitted = true; } }));
+    expect(result).toMatchObject({ ok: true, via: "lattices" });
+    expect(submitted).toBe(true);
+  });
+});
+
+test("native lifecycle uses harness events, fails closed on partial tails", () => {
+  const event = (type: string) => JSON.stringify({ type: "event_msg", payload: { type } }) + "\n";
+  expect(codexActivityFromTranscript("")).toBe("unknown");
+  expect(codexActivityFromTranscript(event("task_started"))).toBe("busy");
+  expect(codexActivityFromTranscript(event("task_started") + event("task_complete"))).toBe("idle");
+  expect(codexActivityFromTranscript(event("turn_aborted"))).toBe("idle");
+  expect(codexActivityFromTranscript(event("task_complete") + event("task_started"))).toBe("busy");
+  expect(codexActivityFromTranscript(event("task_complete") + "{partial")).toBe("unknown");
 });

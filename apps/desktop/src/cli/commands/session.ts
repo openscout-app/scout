@@ -1447,10 +1447,12 @@ function renderSessionTransfer(payload: SessionTransferPayload): string {
 
 const IN_PLACE_REFUSALS: Record<string, string> = {
   not_live: "isn't open in Herdr, Orca, tmux, or a terminal tab on this machine; nothing was sent",
+  busy: "is mid-run; use --harness codex --draft, or queue with ask and wait for app release",
+  activity_unknown: "has unverified activity; use --harness codex --draft instead of submitting",
   draft_unsupported: "does not support draft mode",
   session_blocked: "is waiting on a prompt in its terminal; answer that first, then send again",
   in_place_failed: "is open, but Scout couldn't type into it",
-  scout_app_unavailable: "is open in the ChatGPT app; open the Scout app on this Mac to send, or use session send --harness codex --draft to fill without sending",
+  scout_app_unavailable: "is open in the ChatGPT app; open Scout.app or run Lattices.app with Accessibility permission to send, or use session send --harness codex --draft to fill without sending",
   scout_app_accessibility: "is open in the ChatGPT app; turn on Scout › Settings › System › Send replies into open apps, or use --harness codex --draft",
 };
 

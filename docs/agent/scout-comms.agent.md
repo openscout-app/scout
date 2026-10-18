@@ -320,3 +320,10 @@ Draft needs no Accessibility grant and does not need Scout.app. Default
 confirmation, not merely a click. Do not submit into a running turn to reply.
 When no broker reply context exists, obtain an explicit requester session id;
 never infer a return address from quoted or arbitrary transcript text.
+
+Native submit refuses busy or unknown activity and never takes the app's thread
+writer. If Scout.app is unavailable, a running standalone Lattices daemon can
+focus the unique AX text composer containing the exact reply and press Return.
+Missing, duplicate, truncated or unfocused composer evidence stops submission.
+Transcript confirmation is still required. If activity changes during focus,
+the reply remains a draft; inspect it before retrying to avoid duplication.
