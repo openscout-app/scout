@@ -54,7 +54,8 @@ export type InPlaceVia = "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
 export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "terminal"];
 
 export type InPlaceDelivery =
-  | { ok: true; via: InPlaceVia; location: string }
+  | { ok: true; via: InPlaceVia; location: string; delivered?: "draft" }
+  | { ok: false; code: "draft_unsupported"; detail: string }
   /** The session is live but can't take words right now (e.g. a permission prompt is up). */
   | { ok: false; code: "session_blocked"; via: InPlaceVia; location: string }
   /** The session is live in a place Scout found but couldn't type into. */
@@ -87,6 +88,8 @@ export type DeliverInPlaceDeps = {
   typeIntoTty?: (tty: string, body: string) => Promise<void>;
   /** Whether the ChatGPT app's Codex holds this thread's writer lock. */
   codexHeldByApp?: (sessionId: string) => Promise<boolean>;
+  /** Opens only the exact thread link; never submits. */
+  draftCodexApp?: (sessionId: string, body: string) => Promise<void>;
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
@@ -131,11 +134,25 @@ type Candidates = {
 };
 
 export async function deliverInPlace(
-  input: { sessionId: string; harness?: string | null; body: string; requireExactHarness?: boolean },
+  input: { sessionId: string; harness?: string | null; body: string; requireExactHarness?: boolean; mode?: "submit" | "draft" },
   deps: DeliverInPlaceDeps = {},
 ): Promise<InPlaceDelivery> {
   const { sessionId, body } = input;
   const harness = input.harness?.trim().toLowerCase() || null;
+
+  // Draft is deliberately handled before any terminal or Accessibility actuator.
+  // A missing harness must not accidentally turn a draft into a submitted prompt.
+  if (input.mode === "draft") {
+    if (harness !== "codex") return { ok: false, code: "draft_unsupported", detail: "Draft mode requires --harness codex and an app-held thread; nothing was sent." };
+    const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => false);
+    if (!held) return { ok: false, code: "not_live" };
+    try {
+      await (deps.draftCodexApp ?? draftCodexApp)(sessionId, body);
+      return { ok: true, delivered: "draft", via: "scout-app", location: "the ChatGPT app’s Codex composer (not sent)" };
+    } catch (error) {
+      return { ok: false, code: "in_place_failed", via: "scout-app", location: "the ChatGPT app’s Codex composer", detail: errorText(error) };
+    }
+  }
 
   const candidates: Candidates = { herdr: null, orca: null, tmux: null, terminalPid: null };
 
@@ -406,6 +423,12 @@ export async function codexThreadHeldByChatGPTApp(sessionId: string): Promise<bo
   return (await codexThreadLockHolders(sessionId)).some((holder) => holder.command.includes(CHATGPT_APP));
 }
 
+/** The URL handler fills the composer; no Accessibility grant or Return key. */
+async function draftCodexApp(sessionId: string, body: string): Promise<void> {
+  const link = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(body)}`;
+  await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
+}
+
 async function typeIntoCodexApp(
   sessionId: string,
   body: string,
@@ -419,8 +442,7 @@ async function typeIntoCodexApp(
   // 1. The app's own thread link picks the thread by id and fills its
   //    composer. `-u` keeps `open` a plain URL open; a lone argument is
   //    rerouted to scoutd's file-reveal verb, which refuses URLs.
-  const link = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(body)}`;
-  await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
+  await draftCodexApp(sessionId, body);
   await new Promise((resolve) => setTimeout(resolve, CODEX_APP_OPEN_SETTLE_MS));
 
   // 2. The Scout app anchors on content (the one composer holding exactly

@@ -236,3 +236,34 @@ describe("deliverInPlace", () => {
     expect(await deliverInPlace({ sessionId: SESSION, body: "x" }, noHosts())).toEqual({ ok: false, code: "not_live" });
   });
 });
+
+describe("native app drafts", () => {
+  test("fills only the composer without querying Accessibility or submitting", async () => {
+    const drafts: string[][] = [];
+    const never = async (): Promise<never> => { throw new Error("must not submit or query Accessibility"); };
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "review & reply?", mode: "draft" }, noHosts({
+      codexHeldByApp: async () => true,
+      draftCodexApp: async (...args) => { drafts.push(args); },
+      askScoutApp: never,
+      typeIntoCodexApp: never,
+      findHerdrPane: never,
+    }));
+    expect(result).toMatchObject({ ok: true, delivered: "draft" });
+    expect(drafts).toEqual([[SESSION, "review & reply?"]]);
+  });
+
+  test("never falls back to terminal submission or starts a missing thread", async () => {
+    for (const harness of [undefined, "claude", "codex"]) {
+      const result = await deliverInPlace({ sessionId: SESSION, harness, body: "hello", mode: "draft" }, noHosts());
+      expect(result.ok).toBe(false);
+      expect(result).toMatchObject({ code: harness === "codex" ? "not_live" : "draft_unsupported" });
+    }
+  });
+
+  test("reports a URL transport failure without claiming delivery", async () => {
+    expect(await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "hi", mode: "draft" }, noHosts({
+      codexHeldByApp: async () => true,
+      draftCodexApp: async () => { throw new Error("URL handler unavailable"); },
+    }))).toMatchObject({ ok: false, code: "in_place_failed", detail: "URL handler unavailable" });
+  });
+});
