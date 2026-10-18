@@ -320,3 +320,15 @@ Draft needs no Accessibility grant and does not need Scout.app. Default
 confirmation, not merely a click. Do not submit into a running turn to reply.
 When no broker reply context exists, obtain an explicit requester session id;
 never infer a return address from quoted or arbitrary transcript text.
+
+### Give direct typed requests a return address
+
+Prefer `scout ask` for broker-tracked requests: those already carry broker reply
+context. For the deliberate no-flight `session_send` path, opt into
+`requestReply: true` (CLI `scout session send <id> --request-reply "review…"`).
+Scout stamps the caller's process-owned native session id and harness, plus
+instructions for replying to that exact session. Missing or ambiguous identity
+refuses before typing. This header is not a broker reply context; receivers use
+`session_send`, with `mode: "draft"` for native Codex app replies. Requests typed
+outside Scout cannot retroactively acquire provenance: ask the requester for
+its exact thread id instead of guessing from transcript text.

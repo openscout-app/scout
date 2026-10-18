@@ -1,3 +1,4 @@
+import { currentSessionReturnAddress, stampSessionReturnAddress } from "../../core/mcp/session-return-address.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync, readdirSync } from "node:fs";
@@ -59,7 +60,7 @@ Usage:
   scout session fork <session-id> [prompt]   Fork a recorded session into a new one
   scout session fork --last [prompt]         Fork the most recent recorded session
   scout session touched <session-id>         Show files observed in a session
-  scout session send <session-id> <text>      Type into a live session (--harness codex --draft fills without sending)
+  scout session send <session-id> <text>      Type into a live session (--draft fills; --request-reply stamps return address)
   scout session transfer [<pid>] [--name <tmux>] [--alias @x] [--dry-run] [--no-reattach]
                                             Move a live Claude/Grok TUI into tmux, same session
   scout session pin [--session <codex-thread-id>] [--title <name>]
@@ -1149,6 +1150,7 @@ async function runSessionForkAction(context: ScoutCommandContext, args: string[]
   let all = false;
   let promptFile: string | undefined;
   let draft = false;
+  let requestReply = false;
   const positionals: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -1467,11 +1469,14 @@ async function runSessionSendAction(context: ScoutCommandContext, args: string[]
   let harness: string | undefined;
   let promptFile: string | undefined;
   let draft = false;
+  let requestReply = false;
   const positionals: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
-    if (arg === "--draft") {
+    if (arg === "--request-reply") {
+      requestReply = true;
+    } else if (arg === "--draft") {
       draft = true;
     } else if (arg === "--harness" || arg === "--prompt-file") {
       const value = args[index + 1];
@@ -1492,12 +1497,17 @@ async function runSessionSendAction(context: ScoutCommandContext, args: string[]
   if (!sessionId) {
     throw new ScoutCliError("session send needs a <session-id> — e.g. scout session send <session-id> \"run the tests\"");
   }
-  const body = (promptFile ? await readCliInputFile(promptFile, "prompt") : positionals.join(" ")).trim();
+  let body = (promptFile ? await readCliInputFile(promptFile, "prompt") : positionals.join(" ")).trim();
   if (!body) throw new ScoutCliError("session send needs text to send (inline, or --prompt-file <path>)");
 
   const own = process.env.CLAUDE_CODE_SESSION_ID?.trim() || process.env.CODEX_THREAD_ID?.trim();
   if (sessionId === own) throw new ScoutCliError("that is the session you are running in; nothing was sent");
 
+  if (requestReply) {
+    const address = currentSessionReturnAddress(context.env);
+    if (!address) throw new ScoutCliError("No unambiguous sender session id. Use scout ask for tracked replies, or include an explicit return address; nothing was typed.");
+    body = stampSessionReturnAddress(body, address);
+  }
   const result = await deliverInPlace({ sessionId, harness: harness ?? null, body, ...(draft ? { mode: "draft" as const } : {}) });
   context.output.writeValue({ sessionId, ...result }, () => renderInPlaceDelivery(sessionId, result));
   if (!result.ok) process.exitCode = 1;
