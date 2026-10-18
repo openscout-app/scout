@@ -12,4 +12,5 @@ export interface ScoutReplyContext {
   replyToMessageId: ScoutId;
   replyPath: ScoutReplyPath;
   action?: InvocationAction;
+  completion?: { invocationId: string; flightId: string; revision: number };
 }

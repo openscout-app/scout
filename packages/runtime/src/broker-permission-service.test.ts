@@ -84,6 +84,25 @@ describe("managed permission lifecycle", () => {
     expect(h.records.get("permission-1")?.state).toBe("declined");
     await expect(h.service.decide("permission-1", "v", "once")).rejects.toThrow("no live");
   });
+  test("ambiguous delivery cannot replay even when the close write also fails", async () => {
+    const h = harness(); let sent = 0;
+    const record = h.service["deps"].record;
+    h.service["deps"].record = async (value: QuestionRecord) => {
+      if (value.state === "declined") throw new Error("close persistence failed");
+      return record(value);
+    };
+    const wait = h.service.wait(invocation, { sessionId: "pane", projectRoot: "/p", text: "prompt", version: "v", decisions: ["once"],
+      isCurrent: async () => true, answer: async () => { sent++; throw new Error("send failed"); },
+    });
+    const outcome = wait.catch(error => error.message);
+    await until(() => h.notifications.length > 0);
+    await expect(h.service.decide("permission-1", "v", "once")).rejects.toBeInstanceOf(PermissionDeliveryUnconfirmedError);
+    expect(await outcome).toBe("send failed");
+    // The record is still open, but it carries the attempt mark; nothing may resend.
+    expect(h.records.get("permission-1")?.state).toBe("open");
+    await expect(h.service.decide("permission-1", "v", "once")).rejects.toThrow();
+    expect(sent).toBe(1);
+  });
   test("foreign session is not gated", async () => {
     expect(await waitForTmuxPermission({ sessionId: "foreign", projectRoot: "/p", text: trust,
       capture: async () => trust, alive: async () => true, send: async () => { throw new Error("must not send"); },

@@ -1,3 +1,5 @@
+import { hasExplicitCompletion } from "@openscout/protocol";
+import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
 import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalMessageRecord } from "./message-record-canonical.js";
@@ -29,7 +31,7 @@ import {
 
 export type BrokerMessageRuntime = {
   peek(): { messages: Record<string, MessageRecord> };
-  snapshot(): { invocations: Record<string, InvocationRequest> };
+  snapshot(): { invocations: Record<string, InvocationRequest>; flights?: Record<string, FlightRecord> };
   conversation(conversationId: string): ConversationDefinition | undefined;
   agent(agentId: string): AgentDefinition | undefined;
   flightForInvocation(invocationId: string): FlightRecord | undefined;
@@ -62,6 +64,8 @@ export type BrokerMessageServiceDeps = {
   persistFlight: (flight: FlightRecord, eligible?: () => boolean) => Promise<void>;
   /** Local checkpoint after remote authority acceptance; never a local message/fanout. */
   persistAcceptedReply: (invocation: InvocationRequest, receipt: AcceptedInvocationReply, eligible: () => boolean) => Promise<void>;
+  completionFlight?: (id: string) => FlightRecord | undefined;
+  completionCurrentFlight?: (invocationId: string) => FlightRecord | undefined;
   authorizeReplyCompletion?: (invocation: InvocationRequest, reply: MessageRecord) => boolean;
   activeLocalEndpointForAgent: (agentId: string) => unknown;
 };
@@ -130,6 +134,7 @@ export class BrokerMessageService {
 
     const authority = this.deps.mesh.authorityNodeForConversation(message.conversationId);
     if (authority) {
+      if (message.metadata?.completionReply !== undefined) throw new Error("completion_remote_conversation_unsupported");
       const forwarded = await this.deps.mesh.forwardConversationMessageToAuthority(message);
       const accepted = forwarded.message;
       if (accepted !== undefined) {
@@ -271,8 +276,10 @@ export class BrokerMessageService {
 
   private completionFlight(invocation: InvocationRequest, reply: MessageRecord): FlightRecord | undefined {
     if (!this.authorizedFinalReply(invocation, reply)) return undefined;
-    const flight = this.deps.runtime.flightForInvocation(invocation.id);
-    if (!flight || !isWorkingFlightState(flight.state)) return undefined;
+    const flight = hasExplicitCompletion(invocation) && this.deps.completionCurrentFlight
+      ? this.deps.completionCurrentFlight(invocation.id) : this.deps.runtime.flightForInvocation(invocation.id);
+    if (!flight || !isWorkingFlightState(flight.state)
+      || !explicitReplyMatchesFlight(reply, invocation, flight, this.deps.runtime.snapshot().flights ?? {}, this.deps.completionFlight)) return undefined;
     const startedAt = flight.startedAt ?? invocation.createdAt;
     if (reply.createdAt < Math.max(0, startedAt - 5_000)) return undefined;
     const accepted = acceptedInvocationReply(flight, invocation);

@@ -2425,6 +2425,26 @@ describe("invocation flight-status shadow columns", () => {
     }
   });
 
+  test("old flight receipt acknowledgements preserve current selection and row order across reopen", () => {
+    const fixture = createStoreWithPath();
+    let store = fixture.store;
+    try {
+      seedInvocation(store);
+      const first = { id: "report-first", invocationId: invocation.id, requesterId: "operator", targetAgentId: "agent-1",
+        state: "failed" as const, completedAt: 520, summary: "first failure" };
+      store.recordFlight(first);
+      store.recordFlight({ ...first, id: "report-second", summary: "second failure" });
+      const originalRow = getWritableDb(store).query("SELECT rowid FROM flights WHERE id = ?1").get(first.id);
+      store.recordFlight({ ...first, metadata: { terminalReport: { status: "delivered" } } }, { preserveCurrent: true });
+      expect(shadowRow(getWritableDb(store)).flight_id).toBe("report-second");
+      expect(getWritableDb(store).query("SELECT rowid FROM flights WHERE id = ?1").get(first.id)).toEqual(originalRow);
+      store.close(); store = new SQLiteControlPlaneStore(fixture.dbPath);
+      expect(shadowRow(getWritableDb(store)).flight_id).toBe("report-second");
+      expect(getWritableDb(store).query("SELECT metadata_json FROM flights WHERE id = ?1").get(first.id))
+        .toEqual({ metadata_json: JSON.stringify({ terminalReport: { status: "delivered" } }) });
+    } finally { store.close(); }
+  });
+
   test("equal-timestamp flight rewrites survive activity references and remain latest after reconcile", () => {
     // Equal timestamps resolve by write order: the most recent statement
     // about an invocation's status stands. Both layers implement it: the live

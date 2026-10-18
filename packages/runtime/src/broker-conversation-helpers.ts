@@ -1,3 +1,4 @@
+import { completionReply, hasExplicitCompletion } from "@openscout/protocol";
 import { iterateMessageRecords, iterateMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
 import {
   buildScoutReturnAddress,
@@ -338,6 +339,10 @@ export function isFinalReplyForInvocation(message: MessageRecord, invocation: In
   if (!invocation.conversationId || !invocation.messageId) {
     return false;
   }
+  const explicit = completionReply(message);
+  if (message.metadata?.completionReply !== undefined && !explicit) return false;
+  if (explicit?.kind === "progress" || (hasExplicitCompletion(invocation) && explicit?.kind !== "final")) return false;
+  if (explicit && explicit.invocationId !== invocation.id) return false;
   return message.class === "agent"
     && message.actorId === invocation.targetAgentId
     && message.conversationId === invocation.conversationId

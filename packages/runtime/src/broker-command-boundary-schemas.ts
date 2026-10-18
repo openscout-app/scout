@@ -199,13 +199,18 @@ export const brokerDeliverRequestSchema: z.ZodType<ScoutDeliverRequest> = z.obje
   body: trimmedNonEmptyString,
   // A previous broker rejects this new discriminant instead of ignoring the
   // option and silently starting ordinary consult execution.
-  intent: z.enum(["tell", "consult", "session_input"]),
+  intent: z.enum(["tell", "consult", "session_input", "explicit_consult"]),
+  completion: z.object({ mode: z.literal("explicit") }).strict().optional(),
+  relation: z.object({ parentFlightId: nonEmptyString, kind: z.enum(["joined", "continuation"]) }).strict().optional(),
   operatorSignal: brokerOperatorSignalSchema.optional(),
   sessionDelivery: z.literal("in_place_or_resume").optional(),
 }).passthrough().refine(
   payload => (payload.intent === "session_input") === (payload.sessionDelivery === "in_place_or_resume"),
   "session input requires its versioned wire intent and delivery option",
-).transform(payload => ({ ...payload, intent: payload.intent === "session_input" ? "consult" as const : payload.intent }));
+).refine(
+  payload => (payload.intent === "explicit_consult") === Boolean(payload.completion || payload.relation),
+  "completion contracts require explicit_consult wire intent",
+).transform(payload => ({ ...payload, intent: payload.intent === "session_input" || payload.intent === "explicit_consult" ? "consult" as const : payload.intent }));
 
 export function brokerInvocationRequestSchemaFor(
   runtimeCatalog?: ScoutOwnedRuntimeCatalog,
@@ -234,7 +239,9 @@ export function brokerInvocationRequestSchemaFor(
   targetSessionId: nonEmptyString.nullish(),
   targetLabel: nonEmptyString.nullish(),
   routePolicy: scoutRoutePolicySchema.nullish(),
-}).passthrough();
+}).passthrough().refine(payload => payload.metadata?.completion === undefined
+  && payload.metadata?.completionRelation === undefined && payload.metadata?.completionLocalNodeId === undefined,
+  "completion contracts must enter through ask /v1/deliver");
 }
 
 /** Boundary schema validated against the bundled catalog; request paths that

@@ -1,3 +1,4 @@
+import { hasExplicitCompletion } from "@openscout/protocol";
 import { hasManagedPermissionContext } from "./managed-permission.js";
 import { parseTmuxPermission, waitForTmuxPermission } from "./tmux-permission.js";
 import { SUPPORTED_LOCAL_AGENT_HARNESSES } from "./local-agent-harnesses.js";
@@ -3341,7 +3342,10 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
     conversationId: invocation.conversationId,
     messageId: invocation.messageId,
     replyToMessageId: invocation.messageId,
-    replyPath: "final_response",
+    replyPath: hasExplicitCompletion(invocation) ? "mcp_reply" : "final_response",
+    ...(hasExplicitCompletion(invocation) && typeof invocation.metadata?.completionFlightId === "string" ? {
+      completion: { invocationId: invocation.id, flightId: invocation.metadata.completionFlightId, revision: 0 },
+    } : {}),
     action: invocation.action,
   };
 }
@@ -3527,7 +3531,12 @@ function formatInvocationContextValue(value: unknown): string {
 }
 
 function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string[] {
-  const replyInstruction = context?.replyPath === "mcp_reply"
+  const replyInstruction = context?.completion ? [
+    "> This ask requires explicit completion. Use `messages_reply` with completion.kind='progress' for updates.",
+    "> Before your final, call `current_reply_context` for the current flight and revision; wait for all joined work to settle.",
+    "> Submit `messages_reply` with completion.kind='final', the returned invocationId/flightId/revision, and a new stable requestId. Reuse that requestId only for an identical retry.",
+    "> Your plain final assistant output does not complete this ask. Use `ask` with relation to opt child work into the parent's completion obligations.",
+  ] : context?.replyPath === "mcp_reply"
     ? [
         "> First, immediately publish a short broker-visible acknowledgement in the same conversation.",
         "> Use the provided Scout reply tool for progress acknowledgement and the final answer; do not create a new send/ask.",
@@ -3542,7 +3551,9 @@ function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string
     "<!-- SCOUT BROKER REPLY MODE -->",
     "> **Reply mode:** You are answering a Scout ask.",
     ...replyInstruction,
-    "> Only use Scout tools if you need to ask or delegate to another agent.",
+    context?.completion
+      ? "> Use Scout replies for progress and final completion, and `ask` for delegated work."
+      : "> Only use Scout tools if you need to ask or delegate to another agent.",
     "",
     "<!-- SCOUT SESSION SEARCH -->",
     "> For past harness work (what Codex/Claude/Kimi sessions said or ran), prefer `scout search` over grepping `~/.codex`, `~/.claude`, or `~/.kimi-code` by hand.",

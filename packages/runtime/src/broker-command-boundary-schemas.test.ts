@@ -83,3 +83,14 @@ test("broker boundary validates family aliases using the live family's model-spe
   expect(boundary.safeParse({ ...baseInvocation, execution: { harness: "claude", model: "opus", reasoningEffort: "ultra" } }).success).toBe(true);
   expect(boundary.safeParse({ ...baseInvocation, execution: { harness: "claude", model: "opus", reasoningEffort: "medium" } }).success).toBe(false);
 });
+
+test("explicit completion wire intent fences old brokers and cannot mix with session input", () => {
+  const payload = { intent: "explicit_consult", body: "inspect", requestId: "stable", completion: { mode: "explicit" } };
+  expect(brokerDeliverRequestSchema.parse(payload)).toEqual({ ...payload, intent: "consult" });
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, intent: "consult" }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, completion: undefined }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, completion: { mode: "automatic" } }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, sessionDelivery: "in_place_or_resume" }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, completion: undefined, relation: { parentFlightId: "f", kind: "joined" } }).success).toBe(true);
+  expect(brokerInvocationRequestSchema.safeParse({ ...baseInvocation, metadata: { completion: { mode: "explicit" } } }).success).toBe(false);
+});
