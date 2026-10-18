@@ -4425,10 +4425,10 @@ export function createScoutMcpServer(options: {
         model: z.string().min(1).optional(),
         reasoningEffort: z.enum(SCOUT_REASONING_EFFORTS).optional(),
         placement: z
-          .enum(["background", "foreground"])
+          .enum(["background", "foreground", "attached"])
           .optional()
           .describe(
-            "Where a newly created harness session lives. Background is Scout-managed (default); foreground is openable in the operator's native harness UI. Codex supports foreground.",
+            "Where a newly created harness session lives. Background is Scout-managed (default); foreground is openable in the operator's native harness UI. Codex supports foreground. Attached means a terminal-backed session; an existing session must already match the requested placement.",
           ),
         workspace: z.enum(["same", "new_worktree"]).optional(),
         session: z
