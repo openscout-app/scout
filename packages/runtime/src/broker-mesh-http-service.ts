@@ -152,8 +152,8 @@ export class BrokerMeshHttpService {
     return {
       status: 200,
       body: result.kind === "duplicate"
-        ? { ok: true, duplicate: true }
-        : { ok: true, deliveries: result.deliveries },
+        ? { ok: true, duplicate: true, message: result.message }
+        : { ok: true, deliveries: result.deliveries, message: result.message },
     };
   };
 

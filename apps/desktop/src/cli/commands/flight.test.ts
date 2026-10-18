@@ -123,3 +123,9 @@ describe("runFlightCommand", () => {
     expect(stdout.join("\n")).toContain("On timeout, Scout prints the latest known state");
   });
 });
+
+test("cancel accepts one flight and no wait timeout", () => {
+  expect(parseFlightCommandOptions(["cancel", "flight-queued"])).toEqual({ command: "cancel", flightId: "flight-queued" });
+  expect(() => parseFlightCommandOptions(["cancel", "flight-queued", "--timeout", "10"])).toThrow("does not accept --timeout");
+  expect(() => parseFlightCommandOptions(["cancel"])).toThrow("requires <flightId>");
+});

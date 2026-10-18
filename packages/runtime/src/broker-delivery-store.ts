@@ -32,6 +32,7 @@ export type DeliveryStatusUpdateInput = {
   leaseOwner?: string | null;
   leaseExpiresAt?: number | null;
   expectedLeaseOwner?: string;
+  expectedLeaseGeneration?: number;
   requireActiveLease?: boolean;
 };
 
@@ -50,10 +51,16 @@ export type BrokerDeliveryStoreOptions = {
   nodeId: string;
   createEventId: () => string;
   publishEvent: (event: ControlEvent) => void;
+  now?: () => number;
+  warn?: (message: string) => void;
 };
 
 export function isDeliveryClaimable(delivery: DeliveryIntent, now: number): boolean {
-  if (delivery.status === "pending" || delivery.status === "accepted" || delivery.status === "deferred") {
+  if (delivery.status === "deferred") {
+    const due = delivery.metadata?.nextAttemptAt;
+    return due === undefined || (typeof due === "number" && Number.isFinite(due) && due <= now);
+  }
+  if (delivery.status === "pending" || delivery.status === "accepted") {
     return true;
   }
   return delivery.status === "leased"
@@ -141,11 +148,11 @@ export class BrokerDeliveryStore {
     return this.options.durableStore.runWrite(async () => {
       const previous = this.options.journal.getDelivery(input.deliveryId);
       if ((!previous && !allowMissing) || (previous && !await eligible(previous))) return false;
-      if (input.expectedLeaseOwner || input.requireActiveLease) {
+      if (input.expectedLeaseOwner || input.expectedLeaseGeneration !== undefined || input.requireActiveLease) {
         if (!previous) {
           throw new Error("delivery not found");
         }
-        const now = Date.now();
+        const now = this.options.now?.() ?? Date.now();
         if (
           previous.status !== "leased"
           || !previous.leaseOwner
@@ -155,6 +162,26 @@ export class BrokerDeliveryStore {
         ) {
           throw new Error("delivery lease is missing, expired, or owned by another worker");
         }
+        const generation = previous.metadata?.leaseGeneration;
+        if (generation !== undefined || input.expectedLeaseGeneration !== undefined) {
+          if (!Number.isSafeInteger(generation) || generation! < 1
+            || !Number.isSafeInteger(input.expectedLeaseGeneration)
+            || input.expectedLeaseGeneration !== generation) {
+            throw new Error("delivery lease generation is missing or stale; echo the generation returned by claim");
+          }
+        } else {
+          // Only an outstanding pre-upgrade lease can take this path. Every
+          // new claim has a generation; missing generation never bypasses it.
+          (this.options.warn ?? console.warn)(`[openscout-runtime] accepting legacy unfenced inbox lease ${previous.id}`);
+        }
+      }
+
+      const metadata = input.metadata ? { ...input.metadata } : undefined;
+      if (metadata) {
+        delete metadata.leaseGeneration;
+        if (previous?.metadata?.leaseGeneration !== undefined) {
+          metadata.leaseGeneration = previous.metadata.leaseGeneration;
+        }
       }
 
       await this.options.durableStore.commitEntries(
@@ -162,7 +189,7 @@ export class BrokerDeliveryStore {
           kind: "delivery.status.update",
           deliveryId: input.deliveryId,
           status: input.status,
-          metadata: input.metadata,
+          metadata,
           leaseOwner: input.leaseOwner,
           leaseExpiresAt: input.leaseExpiresAt,
         },
@@ -177,7 +204,7 @@ export class BrokerDeliveryStore {
   readonly claimDelivery = async (input: DeliveryClaimInput): Promise<DeliveryIntent | null> => {
     let previousStatus: DeliveryStatus | undefined;
     const claimed = await this.options.durableStore.runWrite(async () => {
-      const now = Date.now();
+      const now = this.options.now?.() ?? Date.now();
       const reasons = input.reasons?.length ? new Set(input.reasons) : null;
       const matches = (candidate: DeliveryIntent) => (
           (!input.itemId || candidate.id === input.itemId)
@@ -199,9 +226,15 @@ export class BrokerDeliveryStore {
       const leaseOwner = input.leaseOwner?.trim() || `delivery-claim-${this.options.nodeId}`;
       const leaseMs = Number.isFinite(input.leaseMs) && input.leaseMs! > 0 ? input.leaseMs! : 30_000;
       const leaseExpiresAt = now + leaseMs;
+      const previousGeneration = delivery.metadata?.leaseGeneration;
+      if (previousGeneration !== undefined
+        && (!Number.isSafeInteger(previousGeneration) || previousGeneration < 1 || previousGeneration >= Number.MAX_SAFE_INTEGER)) {
+        throw new Error("delivery lease generation is invalid; source preserved for inspection");
+      }
       const metadata = {
         claimedAt: now,
         claimedBy: leaseOwner,
+        leaseGeneration: (previousGeneration ?? 0) + 1,
       };
 
       await this.options.durableStore.commitEntries(

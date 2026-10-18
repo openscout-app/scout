@@ -1024,6 +1024,16 @@ export const mobileAskSessionInputSchema = z.object({
   clientMessageId: z.string().nullable().optional(),
 });
 
+const mobileAskSessionProcedure = procedure
+    .input(mobileAskSessionInputSchema)
+    .mutation(async ({ input }) => {
+      return askMobileHarnessSession(input, {
+        ask: askScoutQuestion,
+        senderId: resolveOperatorName().trim() || "operator",
+        fallbackCurrentDirectory: resolveMobileCurrentDirectory(),
+      });
+    });
+
 const mobileRouter = t.router({
   runtimeCapabilities: procedure
     .input(z.object({ projectRoot: z.string().optional() }).optional())
@@ -1437,18 +1447,13 @@ const mobileRouter = t.router({
     }),
 
   // Reply to a harness session Scout did not start (one the phone saw in the
-  // tail). Exact-session ask with fork-if-live: a session still open in the
-  // operator's terminal is continued as a new Scout-owned fork, never resumed
-  // in a second process. Expected refusals return { ok: false }, not errors.
-  askSession: procedure
-    .input(mobileAskSessionInputSchema)
-    .mutation(async ({ input }) => {
-      return askMobileHarnessSession(input, {
-        ask: askScoutQuestion,
-        senderId: resolveOperatorName().trim() || "operator",
-        fallbackCurrentDirectory: resolveMobileCurrentDirectory(),
-      });
-    }),
+  // tail). The broker reserves a stable request receipt before live input;
+  // only an explicit not-live result permits exact-session resume. Expected
+  // refusals and unknown outcomes return { ok: false }, not replacement asks.
+  askSession: mobileAskSessionProcedure,
+  // Versioned wire name: old bridges reject before input instead of ignoring
+  // a new field and repeating an unreceipted terminal submission.
+  askSessionDurable: mobileAskSessionProcedure,
 
   // Approve / Deny a Claude permission prompt in a Herdr pane: presses the
   // dialog's Yes or No, only while the dialog the phone was shown (`version`)

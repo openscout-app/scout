@@ -7,7 +7,6 @@ import type { ClaudeSessionRecord } from "@openscout/runtime";
 import { mobileAskSessionInputSchema } from "../pairing/runtime/bridge/router.ts";
 
 const SOURCE = "4fad8bb9-b4d3-4432-be75-8cfd636e78c0";
-const notLive = async (): Promise<InPlaceDelivery> => ({ ok: false, code: "not_live" });
 const FORK = "9b1c2d3e-0000-4000-8000-000000000001";
 
 function fakeAsk(result: ScoutAskResult) {
@@ -24,12 +23,13 @@ describe("mobile.askSession", () => {
     const { ask, calls } = fakeAsk({ usedBroker: true, conversationId: "dm.1", messageId: "msg.1", targetSessionId: SOURCE, flight: { id: "flt.1" } as never });
     const result = await askMobileHarnessSession(
       { sessionId: ` ${SOURCE} `, harness: "claude", cwd: "/Users/art/dev/openscout", body: " keep going ", clientMessageId: "c-1" },
-      { ask, senderId: "art", deliverInPlace: notLive },
+      { ask, senderId: "art" },
     );
     expect(calls).toEqual([{
       senderId: "art",
       target: { kind: "session_id", sessionId: SOURCE, harness: "claude", forkIfLive: false },
       body: "keep going",
+      sessionDelivery: "in_place_or_resume",
       clientMessageId: "c-1",
       currentDirectory: "/Users/art/dev/openscout",
       source: "scout-mobile",
@@ -38,8 +38,8 @@ describe("mobile.askSession", () => {
   });
 
   test("reports a fork when the broker delivered to a different session", async () => {
-    const { ask } = fakeAsk({ usedBroker: true, conversationId: "dm.1", messageId: "msg.1", targetSessionId: FORK });
-    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi" }, { ask, senderId: "art", deliverInPlace: notLive }))
+    const { ask } = fakeAsk({ usedBroker: true, conversationId: "dm.1", messageId: "msg.1", targetSessionId: FORK, flight: { id: "flt.1" } as never });
+    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi", clientMessageId: "c-1" }, { ask, senderId: "art" }))
       .toMatchObject({ ok: true, mode: "forked", sessionId: FORK, sourceSessionId: SOURCE });
   });
 
@@ -54,7 +54,7 @@ describe("mobile.askSession", () => {
         unresolvedTarget: `session:claude:${SOURCE}`,
         targetDiagnostic: { agentId: `session:claude:${SOURCE}`, state: "unknown", registrationKind: null, projectRoot: null, sessionWakeReason: code, detail: "raw" },
       });
-      const result = await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi" }, { ask, senderId: "art", deliverInPlace: notLive });
+      const result = await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi", clientMessageId: "c-1" }, { ask, senderId: "art" });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.code).toBe(code);
@@ -65,49 +65,65 @@ describe("mobile.askSession", () => {
 
   test("does not throw for a missing broker, an empty body, or an unexpected failure", async () => {
     const offline = fakeAsk({ usedBroker: false, unresolvedTarget: "x" });
-    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi" }, { ask: offline.ask, senderId: "art", deliverInPlace: notLive }))
+    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi", clientMessageId: "c-1" }, { ask: offline.ask, senderId: "art" }))
       .toMatchObject({ ok: false, code: "broker_unavailable" });
 
     const empty = fakeAsk({ usedBroker: true });
-    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "   " }, { ask: empty.ask, senderId: "art", deliverInPlace: notLive }))
+    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "   ", clientMessageId: "c-1" }, { ask: empty.ask, senderId: "art" }))
       .toMatchObject({ ok: false, code: "empty_body" });
     expect(empty.calls).toHaveLength(0);
 
     const thrown = (async () => { throw new Error("socket closed"); }) as unknown as typeof import("../broker/service.ts").askScoutQuestion;
-    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi" }, { ask: thrown, senderId: "art", deliverInPlace: notLive }))
-      .toMatchObject({ ok: false, code: "delivery_failed" });
+    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi", clientMessageId: "c-1" }, { ask: thrown, senderId: "art" }))
+      .toMatchObject({ ok: false, code: "delivery_unconfirmed" });
   });
 
   test("router input schema accepts the phone payload and rejects a missing session id", () => {
-    expect(mobileAskSessionInputSchema.safeParse({ sessionId: SOURCE, harness: "claude", cwd: null, body: "hi" }).success).toBe(true);
-    expect(mobileAskSessionInputSchema.safeParse({ sessionId: "", harness: "claude", body: "hi" }).success).toBe(false);
+    expect(mobileAskSessionInputSchema.safeParse({ sessionId: SOURCE, harness: "claude", cwd: null, body: "hi", clientMessageId: "c-1" }).success).toBe(true);
+    expect(mobileAskSessionInputSchema.safeParse({ sessionId: "", harness: "claude", body: "hi", clientMessageId: "c-1" }).success).toBe(false);
   });
 
   test("a Codex resume keeps fork-if-live, which only refuses a thread open elsewhere", async () => {
     const { ask, calls } = fakeAsk({ usedBroker: true, conversationId: "dm.1", targetSessionId: SOURCE });
-    await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi" }, { ask, senderId: "art", deliverInPlace: notLive });
+    await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi", clientMessageId: "c-1" }, { ask, senderId: "art" });
     expect(calls[0]?.target).toMatchObject({ kind: "session_id", harness: "codex", forkIfLive: true });
   });
 
-  test("a live session gets the reply in place and the broker is never asked", async () => {
-    const { ask, calls } = fakeAsk({ usedBroker: true, conversationId: "dm.1" });
-    const result = await askMobileHarnessSession(
-      { sessionId: SOURCE, harness: "claude", body: "keep going" },
-      { ask, senderId: "art", deliverInPlace: async () => ({ ok: true, via: "herdr", location: "Herdr scout · w1:p1" }) },
-    );
-    expect(calls).toHaveLength(0);
-    expect(result).toEqual({ ok: true, mode: "resumed", delivery: "in_place", via: "herdr", location: "Herdr scout · w1:p1", sessionId: SOURCE, sourceSessionId: SOURCE });
+  test("a live session receipt comes through the broker with a stable key and no execution flight", async () => {
+    const { ask, calls } = fakeAsk({ usedBroker: true, conversationId: "dm.1", messageId: "msg.1",
+      inputSubmitted: { kind: "in_place", state: "submitted", sessionId: SOURCE, harness: "claude", via: "herdr", location: "pane1" } });
+    const input = { sessionId: SOURCE, harness: "claude", body: "keep going", clientMessageId: "retained-key" };
+    const result = await askMobileHarnessSession(input, { ask, senderId: "art" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ sessionDelivery: "in_place_or_resume", clientMessageId: "retained-key", body: "keep going" });
+    expect(result).toEqual({ ok: true, mode: "resumed", delivery: "in_place", via: "herdr", location: "pane1", sessionId: SOURCE, sourceSessionId: SOURCE, conversationId: "dm.1", messageId: "msg.1" });
+    expect(await askMobileHarnessSession(input, { ask, senderId: "art" })).toEqual(result);
+    expect(calls[1]).toEqual(calls[0]);
   });
 
-  test("a live session Scout can't type into is refused, never copied", async () => {
-    for (const inPlace of [
-      { ok: false, code: "session_blocked", via: "herdr", location: "Herdr scout · w1:p1" },
-      { ok: false, code: "in_place_failed", via: "tmux", location: "tmux work · %3", detail: "boom" },
-    ] as InPlaceDelivery[]) {
-      const { ask, calls } = fakeAsk({ usedBroker: true, conversationId: "dm.1" });
-      const result = await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi" }, { ask, senderId: "art", deliverInPlace: async () => inPlace });
-      expect(calls).toHaveLength(0);
-      expect(result.ok).toBe(false);
+  test("refuses missing key or unobserved harness without submitting", async () => {
+    const { ask, calls } = fakeAsk({ usedBroker: true });
+    expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi" }, { ask, senderId: "art" }))
+      .toMatchObject({ ok: false, code: "request_id_required" });
+    expect(await askMobileHarnessSession({ sessionId: SOURCE, body: "hi", clientMessageId: "c-1" }, { ask, senderId: "art" }))
+      .toMatchObject({ ok: false, code: "session_not_resumable" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("unknown submission is never reported as nothing sent or retried under another key", async () => {
+    let calls = 0;
+    const ask = (async () => { calls++; throw new Error("request_outcome_unknown: keep original request"); }) as typeof import("../broker/service.ts").askScoutQuestion;
+    const result = await askMobileHarnessSession({ sessionId: SOURCE, harness: "codex", body: "hi", clientMessageId: "c-1" }, { ask, senderId: "art" });
+    expect(result).toMatchObject({ ok: false, code: "request_outcome_unknown" });
+    expect(calls).toBe(1);
+    if (!result.ok) expect(result.message).not.toContain("nothing was sent");
+  });
+
+  test("a no-flight acceptance without a matching input receipt remains unconfirmed", async () => {
+    for (const result of [{ usedBroker: true, conversationId: "dm.1" }, { usedBroker: true, conversationId: "dm.1",
+      inputSubmitted: { kind: "in_place", state: "submitted", sessionId: "wrong", harness: "claude", via: "tmux", location: "%3" } }] as ScoutAskResult[]) {
+      expect(await askMobileHarnessSession({ sessionId: SOURCE, harness: "claude", body: "hi", clientMessageId: "c-1" }, { ask: fakeAsk(result).ask, senderId: "art" }))
+        .toMatchObject({ ok: false, code: "delivery_unconfirmed" });
     }
   });
 });
@@ -131,23 +147,30 @@ describe("deliverInPlace", () => {
     expect(prompted).toEqual(["w1:p1:hi"]);
   });
 
-  test("a Codex thread held by the ChatGPT app goes through the Scout app", async () => {
+  test("an app-held Codex thread refuses Scout.app submission without an actuator activity guard", async () => {
     const typed: string[] = [];
     const result = await deliverInPlace({ sessionId: SOURCE, harness: "codex", body: "hi" }, {
       findHerdrPane: async () => null,
       self: [],
       selfTty: async () => null,
+      codexThreadPids: async () => [],
       codexHeldByApp: async () => true,
+      codexActivity: async () => "idle",
       askScoutApp: async () => ({ ok: true, accessibility: "granted" }),
       typeIntoCodexApp: async (id, body) => { typed.push(`${id}:${body}`); },
     });
-    expect(result).toEqual({ ok: true, via: "scout-app", location: "the ChatGPT app’s Codex" });
-    expect(typed).toEqual([`${SOURCE}:hi`]);
+    expect(result).toMatchObject({ ok: false, code: "in_place_failed", via: "scout-app" });
+    expect(typed).toEqual([]);
   });
 
   test("without the Scout app's grant, nothing reaches the ChatGPT composer", async () => {
     const typeIntoCodexApp = async () => { throw new Error("must not open the link"); };
-    const base = { findHerdrPane: async () => null, self: [], selfTty: async () => null, codexHeldByApp: async () => true, typeIntoCodexApp };
+    const base = {
+      findHerdrPane: async () => null, self: [], selfTty: async () => null,
+      codexThreadPids: async () => [], codexHeldByApp: async () => true,
+      codexActivity: async () => "idle" as const, typeIntoCodexApp,
+      latticesCall: async () => { throw new Error("Lattices unavailable"); },
+    };
     expect(await deliverInPlace({ sessionId: SOURCE, harness: "codex", body: "hi" }, {
       ...base,
       askScoutApp: async () => ({ ok: true, accessibility: "not-granted" }),

@@ -323,7 +323,7 @@ describe("broker daemon messaging routes", () => {
 
     const claimed = await broker.postJson<{
       ok: boolean;
-      claimed: { id: string; status: string; leaseOwner?: string; message?: { id: string } } | null;
+      claimed: { id: string; status: string; leaseOwner?: string; leaseGeneration?: number; message?: { id: string } } | null;
     }>(harness.baseUrl, "/v1/inbox/claim", {
       targetId: "fabric",
       itemId: item!.id,
@@ -353,6 +353,7 @@ describe("broker daemon messaging routes", () => {
     await broker.postJson(harness.baseUrl, "/v1/inbox/ack", {
       itemId: claimed.claimed!.id,
       leaseOwner: "test-agent",
+      leaseGeneration: claimed.claimed!.leaseGeneration,
     });
 
     const acknowledged = await broker.getJson<Array<{ id: string; status: string }>>(

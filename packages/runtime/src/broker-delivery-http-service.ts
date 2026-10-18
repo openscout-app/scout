@@ -136,6 +136,7 @@ export class BrokerDeliveryHttpService {
       leaseOwner: null,
       leaseExpiresAt: null,
       expectedLeaseOwner: leaseOwner,
+      expectedLeaseGeneration: body.leaseGeneration,
       requireActiveLease: true,
     }, {
       ok: true,
@@ -171,6 +172,7 @@ export class BrokerDeliveryHttpService {
       leaseOwner: null,
       leaseExpiresAt: null,
       expectedLeaseOwner: leaseOwner,
+      expectedLeaseGeneration: body.leaseGeneration,
       requireActiveLease: true,
     }, {
       ok: true,

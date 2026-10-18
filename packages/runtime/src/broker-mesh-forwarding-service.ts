@@ -45,6 +45,8 @@ export type MeshAuthorityForwardResult = {
 };
 
 export type MeshMessageAuthorityForwardResult = MeshAuthorityForwardResult & {
+  /** Absent only on peers predating canonical message acknowledgements. */
+  message?: MessageRecord;
   deliveries?: DeliveryIntent[];
 };
 
@@ -259,6 +261,7 @@ export class BrokerMeshForwardingService {
       forwarded: true,
       authorityNodeId: authority.conversation.authorityNodeId,
       duplicate: result.duplicate,
+      message: result.message,
       deliveries: result.deliveries,
     };
   }

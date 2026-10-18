@@ -168,6 +168,7 @@ describe("BrokerDeliveryHttpService", () => {
     await expect(harness.service.acknowledgeInboxItem({
       itemId: "delivery-1",
       leaseOwner: "worker-1",
+      leaseGeneration: 4,
       metadata: { source: "test" },
     })).resolves.toEqual({
       status: 200,
@@ -185,6 +186,7 @@ describe("BrokerDeliveryHttpService", () => {
         leaseOwner: null,
         leaseExpiresAt: null,
         expectedLeaseOwner: "worker-1",
+        expectedLeaseGeneration: 4,
         requireActiveLease: true,
       },
     ]);
@@ -210,6 +212,7 @@ describe("BrokerDeliveryHttpService", () => {
     await expect(harness.service.nackInboxItem({
       itemId: "delivery-1",
       leaseOwner: "worker-1",
+      leaseGeneration: 5,
       retryAfterMs: 1_250.8,
       reason: "busy",
       metadata: { source: "test" },
@@ -229,6 +232,7 @@ describe("BrokerDeliveryHttpService", () => {
           nextAttemptAt: 2_250,
         },
         expectedLeaseOwner: "worker-1",
+        expectedLeaseGeneration: 5,
         requireActiveLease: true,
       }),
     ]);

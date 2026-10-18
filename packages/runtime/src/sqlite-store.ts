@@ -3697,7 +3697,7 @@ export class SQLiteControlPlaneStore {
     return this.db.query(`SELECT 1 FROM ${table} WHERE id = ?1`).get(id) ? id : null;
   }
 
-  recordFlight(flight: FlightRecord): ThreadEventEnvelope[] {
+  recordFlight(flight: FlightRecord, options: { preserveCurrent?: boolean } = {}): ThreadEventEnvelope[] {
     const archivedInvocation = this.anchoredRecord<InvocationRequest>("invocation", flight.invocationId);
     if (archivedInvocation) this.recordInvocation(archivedInvocation);
     let recorded = flight;
@@ -3739,7 +3739,7 @@ export class SQLiteControlPlaneStore {
           labels_json, metadata_json, started_at, completed_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(id) DO UPDATE SET
-          rowid = (SELECT COALESCE(MAX(rowid), 0) + 1 FROM flights),
+          rowid = CASE WHEN ?13 = 1 THEN flights.rowid ELSE (SELECT COALESCE(MAX(rowid), 0) + 1 FROM flights) END,
           invocation_id = excluded.invocation_id,
           requester_id = excluded.requester_id,
           target_agent_id = excluded.target_agent_id,
@@ -3764,6 +3764,7 @@ export class SQLiteControlPlaneStore {
         stringify(recorded.metadata),
         recorded.startedAt ?? null,
         recorded.completedAt ?? null,
+        options.preserveCurrent ? 1 : 0,
       );
 
       // Dual-write the flight's status onto the merged invocation record
@@ -3780,6 +3781,7 @@ export class SQLiteControlPlaneStore {
            flight_id = ?2, state = ?3, summary = ?4, output = ?5, error = ?6,
            started_at = ?7, completed_at = ?8, flight_metadata_json = ?9
          WHERE id = ?1
+           AND (?10 = 0 OR flight_id = ?2)
            AND (
              flight_id IS NULL
              OR flight_id = ?2
@@ -3795,6 +3797,7 @@ export class SQLiteControlPlaneStore {
         recorded.startedAt ?? null,
         recorded.completedAt ?? null,
         stringify(recorded.metadata),
+        options.preserveCurrent ? 1 : 0,
       );
     })();
 

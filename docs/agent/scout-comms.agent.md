@@ -299,3 +299,62 @@ event for semantic completion.
 | reply context | `packages/protocol/src/scout-reply-context.ts` |
 | broker | `packages/runtime/src/scout-broker.ts` |
 | prompt projection | `packages/runtime/src/local-agents.ts` |
+
+## Replying into a native Codex app thread
+
+Discover the exact harness session id with `sessions_inventory` / `route_context`.
+Historical search coverage is not proof that an app-held thread is absent. If
+no exact match is available, ask for the thread id; never launch a replacement.
+
+To fill its composer without sending, use MCP
+`session_send { sessionId, harness: "codex", mode: "draft", text }` or:
+
+```sh
+scout session send <thread-id> --harness codex --draft "Your reply"
+```
+
+A `delivered: "draft"` result means the native thread link was opened with the
+text, **not** that a user turn was recorded. The operator reviews and sends it.
+Draft needs no Accessibility grant and does not need Scout.app. Default
+`session_send` requests submission; successful submission requires transcript
+confirmation, not merely a click. Do not submit into a running turn to reply.
+Native submit refuses busy or unknown activity and never takes the app's thread
+writer. Scout.app submission is disabled before opening the thread link: its
+combined focus-and-Return operation cannot recheck activity after focus. Enabling
+that path requires a Swift actuator that binds the exact thread and full composer
+value, checks activity after focus immediately before Return, and refuses busy or
+unknown state. A TypeScript preflight or an unrecognized request flag is not enough.
+
+If Scout.app is unavailable, a running standalone Lattices daemon can
+focus the unique AX text composer containing the exact reply and press Return.
+Missing, duplicate, truncated or unfocused composer evidence stops submission.
+Lattices shortens AX values over 240 characters to 237 characters plus `...`
+without a truncation flag. Scout rejects matching values ending in `...` with
+240 or more UTF-16 code units, including literal replies with that shape. Long
+replies that do not match the snapshot also require draft mode. Draft mode has
+neither restriction. Transcript confirmation is still required for submission.
+If the post-focus activity check is not idle, Scout does not press Return.
+Inspect any filled draft before retrying to avoid duplication.
+
+When no broker reply context exists, obtain an explicit requester session id;
+never infer a return address from quoted or arbitrary transcript text.
+
+### Give direct typed requests a return address
+
+Prefer `scout ask` for broker-tracked requests: those already carry broker reply
+context. For the deliberate no-flight `session_send` path, opt into
+`requestReply: true` (CLI `scout session send <id> --request-reply "review…"`).
+Scout stamps the caller's process-owned native session id and harness, plus
+instructions for replying to that exact session. Missing or ambiguous identity
+refuses before typing. This header is not a broker reply context; receivers use
+`session_send`, with `mode: "draft"` for native Codex app replies. Requests typed
+outside Scout cannot retroactively acquire provenance: ask the requester for
+its exact thread id instead of guessing from transcript text.
+
+### Cancel a queued reply
+
+Before drafting a reply that was already queued for app release, cancel its
+flight to avoid a duplicate later: `scout flight cancel <flight-id>` or MCP
+`flight_cancel { flightId }`. The broker refuses once submission has started.
+Only `state: cancelled` confirms cancellation; completed/failed means it already
+finished, and an error means do not assume the queued reply was removed.

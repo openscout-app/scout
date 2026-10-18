@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { brokerInvocationRequestSchema, brokerInvocationRequestSchemaFor } from "./broker-command-boundary-schemas.js";
+import { brokerDeliverRequestSchema, brokerInvocationRequestSchema, brokerInvocationRequestSchemaFor } from "./broker-command-boundary-schemas.js";
 
 import { parseScoutRuntimeSpec, SCOUT_RUNTIME_CATALOG } from "@openscout/protocol";
 
@@ -15,6 +15,15 @@ const baseInvocation = {
   stream: false,
   createdAt: 1_700_000_000_000,
 };
+
+test("session-input wire intent is required and normalizes to the existing consult command", () => {
+  const payload = { requestId: "mobile-1", body: "continue", intent: "session_input", sessionDelivery: "in_place_or_resume",
+    target: { kind: "session_id", sessionId: "native", harness: "claude" } };
+  expect(brokerDeliverRequestSchema.parse(payload)).toEqual({ ...payload, intent: "consult" });
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, intent: "consult" }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, sessionDelivery: undefined }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ body: "ordinary", intent: "consult" }).success).toBe(true);
+});
 
 describe("brokerInvocationRequestSchema execution.turnBudgetMs", () => {
   test("accepts an execution turn budget up to the 6 h bound", () => {
@@ -73,4 +82,15 @@ test("broker boundary validates family aliases using the live family's model-spe
   const boundary = brokerInvocationRequestSchemaFor(catalog);
   expect(boundary.safeParse({ ...baseInvocation, execution: { harness: "claude", model: "opus", reasoningEffort: "ultra" } }).success).toBe(true);
   expect(boundary.safeParse({ ...baseInvocation, execution: { harness: "claude", model: "opus", reasoningEffort: "medium" } }).success).toBe(false);
+});
+
+test("explicit completion wire intent fences old brokers and cannot mix with session input", () => {
+  const payload = { intent: "explicit_consult", body: "inspect", requestId: "stable", completion: { mode: "explicit" } };
+  expect(brokerDeliverRequestSchema.parse(payload)).toEqual({ ...payload, intent: "consult" });
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, intent: "consult" }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, completion: undefined }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, completion: { mode: "automatic" } }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, sessionDelivery: "in_place_or_resume" }).success).toBe(false);
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, completion: undefined, relation: { parentFlightId: "f", kind: "joined" } }).success).toBe(true);
+  expect(brokerInvocationRequestSchema.safeParse({ ...baseInvocation, metadata: { completion: { mode: "explicit" } } }).success).toBe(false);
 });

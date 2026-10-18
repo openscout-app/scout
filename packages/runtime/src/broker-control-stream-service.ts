@@ -176,6 +176,7 @@ export class BrokerControlStreamService {
       status: delivery.status,
       leaseOwner: delivery.leaseOwner,
       leaseExpiresAt: delivery.leaseExpiresAt,
+      leaseGeneration: delivery.metadata?.leaseGeneration,
       delivery,
       message,
       invocation,

@@ -362,7 +362,7 @@ describe("broker mesh forwarding helpers", () => {
       snapshot,
       forwardMessage: async (target, bundle) => {
         forwarded.push({ target: target as NodeDefinition, bundle });
-        return { ok: true, duplicate: true, deliveries: [delivery()] };
+        return { ok: true, duplicate: true, message: message(), deliveries: [delivery()] };
       },
     });
 
@@ -372,6 +372,7 @@ describe("broker mesh forwarding helpers", () => {
       forwarded: true,
       authorityNodeId: peerNode.id,
       duplicate: true,
+      message: message(),
       deliveries: [expect.objectContaining({ id: "delivery-1" })],
     }));
     expect(forwarded[0]?.target.id).toBe(peerNode.id);

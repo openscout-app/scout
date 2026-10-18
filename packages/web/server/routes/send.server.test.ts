@@ -30,7 +30,8 @@ describe("createOpenScoutWebServer: send routes", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         sessionId: "no-such-live-session-7f3a",
-        harness: "grok",
+        harness: "claude",
+        clientMessageId: "reply-request-1",
         body: "keep going",
         source: "scout-tui",
       }),
@@ -41,6 +42,8 @@ describe("createOpenScoutWebServer: send routes", () => {
       expect.objectContaining({
         target: expect.objectContaining({ kind: "session_id", sessionId: "no-such-live-session-7f3a" }),
         body: "keep going",
+        sessionDelivery: "in_place_or_resume",
+        clientMessageId: "reply-request-1",
         source: "scout-tui",
         currentDirectory: "/tmp/openscout",
       }),

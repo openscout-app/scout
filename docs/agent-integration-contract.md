@@ -245,6 +245,13 @@ Agents connected through Scout's MCP server should prefer:
 - future `sessions_*` tools for explicit harness session start, attach, inspect,
   and stop operations
 
+The broker saves a pending terminal report with each new failed or cancelled
+flight at the request origin. The report has a stable identity derived from the
+flight and outcome; restart recovery retries that same message without invoking
+an executor. A delivery failure leaves the report pending and does not replace
+the terminal outcome. Successful result replies retain their separate validation
+and delivery path. Existing terminal history without an intent is not backfilled.
+
 Use `ask` for requested work. It returns a compact receipt and lets Scout resolve, route,
 and wake the target when possible. If the caller knows the project/capability
 but not the concrete agent/session, pass `projectPath` and optional `harness`
@@ -430,3 +437,24 @@ and assistant records; launch arguments alone do not prove harness acceptance.
 Pi's native session id is linked to the stable Scout session, not substituted
 for it. The broker remains the writer of the final reply and flight result;
 Pi's complete transcript remains harness-owned.
+
+## Inbox claims and retry deadlines
+
+Inbox delivery consumers claim through `POST /v1/inbox/claim`. A successful
+claim returns `leaseOwner`, `leaseExpiresAt`, and `leaseGeneration`. Echo the
+owner **and generation** in `POST /v1/inbox/ack` or `POST /v1/inbox/nack`.
+A worker name alone does not identify an attempt: reclaiming an expired item,
+even with the same owner, advances its generation. Missing, stale, or expired
+claim credentials return a conflict and leave the current lease intact.
+
+Generation is retained in the delivery's durable metadata after ACK/NACK and
+across broker restart. Outstanding leases written before generation support
+may use the legacy owner-only acknowledgement with a broker diagnostic. Every
+new claim requires its returned generation, so consumers must echo that field
+when upgrading. Metadata supplied with an acknowledgement cannot change it.
+
+A NACK with `retryAfterMs` records a deferred delivery and `nextAttemptAt`.
+Claim checks that deadline under the broker writer; an inbox listing or stream
+event is only a candidate, not permission to execute. Deferred records without
+a deadline retain their legacy claimability. This rule applies to inbox claims;
+peer delivery keeps its separate retry and peer-online policy.

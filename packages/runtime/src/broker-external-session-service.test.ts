@@ -175,6 +175,7 @@ describe("external session attachment", () => {
       mesh: { authorityNodeForConversation: () => null, forwardConversationMessageToAuthority: async () => ({ forwarded: true }), forwardPeerBrokerDeliveries: async () => ({ forwarded: [], failed: [] }) },
       recordMessage: async (message) => { writes++; f.messages.set(message.id, message); return { deliveries: [], entries: [] }; },
       applyProjectedEntries: async () => {}, reconcileStaleLocalDeliveries: async () => {}, persistFlight: f.options.recordFlight,
+      persistAcceptedReply: async () => { throw new Error("local reply must not checkpoint remote acceptance"); },
       activeLocalEndpointForAgent: () => undefined,
       authorizeReplyCompletion: (inv, message) => f.service.authorizesReplyCompletion(inv, message),
     });

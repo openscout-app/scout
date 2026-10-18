@@ -39,6 +39,10 @@ import {
   type MessageAttachment,
   type MessageRecord,
   type ScoutDeliverResponse,
+  type ScoutCompletionRequest,
+  type ScoutCompletionRelation,
+  type ScoutCompletionReply,
+  SCOUT_COMPLETION_CAPABILITY,
   type ScoutDeliverRequest,
   type ScoutDispatchRecord,
   type ScoutCapabilityMatrixSnapshot,
@@ -3556,15 +3560,17 @@ export type OutgoingAttachmentInput = {
  * Validate caller-supplied attachments and mint ids where absent. Drops any
  * attachment lacking a media type or a way to fetch it (url/blobKey). Returns
  * undefined when nothing usable remains, to keep the broker payload clean.
+ * A stable message ID makes generated attachment IDs repeatable on retries.
  */
 export function normalizeOutgoingAttachments(
   attachments: OutgoingAttachmentInput[] | undefined,
+  stableMessageId?: string,
 ): MessageAttachment[] | undefined {
   if (!attachments?.length) {
     return undefined;
   }
   const normalized: MessageAttachment[] = [];
-  for (const attachment of attachments) {
+  for (const [index, attachment] of attachments.entries()) {
     const mediaType = attachment?.mediaType?.trim();
     const url = attachment?.url?.trim();
     const blobKey = attachment?.blobKey?.trim();
@@ -3572,7 +3578,9 @@ export function normalizeOutgoingAttachments(
       continue;
     }
     normalized.push({
-      id: attachment.id?.trim() || `att-${randomUUID()}`,
+      id: attachment.id?.trim() || (stableMessageId
+        ? `att-${createHash("sha256").update(JSON.stringify([stableMessageId, index])).digest("hex")}`
+        : `att-${randomUUID()}`),
       mediaType,
       fileName: attachment.fileName?.trim() || undefined,
       url: url || undefined,
@@ -3583,6 +3591,8 @@ export function normalizeOutgoingAttachments(
 }
 
 export async function replyToScoutMessage(input: {
+  requestId?: string;
+  completion?: ScoutCompletionReply;
   senderId: string;
   body: string;
   conversationId: string;
@@ -3594,9 +3604,17 @@ export async function replyToScoutMessage(input: {
   currentDirectory?: string;
   source?: string;
 }): Promise<ScoutReplyPostResult> {
+  if (input.completion && !input.requestId?.trim()) {
+    throw new Error("Explicit completion replies require a stable requestId; reuse it when retrying.");
+  }
   const broker = await loadScoutBrokerContext();
   if (!broker) {
+    if (input.completion) throw new Error("Explicit completion reply was not sent: broker context is unavailable; retry with the same requestId.");
     return { usedBroker: false, notifiedActorIds: [] };
+  }
+
+  if (input.completion && !broker.node.capabilities?.includes(SCOUT_COMPLETION_CAPABILITY)) {
+    throw new Error("Broker does not support explicit-completion/1; upgrade the broker before replying.");
   }
 
   const conversationId = input.conversationId.trim();
@@ -3650,7 +3668,9 @@ export async function replyToScoutMessage(input: {
     currentDirectory,
   );
   const createdAtMs = input.createdAtMs ?? Date.now();
-  const messageId = `m-${createdAtMs.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const messageId = input.requestId
+    ? `msg.request.${createHash("sha256").update(JSON.stringify([senderId, input.requestId])).digest("hex")}`
+    : `m-${createdAtMs.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const notifiedActorIds = replyTarget.actorId !== senderId ? [replyTarget.actorId] : [];
   const speechText = input.shouldSpeak ? input.body.trim() : "";
   const returnAddress = buildScoutReturnAddress(broker.snapshot, senderId, {
@@ -3658,7 +3678,9 @@ export async function replyToScoutMessage(input: {
     replyToMessageId: messageId,
   });
 
-  await brokerPostJson(broker.baseUrl, scoutBrokerPaths.v1.messages, {
+  const accepted = await brokerPostJson<{ message?: MessageRecord }>(
+    broker.baseUrl, input.completion ? "/v1/messages/reply" : scoutBrokerPaths.v1.messages, {
+    ...(input.requestId ? { requestId: input.requestId } : {}),
     id: messageId,
     conversationId,
     replyToMessageId,
@@ -3667,7 +3689,7 @@ export async function replyToScoutMessage(input: {
     class: conversation.kind === "system" ? "system" : "agent",
     body: input.body,
     speech: speechText ? { text: speechText } : undefined,
-    attachments: normalizeOutgoingAttachments(input.attachments),
+    attachments: normalizeOutgoingAttachments(input.attachments, input.requestId ? messageId : undefined),
     audience: notifiedActorIds.length > 0
       ? { notify: notifiedActorIds, reason: "thread_reply" }
       : undefined,
@@ -3676,6 +3698,7 @@ export async function replyToScoutMessage(input: {
     createdAt: createdAtMs,
     metadata: {
       source,
+      ...(input.completion ? { completionReply: input.completion } : {}),
       relayChannel: relayChannelMetadata(conversation),
       relayMessageId: messageId,
       ...clientMessageMetadata(input.clientMessageId),
@@ -3683,6 +3706,9 @@ export async function replyToScoutMessage(input: {
     },
   } satisfies MessageRecord);
 
+  if (input.completion && accepted?.message?.id !== messageId) {
+    throw new Error("Broker did not return the canonical explicit reply receipt; retry with the same requestId.");
+  }
   return {
     usedBroker: true,
     conversationId,
@@ -4212,6 +4238,8 @@ function defaultAskExecutionSession(
 
 export async function deliverScoutAsk(input: {
   requestId?: string;
+  completion?: ScoutCompletionRequest;
+  relation?: ScoutCompletionRelation;
   senderId: string;
   senderResolution?: "exact" | "legacy";
   target: ScoutRouteTarget;
@@ -4239,6 +4267,18 @@ export async function deliverScoutAsk(input: {
 }): Promise<ScoutAskResult> {
   const renderedTarget = input.targetLabel?.trim() || renderedScoutAskTarget(input.target);
   const brokerBaseUrl = resolveScoutBrokerUrl();
+  if (input.completion || input.relation) {
+    if ((!directAgentIdForAskTarget(input.target) && !directSessionIdForAskTarget(input.target) && !input.targetSessionId)
+      || input.projectAgent || input.executionHarness || input.executionModel || input.executionReasoningEffort
+      || input.executionPlacement || input.executionSession === "new" || input.workspace === "new_worktree") {
+      throw new Error("Explicit completion requires an exact local agent or session without launch options.");
+    }
+    if (!input.requestId?.trim()) throw new Error("Explicit completion asks require a stable requestId.");
+    const node = await brokerReadJson<ScoutBrokerNodeRecord>(brokerBaseUrl, scoutBrokerPaths.v1.node);
+    if (!node.capabilities?.includes(SCOUT_COMPLETION_CAPABILITY)) {
+      throw new Error("Broker does not support explicit-completion/1; upgrade the broker before asking.");
+    }
+  }
   let brokerNodeId: string | undefined;
   let senderId = input.senderId.trim() || OPERATOR_ID;
   const currentDirectory = input.currentDirectory ?? process.cwd();
@@ -4303,7 +4343,9 @@ export async function deliverScoutAsk(input: {
     targetLabel: renderedTarget,
     ...(replyToSessionId ? { replyToSessionId } : {}),
     body: input.body.trim(),
-    intent: "consult",
+    intent: input.completion || input.relation ? "explicit_consult" : "consult",
+    ...(input.completion ? { completion: input.completion } : {}),
+    ...(input.relation ? { relation: input.relation } : {}),
     channel: input.channel,
     speechText: input.shouldSpeak
       ? input.target.kind === "agent_id"
@@ -5539,4 +5581,23 @@ export async function speakScoutText(
 
 export function defaultScoutAgentNameForPath(projectPath: string): string {
   return basename(projectPath);
+}
+
+
+export type CancelScoutFlightResult =
+  | { ok: true; flightId: string; state: "cancelled" | "completed" | "failed" }
+  | { ok: false; flightId: string; code: "already_started" | "not_found" | "unconfirmed"; detail: string };
+
+/** Broker lifecycle guard owns cancellation; never patch the flight row locally. */
+export async function cancelScoutFlight(baseUrl: string, flightId: string): Promise<CancelScoutFlightResult> {
+  const response = await brokerPostJson<{ result?: { status?: { state?: string } }; error?: { code?: number; message?: string } }>(baseUrl, "/a2a", {
+    jsonrpc: "2.0", id: `scout-cancel:${flightId}`, method: "CancelTask", params: { id: flightId },
+  });
+  if (response.error?.code === -32004) return { ok: false, flightId, code: "already_started", detail: "This flight has started or is being submitted; nothing was cancelled. Wait for its result; do not send a duplicate." };
+  if (response.error?.code === -32001) return { ok: false, flightId, code: "not_found", detail: "Flight not found on this broker. Check the receipt's flight id and machine." };
+  const state = response.result?.status?.state;
+  if (state === "TASK_STATE_CANCELED") return { ok: true, flightId, state: "cancelled" };
+  if (state === "TASK_STATE_COMPLETED") return { ok: true, flightId, state: "completed" };
+  if (state === "TASK_STATE_FAILED") return { ok: true, flightId, state: "failed" };
+  return { ok: false, flightId, code: "unconfirmed", detail: "Cancellation was not confirmed. Read flight get before retrying; do not dispatch a duplicate." };
 }

@@ -99,3 +99,15 @@ test("peer forward candidates rotate past a 500-delivery leased prefix without s
   await restored.appendEntries({ kind: "delivery.status.update", deliveryId: "delivery-1100", status: "peer_acked" });
   expect(restored.listPendingPeerForwardDeliveries({ limit: 5000 })).toHaveLength(604);
 });
+
+test("only explicitly uncertain sent peer receipts enter observation recovery", async () => {
+  const { journal, path } = await journalFixture();
+  const legacy = { ...pair(1).delivery, status: "sent" as const };
+  const uncertain = { ...pair(2).delivery, status: "sent" as const,
+    metadata: { peerSubmission: { version: 1, status: "unknown" } } };
+  await journal.appendEntries({ kind: "deliveries.record", deliveries: [legacy, uncertain] });
+  const restored = new FileBackedBrokerJournal(path);
+  await restored.load();
+  expect(restored.listPendingPeerForwardDeliveries()).toEqual([]);
+  expect(restored.listPendingPeerMirrorDeliveries()).toEqual([uncertain]);
+});

@@ -997,3 +997,25 @@ test("CLI preserves a newly published model and effort without bundled-model leg
   const natural = parseAskCommandOptions(["codex/gpt-published-next/max", "to", "review"], "/repo");
   expect(natural).toMatchObject({ harness: "codex", model: "gpt-published-next", reasoningEffort: "max", message: "review", session: "new" });
 });
+
+
+describe("explicit completion ask options", () => {
+  test("keeps completion and join identity separate from the body", () => {
+    expect(parseAskCommandOptions([
+      "--to", "id:reviewer", "--completion", "explicit", "--join-to", "flight-parent",
+      "--request-id", "child-command", "--notify", "Review this",
+    ], "/tmp")).toMatchObject({
+      completion: { mode: "explicit" }, relation: { kind: "joined", parentFlightId: "flight-parent" },
+      requestId: "child-command", targetLabel: "id:reviewer", message: "Review this",
+    });
+    expect(parseAskCommandOptions(["--to", "session:worker", "--continue-for=parent", "Continue"], "/tmp"))
+      .toMatchObject({ relation: { kind: "continuation", parentFlightId: "parent" }, message: "Continue" });
+  });
+
+  test("rejects unsupported modes and ambiguous parent relations", () => {
+    expect(() => parseAskCommandOptions(["--completion", "automatic", "hi"], "/tmp")).toThrow("must be explicit");
+    expect(() => parseAskCommandOptions(["--join-to", "one", "--continue-for", "two", "hi"], "/tmp"))
+      .toThrow("mutually exclusive");
+    expect(() => parseAskCommandOptions(["--join-to=", "hi"], "/tmp")).toThrow();
+  });
+});

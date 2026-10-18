@@ -33,6 +33,8 @@ export interface InboxItem {
   status: DeliveryStatus;
   leaseOwner?: string;
   leaseExpiresAt?: number;
+  /** Echo this claim generation when acknowledging or releasing the lease. */
+  leaseGeneration?: number;
   delivery: DeliveryIntent;
   message?: MessageRecord;
   invocation?: InvocationRequest;
@@ -56,12 +58,16 @@ export interface InboxClaimResponse {
 export interface InboxAckRequest {
   itemId: ScoutId;
   leaseOwner?: string | null;
+  /** Required for claims issued by brokers supporting lease fencing. */
+  leaseGeneration?: number;
   metadata?: MetadataMap;
 }
 
 export interface InboxNackRequest {
   itemId: ScoutId;
   leaseOwner?: string | null;
+  /** Required for claims issued by brokers supporting lease fencing. */
+  leaseGeneration?: number;
   retryAfterMs?: number;
   reason?: string;
   metadata?: MetadataMap;

@@ -416,7 +416,7 @@ describe("BrokerMeshHttpService", () => {
 
   test("archived messages remain duplicate receipts and reject collisions without a new delivery", async () => {
     const { harness, request, expectedMessage } = archivedFixture();
-    expect((await harness.service.receiveMessageBundle(messageBundle({ message: request }))).body).toEqual({ ok: true, duplicate: true });
+    expect((await harness.service.receiveMessageBundle(messageBundle({ message: request }))).body).toEqual({ ok: true, duplicate: true, message: expectedMessage });
     expect(harness.completedReplies).toEqual([expectedMessage!]);
     await expect(harness.service.receiveMessageBundle(messageBundle({ message: { ...request, body: "collision" } })))
       .rejects.toThrow("conflicts with existing record");
@@ -507,7 +507,7 @@ describe("BrokerMeshHttpService", () => {
     const canonical = message({ actorId: "agent-1", replyToMessageId: "msg-request", body: "accepted result" });
     const harness = createHarness({ messages: { [canonical.id]: canonical } });
     const result = await harness.service.receiveMessageBundle(messageBundle({ message: { ...canonical } }));
-    expect(result.body).toEqual({ ok: true, duplicate: true });
+    expect(result.body).toEqual({ ok: true, duplicate: true, message: canonical });
     expect(harness.completedReplies).toHaveLength(1);
     expect(harness.completedReplies[0]).toBe(canonical);
     expect(harness.committedEntries).toEqual([]);
@@ -551,6 +551,7 @@ describe("BrokerMeshHttpService", () => {
       status: 200,
       body: {
         ok: true,
+        message: bundle.message,
         deliveries: [expect.objectContaining({ id: "delivery-1", messageId: "msg-1" })],
       },
     });

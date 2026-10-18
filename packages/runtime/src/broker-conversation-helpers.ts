@@ -1,3 +1,4 @@
+import { completionReply, hasExplicitCompletion } from "@openscout/protocol";
 import { iterateMessageRecords, iterateMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
 import {
   buildScoutReturnAddress,
@@ -330,19 +331,26 @@ export function messageVisibilityForConversation(conversation?: ConversationDefi
   }
 }
 
-export function messageAnswersInvocation(message: MessageRecord, invocation: InvocationRequest): boolean {
+/** Legacy replies are final; explicit progress/final semantics belong here. */
+export function isFinalReplyForInvocation(message: MessageRecord, invocation: InvocationRequest): boolean {
   if (invocation.action === "wake") {
     return false;
   }
   if (!invocation.conversationId || !invocation.messageId) {
     return false;
   }
+  const explicit = completionReply(message);
+  if (message.metadata?.completionReply !== undefined && !explicit) return false;
+  if (explicit?.kind === "progress" || (hasExplicitCompletion(invocation) && explicit?.kind !== "final")) return false;
+  if (explicit && explicit.invocationId !== invocation.id) return false;
   return message.class === "agent"
     && message.actorId === invocation.targetAgentId
     && message.conversationId === invocation.conversationId
     && message.replyToMessageId === invocation.messageId
     && message.body.trim().length > 0;
 }
+
+export const messageAnswersInvocation = isFinalReplyForInvocation;
 
 export function completedFlightFromBrokerReply(
   invocation: InvocationRequest,

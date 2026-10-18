@@ -1,3 +1,4 @@
+import { flightCompletion } from "@openscout/protocol";
 import type { CollaborationEvent, DeliveryAttempt, DeliveryIntent, DeliveryStatus, FlightRecord, InvocationRequest } from "@openscout/protocol";
 
 import { isTerminalFlightState } from "./broker-local-invocation-helpers.js";
@@ -50,9 +51,17 @@ function flightRotationTimestamp(flight: { completedAt?: number; startedAt?: num
   return flight.completedAt ?? flight.startedAt ?? 0;
 }
 
+function pendingFlightReports(flight: FlightRecord): Array<{ message?: { id?: string; replyToMessageId?: string } }> {
+  return [flight.metadata?.resultReply, flight.metadata?.terminalReport].filter((intent) =>
+    intent && typeof intent === "object" && (intent as { status?: unknown }).status === "pending") as Array<{ message?: { id?: string; replyToMessageId?: string } }>;
+}
 function hasPendingResultReply(flight: FlightRecord): boolean {
-  const reply = flight.metadata?.resultReply;
-  return Boolean(reply && typeof reply === "object" && (reply as { status?: unknown }).status === "pending");
+  return pendingFlightReports(flight).length > 0;
+}
+
+function hasPendingWorkPromotion(flight: FlightRecord): boolean {
+  const intent = flight.metadata?.workPromotion;
+  return Boolean(intent && typeof intent === "object" && (intent as { status?: unknown }).status === "pending");
 }
 
 const TERMINAL_DELIVERY_STATUSES = new Set<DeliveryStatus>([
@@ -145,6 +154,7 @@ export function planHistoryRotation(
 ): HistoryRotationPlan {
   const protectedMessageIds = new Set<string>();
   const protectedInvocationIds = new Set<string>();
+  const protectedCompletionFlights = new Set<string>();
 
   // Context iterables may be one-shot (the journal hands live `.values()`
   // iterators) and deliveries are consulted twice — protection first, doom
@@ -171,11 +181,14 @@ export function planHistoryRotation(
     const list = flightsByInvocation.get(flight.invocationId) ?? [];
     list.push(flight);
     flightsByInvocation.set(flight.invocationId, list);
-    if (!isTerminalFlightState(flight.state) || hasPendingResultReply(flight)) {
+    if (!isTerminalFlightState(flight.state) || hasPendingResultReply(flight) || hasPendingWorkPromotion(flight)) {
       protectedInvocationIds.add(flight.invocationId);
     }
-    if (hasPendingResultReply(flight)) {
-      const message = (flight.metadata!.resultReply as { message?: { id?: string; replyToMessageId?: string } }).message;
+    if (!isTerminalFlightState(flight.state)) for (const obligation of flightCompletion(flight)?.obligations ?? []) {
+      protectedInvocationIds.add(obligation.invocationId);
+      protectedCompletionFlights.add(obligation.flightId);
+    }
+    for (const { message } of pendingFlightReports(flight)) {
       if (message?.id) protectedMessageIds.add(message.id);
       if (message?.replyToMessageId) protectedMessageIds.add(message.replyToMessageId);
     }
@@ -221,7 +234,7 @@ export function planHistoryRotation(
 
   for (const flight of Object.values(snapshot.flights)) {
     if (!isTerminalFlightState(flight.state)) continue;
-    if (hasPendingResultReply(flight)) continue;
+    if (hasPendingResultReply(flight) || hasPendingWorkPromotion(flight) || protectedCompletionFlights.has(flight.id)) continue;
     if (flightRotationTimestamp(flight) >= cutoff) continue;
     // A terminal flight is evictable only when its invocation is leaving
     // too (or is already gone). Keeping it while the invocation survives

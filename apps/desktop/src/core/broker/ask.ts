@@ -2,6 +2,7 @@ import { basename, resolve } from "node:path";
 
 import {
   parseScoutComposerRouteTarget,
+  flightCompletion,
   type ScoutRouteTarget,
 } from "@openscout/protocol";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
@@ -178,9 +179,17 @@ function buildScoutAskReceipt(input: {
         currentDirectory: input.currentDirectory,
       });
 
+  const completion = flightCompletion(input.result.flight);
+  const parent = input.result.flight?.metadata?.parentCompletion as { flightId?: unknown; revision?: unknown } | undefined;
+  const parentCompletion = parent && typeof parent.flightId === "string"
+    && typeof parent.revision === "number" && Number.isSafeInteger(parent.revision) && parent.revision >= 0
+    ? { flightId: parent.flightId, revision: parent.revision } : undefined;
   return {
     ok,
     state,
+    ...(completion && input.result.flight ? { completion: { ...completion,
+      invocationId: input.result.flight.invocationId, flightId: input.result.flight.id } } : {}),
+    ...(parentCompletion ? { parentCompletion } : {}),
     ids: compactAskIds({
       targetAgentId: input.result.flight?.targetAgentId,
       invocationId: input.result.flight?.invocationId,
@@ -334,6 +343,20 @@ export function buildScoutAskRoute(input: {
 
 export const scoutAskHandler: ScoutAskHandler = async (command) => {
   const currentDirectory = command.currentDirectory ?? process.cwd();
+  if (command.completion || command.relation) {
+    const target = command.to?.trim();
+    const exactTarget = target && /^(id|session):[^\s]+$/.test(target);
+    if (!exactTarget || command.projectPath || command.runtimeProfile || command.existingHandle
+      || command.host || command.aliasScope || command.harness || command.model || command.reasoningEffort
+      || command.placement || command.workspace === "new_worktree" || command.session === "new") {
+      return { ok: false, state: "failed", ids: {}, error: { code: "invalid_request",
+        message: "Explicit completion requires an exact local id:<agent> or session:<id> target without launch options." } };
+    }
+    if (!command.requestId?.trim()) {
+      return { ok: false, state: "failed", ids: {}, error: { code: "invalid_request",
+        message: "Explicit completion asks require a stable requestId; reuse it when retrying." } };
+    }
+  }
   const host = command.host?.trim() || undefined;
   if (host && !command.projectPath?.trim()) {
     return {
@@ -445,6 +468,8 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
     });
   const result = await deliverScoutAsk({
     requestId: command.requestId,
+    completion: command.completion,
+    relation: command.relation,
     senderId: command.senderId,
     senderResolution: command.senderResolution,
     target: resolvedTarget.target,

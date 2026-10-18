@@ -107,3 +107,11 @@ test("duplicate machine matches and truncated coverage remain visible", async ()
   expect(first.coverage.sessions.truncated).toBe(true);
   expect(result.machines[1]?.status).toBe("unavailable");
 });
+
+test("native UI routes are local-only exact session-send targets, never fabricated broker continuations", async () => {
+  const deps = fixture();
+  deps.nativeApp = async () => ({ available: true, truncated: false, threads: [{ sessionId: "native-app", harness: "codex", title: "Review", cwd: "/scout", location: "native_codex_app", deliveryModes: ["draft", "submit"] }] });
+  expect((await loadRouteContext({ query: "Review" }, deps)).nativeApp.threads).toMatchObject([{ send: { tool: "session_send", sessionId: "native-app" } }]);
+  expect((await loadRouteContext({ query: "Review", machine: "mini" }, deps)).nativeApp.threads).toEqual([]);
+  expect((await loadRouteContext({ query: "Review", projectRoot: "/other" }, deps)).nativeApp.threads).toEqual([]);
+});

@@ -150,3 +150,20 @@ attach the thread to do this.
 
 **When Scout misbehaves**, report the error and the layer it came from. Don't
 reinstall, switch brokers, or override service ownership just to get a call through.
+
+**Native Codex app replies.** Discover the exact thread id with session inventory
+or route context; never launch a replacement beside a live app thread. To leave
+a reply for review without sending, use `session_send` with `harness: "codex"`,
+`mode: "draft"`, or `scout session send <id> --harness codex --draft "reply"`.
+Draft only opens the native thread link with composer text; it is not transcript
+confirmation. Default send submits and must be confirmed by the transcript.
+Never submit into a running turn unless explicitly asked to steer. Without
+broker reply context, request an explicit return address instead of guessing.
+
+**Direct typed requests need a return address.** Prefer broker `ask`, which
+already stamps reply context. If deliberately using `session_send` to request
+work without a flight, set `requestReply: true` (CLI `--request-reply`): Scout
+adds this process's exact native session id and harness. If manually typing a
+request outside Scout, include an explicit verified return address and draft
+instructions; never infer one from title, cwd or quoted prose. A direct-request
+header is not broker reply context and must not activate `current_reply_context`.

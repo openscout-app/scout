@@ -61,6 +61,10 @@ export class BrokerPermissionService {
     if (pending.busy) throw new Error("Permission request is already being answered.");
     if (pending.prompt.version !== version) throw new Error("Permission request changed. Refresh.");
     if (!pending.prompt.decisions.includes(decision)) throw new Error("The harness does not offer this permission scope.");
+    // A recorded attempt means keys may already have reached the harness.
+    if ((record.metadata?.permissionActuation as { status?: string } | undefined)?.status === "attempt") {
+      throw new Error("A decision may already have been sent. Open the session.");
+    }
     pending.busy = true;
     let actuated = false;
     try {
@@ -74,11 +78,14 @@ export class BrokerPermissionService {
       await this.close(id, decision, "closed");
       pending.done = true;
     } catch (error) {
-      await this.close(id, `Decision delivery unconfirmed: ${error instanceof Error ? error.message : String(error)}`, "declined");
       pending.error = actuated
         ? new PermissionDeliveryUnconfirmedError(error instanceof Error ? error.message : String(error))
         : error instanceof Error ? error : new Error(String(error));
+      // Settle before the close write: if that write fails too, this request
+      // must still never be answerable again.
       pending.done = true;
+      await this.close(id, `Decision delivery unconfirmed: ${error instanceof Error ? error.message : String(error)}`, "declined")
+        .catch(() => undefined);
       throw pending.error;
     } finally { pending.busy = false; }
   }

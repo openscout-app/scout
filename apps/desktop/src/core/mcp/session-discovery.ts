@@ -1,3 +1,4 @@
+import { readNativeAppThreads, type NativeThreadInventory } from "@openscout/runtime/in-place";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { knowledgeIndexEnabled, KNOWLEDGE_INDEX_OFF, SQLiteKnowledgeStore, type KnowledgeCoverage, type KnowledgeSearchHit, type KnowledgeWarmSpan } from "@openscout/runtime";
@@ -24,6 +25,7 @@ type SearchStore = Pick<SQLiteKnowledgeStore, "assessCoverage" | "searchLexical"
 export type SessionDiscoveryDependencies = {
   openStore: () => SearchStore;
   readInventory: () => Promise<{
+    nativeApp?: NativeThreadInventory;
     sessions: ObservedSession[];
     terminals: TerminalSessionRecord[];
     herdr?: Awaited<ReturnType<HerdrWorkspacesDependencies["readDigests"]>>;
@@ -34,7 +36,7 @@ export type SessionDiscoveryDependencies = {
 
 export function sessionDiscoveryDependencies(
   webOrigin: string,
-  options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
+  options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch; readNativeApp?: () => Promise<NativeThreadInventory> } = {},
 ): SessionDiscoveryDependencies {
   const fetchImpl = options.fetchImpl ?? fetch;
   const boundedFetch = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
@@ -48,16 +50,19 @@ export function sessionDiscoveryDependencies(
       ? new SQLiteKnowledgeStore(undefined, undefined, { readonly: true })
       : { assessCoverage: () => ({ kind: "index_off", suggestion: KNOWLEDGE_INDEX_OFF }), searchLexical: () => [], close() {} },
     readInventory: async () => {
-      const [sessions, terminals, herdr] = await Promise.allSettled([
+      const [sessions, terminals, herdr, nativeApp] = await Promise.allSettled([
         read<ObservedSession[]>("/api/sessions"),
         read<{ sessions: TerminalSessionRecord[] }>("/api/terminal-sessions?includeDiscovered=1&limit=100"),
         herdrWorkspacesDependencies(webOrigin, options).readDigests(),
+        (options.readNativeApp ?? readNativeAppThreads)(),
       ]);
       return {
+        nativeApp: nativeApp.status === "fulfilled" ? nativeApp.value : { threads: [], available: false, truncated: false },
         sessions: sessions.status === "fulfilled" ? sessions.value : [],
         terminals: terminals.status === "fulfilled" ? terminals.value.sessions : [],
         sources: {
-          sessions: sessions.status === "fulfilled" ? "available" : "unavailable",
+          nativeApp: nativeApp.status === "fulfilled" ? nativeApp.value : { threads: [], available: false, truncated: false },
+        sessions: sessions.status === "fulfilled" ? "available" : "unavailable",
           terminals: terminals.status === "fulfilled" ? "available" : "unavailable",
         },
         herdr: herdr.status === "fulfilled" ? herdr.value : { digests: [], available: false, truncated: false },
@@ -93,6 +98,7 @@ function panelSessionId(panel: HerdrPanelIdentity): string | null {
 function inventorySources(inventory: Awaited<ReturnType<SessionDiscoveryDependencies["readInventory"]>>) {
   return {
     ...(inventory.sources ?? { sessions: "available", terminals: "available" }),
+    nativeApp: inventory.nativeApp?.available ? "available" : "unavailable",
     herdr: inventory.herdr?.available ? "available" : "unavailable",
   };
 }
@@ -159,6 +165,12 @@ export function registerSessionDiscoveryTools(server: McpServer, deps: SessionDi
       if ([session.harnessSessionId, session.sessionId].some(id => id && terminalSourceIds.has(`${session.harness}:${id}`))) continue;
       results.push({ queryAliases: [session.id, session.sessionId, session.harnessSessionId], sessionId: session.harnessSessionId ?? session.sessionId, terminalId: session.id, harness: session.harness, cwd: session.workspaceRoot ?? "", title: session.title, state: "unknown", actions: actionsFor(undefined, session, deps.webOrigin), panels: linkedPanels(session.harness, session.harnessSessionId ?? session.sessionId) });
     }
+    // App-held locks are live reachability evidence even with no indexed transcript.
+    for (const native of inventory.nativeApp?.threads ?? []) {
+      const existing = results.find(row => row.harness === "codex" && row.sessionId === native.sessionId);
+      if (existing) continue;
+      results.push({ queryAliases: [], sessionId: native.sessionId, terminalId: native.sessionId, harness: "codex", cwd: native.cwd ?? "", title: native.title, state: "unknown", actions: [], panels: [] });
+    }
     const attachedPanels = new Set(results.flatMap((result) => result.panels.map((panel) => JSON.stringify([panel.herdrSession, panel.paneId]))));
     for (const panel of panels) {
       if (attachedPanels.has(JSON.stringify([panel.herdrSession, panel.paneId]))) continue;
@@ -173,10 +185,13 @@ export function registerSessionDiscoveryTools(server: McpServer, deps: SessionDi
     const structuredContent = {
       source: "canonical_session_views_and_observed_terminal_inventory", coverage: "bounded_inventory_not_exhaustive", query: query ?? "",
       available: Object.values(sources).some((status) => status === "available"), sources,
-      truncated: filtered.length > limit || inventory.terminals.length >= 100 || inventory.sessions.length >= 80 || inventory.herdr?.truncated === true || inventory.herdr?.digests.some((digest) => digest.truncated) === true,
+      truncated: inventory.nativeApp?.truncated === true || filtered.length > limit || inventory.terminals.length >= 100 || inventory.sessions.length >= 80 || inventory.herdr?.truncated === true || inventory.herdr?.digests.some((digest) => digest.truncated) === true,
       candidateCount: filtered.length, selection: "candidates_only",
       note: "Herdr names are panel labels, not Scout addresses. A reported session is not transcript verification. Idle/unknown is not task completion. Unavailable or bounded sources cannot establish absence. Read commands return terminal output, not a guaranteed final turn.",
-      results: filtered.slice(0, limit).map(({ queryAliases, ...result }) => result),
+      results: filtered.slice(0, limit).map(({ queryAliases, ...result }) => {
+        const native = inventory.nativeApp?.threads.find(thread => result.harness === "codex" && thread.sessionId === result.sessionId);
+        return native ? { ...result, reachable: true, location: native.location, deliveryModes: native.deliveryModes, submissionRequires: "idle thread, Accessibility transport and transcript confirmation" } : result;
+      }),
     };
     return { content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }], structuredContent };
   });

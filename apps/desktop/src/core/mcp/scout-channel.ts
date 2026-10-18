@@ -119,11 +119,13 @@ function startBrokerSubscription(
                 await ackInboxItem(broker, {
                   itemId: claim.id,
                   leaseOwner: `scout-channel:${agentId}`,
+                  leaseGeneration: claim.leaseGeneration,
                 });
               } else {
                 await nackInboxItem(broker, {
                   itemId: claim.id,
                   leaseOwner: `scout-channel:${agentId}`,
+                  leaseGeneration: claim.leaseGeneration,
                   reason: "channel notification was not accepted by host",
                 });
               }
@@ -198,14 +200,14 @@ async function claimInboxItem(
 
 async function ackInboxItem(
   broker: ScoutBrokerContext,
-  input: { itemId: string; leaseOwner: string },
+  input: { itemId: string; leaseOwner: string; leaseGeneration?: number },
 ): Promise<void> {
   await postBrokerJson(broker, "/v1/inbox/ack", input);
 }
 
 async function nackInboxItem(
   broker: ScoutBrokerContext,
-  input: { itemId: string; leaseOwner: string; reason?: string },
+  input: { itemId: string; leaseOwner: string; leaseGeneration?: number; reason?: string },
 ): Promise<void> {
   await postBrokerJson(broker, "/v1/inbox/nack", input);
 }

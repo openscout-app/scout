@@ -535,7 +535,7 @@ export async function forwardMeshMessage(
   target: MeshForwardTarget,
   bundle: MeshMessageBundle,
   options?: MeshForwardRequestOptions,
-): Promise<{ ok: true; deliveries?: DeliveryIntent[]; duplicate?: boolean }> {
+): Promise<{ ok: true; message?: MessageRecord; deliveries?: DeliveryIntent[]; duplicate?: boolean }> {
   return forwardMeshEnvelope(target, "messages", "/v1/mesh/messages", bundle, options);
 }
 

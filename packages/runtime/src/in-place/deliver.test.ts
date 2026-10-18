@@ -2,11 +2,41 @@ import { describe, expect, test } from "bun:test";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
+import { codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
 import { parseOrcaWorktreeAgents } from "./orca.js";
 import { innermostProcessHost, parseProcessHostEnv, processHostLocations } from "./process-host.js";
 
 const SESSION = "4cc36bba-a893-461f-a5b1-79c1f6b7e088";
+
+test("strict session input refuses wrong or unobserved Herdr harness identity before any prompt", async () => {
+  let prompts = 0;
+  for (const observation of [{ harness: "claude", sessionKind: "id" }, { harness: "codex", sessionKind: "name" }, {}]) {
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "input", requireExactHarness: true }, noHosts({
+      findHerdrPane: async (_sessionId, harness) => {
+        expect(harness).toBe("codex");
+        return { session: "herdr", paneId: "p1", status: "idle", ...observation };
+      },
+      promptHerdr: async () => { prompts++; },
+    }));
+    expect(result).toEqual({ ok: false, code: "session_runtime_unobserved" });
+  }
+  expect(prompts).toBe(0);
+});
+
+test("strict session input accepts a correlated Herdr native id and harness, and refuses ambiguous observations", async () => {
+  let prompts = 0;
+  const input = { sessionId: SESSION, harness: "codex", body: "input", requireExactHarness: true };
+  const result = await deliverInPlace(input, noHosts({
+    findHerdrPane: async () => ({ session: "herdr", paneId: "p1", status: "idle", harness: "codex", sessionKind: "id" }),
+    promptHerdr: async () => { prompts++; },
+  }));
+  expect(result).toMatchObject({ ok: true, via: "herdr" });
+  expect(prompts).toBe(1);
+  expect(await deliverInPlace(input, noHosts({ findHerdrPane: async () => { throw new Error("session_ambiguous: two panes"); } })))
+    .toEqual({ ok: false, code: "session_ambiguous" });
+  expect(await deliverInPlace(input, noHosts({ findHerdrPane: async () => { throw new Error("probe timed out"); } })))
+    .toEqual({ ok: false, code: "session_runtime_unobserved" });
+});
 
 function claudeRecord(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
   return {
@@ -205,4 +235,98 @@ describe("deliverInPlace", () => {
   test("nothing holding the session is not_live", async () => {
     expect(await deliverInPlace({ sessionId: SESSION, body: "x" }, noHosts())).toEqual({ ok: false, code: "not_live" });
   });
+});
+
+describe("native app drafts", () => {
+  test.each([
+    ["short", "review & reply?"],
+    ["ellipsis-shaped", "x".repeat(237) + "..."],
+    ["long", "x".repeat(300)],
+  ])("drafts a %s reply without querying Accessibility, activity, or submitting", async (_label, body) => {
+    const drafts: string[][] = [];
+    const never = async (): Promise<never> => { throw new Error("must not submit or query Accessibility"); };
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body, mode: "draft" }, noHosts({
+      codexHeldByApp: async () => true,
+      draftCodexApp: async (...args) => { drafts.push(args); },
+      askScoutApp: never,
+      latticesCall: never,
+      codexActivity: never,
+      typeIntoCodexApp: never,
+      findHerdrPane: never,
+    }));
+    expect(result).toMatchObject({ ok: true, delivered: "draft" });
+    expect(drafts).toEqual([[SESSION, body]]);
+  });
+
+  test("never falls back to terminal submission or starts a missing thread", async () => {
+    for (const harness of [undefined, "claude", "codex"]) {
+      const result = await deliverInPlace({ sessionId: SESSION, harness, body: "hello", mode: "draft" }, noHosts());
+      expect(result.ok).toBe(false);
+      expect(result).toMatchObject({ code: harness === "codex" ? "not_live" : "draft_unsupported" });
+    }
+  });
+
+  test("reports a URL transport failure without claiming delivery", async () => {
+    expect(await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "hi", mode: "draft" }, noHosts({
+      codexHeldByApp: async () => true,
+      draftCodexApp: async () => { throw new Error("URL handler unavailable"); },
+    }))).toMatchObject({ ok: false, code: "in_place_failed", detail: "URL handler unavailable" });
+  });
+});
+
+describe("native app submission activity guard", () => {
+  test("refuses Scout.app's unguarded idle → focus → busy → Return sequence before any actuator", async () => {
+    const calls: string[] = [];
+    let activity: "idle" | "busy" = "idle";
+    const ask: NonNullable<DeliverInPlaceDeps["askScoutApp"]> = async request => {
+      calls.push(request.op);
+      if (request.op === "status") return { ok: true, accessibility: "granted" };
+      if (request.op === "composer.submit") {
+        // Model the legacy Swift operation: focus can start a turn, but the
+        // combined operation still presses Return without checking activity.
+        calls.push("focus");
+        activity = "busy";
+        calls.push("Return");
+        return { ok: true };
+      }
+      throw new Error(`unexpected operation: ${request.op}`);
+    };
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({
+      codexHeldByApp: async () => true,
+      codexActivity: async () => { calls.push(`activity:${activity}`); return activity; },
+      askScoutApp: ask,
+      draftCodexApp: async () => { calls.push("draft"); },
+      latticesCall: async () => { calls.push("lattices fallback"); return { ok: true }; },
+      typeIntoCodexApp: async () => {
+        calls.push("open");
+        await ask({ op: "composer.submit", text: "reply" });
+      },
+    }));
+    expect(result).toMatchObject({ ok: false, code: "in_place_failed", via: "scout-app" });
+    if (!result.ok && "detail" in result) expect(result.detail).toContain("after focus and before Return");
+    expect(calls).toEqual(["activity:idle", "status"]);
+  });
+
+  test.each(["busy", "unknown"] as const)("never opens or submits a %s thread", async activity => {
+    let submitted = false;
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({ codexHeldByApp: async () => true, codexActivity: async () => activity, typeIntoCodexApp: async () => { submitted = true; } }));
+    expect(result).toMatchObject({ ok: false, code: activity === "busy" ? "busy" : "activity_unknown" });
+    expect(submitted).toBe(false);
+  });
+  test("falls back only when Scout.app is unavailable", async () => {
+    let submitted = false;
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({ codexHeldByApp: async () => true, codexActivity: async () => "idle", askScoutApp: async () => ({ ok: false, code: "unavailable", message: "offline" }), latticesCall: async () => ({ ok: true }), typeIntoCodexApp: async () => { submitted = true; } }));
+    expect(result).toMatchObject({ ok: true, via: "lattices" });
+    expect(submitted).toBe(true);
+  });
+});
+
+test("native lifecycle uses harness events, fails closed on partial tails", () => {
+  const event = (type: string) => JSON.stringify({ type: "event_msg", payload: { type } }) + "\n";
+  expect(codexActivityFromTranscript("")).toBe("unknown");
+  expect(codexActivityFromTranscript(event("task_started"))).toBe("busy");
+  expect(codexActivityFromTranscript(event("task_started") + event("task_complete"))).toBe("idle");
+  expect(codexActivityFromTranscript(event("turn_aborted"))).toBe("idle");
+  expect(codexActivityFromTranscript(event("task_complete") + event("task_started"))).toBe("busy");
+  expect(codexActivityFromTranscript(event("task_complete") + "{partial")).toBe("unknown");
 });

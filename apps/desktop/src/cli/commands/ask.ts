@@ -94,6 +94,12 @@ export function renderAskCommandHelp(): string {
     "  --notify                          -> asynchronous ask; return now and surface completion later",
     "  --reply-mode <mode>                -> inline (default), notify, or none",
     "  --request-id <id>                  -> reuse a command ID after an uncertain receipt; content must match",
+    "  --completion explicit             -> require an explicit final reply (exact local id:<agent> or session:<id> only)",
+    "  --join-to <parent-flight-id>       -> join this child to the parent; parent final waits for it to settle",
+    "  --continue-for <parent-flight-id>  -> add a continuation obligation; mutually exclusive with --join-to",
+    "Explicit completion requires a broker advertising explicit-completion/1. Progress never completes work.",
+    "Use MCP current_reply_context for the latest revision, then messages_reply with completion and a stable requestId.",
+    "After joined work settles, submit a new final reply. An early final is rejected and is not saved for later.",
     "  --placement <placement>           -> background (default), foreground, or attached (Codex: use the running Codex app-server daemon)",
     "  --foreground                      -> alias for --placement foreground",
     "",
@@ -418,6 +424,8 @@ export async function runAskWithOptions(
   context.stderr(`request ${requestId} (reuse with --request-id after an uncertain receipt)`);
   const receipt = await scoutAskHandler({
     requestId,
+    completion: options.completion,
+    relation: options.relation,
     senderId,
     senderResolution: options.agentName?.trim() && options.agentName.trim() !== "operator" ? "legacy" : "exact",
     ...target,

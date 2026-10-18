@@ -1,4 +1,8 @@
+import { hasExplicitCompletion } from "@openscout/protocol";
+import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
 import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
+import { isDeepStrictEqual } from "node:util";
+import { canonicalMessageRecord } from "./message-record-canonical.js";
 import { selectMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
 import type {
   AgentDefinition,
@@ -13,7 +17,7 @@ import type {
 import type { BrokerJournalEntry } from "./broker-journal.js";
 import {
   completedFlightFromBrokerReply,
-  messageAnswersInvocation,
+  isFinalReplyForInvocation,
   messageVisibilityForConversation,
 } from "./broker-conversation-helpers.js";
 import type {
@@ -27,7 +31,7 @@ import {
 
 export type BrokerMessageRuntime = {
   peek(): { messages: Record<string, MessageRecord> };
-  snapshot(): { invocations: Record<string, InvocationRequest> };
+  snapshot(): { invocations: Record<string, InvocationRequest>; flights?: Record<string, FlightRecord> };
   conversation(conversationId: string): ConversationDefinition | undefined;
   agent(agentId: string): AgentDefinition | undefined;
   flightForInvocation(invocationId: string): FlightRecord | undefined;
@@ -57,10 +61,32 @@ export type BrokerMessageServiceDeps = {
   ) => Promise<{ deliveries: DeliveryIntent[]; entries: BrokerJournalEntry[]; duplicate?: MessageRecord }>;
   applyProjectedEntries: (entries: BrokerJournalEntry[]) => Promise<void>;
   reconcileStaleLocalDeliveries: () => Promise<void>;
-  persistFlight: (flight: FlightRecord) => Promise<void>;
+  persistFlight: (flight: FlightRecord, eligible?: () => boolean) => Promise<void>;
+  /** Local checkpoint after remote authority acceptance; never a local message/fanout. */
+  persistAcceptedReply: (invocation: InvocationRequest, receipt: AcceptedInvocationReply, eligible: () => boolean) => Promise<void>;
+  completionFlight?: (id: string) => FlightRecord | undefined;
+  completionCurrentFlight?: (invocationId: string) => FlightRecord | undefined;
   authorizeReplyCompletion?: (invocation: InvocationRequest, reply: MessageRecord) => boolean;
   activeLocalEndpointForAgent: (agentId: string) => unknown;
 };
+
+export type AcceptedInvocationReply = {
+  version: 1;
+  authorityNodeId: string;
+  message: MessageRecord;
+};
+
+function acceptedInvocationReply(flight: FlightRecord | undefined, invocation: InvocationRequest): AcceptedInvocationReply | undefined {
+  const receipt = flight?.metadata?.acceptedReply as AcceptedInvocationReply | undefined;
+  if (receipt === undefined) return undefined;
+  if (receipt?.version !== 1 || typeof receipt.authorityNodeId !== "string" || !receipt.authorityNodeId
+    || !receipt.message || typeof receipt.message.id !== "string" || !receipt.message.id
+    || typeof receipt.message.body !== "string" || !Number.isFinite(receipt.message.createdAt)
+    || !isFinalReplyForInvocation(receipt.message, invocation)) {
+    throw new Error(`Malformed accepted reply for invocation ${invocation.id}; completion recovery held`);
+  }
+  return receipt;
+}
 
 export class BrokerMessageService {
   constructor(private readonly deps: BrokerMessageServiceDeps) {}
@@ -80,6 +106,7 @@ export class BrokerMessageService {
       if (!isIdempotentMessageRetry(existing, message)) {
         throw new Error(`message id ${message.id} is already assigned to a different record`);
       }
+      await this.completeInvocationsForBrokerReply(existing);
       return {
         ok: true,
         message: existing,
@@ -88,18 +115,46 @@ export class BrokerMessageService {
       };
     }
 
+    // An authority-owned reply is intentionally absent from local messages.
+    // Its acknowledged receipt repairs completion without contacting that peer.
+    for (const invocation of Object.values(this.deps.runtime.snapshot().invocations)) {
+      if (!isFinalReplyForInvocation(message, invocation)) continue;
+      const receipt = acceptedInvocationReply(this.deps.runtime.flightForInvocation(invocation.id), invocation);
+      if (receipt?.message.id !== message.id) continue;
+      if (!isIdempotentMessageRetry(receipt.message, message)) {
+        // Legacy broker replies have no client ID; only their exact retry qualifies.
+        if (!isDeepStrictEqual(receipt.message, message)) {
+          throw new Error(`message id ${message.id} is already assigned to a different record`);
+        }
+      }
+      await this.checkpointAndCompleteAcceptedReplies(receipt.message, receipt.authorityNodeId);
+      return { ok: true, message: receipt.message, deliveries: [], forwarded: true,
+        authorityNodeId: receipt.authorityNodeId, duplicate: true };
+    }
+
     const authority = this.deps.mesh.authorityNodeForConversation(message.conversationId);
     if (authority) {
+      if (message.metadata?.completionReply !== undefined) throw new Error("completion_remote_conversation_unsupported");
       const forwarded = await this.deps.mesh.forwardConversationMessageToAuthority(message);
-      // The authority owns the message. Once it acknowledges that durable
-      // reply, the executor must also settle its local flight; otherwise its
-      // tmux waiter and the requester's status mirror remain running forever.
-      await this.completeInvocationsForBrokerReply(message);
+      const accepted = forwarded.message;
+      if (accepted !== undefined) {
+        if (!accepted || accepted.id !== message.id || !Number.isFinite(accepted.createdAt)
+          || !(isIdempotentMessageRetry(canonicalMessageRecord(accepted), canonicalMessageRecord(message))
+            || isDeepStrictEqual(canonicalMessageRecord(accepted), canonicalMessageRecord(message)))) {
+          throw new Error(`authority ${forwarded.authorityNodeId} returned a conflicting canonical message for ${message.id}`);
+        }
+        // A retry's timestamp/provenance is not proof of what the authority stored.
+        await this.checkpointAndCompleteAcceptedReplies(accepted, forwarded.authorityNodeId);
+      } else if (Object.values(this.deps.runtime.snapshot().invocations)
+        .some((invocation) => this.completionFlight(invocation, message))) {
+        // Older peers can acknowledge delivery, but cannot prove final completion.
+        throw new Error(`authority ${forwarded.authorityNodeId} acknowledged ${message.id} without a canonical message; completion recovery held`);
+      }
       return {
         ok: true,
-        message,
-        deliveries: forwarded.deliveries ?? [],
         ...forwarded,
+        message: accepted ?? message,
+        deliveries: forwarded.deliveries ?? [],
       };
     }
 
@@ -107,7 +162,10 @@ export class BrokerMessageService {
       enqueueProjection: false,
       dedupeExisting: true,
     });
-    if (duplicate) return { ok: true, message: duplicate, deliveries: [], duplicate: true };
+    if (duplicate) {
+      await this.completeInvocationsForBrokerReply(duplicate);
+      return { ok: true, message: duplicate, deliveries: [], duplicate: true };
+    }
     await this.deps.mesh.forwardPeerBrokerDeliveries(message, deliveries);
     await this.deps.applyProjectedEntries(entries);
     await this.deps.reconcileStaleLocalDeliveries();
@@ -174,8 +232,7 @@ export class BrokerMessageService {
     const since = Math.max(0, sinceMs - 5_000);
     const replies = await selectMessageRecordsAsync(this.deps.runtime.peek().messages, 1,
       (lhs, rhs) => rhs.createdAt - lhs.createdAt, (message) =>
-        message.conversationId === invocation.conversationId
-        && message.replyToMessageId === invocation.messageId
+        this.authorizedFinalReply(invocation, message)
         && message.actorId === agentId
         && message.class === "agent"
         && message.createdAt >= since, {selection:{conversationIds:[invocation.conversationId],actorId:agentId,replyToMessageId:invocation.messageId,since,newestFirst:true}});
@@ -186,25 +243,60 @@ export class BrokerMessageService {
   readonly completeInvocationForBrokerReply = async (
     invocation: InvocationRequest,
     reply: MessageRecord,
+    expectedFlightId?: string,
   ): Promise<boolean> => {
-    if (this.deps.authorizeReplyCompletion && !this.deps.authorizeReplyCompletion(invocation, reply)) return false;
-    const flight = this.deps.runtime.flightForInvocation(invocation.id);
-    if (!flight || !isWorkingFlightState(flight.state)) {
-      return false;
-    }
-    const startedAt = flight.startedAt ?? invocation.createdAt;
-    if (reply.createdAt < Math.max(0, startedAt - 5_000)) {
-      return false;
-    }
+    const flight = this.completionFlight(invocation, reply);
+    if (!flight || (expectedFlightId !== undefined && flight.id !== expectedFlightId)) return false;
 
     await this.deps.persistFlight(completedFlightFromBrokerReply(
       invocation,
       flight,
       reply,
       this.deps.runtime.agent(invocation.targetAgentId)?.displayName,
-    ));
-    return true;
+    ), () => this.completionFlight(invocation, reply)?.id === flight.id);
+    const completed = this.deps.runtime.flightForInvocation(invocation.id);
+    return completed?.id === flight.id && completed.state === "completed" && completed.metadata?.replyMessageId === reply.id;
   };
+
+  /** Called for active flights only; accepted-message reads never resubmit work. */
+  readonly recoverInvocationReply = async (invocation: InvocationRequest): Promise<boolean> => {
+    const flight = this.deps.runtime.flightForInvocation(invocation.id);
+    if (!flight || !isWorkingFlightState(flight.state)) return false;
+    const receipt = acceptedInvocationReply(flight, invocation);
+    const reply = receipt?.message ?? await this.existingBrokerReplyForInvocation(
+      invocation, invocation.targetAgentId, flight.startedAt ?? invocation.createdAt,
+    );
+    return reply ? this.completeInvocationForBrokerReply(invocation, reply, flight.id) : false;
+  };
+
+  private authorizedFinalReply(invocation: InvocationRequest, reply: MessageRecord): boolean {
+    return isFinalReplyForInvocation(reply, invocation)
+      && (!this.deps.authorizeReplyCompletion || this.deps.authorizeReplyCompletion(invocation, reply));
+  }
+
+  private completionFlight(invocation: InvocationRequest, reply: MessageRecord): FlightRecord | undefined {
+    if (!this.authorizedFinalReply(invocation, reply)) return undefined;
+    const flight = hasExplicitCompletion(invocation) && this.deps.completionCurrentFlight
+      ? this.deps.completionCurrentFlight(invocation.id) : this.deps.runtime.flightForInvocation(invocation.id);
+    if (!flight || !isWorkingFlightState(flight.state)
+      || !explicitReplyMatchesFlight(reply, invocation, flight, this.deps.runtime.snapshot().flights ?? {}, this.deps.completionFlight)) return undefined;
+    const startedAt = flight.startedAt ?? invocation.createdAt;
+    if (reply.createdAt < Math.max(0, startedAt - 5_000)) return undefined;
+    const accepted = acceptedInvocationReply(flight, invocation);
+    // The first durable authority acknowledgement owns this completion.
+    if (accepted && !isDeepStrictEqual(accepted.message, reply)) return undefined;
+    return flight;
+  }
+
+  private async checkpointAndCompleteAcceptedReplies(message: MessageRecord, authorityNodeId: string): Promise<void> {
+    for (const invocation of Object.values(this.deps.runtime.snapshot().invocations)) {
+      const flight = this.completionFlight(invocation, message);
+      if (!flight) continue;
+      await this.deps.persistAcceptedReply(invocation, { version: 1, authorityNodeId, message },
+        () => this.completionFlight(invocation, message)?.id === flight.id);
+      await this.completeInvocationForBrokerReply(invocation, message, flight.id);
+    }
+  }
 
   readonly completeInvocationsForBrokerReply = async (message: MessageRecord): Promise<void> => {
     if (message.class !== "agent" || !message.replyToMessageId || !message.body.trim()) {
@@ -212,7 +304,7 @@ export class BrokerMessageService {
     }
 
     const invocations = Object.values(this.deps.runtime.snapshot().invocations)
-      .filter((invocation) => messageAnswersInvocation(message, invocation));
+      .filter((invocation) => isFinalReplyForInvocation(message, invocation));
     for (const invocation of invocations) {
       await this.completeInvocationForBrokerReply(invocation, message);
     }

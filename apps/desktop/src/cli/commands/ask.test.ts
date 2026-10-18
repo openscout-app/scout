@@ -14,6 +14,10 @@ describe("renderAskCommandHelp", () => {
     expect(help).toContain("--prompt-file <path>");
     expect(help).toContain("--reply-mode notify");
     expect(help).toContain("--label <label>");
+    expect(help).toContain("--completion explicit");
+    expect(help).toContain("--join-to <parent-flight-id>");
+    expect(help).toContain("--continue-for <parent-flight-id>");
+    expect(help).toContain("An early final is rejected and is not saved for later.");
     expect(help).toContain("--project <path>                   -> ask by repo/workspace path");
     expect(help).toContain("--harness <runtime> with no target");
     expect(help).toContain("scout ask --harness codex");

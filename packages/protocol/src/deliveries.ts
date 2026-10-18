@@ -17,6 +17,8 @@ import type {
  * were always plain metadata keys, now they are typed.
  */
 export interface DeliveryMetadata extends MetadataMap {
+  /** Monotonic inbox claim generation, retained after ACK/NACK and across restart. */
+  leaseGeneration?: number;
   /** Epoch ms of the next retry attempt. Set while `status` is `"deferred"`. */
   nextAttemptAt?: number;
   /** Classified failure reason. Set when `status` is `"failed"`. */

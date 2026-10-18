@@ -1,3 +1,6 @@
+import { flightCompletion, hasExplicitCompletion } from "@openscout/protocol";
+import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
+import { isFinalReplyForInvocation } from "./broker-conversation-helpers.js";
 import { readMessageRecord } from "./broker-message-records.js";
 import { isDeepStrictEqual } from "node:util";
 
@@ -33,6 +36,8 @@ type FlightLifecycleRuntime = {
 };
 
 type FlightLifecycleJournal = {
+  getFlight?: (id: string) => FlightRecord | undefined;
+  getCurrentFlightForInvocation?: (invocationId: string) => FlightRecord | undefined;
   visitDeliveries(visitor: (delivery: DeliveryIntent) => void | Promise<void>, options?: { activeOnly?: boolean }): Promise<void>;
   listDeliveryAttempts?: (deliveryId: string) => DeliveryAttempt[];
 };
@@ -63,6 +68,8 @@ export type BrokerFlightLifecycleServiceOptions = {
     input: Parameters<BrokerFlightLifecycleServiceOptions["updateDeliveryStatus"]>[0],
     eligible: (current: DeliveryIntent) => boolean | Promise<boolean>,
   ) => Promise<boolean>;
+  /** Pure preparation inside the terminal-flight writer; application runs after commit. */
+  prepareWorkPromotion?: (flight: FlightRecord, invocation: InvocationRequest | undefined, previous?: FlightRecord) => FlightRecord;
   promoteInvocationFlightToWork: (
     invocation: InvocationRequest,
     flight: FlightRecord,
@@ -70,6 +77,9 @@ export type BrokerFlightLifecycleServiceOptions = {
   ) => Promise<void>;
   maybeForwardFlightToAuthority: (flight: FlightRecord) => Promise<void>;
   isInvocationActive: (invocationId: string) => boolean;
+  /** Runs inside the writer; the report intent commits with terminal truth. */
+  prepareTerminalReport?: (flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
+  deliverTerminalReport?: (flightId: string) => Promise<unknown>;
   /**
    * Role lifecycle (e.g. orchestrator post_ask_summary). Fire-and-forget safe;
    * failures should be warned, not thrown into flight recording.
@@ -265,27 +275,72 @@ function normalizeRecordedFlight(
 export class BrokerFlightLifecycleService {
   constructor(private readonly options: BrokerFlightLifecycleServiceOptions) {}
 
-  readonly recordFlight = async (flight: FlightRecord): Promise<void> => {
+  readonly recordFlight = async (flight: FlightRecord, eligible?: () => boolean): Promise<void> => {
     const invocation = this.options.invocationFor(flight.invocationId)
       ?? this.options.runtime.snapshot().invocations[flight.invocationId];
     // Single chokepoint before journal/sqlite persistence, work-item promotion,
     // and mesh forwarding: scrub registered credentials from free-text fields.
     let flightToRecord = redactFlightRecordSecrets(
-      normalizeRecordedFlight(flight, invocation, this.now()),
+      flight,
     );
     let didRecordFlight = false;
     let previousFlight: FlightRecord | undefined;
     await this.options.durableStore.runWrite(async () => {
-      const previous = this.options.runtime.snapshot().flights[flightToRecord.id];
+      // Recheck the caller's observation after acquiring the canonical writer.
+      if (eligible && !eligible()) return;
+      const previous = this.options.journal.getFlight?.(flightToRecord.id) ?? this.options.runtime.snapshot().flights[flightToRecord.id];
       previousFlight = previous;
+      if (previous?.metadata?.completion !== undefined && (!invocation || !hasExplicitCompletion(invocation)
+        || previous.invocationId !== flightToRecord.invocationId || previous.targetAgentId !== flightToRecord.targetAgentId
+        || previous.requesterId !== flightToRecord.requesterId)) {
+        throw new Error("completion_flight_identity_mismatch");
+      }
+      if (invocation && hasExplicitCompletion(invocation)) {
+        if (!previous) throw new Error("completion_flight_unknown");
+        if (this.options.journal.getCurrentFlightForInvocation
+          && this.options.journal.getCurrentFlightForInvocation(invocation.id)?.id !== flightToRecord.id) return;
+        const completion = flightCompletion(previous);
+        if (!completion) throw new Error("completion_state_invalid");
+        // Adapter/status snapshots never own the contract revision or obligations.
+        flightToRecord = { ...flightToRecord, metadata: { ...flightToRecord.metadata, completion } };
+        if (flightToRecord.state === "completed" || (flightToRecord.state === "failed"
+          && ["empty_reply", "empty_completed_output"].includes(String(flightToRecord.metadata?.failureStage)))) {
+          const replyId = flightToRecord.metadata?.replyMessageId;
+          const reply = typeof replyId === "string" ? await readMessageRecord(this.options.runtime.snapshot().messages, replyId) : undefined;
+          if (!reply || !isFinalReplyForInvocation(reply, invocation)
+            || !explicitReplyMatchesFlight(reply, invocation, previous, this.options.runtime.snapshot().flights, this.options.journal.getFlight?.bind(this.options.journal))) {
+            if (flightToRecord.metadata?.completedByBrokerReply === true) return;
+            const { resultReply: _result, failureStage: _failure, ...metadata } = flightToRecord.metadata ?? {};
+            flightToRecord = { ...flightToRecord, state: "waiting", completedAt: undefined, output: undefined, error: undefined,
+              summary: "Execution ended; awaiting an explicit final reply.",
+              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true } } };
+          }
+        }
+      }
+      flightToRecord = normalizeRecordedFlight(flightToRecord, invocation, this.now());
+      // A delayed adapter/status update cannot erase an acknowledged reply
+      // while its separate completion write is being recovered.
+      if (previous?.metadata?.acceptedReply !== undefined) {
+        flightToRecord = { ...flightToRecord, metadata: {
+          ...flightToRecord.metadata, acceptedReply: previous.metadata.acceptedReply,
+        } };
+      }
       if (previous && isTerminalFlightState(previous.state)) {
         // Terminal enrichment must not erase/reopen a durable reply intent.
         // Only the result outbox's compare-and-write marks it delivered.
-        flightToRecord = { ...flightToRecord, metadata: {
+        flightToRecord = { ...flightToRecord,
+          // Preserve the first report's human-readable terminal payload.
+          ...(previous.metadata?.terminalReport ? { summary: previous.summary } : {}),
+          metadata: {
           ...previous.metadata, ...flightToRecord.metadata,
           ...(previous.metadata?.resultReply ? { resultReply: previous.metadata.resultReply } : {}),
+          ...(previous.metadata?.terminalReport ? { terminalReport: previous.metadata.terminalReport } : {}),
         } };
       }
+      if (!previous?.metadata?.terminalReport) {
+        flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
+      }
+      flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       if (previous && isDuplicateFlightUpdate(previous, flightToRecord)) {
         return;
       }
@@ -308,6 +363,13 @@ export class BrokerFlightLifecycleService {
     });
     if (!didRecordFlight) return;
 
+    // Start delivery before unrelated endpoint/work bookkeeping can fail. The
+    // durable intent remains recoverable even when this process stops here.
+    if (flightToRecord.metadata?.terminalReport) {
+      void this.options.deliverTerminalReport?.(flightToRecord.id).catch((error) => {
+        this.options.warn?.(`[openscout-runtime] terminal report pending ${flightToRecord.id}:`, error);
+      });
+    }
     await this.reconcileMessageDeliveriesForFlight(flightToRecord, invocation);
     if (invocation && isTerminalFlightState(flightToRecord.state)) {
       try {

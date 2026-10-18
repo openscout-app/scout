@@ -164,7 +164,8 @@ function makeHarness(opts: {
       list.push({ attempt: attempt.attempt, status: attempt.status, metadata: attempt.metadata });
       attempts.set(attempt.deliveryId, list);
     },
-    recordFlight: async (flight) => {
+    recordFlight: async (flight, eligible) => {
+      if (eligible && !eligible()) return;
       flights.push(flight);
     },
     failInvocation: async (inv, detail) => {
@@ -405,7 +406,7 @@ describe("peer-delivery outbox worker", () => {
     expect(harness.failedInvocations).toHaveLength(0);
   });
 
-  test("after the retry window expires, marks failed and fails the invocation", async () => {
+  test("after the retry window expires, retains unknown submission without failing the invocation", async () => {
     const invocation = makeInvocation("inv-5", "scout.main.mini");
     const peer = makeNode("mini-node", "http://10.0.0.2:65501");
     const harness = makeHarness({ invocation, peer });
@@ -426,7 +427,7 @@ describe("peer-delivery outbox worker", () => {
     await worker.tick();
     expect(harness.deliveries.get(delivery.id)?.status).toBe("deferred");
 
-    // Second attempt past the retry window → terminal failure.
+    // Second attempt past the retry window stops forwarding, not remote work.
     harness.setNow(20_000);
     // Force the deferred entry to become eligible.
     const cur = harness.deliveries.get(delivery.id)!;
@@ -437,10 +438,15 @@ describe("peer-delivery outbox worker", () => {
     await worker.tick();
 
     const stored = harness.deliveries.get(delivery.id);
-    expect(stored?.status).toBe("failed");
-    expect(stored?.metadata?.failureReason).toBe("peer_unreachable");
-    expect(harness.failedInvocations).toHaveLength(1);
-    expect(harness.failedInvocations[0]?.detail).toContain("attempts");
+    expect(stored?.status).toBe("sent");
+    expect(stored?.metadata?.peerSubmission).toMatchObject({ status: "unknown", reason: "retry_window_expired" });
+    expect(harness.failedInvocations).toHaveLength(0);
+    const attempts = harness.attempts.get(delivery.id)?.length;
+    harness.setNow(100_000);
+    worker.notifyPeerOnline(peer.id);
+    await worker.tick();
+    expect(harness.attempts.get(delivery.id)).toHaveLength(attempts!);
+    worker.stop();
   });
 
   test("deferred entries are skipped before nextAttemptAt", async () => {

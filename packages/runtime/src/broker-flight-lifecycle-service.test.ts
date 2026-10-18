@@ -155,6 +155,7 @@ function createHarness(input: {
   deliveries?: DeliveryIntent[];
   deliveryAttempts?: Record<string, DeliveryAttempt[]>;
   beforeConditionalUpdate?: () => void;
+  beforeWrite?: () => void;
   invocation?: InvocationRequest;
   activeInvocationIds?: string[];
   now?: number;
@@ -197,6 +198,7 @@ function createHarness(input: {
     },
     durableStore: {
       async runWrite(work) {
+        input.beforeWrite?.();
         return await work();
       },
       async commitEntries(entries, applyRuntime) {
@@ -244,6 +246,34 @@ function createHarness(input: {
 }
 
 describe("broker flight lifecycle helpers", () => {
+  test("a caller eligibility guard runs inside the writer and suppresses all rejected-flight effects", async () => {
+    let eligible = true;
+    let observedInsideWriter = false;
+    const harness = createHarness({ beforeWrite: () => { eligible = false; },
+      onTerminalFlight: () => { throw new Error("rejected flight must not notify"); },
+    });
+    await harness.service.recordFlight(testFlight({ state: "completed", output: "old result" }), () => {
+      observedInsideWriter = !eligible;
+      return eligible;
+    });
+    expect(observedInsideWriter).toBe(true);
+    expect(harness.committedFlights).toEqual([]);
+    expect(harness.appliedEntries).toEqual([]);
+    expect(harness.updatedDeliveries).toEqual([]);
+    expect(harness.promoted).toEqual([]);
+    expect(harness.forwardedFlights).toEqual([]);
+  });
+
+  test("delayed working metadata cannot erase or replace an authority-accepted reply", async () => {
+    const acceptedReply = { version: 1, authorityNodeId: "peer", message: { id: "reply-original", body: "done" } };
+    const running = testFlight({ metadata: { acceptedReply } });
+    const harness = createHarness({ snapshot: testSnapshot({ flights: { [running.id]: running } }) });
+    await harness.service.recordFlight({ ...running, metadata: { requesterTimedOut: true } });
+    expect(harness.committedFlights.at(-1)?.metadata?.acceptedReply).toEqual(acceptedReply);
+    await harness.service.recordFlight({ ...running, metadata: { requesterTimedOut: true, acceptedReply: { message: { id: "replacement" } } } });
+    expect(harness.committedFlights).toHaveLength(1);
+  });
+
   test("classifies terminal downgrades and delivery statuses", () => {
     expect(shouldIgnoreFlightUpdate(
       testFlight({ state: "completed" }),

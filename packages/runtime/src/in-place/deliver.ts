@@ -1,3 +1,4 @@
+import { callLattices, submitLatticesComposer, type LatticesCall } from "./lattices-composer.js";
 // A reply to a session that is open somewhere goes INTO that session, where it
 // runs — never to a background copy or a fork. The operator started it in a
 // place; the words belong in that place.
@@ -19,9 +20,10 @@
 //              through Lattices' computer-use surface.
 // A Codex thread held by the ChatGPT app's Codex (its app-server is stdio-only,
 // so no process can join it) gets the words through the app's own thread link
-// (`codex://threads/<id>?prompt=`); the Scout app, which holds the
-// Accessibility grant, focuses the composer holding exactly that text and
-// presses Return, and the thread's transcript confirms it.
+// (`codex://threads/<id>?prompt=`). Scout.app's combined focus + Return has no
+// activity guard at the actuator, so that submission path is refused. When
+// Scout.app is unavailable, Lattices can focus an unambiguous text composer,
+// recheck activity, and press Return; the thread's transcript confirms it.
 //
 // Hosts are exact, so a session normally matches one. The order decides only
 // between two that both hold it — a Herdr pane inside a tmux session.
@@ -54,7 +56,9 @@ export type InPlaceVia = "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
 export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "terminal"];
 
 export type InPlaceDelivery =
-  | { ok: true; via: InPlaceVia; location: string }
+  | { ok: true; via: InPlaceVia; location: string; delivered?: "draft" }
+  | { ok: false; code: "busy" | "activity_unknown"; via: InPlaceVia; location: string; detail: string }
+  | { ok: false; code: "draft_unsupported"; detail: string }
   /** The session is live but can't take words right now (e.g. a permission prompt is up). */
   | { ok: false; code: "session_blocked"; via: InPlaceVia; location: string }
   /** The session is live in a place Scout found but couldn't type into. */
@@ -62,12 +66,14 @@ export type InPlaceDelivery =
   /** Live in an app only the Scout app can reach, and the Scout app can't right now. */
   | { ok: false; code: "scout_app_unavailable" | "scout_app_accessibility"; via: InPlaceVia; location: string }
   /** No live place holds this session. */
-  | { ok: false; code: "not_live" };
+  | { ok: false; code: "not_live" }
+  /** Exact session identity could not be established before any input. */
+  | { ok: false; code: "session_runtime_unobserved" | "session_ambiguous" };
 
-export type HerdrPaneMatch = { session: string; paneId: string; status: string | null };
+export type HerdrPaneMatch = { session: string; paneId: string; status: string | null; harness?: string; sessionKind?: string };
 
 export type DeliverInPlaceDeps = {
-  findHerdrPane?: (sessionId: string) => Promise<HerdrPaneMatch | null>;
+  findHerdrPane?: (sessionId: string, harness?: string | null) => Promise<HerdrPaneMatch | null>;
   promptHerdr?: (match: HerdrPaneMatch, body: string) => Promise<void>;
   findClaudeRecord?: (sessionId: string) => Promise<ClaudeSessionRecord | null>;
   /** Pids of processes holding a Codex thread, other than the ChatGPT app. */
@@ -85,6 +91,11 @@ export type DeliverInPlaceDeps = {
   typeIntoTty?: (tty: string, body: string) => Promise<void>;
   /** Whether the ChatGPT app's Codex holds this thread's writer lock. */
   codexHeldByApp?: (sessionId: string) => Promise<boolean>;
+  /** Opens only the exact thread link; never submits. */
+  draftCodexApp?: (sessionId: string, body: string) => Promise<void>;
+  codexActivity?: (sessionId: string) => Promise<"idle" | "busy" | "unknown">;
+  latticesCall?: LatticesCall;
+  /** Lattices submission override for tests; never bypasses the Scout.app refusal. */
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
@@ -129,16 +140,39 @@ type Candidates = {
 };
 
 export async function deliverInPlace(
-  input: { sessionId: string; harness?: string | null; body: string },
+  input: { sessionId: string; harness?: string | null; body: string; requireExactHarness?: boolean; mode?: "submit" | "draft" },
   deps: DeliverInPlaceDeps = {},
 ): Promise<InPlaceDelivery> {
   const { sessionId, body } = input;
   const harness = input.harness?.trim().toLowerCase() || null;
 
+  // Draft is deliberately handled before any terminal or Accessibility actuator.
+  // A missing harness must not accidentally turn a draft into a submitted prompt.
+  if (input.mode === "draft") {
+    if (harness !== "codex") return { ok: false, code: "draft_unsupported", detail: "Draft mode requires --harness codex and an app-held thread; nothing was sent." };
+    const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => false);
+    if (!held) return { ok: false, code: "not_live" };
+    try {
+      await (deps.draftCodexApp ?? draftCodexApp)(sessionId, body);
+      return { ok: true, delivered: "draft", via: "scout-app", location: "the ChatGPT app’s Codex composer (not sent)" };
+    } catch (error) {
+      return { ok: false, code: "in_place_failed", via: "scout-app", location: "the ChatGPT app’s Codex composer", detail: errorText(error) };
+    }
+  }
+
   const candidates: Candidates = { herdr: null, orca: null, tmux: null, terminalPid: null };
 
   // Herdr names the session itself when its integration is installed.
-  candidates.herdr = await (deps.findHerdrPane ?? findHerdrPaneForSession)(sessionId).catch(() => null);
+  if (input.requireExactHarness && !harness) return { ok: false, code: "session_runtime_unobserved" };
+  try {
+    candidates.herdr = await (deps.findHerdrPane ?? findHerdrPaneForSession)(sessionId, input.requireExactHarness ? harness : undefined);
+  } catch (error) {
+    if (input.requireExactHarness) return { ok: false, code: errorText(error).startsWith("session_ambiguous:") ? "session_ambiguous" : "session_runtime_unobserved" };
+  }
+  if (input.requireExactHarness && candidates.herdr
+    && (candidates.herdr.harness !== harness || candidates.herdr.sessionKind !== "id")) {
+    return { ok: false, code: "session_runtime_unobserved" };
+  }
 
   // The process holding the session, and the panes its environment names.
   const pids: number[] = [];
@@ -201,15 +235,28 @@ export async function deliverInPlace(
     const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => false);
     if (!held) return { ok: false, code: "not_live" };
     const location = "the ChatGPT app’s Codex";
-    const via = "scout-app";
+    let via: InPlaceVia = "scout-app";
+    const activity = await (deps.codexActivity ?? codexActivity)(sessionId).catch(() => "unknown" as const);
+    if (activity !== "idle") return { ok: false, code: activity === "busy" ? "busy" : "activity_unknown", via, location, detail: "Nothing submitted. Use mode=draft (--draft) to fill the composer, or queue with ask and wait for app release." };
     // Check the app can finish before the link puts words in the composer,
     // so a refusal never leaves a half-sent reply sitting there.
     const ask = deps.askScoutApp ?? ((request) => askScoutApp(request, { timeoutMs: 3_000 }));
     const status = await ask({ op: "status" });
-    if (!status.ok) return { ok: false, code: "scout_app_unavailable", via, location };
-    if (status.accessibility !== "granted") return { ok: false, code: "scout_app_accessibility", via, location };
+    if (!status.ok) {
+      // A call to an already-running daemon is a probe, never an app launch.
+      try { await (deps.latticesCall ?? callLattices)("daemon.status", {}); via = "lattices"; }
+      catch { return { ok: false, code: "scout_app_unavailable", via, location }; }
+    }
+    if (status.ok && status.accessibility !== "granted") return { ok: false, code: "scout_app_accessibility", via, location };
+    if (status.ok) {
+      // composer.submit combines focus + Return without a thread-bound idle
+      // check between them. A preflight here cannot guard a turn started by
+      // focus. Refuse before opening the URL; do not send ignored safety flags
+      // to an old actuator or bypass this refusal through another backend.
+      return { ok: false, code: "in_place_failed", via, location, detail: "Scout.app cannot recheck thread activity after focus and before Return; nothing opened or submitted. Use mode=draft (--draft) and send manually." };
+    }
     try {
-      await (deps.typeIntoCodexApp ?? ((id, words) => typeIntoCodexApp(id, words, deps.askScoutApp)))(sessionId, body);
+      await (deps.typeIntoCodexApp ?? ((id, words) => typeIntoCodexAppWithLattices(id, words, deps.latticesCall, deps.codexActivity)))(sessionId, body);
       return { ok: true, via, location };
     } catch (error) {
       return { ok: false, code: "in_place_failed", via, location, detail: errorText(error) };
@@ -272,7 +319,8 @@ async function promptOrcaCandidate(
   }
 }
 
-export async function findHerdrPaneForSession(sessionId: string): Promise<HerdrPaneMatch | null> {
+export async function findHerdrPaneForSession(sessionId: string, harness?: string | null): Promise<HerdrPaneMatch | null> {
+  const matches: HerdrPaneMatch[] = [];
   const sessions = await readHerdrSessions({ maxAgeMs: 0 });
   for (const session of sessions) {
     if (!session.running) continue;
@@ -282,13 +330,20 @@ export async function findHerdrPaneForSession(sessionId: string): Promise<HerdrP
       for (const tab of workspace.tabs) {
         for (const pane of tab.panes) {
           if (pane.agentSession?.value === sessionId) {
-            return { session: session.name, paneId: pane.paneId, status: pane.agentStatus ?? null };
+            const match = { session: session.name, paneId: pane.paneId, status: pane.agentStatus ?? null,
+              harness: pane.agentSession.agent, sessionKind: pane.agentSession.kind };
+            if (!harness) return match;
+            matches.push(match);
           }
         }
       }
     }
   }
-  return null;
+  const exact = matches.filter(match => match.harness === harness && match.sessionKind === "id");
+  if (exact.length > 1) throw new Error("session_ambiguous: multiple Herdr panes report this native session and harness");
+  // Return an unmatched observation for strict callers to refuse; absence of
+  // matching identity must not be confused with proof that nothing is live.
+  return exact[0] ?? matches[0] ?? null;
 }
 
 async function locateProcessHost(pid: number): Promise<ProcessHostLocation | null> {
@@ -387,37 +442,66 @@ export async function codexThreadHeldByChatGPTApp(sessionId: string): Promise<bo
   return (await codexThreadLockHolders(sessionId)).some((holder) => holder.command.includes(CHATGPT_APP));
 }
 
-async function typeIntoCodexApp(
+/** The URL handler fills the composer; no Accessibility grant or Return key. */
+async function draftCodexApp(sessionId: string, body: string): Promise<void> {
+  const link = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(body)}`;
+  await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
+}
+
+async function typeIntoCodexAppWithLattices(
   sessionId: string,
   body: string,
-  ask: DeliverInPlaceDeps["askScoutApp"] = (request) => askScoutApp(request),
+  latticesCall: LatticesCall = callLattices,
+  activity: (sessionId: string) => Promise<"idle" | "busy" | "unknown"> = codexActivity,
 ): Promise<void> {
   // The bridge holds no Accessibility grant. The link and the transcript need
-  // none; the one step that does (focus + Return) runs in the Scout app.
+  // none; focus and Return use the already-running Lattices daemon's grant.
   const transcript = await findCodexTranscript(sessionId);
   const offset = transcript ? (await stat(transcript).catch(() => null))?.size ?? 0 : 0;
+
+  if (!transcript) throw new Error("Cannot verify the target transcript; use draft mode instead.");
 
   // 1. The app's own thread link picks the thread by id and fills its
   //    composer. `-u` keeps `open` a plain URL open; a lone argument is
   //    rerouted to scoutd's file-reveal verb, which refuses URLs.
-  const link = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(body)}`;
-  await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
+  await draftCodexApp(sessionId, body);
   await new Promise((resolve) => setTimeout(resolve, CODEX_APP_OPEN_SETTLE_MS));
 
-  // 2. The Scout app anchors on content (the one composer holding exactly
-  //    these words; none or several and it stops) and presses Return there.
-  const submitted = await ask({ op: "composer.submit", bundleId: CHATGPT_BUNDLE_ID, text: body });
-  if (!submitted.ok) throw new Error(`the Scout app didn't submit it: ${submitted.message}`);
+  // 2. Lattices anchors on content, verifies it again after focus, and checks
+  //    activity before Return. Scout.app's unguarded operation is never used.
+  const beforeSubmit = async () => {
+    if (await activity(sessionId) !== "idle") throw new Error("Thread is busy or activity is unknown; nothing submitted. Use draft mode or queue with ask.");
+  };
+  await beforeSubmit();
+  await submitLatticesComposer(body, beforeSubmit, latticesCall);
 
   // 3. Delivered means the thread recorded it, not that a key was pressed.
   if (!transcript) throw new Error("couldn't find this thread's transcript to confirm the reply");
   if (!(await waitForCodexUserMessage(transcript, offset, body))) {
-    throw new Error("Return was pressed, but the thread didn't record the reply");
+    throw new Error("Return was pressed, but the thread didn't record the reply; inspect the transcript before retrying to avoid duplicates, or use draft mode");
   }
 }
 
-/** The ChatGPT app's bundle id (it ships Codex, and registers as such). */
-const CHATGPT_BUNDLE_ID = "com.openai.codex";
+/** No heuristic based on assistant prose: only harness lifecycle events establish activity. */
+export function codexActivityFromTranscript(text: string): "idle" | "busy" | "unknown" {
+  let state: "idle" | "busy" | "unknown" = "unknown";
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row.type !== "event_msg") continue;
+      if (row.payload?.type === "task_started") state = "busy";
+      if (["task_complete", "turn_aborted"].includes(row.payload?.type)) state = "idle";
+    } catch { return "unknown"; } // An incomplete append cannot establish idle.
+  }
+  return state;
+}
+
+async function codexActivity(sessionId: string): Promise<"idle" | "busy" | "unknown"> {
+  const path = await findCodexTranscript(sessionId);
+  return path ? codexActivityFromTranscript(await readFile(path, "utf8")) : "unknown";
+}
+
 const TRANSCRIPT_CONFIRM_MS = 8_000;
 
 async function findCodexTranscript(sessionId: string): Promise<string | null> {
@@ -443,7 +527,7 @@ async function waitForCodexUserMessage(transcript: string, offset: number, body:
         const said = payload?.type === "user_message"
           ? payload.message ?? ""
           : payload?.role === "user" ? (payload.content ?? []).map((part) => part.text ?? "").join(" ") : "";
-        if (said && collapseWhitespace(said).includes(expected)) return true;
+        if (said && collapseWhitespace(said) === expected) return true;
       } catch {
         // A line still being written; read again.
       }

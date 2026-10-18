@@ -1,4 +1,4 @@
-import type { AgentHarness, RouteAliasScope, ScoutExecutionResolution, SessionPlacement } from "@openscout/protocol";
+import type { AgentHarness, ScoutCompletionRequest, ScoutCompletionRelation, ScoutCompletionState, RouteAliasScope, ScoutExecutionResolution, SessionPlacement } from "@openscout/protocol";
 
 export type ScoutAskWorkspace = "same" | "new_worktree";
 export type ScoutAskSession = "reuse" | "new";
@@ -14,6 +14,8 @@ export type ScoutAskSenderContext = {
 
 type ScoutAskCommandBase = {
   requestId?: string;
+  completion?: ScoutCompletionRequest;
+  relation?: ScoutCompletionRelation;
   senderId: string;
   /** Exact IDs are sent directly; legacy mode resolves explicit --as names locally. */
   senderResolution?: "exact" | "legacy";
@@ -92,6 +94,8 @@ export type ScoutAskReceipt = {
   };
   delivery?: "none" | "inline" | "mcp_notification";
   executionResolution?: ScoutExecutionResolution;
+  completion?: ScoutCompletionState & { invocationId: string; flightId: string };
+  parentCompletion?: { flightId: string; revision: number };
   notification?: {
     method: "notifications/scout/reply";
     status: "scheduled" | "not_scheduled";

@@ -212,7 +212,7 @@ describe("BrokerDeliveryStore", () => {
     })).rejects.toThrow("owned by another worker");
     await store.updateDeliveryStatus({
       deliveryId: "history-6000", status: "acknowledged",
-      expectedLeaseOwner: "worker-1", requireActiveLease: true,
+      expectedLeaseOwner: "worker-1", expectedLeaseGeneration: first?.metadata?.leaseGeneration, requireActiveLease: true,
     });
     expect(journal.deliveries.get("history-6000")?.status).toBe("acknowledged");
     expect(events).toHaveLength(2);
