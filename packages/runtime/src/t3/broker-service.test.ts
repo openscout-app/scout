@@ -197,6 +197,38 @@ describe("broker T3 source reconciliation", () => {
     expect(f.flights.get("flight")).toMatchObject({ state: "completed", output: "Correlated result" });
   });
 
+  test("retries a persisted final response before polling when the reply write fails and T3 goes offline", async () => {
+    const f = fixture();
+    f.onStart(input => { f.thread = f.snapshotFor(input); });
+    const post = f.options.postMessage;
+    const attempts: MessageRecord[] = [];
+    let offlineReads = 0;
+    f.options.postMessage = async message => {
+      attempts.push(message);
+      if (attempts.length === 1) {
+        expect(f.deliveries.get(f.receiptId)?.metadata).toMatchObject({ resultBody: message.body, turnId: "turn" });
+        f.onThread(() => {
+          offlineReads++;
+          // Bound a regression instead of leaving the poll loop running forever.
+          f.stop();
+          throw new Error("T3 is offline");
+        });
+        throw new Error("Scout reply persistence interrupted");
+      }
+      await post(message);
+    };
+
+    await f.service.dispatch(f.invocation, f.endpoint);
+
+    expect(offlineReads).toBe(0);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual(attempts[0]);
+    expect(f.starts).toHaveLength(1);
+    expect(f.messages).toHaveLength(1);
+    expect(f.flights.get("flight")).toMatchObject({ state: "completed", output: "Correlated result" });
+    expect(f.deliveries.get(f.receiptId)).toMatchObject({ status: "completed", metadata: { phase: "replied", turnId: "turn" } });
+  });
+
   test("recovers a known terminal turn after latestTurn advances using the persisted terminal proof", async () => {
     const f = fixture();
     let input: Start | undefined;

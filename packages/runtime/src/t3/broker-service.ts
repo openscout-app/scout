@@ -209,6 +209,13 @@ export class BrokerT3Service {
       // Full snapshots recover source facts after every reconnect, without replaying a mutation.
       while (!terminal(this.deps.flight(invocation.id))) {
         try {
+          // A failed reply write leaves the final response durable. Retry it
+          // without depending on T3 still being reachable or retaining the turn.
+          receipt = this.deps.delivery(id)!;
+          if (typeof receipt.metadata?.resultBody === "string" && typeof receipt.metadata.turnId === "string") {
+            await this.complete(invocation, endpoint, receipt.metadata.resultBody, receipt.metadata.turnId);
+            return;
+          }
           const thread = await adapter.thread(threadId);
           if (thread.projectId !== endpoint.metadata?.projectId) throw new Error("t3_project_identity_mismatch");
           receipt = this.deps.delivery(id)!;

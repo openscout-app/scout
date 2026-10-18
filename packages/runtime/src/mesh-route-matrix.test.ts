@@ -70,6 +70,16 @@ describe("mesh route matrix", () => {
     }
   });
 
+  test("T3 integration actions are explicitly local and cannot be reached with peer grants", () => {
+    expect(meshRouteMatrixEntries()["POST /v1/integrations/t3/:id"]).toBe("local");
+    for (const action of ["inspect", "board", "refresh", "attach", "run"]) {
+      const tier = meshRouteTierFor("POST", `/v1/integrations/t3/${action}`);
+      expect(tier).toBe("local");
+      expect(grantSatisfiesRouteTier("observe", tier)).toBe(false);
+      expect(grantSatisfiesRouteTier("control", tier)).toBe(false);
+    }
+  });
+
   test("runtime lookup resolves parameterized routes and denies unknown routes by default", () => {
     expect(meshRouteTierFor("GET", "/v1/mesh/nodes")).toBe("observe");
     expect(meshRouteTierFor("GET", "/v1/mesh/snapshot")).toBe("observe");
