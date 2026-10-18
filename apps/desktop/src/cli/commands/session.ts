@@ -1454,8 +1454,8 @@ const IN_PLACE_REFUSALS: Record<string, string> = {
   draft_unsupported: "does not support draft mode",
   session_blocked: "is waiting on a prompt in its terminal; answer that first, then send again",
   in_place_failed: "is open, but Scout couldn't type into it",
-  scout_app_unavailable: "is open in the ChatGPT app; open Scout.app or run Lattices.app with Accessibility permission to send, or use session send --harness codex --draft to fill without sending",
-  scout_app_accessibility: "is open in the ChatGPT app; turn on Scout › Settings › System › Send replies into open apps, or use --harness codex --draft",
+  scout_app_unavailable: "is open in the ChatGPT app; use --harness codex --draft to fill without sending, or run Lattices.app with Accessibility permission for the submission fallback",
+  scout_app_accessibility: "is open in the ChatGPT app but Scout.app has no Accessibility permission; use --harness codex --draft and send manually",
 };
 
 export function renderInPlaceDelivery(sessionId: string, result: InPlaceDelivery): string {

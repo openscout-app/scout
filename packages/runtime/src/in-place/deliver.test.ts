@@ -238,18 +238,24 @@ describe("deliverInPlace", () => {
 });
 
 describe("native app drafts", () => {
-  test("fills only the composer without querying Accessibility or submitting", async () => {
+  test.each([
+    ["short", "review & reply?"],
+    ["ellipsis-shaped", "x".repeat(237) + "..."],
+    ["long", "x".repeat(300)],
+  ])("drafts a %s reply without querying Accessibility, activity, or submitting", async (_label, body) => {
     const drafts: string[][] = [];
     const never = async (): Promise<never> => { throw new Error("must not submit or query Accessibility"); };
-    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "review & reply?", mode: "draft" }, noHosts({
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body, mode: "draft" }, noHosts({
       codexHeldByApp: async () => true,
       draftCodexApp: async (...args) => { drafts.push(args); },
       askScoutApp: never,
+      latticesCall: never,
+      codexActivity: never,
       typeIntoCodexApp: never,
       findHerdrPane: never,
     }));
     expect(result).toMatchObject({ ok: true, delivered: "draft" });
-    expect(drafts).toEqual([[SESSION, "review & reply?"]]);
+    expect(drafts).toEqual([[SESSION, body]]);
   });
 
   test("never falls back to terminal submission or starts a missing thread", async () => {
@@ -269,6 +275,38 @@ describe("native app drafts", () => {
 });
 
 describe("native app submission activity guard", () => {
+  test("refuses Scout.app's unguarded idle → focus → busy → Return sequence before any actuator", async () => {
+    const calls: string[] = [];
+    let activity: "idle" | "busy" = "idle";
+    const ask: NonNullable<DeliverInPlaceDeps["askScoutApp"]> = async request => {
+      calls.push(request.op);
+      if (request.op === "status") return { ok: true, accessibility: "granted" };
+      if (request.op === "composer.submit") {
+        // Model the legacy Swift operation: focus can start a turn, but the
+        // combined operation still presses Return without checking activity.
+        calls.push("focus");
+        activity = "busy";
+        calls.push("Return");
+        return { ok: true };
+      }
+      throw new Error(`unexpected operation: ${request.op}`);
+    };
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({
+      codexHeldByApp: async () => true,
+      codexActivity: async () => { calls.push(`activity:${activity}`); return activity; },
+      askScoutApp: ask,
+      draftCodexApp: async () => { calls.push("draft"); },
+      latticesCall: async () => { calls.push("lattices fallback"); return { ok: true }; },
+      typeIntoCodexApp: async () => {
+        calls.push("open");
+        await ask({ op: "composer.submit", text: "reply" });
+      },
+    }));
+    expect(result).toMatchObject({ ok: false, code: "in_place_failed", via: "scout-app" });
+    if (!result.ok && "detail" in result) expect(result.detail).toContain("after focus and before Return");
+    expect(calls).toEqual(["activity:idle", "status"]);
+  });
+
   test.each(["busy", "unknown"] as const)("never opens or submits a %s thread", async activity => {
     let submitted = false;
     const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({ codexHeldByApp: async () => true, codexActivity: async () => activity, typeIntoCodexApp: async () => { submitted = true; } }));

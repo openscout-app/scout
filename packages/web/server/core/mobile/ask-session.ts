@@ -69,8 +69,8 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   session_fork_unroutable: "Scout couldn't start a copy of this session, so nothing was sent.",
   session_blocked: "This session is waiting on a prompt in its terminal. Answer that first, then send again.",
   in_place_failed: "Scout could not confirm whether input reached this session. Keep this reply; do not send a new copy.",
-  scout_app_unavailable: "This session is open in the ChatGPT app. Open the Scout app on this Mac to send into it; nothing was sent.",
-  scout_app_accessibility: "This session is open in the ChatGPT app. Turn on Scout › Settings › System › Send replies into open apps; nothing was sent.",
+  scout_app_unavailable: "This session is open in the ChatGPT app. Send the reply there, or use Scout's draft mode on this Mac; nothing was sent.",
+  scout_app_accessibility: "Scout.app has no Accessibility permission. Use draft mode on this Mac and send manually; nothing was sent.",
   delivery_failed: "Scout couldn't deliver this reply.",
 };
 

@@ -316,14 +316,25 @@ scout session send <thread-id> --harness codex --draft "Your reply"
 A `delivered: "draft"` result means the native thread link was opened with the
 text, **not** that a user turn was recorded. The operator reviews and sends it.
 Draft needs no Accessibility grant and does not need Scout.app. Default
-`session_send` still submits; successful submission requires transcript
+`session_send` requests submission; successful submission requires transcript
 confirmation, not merely a click. Do not submit into a running turn to reply.
 Native submit refuses busy or unknown activity and never takes the app's thread
-writer. If Scout.app is unavailable, a running standalone Lattices daemon can
+writer. Scout.app submission is disabled before opening the thread link: its
+combined focus-and-Return operation cannot recheck activity after focus. Enabling
+that path requires a Swift actuator that binds the exact thread and full composer
+value, checks activity after focus immediately before Return, and refuses busy or
+unknown state. A TypeScript preflight or an unrecognized request flag is not enough.
+
+If Scout.app is unavailable, a running standalone Lattices daemon can
 focus the unique AX text composer containing the exact reply and press Return.
 Missing, duplicate, truncated or unfocused composer evidence stops submission.
-Transcript confirmation is still required. If activity changes during focus,
-the reply remains a draft; inspect it before retrying to avoid duplication.
+Lattices shortens AX values over 240 characters to 237 characters plus `...`
+without a truncation flag. Scout rejects matching values ending in `...` with
+240 or more UTF-16 code units, including literal replies with that shape. Long
+replies that do not match the snapshot also require draft mode. Draft mode has
+neither restriction. Transcript confirmation is still required for submission.
+If the post-focus activity check is not idle, Scout does not press Return.
+Inspect any filled draft before retrying to avoid duplication.
 
 When no broker reply context exists, obtain an explicit requester session id;
 never infer a return address from quoted or arbitrary transcript text.

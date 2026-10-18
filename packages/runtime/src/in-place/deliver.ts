@@ -20,9 +20,10 @@ import { callLattices, submitLatticesComposer, type LatticesCall } from "./latti
 //              through Lattices' computer-use surface.
 // A Codex thread held by the ChatGPT app's Codex (its app-server is stdio-only,
 // so no process can join it) gets the words through the app's own thread link
-// (`codex://threads/<id>?prompt=`); the Scout app, which holds the
-// Accessibility grant, focuses the composer holding exactly that text and
-// presses Return, and the thread's transcript confirms it.
+// (`codex://threads/<id>?prompt=`). Scout.app's combined focus + Return has no
+// activity guard at the actuator, so that submission path is refused. When
+// Scout.app is unavailable, Lattices can focus an unambiguous text composer,
+// recheck activity, and press Return; the thread's transcript confirms it.
 //
 // Hosts are exact, so a session normally matches one. The order decides only
 // between two that both hold it — a Herdr pane inside a tmux session.
@@ -94,6 +95,7 @@ export type DeliverInPlaceDeps = {
   draftCodexApp?: (sessionId: string, body: string) => Promise<void>;
   codexActivity?: (sessionId: string) => Promise<"idle" | "busy" | "unknown">;
   latticesCall?: LatticesCall;
+  /** Lattices submission override for tests; never bypasses the Scout.app refusal. */
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
@@ -246,8 +248,15 @@ export async function deliverInPlace(
       catch { return { ok: false, code: "scout_app_unavailable", via, location }; }
     }
     if (status.ok && status.accessibility !== "granted") return { ok: false, code: "scout_app_accessibility", via, location };
+    if (status.ok) {
+      // composer.submit combines focus + Return without a thread-bound idle
+      // check between them. A preflight here cannot guard a turn started by
+      // focus. Refuse before opening the URL; do not send ignored safety flags
+      // to an old actuator or bypass this refusal through another backend.
+      return { ok: false, code: "in_place_failed", via, location, detail: "Scout.app cannot recheck thread activity after focus and before Return; nothing opened or submitted. Use mode=draft (--draft) and send manually." };
+    }
     try {
-      await (deps.typeIntoCodexApp ?? ((id, words) => typeIntoCodexApp(id, words, deps.askScoutApp, via, deps.latticesCall, deps.codexActivity)))(sessionId, body);
+      await (deps.typeIntoCodexApp ?? ((id, words) => typeIntoCodexAppWithLattices(id, words, deps.latticesCall, deps.codexActivity)))(sessionId, body);
       return { ok: true, via, location };
     } catch (error) {
       return { ok: false, code: "in_place_failed", via, location, detail: errorText(error) };
@@ -439,16 +448,14 @@ async function draftCodexApp(sessionId: string, body: string): Promise<void> {
   await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
 }
 
-async function typeIntoCodexApp(
+async function typeIntoCodexAppWithLattices(
   sessionId: string,
   body: string,
-  ask: DeliverInPlaceDeps["askScoutApp"] = (request) => askScoutApp(request),
-  via: InPlaceVia = "scout-app",
   latticesCall: LatticesCall = callLattices,
   activity: (sessionId: string) => Promise<"idle" | "busy" | "unknown"> = codexActivity,
 ): Promise<void> {
   // The bridge holds no Accessibility grant. The link and the transcript need
-  // none; the one step that does (focus + Return) runs in the Scout app.
+  // none; focus and Return use the already-running Lattices daemon's grant.
   const transcript = await findCodexTranscript(sessionId);
   const offset = transcript ? (await stat(transcript).catch(() => null))?.size ?? 0 : 0;
 
@@ -460,18 +467,13 @@ async function typeIntoCodexApp(
   await draftCodexApp(sessionId, body);
   await new Promise((resolve) => setTimeout(resolve, CODEX_APP_OPEN_SETTLE_MS));
 
-  // 2. The Scout app anchors on content (the one composer holding exactly
-  //    these words; none or several and it stops) and presses Return there.
+  // 2. Lattices anchors on content, verifies it again after focus, and checks
+  //    activity before Return. Scout.app's unguarded operation is never used.
   const beforeSubmit = async () => {
     if (await activity(sessionId) !== "idle") throw new Error("Thread is busy or activity is unknown; nothing submitted. Use draft mode or queue with ask.");
   };
   await beforeSubmit();
-  if (via === "lattices") {
-    await submitLatticesComposer(body, beforeSubmit, latticesCall);
-  } else {
-    const submitted = await ask({ op: "composer.submit", bundleId: CHATGPT_BUNDLE_ID, text: body });
-    if (!submitted.ok) throw new Error(`the Scout app didn't submit it: ${submitted.message}; use draft mode`);
-  }
+  await submitLatticesComposer(body, beforeSubmit, latticesCall);
 
   // 3. Delivered means the thread recorded it, not that a key was pressed.
   if (!transcript) throw new Error("couldn't find this thread's transcript to confirm the reply");
@@ -500,8 +502,6 @@ async function codexActivity(sessionId: string): Promise<"idle" | "busy" | "unkn
   return path ? codexActivityFromTranscript(await readFile(path, "utf8")) : "unknown";
 }
 
-/** The ChatGPT app's bundle id (it ships Codex, and registers as such). */
-const CHATGPT_BUNDLE_ID = "com.openai.codex";
 const TRANSCRIPT_CONFIRM_MS = 8_000;
 
 async function findCodexTranscript(sessionId: string): Promise<string | null> {

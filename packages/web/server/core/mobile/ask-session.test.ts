@@ -147,23 +147,30 @@ describe("deliverInPlace", () => {
     expect(prompted).toEqual(["w1:p1:hi"]);
   });
 
-  test("a Codex thread held by the ChatGPT app goes through the Scout app", async () => {
+  test("an app-held Codex thread refuses Scout.app submission without an actuator activity guard", async () => {
     const typed: string[] = [];
     const result = await deliverInPlace({ sessionId: SOURCE, harness: "codex", body: "hi" }, {
       findHerdrPane: async () => null,
       self: [],
       selfTty: async () => null,
+      codexThreadPids: async () => [],
       codexHeldByApp: async () => true,
+      codexActivity: async () => "idle",
       askScoutApp: async () => ({ ok: true, accessibility: "granted" }),
       typeIntoCodexApp: async (id, body) => { typed.push(`${id}:${body}`); },
     });
-    expect(result).toEqual({ ok: true, via: "scout-app", location: "the ChatGPT app’s Codex" });
-    expect(typed).toEqual([`${SOURCE}:hi`]);
+    expect(result).toMatchObject({ ok: false, code: "in_place_failed", via: "scout-app" });
+    expect(typed).toEqual([]);
   });
 
   test("without the Scout app's grant, nothing reaches the ChatGPT composer", async () => {
     const typeIntoCodexApp = async () => { throw new Error("must not open the link"); };
-    const base = { findHerdrPane: async () => null, self: [], selfTty: async () => null, codexHeldByApp: async () => true, typeIntoCodexApp };
+    const base = {
+      findHerdrPane: async () => null, self: [], selfTty: async () => null,
+      codexThreadPids: async () => [], codexHeldByApp: async () => true,
+      codexActivity: async () => "idle" as const, typeIntoCodexApp,
+      latticesCall: async () => { throw new Error("Lattices unavailable"); },
+    };
     expect(await deliverInPlace({ sessionId: SOURCE, harness: "codex", body: "hi" }, {
       ...base,
       askScoutApp: async () => ({ ok: true, accessibility: "not-granted" }),
