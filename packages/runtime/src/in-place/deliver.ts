@@ -476,7 +476,7 @@ async function typeIntoCodexApp(
   // 3. Delivered means the thread recorded it, not that a key was pressed.
   if (!transcript) throw new Error("couldn't find this thread's transcript to confirm the reply");
   if (!(await waitForCodexUserMessage(transcript, offset, body))) {
-    throw new Error("Return was pressed, but the thread didn't record the reply");
+    throw new Error("Return was pressed, but the thread didn't record the reply; inspect the transcript before retrying to avoid duplicates, or use draft mode");
   }
 }
 
