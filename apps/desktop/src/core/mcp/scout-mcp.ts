@@ -18,6 +18,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   BUILT_IN_AGENT_DEFINITION_IDS,
   diagnoseAgentIdentity,
+  flightCompletion,
+  type ScoutCompletionReply,
   formatMinimalAgentIdentity,
   parseScoutRuntimeSpec,
   parseAgentIdentity,
@@ -533,6 +535,8 @@ type ScoutMcpDependencies = {
     source?: string;
   }) => Promise<ScoutStructuredMessagePostResult>;
   replyMessage: (input: {
+    requestId?: string;
+    completion?: ScoutCompletionReply;
     senderId: string;
     body: string;
     conversationId: string;
@@ -1196,7 +1200,28 @@ const nonBlankToolStringSchema = z.string().refine(
   { message: "Must contain non-whitespace text" },
 ).transform((value) => value.trim());
 
+const completionIdentitySchema = z.object({
+  invocationId: z.string().min(1).regex(/\S/),
+  flightId: z.string().min(1).regex(/\S/),
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+const completionReplySchema = completionIdentitySchema.extend({ kind: z.enum(["progress", "final"]) });
+const completionRequestSchema = z.object({ mode: z.literal("explicit") });
+const completionRelationSchema = z.object({
+  parentFlightId: nonBlankToolStringSchema,
+  kind: z.enum(["joined", "continuation"]),
+});
+const completionStateSchema = z.object({
+  version: z.literal(1),
+  revision: z.number().int().min(0),
+  obligations: z.array(z.object({
+    invocationId: z.string(), flightId: z.string(), kind: z.enum(["joined", "continuation"]),
+  })),
+  awaitingFinal: z.boolean().optional(),
+});
+
 const replyContextSchema = z.object({
+  completion: completionIdentitySchema.optional(),
   mode: z.literal("broker_reply"),
   fromAgentId: z.string(),
   toAgentId: z.string(),
@@ -1298,6 +1323,8 @@ const askResultSchema = z.object({
 });
 
 const askReceiptSchema = z.object({
+  completion: completionStateSchema.extend({ invocationId: z.string(), flightId: z.string() }).optional(),
+  parentCompletion: z.object({ flightId: z.string(), revision: z.number().int().min(0) }).optional(),
   links: followLinksSchema.optional(),
   followUrl: z.string().nullable().optional(),
   ok: z.boolean(),
@@ -3070,6 +3097,8 @@ function defaultScoutMcpDependencies(
         source,
       }),
     replyMessage: ({
+      requestId,
+      completion,
       senderId,
       body,
       conversationId,
@@ -3080,6 +3109,8 @@ function defaultScoutMcpDependencies(
       source,
     }) =>
       replyToScoutMessage({
+        requestId,
+        completion,
         senderId,
         body,
         conversationId,
@@ -3886,7 +3917,19 @@ export function createScoutMcpServer(options: {
       },
     },
     async () => {
-      const context = parseScoutReplyContextFromEnv(env);
+      let context = parseScoutReplyContextFromEnv(env);
+      if (context?.completion) {
+        const identity = completionIdentitySchema.safeParse(context.completion);
+        if (!identity.success) throw new Error("Current explicit completion context has invalid identity.");
+        const flight = await deps.getFlight(deps.resolveBrokerUrl(), identity.data.flightId);
+        const completion = flightCompletion(flight);
+        if (!flight || !completion || flight.invocationId !== identity.data.invocationId
+          || flight.targetAgentId !== context.toAgentId
+          || ["completed", "failed", "cancelled"].includes(flight.state)) {
+          throw new Error("Current explicit completion flight is unavailable or terminal; refresh the reply context before replying.");
+        }
+        context = { ...context, completion: { ...identity.data, revision: completion.revision } };
+      }
       const structuredContent = {
         active: Boolean(context),
         context,
@@ -3903,8 +3946,10 @@ export function createScoutMcpServer(options: {
     {
       title: "Reply to Scout Message",
       description:
-        "Reply in an existing Scout conversation/thread. This is a normal threaded conversation message, not a fresh ask or owned-work lifecycle. If conversationId and replyToMessageId are omitted, this uses the current ScoutReplyContext. If there is no active context, use messages_send for a new message or ask for a new request.",
+        "Reply in an existing Scout conversation/thread. Replies with completion report explicit progress or final completion for a flight; refresh current_reply_context first and supply a stable requestId. A final is rejected while joined work is pending; submit a new final after it settles. Other replies are normal threaded conversation messages. If conversationId and replyToMessageId are omitted, this uses the current ScoutReplyContext. If there is no active context, use messages_send for a new message or ask for a new request.",
       inputSchema: z.object({
+        requestId: z.string().min(1).max(256).optional(),
+        completion: completionReplySchema.optional(),
         body: z.string().min(1),
         currentDirectory: z.string().optional(),
         senderId: z.string().optional(),
@@ -3922,6 +3967,8 @@ export function createScoutMcpServer(options: {
       },
     },
     async ({
+      requestId,
+      completion,
       body,
       currentDirectory,
       senderId,
@@ -3930,6 +3977,9 @@ export function createScoutMcpServer(options: {
       shouldSpeak,
       attachments,
     }) => {
+      if (completion && !requestId?.trim()) {
+        throw new Error("Explicit completion replies require a stable requestId; reuse it when retrying.");
+      }
       const resolvedCurrentDirectory = resolveToolCurrentDirectory(
         currentDirectory,
         options.defaultCurrentDirectory,
@@ -3964,6 +4014,8 @@ export function createScoutMcpServer(options: {
       }
 
       const result = await deps.replyMessage({
+        ...(requestId ? { requestId } : {}),
+        ...(completion ? { completion } : {}),
         senderId: resolvedSenderId,
         body,
         conversationId: resolvedConversationId,
@@ -3973,6 +4025,9 @@ export function createScoutMcpServer(options: {
         currentDirectory: resolvedCurrentDirectory,
         source: "scout-mcp",
       });
+      if (completion && (!result.usedBroker || !result.messageId || result.routingError)) {
+        throw new Error(`Explicit completion reply was not accepted: ${result.routingError ?? "canonical broker receipt unavailable"}; retry with the same requestId.`);
+      }
       const structuredContent = {
         currentDirectory: resolvedCurrentDirectory,
         senderId: resolvedSenderId,
@@ -4374,6 +4429,8 @@ export function createScoutMcpServer(options: {
       description:
         "Ask another agent to answer, review, try, build, compare, or give feedback — on this machine or on another mesh machine. To start work on another machine, pass `on` (the machine, e.g. archie) with `projectPath` as the folder on that machine, plus harness/runtime; Scout starts a fresh session there and forwards the ask, so never ssh in to launch an agent yourself. Exact runtime requests accept `runtime` as harness/model/effort (for example codex/gpt-5.6-sol/xhigh), or separate harness/model/reasoningEffort fields. A profile is a base preset and explicit dimensions override it when legal. Exact runtime requests create a fresh isolated session; targetSessionId fails closed unless the selected session's observed runtime matches. Ask may create message, invocation, flight, delivery, and work records as side effects; use invocations_get/invocations_wait and the execution-resolution receipt to verify requested, resolved, and observed values.",
       inputSchema: z.object({
+        completion: completionRequestSchema.optional().describe("Require an explicit final reply; exact local id or session targets only, with a stable requestId."),
+        relation: completionRelationSchema.optional().describe("Join child work or continue a parent flight; requires a stable requestId."),
         requestId: z.string().min(1).max(256).optional().describe("Requester-scoped idempotency key; reuse on retries."),
         to: z
           .string()
@@ -4428,10 +4485,10 @@ export function createScoutMcpServer(options: {
         model: z.string().min(1).optional(),
         reasoningEffort: z.enum(SCOUT_REASONING_EFFORTS).optional(),
         placement: z
-          .enum(["background", "foreground"])
+          .enum(["background", "foreground", "attached"])
           .optional()
           .describe(
-            "Where a newly created harness session lives. Background is Scout-managed (default); foreground is openable in the operator's native harness UI. Codex supports foreground.",
+            "Where a newly created harness session lives. Background is Scout-managed (default); foreground is openable in the operator's native harness UI. Codex supports foreground. Attached means a terminal-backed session; an existing session must already match the requested placement.",
           ),
         workspace: z.enum(["same", "new_worktree"]).optional(),
         session: z
@@ -4460,6 +4517,8 @@ export function createScoutMcpServer(options: {
     },
     async ({
       requestId,
+      completion,
+      relation,
       to,
       targetSessionId,
       projectPath,
@@ -4486,6 +4545,9 @@ export function createScoutMcpServer(options: {
       session,
       wait,
     }) => {
+      if ((completion || relation) && !requestId?.trim()) {
+        throw new Error("Explicit completion asks require a stable requestId; reuse it when retrying.");
+      }
       const resolvedCurrentDirectory = resolveToolCurrentDirectory(
         currentDirectory,
         options.defaultCurrentDirectory,
@@ -4568,6 +4630,8 @@ export function createScoutMcpServer(options: {
           }
         : await deps.scoutAskHandler({
             requestId,
+            ...(completion ? { completion } : {}),
+            ...(relation ? { relation } : {}),
             senderId: resolvedSenderId,
             ...(profile
               ? {

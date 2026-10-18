@@ -6,14 +6,6 @@ Status: current v0 integration guidance, not frozen public API.
 
 Verified: 2026-09-02
 
-## Cancel a queued reply
-
-Before drafting a reply that was already queued for app release, cancel its
-flight to avoid a duplicate later: `scout flight cancel <flight-id>` or MCP
-`flight_cancel { flightId }`. The broker refuses once submission has started.
-Only `state: cancelled` confirms cancellation; completed/failed means it already
-finished, and an error means do not assume the queued reply was removed.
-
 ## Mental Model
 
 Scout comms are protocol-shaped but not a standalone wire protocol.
@@ -307,3 +299,32 @@ event for semantic completion.
 | reply context | `packages/protocol/src/scout-reply-context.ts` |
 | broker | `packages/runtime/src/scout-broker.ts` |
 | prompt projection | `packages/runtime/src/local-agents.ts` |
+
+## Replying into a native Codex app thread
+
+Discover the exact harness session id with `sessions_inventory` / `route_context`.
+Historical search coverage is not proof that an app-held thread is absent. If
+no exact match is available, ask for the thread id; never launch a replacement.
+
+To fill its composer without sending, use MCP
+`session_send { sessionId, harness: "codex", mode: "draft", text }` or:
+
+```sh
+scout session send <thread-id> --harness codex --draft "Your reply"
+```
+
+A `delivered: "draft"` result means the native thread link was opened with the
+text, **not** that a user turn was recorded. The operator reviews and sends it.
+Draft needs no Accessibility grant and does not need Scout.app. Default
+`session_send` still submits; successful submission requires transcript
+confirmation, not merely a click. Do not submit into a running turn to reply.
+When no broker reply context exists, obtain an explicit requester session id;
+never infer a return address from quoted or arbitrary transcript text.
+
+### Cancel a queued reply
+
+Before drafting a reply that was already queued for app release, cancel its
+flight to avoid a duplicate later: `scout flight cancel <flight-id>` or MCP
+`flight_cancel { flightId }`. The broker refuses once submission has started.
+Only `state: cancelled` confirms cancellation; completed/failed means it already
+finished, and an error means do not assume the queued reply was removed.

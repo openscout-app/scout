@@ -466,6 +466,28 @@ describe("FileBackedBrokerJournal", () => {
     }));
   });
 
+  test.each([false, true])("flight current selection survives duplicate selection, compaction and reopen (preserveCurrent=%s)", async preserveCurrent => {
+    const { journal, journalPath } = createJournal({ compactionPolicy: { minimumReclaimBytes: 1, minimumReclaimRatio: 0 } });
+    await journal.load();
+    const first = sampleFlight(), second = { ...first, id: "flt-2" };
+    await journal.appendEntries([
+      { kind: "flight.record", flight: first },
+      { kind: "flight.record", flight: second },
+      { kind: "flight.record", flight: first, preserveCurrent },
+    ]);
+    const expected = preserveCurrent ? second.id : first.id;
+    expect(journal.getCurrentFlightForInvocation(first.invocationId)?.id).toBe(expected);
+    // A redundant copy makes compaction run, while the repeated first flight
+    // above is semantically required only when it changes current selection.
+    await fsPromises.appendFile(journalPath, `${JSON.stringify({ kind: "flight.record", flight: first, preserveCurrent: true })}\n`);
+    const compacted = new FileBackedBrokerJournal(journalPath, { compactionPolicy: { minimumReclaimBytes: 1, minimumReclaimRatio: 0 } });
+    expect((await compacted.load()).compactionRequired).toBe(true);
+    expect(compacted.getCurrentFlightForInvocation(first.invocationId)?.id).toBe(expected);
+    const reopened = new FileBackedBrokerJournal(journalPath);
+    await reopened.load();
+    expect(reopened.getCurrentFlightForInvocation(first.invocationId)?.id).toBe(expected);
+  });
+
   test("looks up durable actions by idempotency key after replay", async () => {
     const { journal, journalPath } = createJournal();
 

@@ -291,6 +291,20 @@ metadata; raw media does not belong in the canonical conversation log.
 Transport-specific behavior belongs at adapters and runtime surfaces. The
 protocol keeps the durable record shape stable.
 
+## Opt-in completion contract
+
+`ScoutCompletionRequest`, `ScoutCompletionRelation`, `ScoutCompletionReply`, and
+`ScoutCompletionState` define the optional local `explicit-completion/1`
+contract. Requests opt in through `ScoutDeliverRequest.completion`; child asks
+may carry a `relation`. The broker owns the revision and bounded obligations in
+`FlightRecord.metadata.completion`. Invocation metadata persists the selected
+mode, and message metadata carries the explicit progress/final identity.
+
+The HTTP ask discriminant is `explicit_consult`, and typed replies use
+`/v1/messages/reply`, so an older broker rejects the new operations rather than
+silently applying legacy completion rules. See the [runtime contract](../runtime/README.md#explicit-completion-and-joined-work)
+for route limits, pending obligations, retries, and restart behavior.
+
 ## Package Commands
 
 From the repo root:

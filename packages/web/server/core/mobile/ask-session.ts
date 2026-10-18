@@ -4,10 +4,9 @@
 // (see @openscout/runtime/in-place). Only a session nothing holds is resumed, as an
 // exact-session ask. Replies never split off into a fork or a background copy.
 
-import type { AgentHarness } from "@openscout/protocol";
+import type { ScoutSessionInputReceipt } from "@openscout/protocol";
 
 import type { ScoutAskResult, askScoutQuestion } from "../broker/service.ts";
-import { deliverInPlace, type InPlaceDelivery, type InPlaceVia } from "./deliver-in-place.ts";
 
 export type MobileAskSessionInput = {
   sessionId: string;
@@ -29,7 +28,7 @@ export type MobileAskSessionResult =
       /** "in_place" when the words were typed into the live session. */
       delivery?: "in_place" | "resumed";
       /** How it got in: herdr, orca, tmux, lattices or scout-app. */
-      via?: InPlaceVia;
+      via?: ScoutSessionInputReceipt["via"];
       /** Where, in the operator's words: "Herdr scout · w1:p1". */
       location?: string;
       /** The session the reply actually went to (the fork's id when forked). */
@@ -49,12 +48,14 @@ export type MobileAskSessionDeps = {
   fallbackCurrentDirectory?: string;
   /** Recorded on the ask; defaults to the phone. */
   source?: string;
-  /** Types the reply into the live session; injectable for tests. */
-  deliverInPlace?: (input: { sessionId: string; harness?: string | null; body: string }) => Promise<InPlaceDelivery>;
 };
 
 const REFUSAL_MESSAGES: Record<string, string> = {
   empty_body: "Type a reply before sending.",
+  request_id_required: "Update the app on this device before sending this reply.",
+  session_input_unsupported: "Update Scout on this Mac before sending replies into open sessions.",
+  delivery_unconfirmed: "Scout could not confirm whether this reply was submitted. Keep this reply and retry it here.",
+  request_outcome_unknown: "This reply may have been submitted. Keep this reply while Scout checks the outcome; do not send a new copy.",
   broker_unavailable: "Scout isn't running on this Mac, so nothing was sent.",
   session_unknown: "Scout couldn't find this session on this Mac.",
   session_ambiguous_harness: "More than one kind of session uses this id, so nothing was sent.",
@@ -67,7 +68,7 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   session_wake_failed: "Scout couldn't start this session, so nothing was sent.",
   session_fork_unroutable: "Scout couldn't start a copy of this session, so nothing was sent.",
   session_blocked: "This session is waiting on a prompt in its terminal. Answer that first, then send again.",
-  in_place_failed: "This session is open, but Scout couldn't type into it, so nothing was sent.",
+  in_place_failed: "Scout could not confirm whether input reached this session. Keep this reply; do not send a new copy.",
   scout_app_unavailable: "This session is open in the ChatGPT app. Open the Scout app on this Mac to send into it; nothing was sent.",
   scout_app_accessibility: "This session is open in the ChatGPT app. Turn on Scout › Settings › System › Send replies into open apps; nothing was sent.",
   delivery_failed: "Scout couldn't deliver this reply.",
@@ -87,31 +88,10 @@ export async function askMobileHarnessSession(
   if (!body) return mobileAskSessionRefusal("empty_body");
   if (!sessionId) return mobileAskSessionRefusal("session_unknown");
 
-  // The session's own place first. A live session Scout finds but can't
-  // reach is reported, not worked around with a copy.
-  const inPlace = await (deps.deliverInPlace ?? deliverInPlace)({ sessionId, harness: harness || null, body })
-    .catch((): InPlaceDelivery => ({ ok: false, code: "not_live" }));
-  if (inPlace.ok) {
-    return {
-      ok: true,
-      mode: "resumed",
-      delivery: "in_place",
-      via: inPlace.via,
-      location: inPlace.location,
-      sessionId,
-      sourceSessionId: sessionId,
-    };
-  }
-  if (inPlace.code !== "not_live") {
-    if (inPlace.code === "in_place_failed") {
-      console.warn(`[mobile.askSession] in-place delivery failed via ${inPlace.via} at ${inPlace.location}: ${inPlace.detail}`);
-    }
-    const refusal = mobileAskSessionRefusal(inPlace.code);
-    return inPlace.code === "in_place_failed"
-      ? { ...refusal, message: `${refusal.message} (${inPlace.location})` }
-      : refusal;
-  }
+  if (!input.clientMessageId?.trim()) return mobileAskSessionRefusal("request_id_required");
+  if (harness !== "claude" && harness !== "codex") return mobileAskSessionRefusal("session_not_resumable");
 
+  // The broker reserves one durable command before typing or resuming.
   const cwd = input.cwd?.trim() || undefined;
   let result: ScoutAskResult;
   try {
@@ -120,23 +100,27 @@ export async function askMobileHarnessSession(
       target: {
         kind: "session_id",
         sessionId,
-        ...(harness ? { harness: harness as AgentHarness } : {}),
-        // Nothing live was found above. If the broker still sees a writer,
-        // it refuses rather than forking: a reply never splits the session.
+        harness,
+        // After a definite not-live result, a concurrent Codex writer must
+        // still be refused: a reply never splits the session.
         // Codex keeps the flag because its fork-if-live path only ever
         // refuses (a thread open in another Codex app); without it the
         // broker would resume a second writer on that thread.
         forkIfLive: harness === "codex",
       },
       body,
+      sessionDelivery: "in_place_or_resume",
       clientMessageId: input.clientMessageId ?? null,
       // Sender-context only: the broker wakes the session in the cwd recorded
       // in its own transcript, not this directory.
       currentDirectory: cwd ?? deps.fallbackCurrentDirectory,
       source: deps.source ?? "scout-mobile",
     });
-  } catch {
-    return mobileAskSessionRefusal("delivery_failed");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const code = ["request_id_required", "session_input_unsupported", "request_outcome_unknown"]
+      .find(candidate => detail.includes(candidate));
+    return mobileAskSessionRefusal(code ?? "delivery_unconfirmed");
   }
 
   if (!result.usedBroker) return mobileAskSessionRefusal("broker_unavailable");
@@ -148,6 +132,15 @@ export async function askMobileHarnessSession(
     return mobileAskSessionRefusal(code);
   }
 
+  if (result.inputSubmitted) {
+    const submitted = result.inputSubmitted;
+    if (submitted.kind !== "in_place" || submitted.state !== "submitted" || submitted.sessionId !== sessionId || submitted.harness !== harness) {
+      return mobileAskSessionRefusal("delivery_unconfirmed");
+    }
+    return { ok: true, mode: "resumed", delivery: "in_place", via: submitted.via, location: submitted.location,
+      sessionId, sourceSessionId: sessionId, conversationId: result.conversationId, messageId: result.messageId };
+  }
+  if (!result.flight?.id) return mobileAskSessionRefusal("delivery_unconfirmed");
   const deliveredSessionId = result.targetSessionId?.trim() || sessionId;
   return {
     ok: true,

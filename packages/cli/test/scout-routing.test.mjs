@@ -40,6 +40,9 @@ server.listen(0, "127.0.0.1");
 await once(server, "listening");
 test.after(() => { server.closeAllConnections(); server.close(); });
 const env = isolatedEnvironment({ OPENSCOUT_BROKER_URL: `http://127.0.0.1:${server.address().port}` });
+// `where` is gated on the local search index, which is off by default.
+mkdirSync(env.OPENSCOUT_SUPPORT_DIRECTORY, { recursive: true });
+writeFileSync(join(env.OPENSCOUT_SUPPORT_DIRECTORY, "settings.json"), JSON.stringify({ knowledgeIndexEnabled: true }));
 async function runCommand(command, ...args) {
   const child = spawn("bun", [cli, command, ...args, "--json"], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";

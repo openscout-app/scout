@@ -1,3 +1,4 @@
+import { readNativeAppThreads, type NativeThreadInventory } from "@openscout/runtime/in-place";
 import { parseScoutSessionHostAddress, scoutNodeMatchesSessionHost } from "@openscout/protocol";
 import { RoutingStore, RoutingChunks, resolveRoute, type RouteKind, type RouteResult, type RouteOptions } from "@openscout/runtime/routing";
 import { loadMachineNodeStates, type ScoutMachineNodeStateOptions, type ScoutRecentDeps } from "./recent.ts";
@@ -5,11 +6,13 @@ import { loadMachineNodeStates, type ScoutMachineNodeStateOptions, type ScoutRec
 export type RouteContextInput = { query: string; machine?: string; projectRoot?: string; agentId?: string };
 export type RouteContextDeps = {
   live: (options: ScoutMachineNodeStateOptions) => ReturnType<typeof loadMachineNodeStates>;
+  nativeApp?: () => Promise<NativeThreadInventory>;
   history: (query: string, scope: RouteOptions) => RouteResult[];
 };
 
 export function routeContextDependencies(deps: ScoutRecentDeps = {}): RouteContextDeps {
   return {
+    nativeApp: readNativeAppThreads,
     live: (options) => loadMachineNodeStates(options, deps),
     history: (query, scope) => {
       const store = new RoutingStore(undefined, { readonly: true });
@@ -36,7 +39,7 @@ export async function loadRouteContext(input: RouteContextInput, deps = routeCon
   const query = input.query.trim();
   if (!query || query.length > 4096) throw new Error("Provide a recipient/topic query of 1–4096 characters");
   const { query: _query, ...scope } = input;
-  const [live] = await Promise.allSettled([deps.live(scope)]);
+  const [live, nativeApp] = await Promise.allSettled([deps.live(scope), deps.nativeApp?.() ?? Promise.resolve({ threads: [], available: false, truncated: false })]);
   // Constrain before the index's top-three cap, using this read's node identities.
   const [history] = await Promise.allSettled([Promise.resolve().then(() => deps.history(query, {
     ...(input.machine ? { nodeIds: live!.status === "fulfilled" ? live!.value.machines.map((m) => m.nodeId) : [] } : {}),
@@ -82,6 +85,16 @@ export async function loadRouteContext(input: RouteContextInput, deps = routeCon
   const nodeIds = new Set(machines.map((m) => m.nodeId));
   return {
     query, scope, machines,
+    nativeApp: nativeApp.status === "fulfilled" ? {
+      ...nativeApp.value,
+      // These are local UI addresses, not broker continuation promises. Never widen a remote scope.
+      threads: (!input.machine && !input.agentId ? nativeApp.value.threads : []).filter(thread =>
+        (!input.projectRoot || thread.cwd === input.projectRoot)).map(thread => ({ ...thread,
+        matchedTerms: matched([thread.title, thread.sessionId, thread.cwd, thread.harness]),
+        send: { tool: "session_send", sessionId: thread.sessionId, harness: "codex" },
+        submissionRequires: "idle thread, Accessibility transport and transcript confirmation",
+      })),
+    } : { threads: [], available: false, truncated: false },
     history: history.status === "fulfilled" ? history.value.map((result) => ({ query: result.query, coverage: result.coverage,
       // A failed machine constraint must not widen historical results to other nodes.
       candidates: result.candidates.filter((c) => (!input.machine || nodeIds.has(c.target.nodeId))

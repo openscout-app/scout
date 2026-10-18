@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { z } from "zod";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2622,6 +2623,74 @@ test("retained question history queries both terminal states with broker scope a
     expect(url.pathname).toBe("/v1/collaboration/records");
     expect(Object.fromEntries(url.searchParams)).toMatchObject({ conversationId: "room/a", kind: "question", includeThreads: "true", orderByCreatedAt: "true", afterCreatedAt: "123", afterId: "q+2", limit: "51" });
   }
+});
+
+describe("broker-owned live session replies", () => {
+  function brokerWithCapability(supported = true, replacedByLegacyBeforePost = false) {
+    const home = useIsolatedOpenScoutHome();
+    let capabilities = supported ? ["session-input-receipts/1"] : [];
+    const posts: ScoutDeliverRequest[] = [];
+    let executions = 0;
+    globalThis.fetch = (async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === "/health") return jsonResponse({ ok: true });
+      if (path === "/v1/node") return jsonResponse({ id: "node-1", capabilities });
+      if (path === "/v1/snapshot") return jsonResponse({ actors: { operator: { id: "operator", kind: "person", displayName: "Operator" } }, agents: {}, endpoints: {}, conversations: {}, messages: {}, flights: {} });
+      if (path !== "/v1/deliver") throw new Error(`unexpected mutation: ${path}`);
+      const command = await request.json() as ScoutDeliverRequest;
+      posts.push(command);
+      // The older broker only validates body+intent, passing unknown fields
+      // through. Its enum must reject the command even after a fresh probe.
+      if (replacedByLegacyBeforePost && !z.object({ body: z.string().min(1), intent: z.enum(["tell", "consult"]) }).passthrough().safeParse(command).success) {
+        return jsonResponse({ error: "invalid intent" }, 400);
+      }
+      executions++;
+      return jsonResponse({ kind: "delivery", accepted: true, routeKind: "dm", conversation: { id: "conversation" }, message: { id: "message" },
+        targetSessionId: "native-session", receipt: { inputSubmitted: { kind: "in_place", state: "submitted", sessionId: "native-session", harness: "claude", via: "tmux", location: "%3" } } });
+    }) as typeof fetch;
+    const input: Parameters<typeof askScoutQuestion>[0] = { senderId: "operator", target: { kind: "session_id", sessionId: "native-session", harness: "claude" },
+      body: "preserve these words", currentDirectory: home, clientMessageId: "retained-reply", sessionDelivery: "in_place_or_resume" };
+    return { posts, input, executions: () => executions, downgrade: () => { capabilities = []; } };
+  }
+
+  test("requires broker support before submitting and does not trust stale cached capabilities", async () => {
+    const unsupported = brokerWithCapability(false);
+    await expect(askScoutQuestion(unsupported.input)).rejects.toThrow("session_input_unsupported");
+    expect(unsupported.posts).toHaveLength(0);
+    const broker = brokerWithCapability();
+    await loadScoutBrokerContext();
+    broker.downgrade();
+    await expect(askScoutQuestion(broker.input)).rejects.toThrow("session_input_unsupported");
+    expect(broker.posts).toHaveLength(0);
+  });
+
+  test("passes exact body bytes and stable identity through canonical deliver, exposing submission without a flight", async () => {
+    const broker = brokerWithCapability();
+    const first = await askScoutQuestion(broker.input);
+    Date.now = () => 9_999_999_999_999;
+    const second = await askScoutQuestion(broker.input);
+    expect(broker.posts).toHaveLength(2);
+    expect(broker.posts[0]).toEqual(broker.posts[1]);
+    expect(broker.posts[0]).toMatchObject({ intent: "session_input", sessionDelivery: "in_place_or_resume", body: "preserve these words", requestId: expect.stringContaining("deliver-client-"), execution: { session: "existing" } });
+    expect(broker.posts[0]!.createdAt).toBeUndefined();
+    expect(first).toEqual(second);
+    expect(first.inputSubmitted).toMatchObject({ state: "submitted", sessionId: "native-session" });
+    expect(first.flight).toBeUndefined();
+  });
+
+  test("an older broker replacing the advertised one rejects the wire intent before execution", async () => {
+    const broker = brokerWithCapability(true, true);
+    await expect(askScoutQuestion(broker.input)).rejects.toThrow("invalid intent");
+    expect(broker.posts).toHaveLength(1);
+    expect(broker.executions()).toBe(0);
+  });
+
+  test("missing client identity cannot fall back to a random request", async () => {
+    const broker = brokerWithCapability();
+    await expect(askScoutQuestion({ ...broker.input, clientMessageId: undefined })).rejects.toThrow("request_id_required");
+    expect(broker.posts).toHaveLength(0);
+  });
 });
 
 describe("web delivery request receipts", () => {

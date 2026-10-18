@@ -21,6 +21,8 @@ import {
   type ScoutOwnedRuntimeCatalog,
 } from "@openscout/protocol";
 
+import { recoverSessionInputDelivery } from "./broker-session-input-delivery.js";
+import type { SessionInputDeliveryOptions } from "./broker-session-input-delivery.js";
 import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
 import type { InvocationResolution } from "./broker-delivery-routing.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
@@ -128,6 +130,9 @@ function createHarness(input: {
   commandAdmission?: BrokerCommandAdmission;
   readAcceptedInvocation?: (id: string) => Promise<InvocationRequest | undefined>;
   duringCommit?: () => void;
+  submitSessionInput?: SessionInputDeliveryOptions["submitSessionInput"];
+  readAcceptedMessage?: (id: string) => Promise<MessageRecord | undefined>;
+  onPostedMessage?: (message: MessageRecord) => Promise<void>;
 } = {}) {
   const agent = testAgent();
   const endpoint = testEndpoint();
@@ -172,6 +177,9 @@ function createHarness(input: {
 
   const service = new BrokerDeliveryAcceptanceService({
     requestReceipts: input.requestReceipts,
+    submitSessionInput: input.submitSessionInput,
+    upsertSessionInputActor: async actor => { snapshot.actors[actor.id] = actor; },
+    readAcceptedMessage: input.readAcceptedMessage,
     commandAdmission: input.commandAdmission,
     readAcceptedInvocation: input.readAcceptedInvocation,
     nodeId: "node-1",
@@ -255,6 +263,7 @@ function createHarness(input: {
     deliveryWorkItemResolutionForTell: () => ({ record: null }),
     async postConversationMessage(message) {
       postedMessages.push(message);
+      await input.onPostedMessage?.(message);
       return { ok: true };
     },
     async acceptInvocation(invocation, message) {
@@ -296,6 +305,156 @@ function createHarness(input: {
     service,
   };
 }
+
+describe("broker session input receipts", () => {
+  const payload: ScoutDeliverRequest = { requestId: "mobile-reply-1", requesterId: "operator", requesterNodeId: "node-1",
+    intent: "consult", body: "continue with this", sessionDelivery: "in_place_or_resume",
+    target: { kind: "session_id", sessionId: "native-1", harness: "claude" }, execution: { session: "existing" } };
+
+  test("reserves before input, coalesces concurrent retries and replays after restart without a flight", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-input-"));
+    try {
+      const ledger = new BrokerRequestReceipts(directory);
+      let submits = 0;
+      const harness = createHarness({ requestReceipts: ledger, submitSessionInput: async input => {
+        submits++;
+        expect((await ledger.get("operator", payload.requestId!, "deliver"))?.state).toBe("unknown");
+        expect(input).toEqual({ sessionId: "native-1", harness: "claude", body: payload.body });
+        return { ok: true, via: "tmux", location: "%3" };
+      } });
+      const responses = await Promise.all([harness.service.accept(payload), harness.service.accept(payload)]);
+      expect(submits).toBe(1);
+      expect(responses[0]).toEqual(responses[1]);
+      expect(responses[0]).toMatchObject({ kind: "delivery", targetAgentId: "flat-claude-native-1", receipt: {
+        inputSubmitted: { kind: "in_place", state: "submitted", sessionId: "native-1", harness: "claude", via: "tmux", location: "%3" },
+      } });
+      expect("flight" in responses[0]!).toBe(false);
+      expect(harness.acceptedInvocations).toHaveLength(0);
+      expect(harness.dispatchedInvocations).toHaveLength(0);
+      expect(harness.postedMessages).toHaveLength(1);
+      expect(harness.postedMessages[0]?.audience).toEqual({ delivery: "none" });
+      const restarted = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), now: 99_000,
+        submitSessionInput: async () => { throw new Error("must not resubmit"); } });
+      expect(await restarted.service.accept(payload)).toEqual(responses[0]);
+      for (const changed of [{ ...payload, body: "different" }, { ...payload, target: { kind: "session_id" as const, sessionId: "native-2", harness: "claude" as const } }]) {
+        await expect(restarted.service.accept(changed)).rejects.toThrow("different content");
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("only explicit not_live continues normal exact-session acceptance within the same receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-resume-"));
+    try {
+      let submits = 0;
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), submitSessionInput: async () => {
+        submits++; return { ok: false, code: "not_live" };
+      } });
+      const response = await harness.service.accept(payload);
+      expect(response.kind).toBe("delivery");
+      expect(harness.acceptedInvocations).toHaveLength(1);
+      expect(await harness.service.accept(payload)).toEqual(response);
+      expect(submits).toBe(1);
+      expect(harness.acceptedInvocations).toHaveLength(1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("a definite live refusal is replayable and never resumes or submits a second time", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-refusal-"));
+    try {
+      let submits = 0;
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), submitSessionInput: async () => {
+        submits++; return { ok: false, code: "session_blocked", via: "herdr", location: "pane1" };
+      } });
+      const result = await harness.service.accept(payload);
+      expect(result).toMatchObject({ kind: "rejected", rejection: { sessionWakeReason: "session_blocked" } });
+      expect(await harness.service.accept(payload)).toEqual(result);
+      expect(submits).toBe(1);
+      expect(harness.acceptedInvocations).toHaveLength(0);
+      expect(harness.postedMessages).toHaveLength(0);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("ambiguous input, unexpected throws, and failure before canonical commit remain unknown across restart", async () => {
+    for (const failure of ["uncertain", "throw", "commit"] as const) {
+      const directory = await mkdtemp(join(tmpdir(), "scout-session-unknown-"));
+      try {
+        let submits = 0;
+        const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), submitSessionInput: async () => {
+          submits++;
+          if (failure === "throw") throw new Error("socket closed after input");
+          if (failure === "uncertain") return { ok: false, code: "in_place_failed", via: "scout-app", location: "Codex", detail: "confirmation timed out" };
+          return { ok: true, via: "tmux", location: "%3" };
+        }, onPostedMessage: async () => { throw new Error("commit interrupted"); } });
+        await expect(harness.service.accept(payload)).rejects.toThrow();
+        expect(harness.acceptedInvocations).toHaveLength(0);
+        const restarted = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), submitSessionInput: async () => {
+          submits++; return { ok: false, code: "not_live" };
+        } });
+        await expect(restarted.service.accept(payload)).rejects.toThrow("request_outcome_unknown");
+        expect(submits).toBe(1);
+        expect(restarted.acceptedInvocations).toHaveLength(0);
+        expect((await new BrokerRequestReceipts(directory).get("operator", payload.requestId!, "deliver"))?.state).toBe("unknown");
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    }
+  });
+
+  test("canonical submission witness recovers an unknown ledger and rejects mismatched provenance", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-witness-"));
+    try {
+      let committed: MessageRecord | undefined;
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), submitSessionInput: async () => ({ ok: true, via: "herdr", location: "pane1" }),
+        onPostedMessage: async message => { committed = message; throw new Error("lost commit acknowledgement"); } });
+      await expect(harness.service.accept(payload)).rejects.toThrow("lost commit acknowledgement");
+      const restarted = createHarness({ requestReceipts: new BrokerRequestReceipts(directory), readAcceptedMessage: async () => committed,
+        submitSessionInput: async () => { throw new Error("must not resubmit"); } });
+      const response = await restarted.service.accept(payload);
+      expect(response).toMatchObject({ receipt: { inputSubmitted: { state: "submitted" } } });
+      expect("flight" in response).toBe(false);
+      expect(recoverSessionInputDelivery(committed, "different-requester", payload.requestId!)).toBeNull();
+      expect(recoverSessionInputDelivery(committed, "operator", "different-request")).toBeNull();
+      expect(recoverSessionInputDelivery({ ...committed!, originNodeId: "wrong-node" }, "operator", payload.requestId!)).toBeNull();
+      expect(recoverSessionInputDelivery({ ...committed!, conversationId: "wrong-conversation" }, "operator", payload.requestId!)).toBeNull();
+      const wrongSession = structuredClone(committed!);
+      (wrongSession.metadata!.scoutSessionInputAcceptance as any).response.receipt.inputSubmitted.sessionId = "wrong-session";
+      expect(recoverSessionInputDelivery(wrongSession, "operator", payload.requestId!)).toBeNull();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("rejects missing keys and unsupported semantics before input or ledger reservation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-validation-"));
+    try {
+      let submits = 0;
+      const ledger = new BrokerRequestReceipts(directory);
+      const harness = createHarness({ requestReceipts: ledger, submitSessionInput: async () => { submits++; return { ok: false, code: "not_live" }; } });
+      for (const change of [{ requestId: undefined }, { body: " " }, { intent: "tell" }, { attachments: [{ id: "a", mediaType: "text/plain", url: "file:///a" }] },
+        { workItem: { title: "work" } }, { execution: { session: "fork" } }, { execution: { model: "x" } },
+        { target: { kind: "session_id", sessionId: "native-1" } }, { target: { kind: "session_id", sessionId: "native-1", harness: "claude", host: "remote" } }]) {
+        await expect(harness.service.accept({ ...payload, ...change } as ScoutDeliverRequest)).rejects.toThrow();
+      }
+      expect(submits).toBe(0);
+      expect(await ledger.get("operator", payload.requestId!, "deliver")).toBeNull();
+      await expect(createHarness({ submitSessionInput: async () => ({ ok: false, code: "not_live" }) }).service.accept(payload)).rejects.toThrow("session_input_unsupported");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("reuses the unique local native session actor and refuses ambiguous identities before input", async () => {
+    for (const ambiguous of [false, true]) {
+      const directory = await mkdtemp(join(tmpdir(), "scout-session-actor-"));
+      try {
+        let submits = 0;
+        const snapshot = testSnapshot({ endpoints: {
+          one: testEndpoint({ sessionId: "broker-session", metadata: { nativeSessionId: "native-1" }, harness: "claude" }),
+          remote: testEndpoint({ agentId: "remote", nodeId: "node-2", sessionId: "native-1", harness: "claude" }),
+          ...(ambiguous ? { two: testEndpoint({ agentId: "other", sessionId: "native-1", harness: "claude" }) } : {}),
+        } });
+        const harness = createHarness({ snapshot, requestReceipts: new BrokerRequestReceipts(directory), submitSessionInput: async () => { submits++; return { ok: true, via: "tmux", location: "%3" }; } });
+        const response = await harness.service.accept(payload);
+        expect(submits).toBe(ambiguous ? 0 : 1);
+        expect(response).toMatchObject(ambiguous ? { kind: "rejected", rejection: { sessionWakeReason: "session_ambiguous" } } : { targetAgentId: "agent-1" });
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    }
+  });
+});
 
 describe("BrokerDeliveryAcceptanceService", () => {
   test("unknown sidecar recovers a reused message through historical invocation after restart", async () => {
@@ -1350,4 +1509,31 @@ test("operator permission is durably recorded before its push is queued", async 
   expect(harness.operatorNeeds).toHaveLength(1);
   expect(harness.operatorNeeds[0]?.metadata?.operatorSignal).toMatchObject({ requestKind: "permission" });
   expect(harness.operatorSignals).toHaveLength(1);
+});
+
+describe("explicit completion local rollout", () => {
+  const payload: ScoutDeliverRequest = { requestId: "explicit-1", requesterId: "operator", requesterNodeId: "node-1", intent: "consult", body: "inspect",
+    target: { kind: "agent_id", agentId: "agent-1" }, completion: { mode: "explicit" } };
+  test("passes typed local ask and accepted flight identity to execution", async () => {
+    const h = createHarness(); await h.service.accept(payload);
+    expect(h.acceptedInvocations[0]).toMatchObject({ targetNodeId: "node-1", metadata: { completion: { mode: "explicit" }, completionLocalNodeId: "node-1", completionEndpointId: "endpoint-1" } });
+    expect(h.dispatchedInvocations[0]?.metadata?.completionFlightId).toBe("flight-1");
+  });
+  test.each([
+    { target: { kind: "project_path", projectPath: "/tmp/project" } },
+    { target: { kind: "route_alias", alias: "other", scope: { nodeId: "remote" } } },
+    { target: { kind: "session_id", sessionId: "session-1", host: "remote" } },
+    { requestId: undefined }, { requesterNodeId: "remote" }, { execution: { session: "fork" } },
+    { execution: { harness: "codex" } }, { execution: { model: "model" } }, { execution: { reasoningEffort: "high" } },
+    { execution: { placement: "foreground" } }, { projectAgent: { persistence: "one_time" } },
+  ])("unsupported route rejects before launching or accepting: %j", async override => {
+    const h = createHarness(); await expect(h.service.accept({ ...payload, ...override } as ScoutDeliverRequest)).rejects.toThrow("completion_route_unsupported");
+    expect(h.cardlessProjectSessionCalls).toEqual([]); expect(h.acceptedInvocations).toEqual([]); expect(h.dispatchedInvocations).toEqual([]);
+  });
+  test("remote or external endpoint fails before command acceptance", async () => {
+    for (const endpoint of [testEndpoint({ nodeId: "remote" }), testEndpoint({ transport: "http", metadata: { externalSession: true } })]) {
+      const h = createHarness({ snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint } }) });
+      await expect(h.service.accept(payload)).rejects.toThrow("completion_route_unsupported"); expect(h.acceptedInvocations).toEqual([]);
+    }
+  });
 });

@@ -3811,3 +3811,99 @@ describe("messages_send interaction", () => {
     expect(calls.sendMessageToAgentIds).toHaveLength(0);
   });
 });
+
+
+describe("explicit completion MCP contract", () => {
+  const identity = { invocationId: "inv-1", flightId: "flt-1", revision: 0 };
+  const context = { mode: "broker_reply", fromAgentId: "parent", toAgentId: "worker",
+    conversationId: "dm.test", messageId: "msg-1", replyToMessageId: "msg-1", replyPath: "mcp_reply", completion: identity };
+
+  test("refreshes the revision on every context read and fails closed when unavailable", async () => {
+    let revision = 4;
+    let available = true;
+    const { client } = await connectTestServer({
+      resolveBrokerUrl: () => "http://broker.test",
+      getFlight: async (baseUrl, flightId) => {
+        expect(baseUrl).toBe("http://broker.test");
+        expect(flightId).toBe("flt-1");
+        return available ? { id: flightId, invocationId: "inv-1", requesterId: "parent", targetAgentId: "worker",
+          state: "running", metadata: { completion: { version: 1, revision, obligations: [] } } } : null;
+      },
+    }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
+    expect((await client.callTool({ name: "current_reply_context", arguments: {} })).structuredContent)
+      .toMatchObject({ active: true, context: { completion: { ...identity, revision: 4 } } });
+    revision = 7;
+    expect((await client.callTool({ name: "current_reply_context", arguments: {} })).structuredContent)
+      .toMatchObject({ context: { completion: { ...identity, revision: 7 } } });
+    available = false;
+    const missing = await client.callTool({ name: "current_reply_context", arguments: {} });
+    expect(missing.isError).toBe(true);
+    expect(missing.structuredContent).toBeUndefined();
+  });
+
+  test("does not reuse completion context for another invocation or worker", async () => {
+    const { client } = await connectTestServer({
+      resolveBrokerUrl: () => "http://broker.test",
+      getFlight: async () => ({ id: "flt-1", invocationId: "inv-other", requesterId: "parent", targetAgentId: "worker",
+        state: "running", metadata: { completion: { version: 1, revision: 3, obligations: [] } } }),
+    }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
+    expect((await client.callTool({ name: "current_reply_context", arguments: {} })).isError).toBe(true);
+  });
+
+  test("preserves typed replies and requires retry identity before calling the broker", async () => {
+    const replies: unknown[] = [];
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "worker",
+      replyMessage: async (input) => {
+        replies.push(input);
+        return { usedBroker: true, conversationId: input.conversationId, messageId: "reply-1", notifiedActorIds: ["parent"] };
+      },
+    }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
+    const completion = { ...identity, revision: 3, kind: "progress" };
+    const missing = await client.callTool({ name: "messages_reply", arguments: { body: "Still working", completion } });
+    expect(missing.isError).toBe(true);
+    expect(replies).toEqual([]);
+    const result = await client.callTool({ name: "messages_reply", arguments: { body: "Still working", requestId: "progress-1", completion } });
+    expect(result.isError).not.toBe(true);
+    expect(replies).toEqual([expect.objectContaining({ requestId: "progress-1", completion, senderId: "worker",
+      conversationId: "dm.test", replyToMessageId: "msg-1" })]);
+  });
+
+  test("typed replies never claim sent without a canonical broker receipt", async () => {
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "worker",
+      replyMessage: async () => ({ usedBroker: false, notifiedActorIds: [] }),
+    }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
+    const result = await client.callTool({ name: "messages_reply", arguments: {
+      body: "Finished", requestId: "final-offline", completion: { ...identity, kind: "final" },
+    } });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).not.toContain("Reply sent");
+    expect(result.structuredContent).toBeUndefined();
+  });
+
+  test("passes explicit ask and parent receipt metadata without stripping fields", async () => {
+    const asks: ScoutAskCommand[] = [];
+    const completion = { mode: "explicit" };
+    const relation = { kind: "joined", parentFlightId: "parent-flight" };
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "worker",
+      scoutAskHandler: async (command) => {
+        asks.push(command);
+        return { ok: true, state: "queued", ids: { flightId: "flt-child", invocationId: "inv-child" },
+          completion: { version: 1, revision: 0, obligations: [], invocationId: "inv-child", flightId: "flt-child" }, parentCompletion: { flightId: "parent-flight", revision: 5 } };
+      },
+    });
+    const missing = await client.callTool({ name: "ask", arguments: { to: "id:child", body: "Review", relation, replyMode: "none" } });
+    expect(missing.isError).toBe(true);
+    expect(asks).toEqual([]);
+    expect((await client.callTool({ name: "ask", arguments: { to: "id:child", body: "Review", completion, replyMode: "none" } })).isError).toBe(true);
+    expect(asks).toEqual([]);
+    const result = await client.callTool({ name: "ask", arguments: { targetSessionId: "child-session", body: "Review",
+      completion, relation, requestId: "child-1", replyMode: "none" } });
+    expect(result.isError).not.toBe(true);
+    expect(asks).toEqual([expect.objectContaining({ to: "session:child-session", requestId: "child-1", completion, relation })]);
+    expect(result.structuredContent).toMatchObject({ completion: { version: 1, revision: 0, obligations: [] },
+      parentCompletion: { flightId: "parent-flight", revision: 5 } });
+  });
+});

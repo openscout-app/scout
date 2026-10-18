@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import {
   epochMs,
+  type ScoutCompletionRequest,
+  type ScoutCompletionRelation,
   normalizeAgentSelectorSegment,
   normalizeReservedRuntimeProfileId,
   normalizeRuntimeProfileReasoningEffort,
@@ -53,6 +55,8 @@ export type ScoutSetupCommandOptions = {
 export type ScoutAskCommandOptions = ContextRootOptions & {
   agentName: string | null;
   requestId?: string;
+  completion?: ScoutCompletionRequest;
+  relation?: ScoutCompletionRelation;
   targetLabel?: string;
   existingTargetHandle?: string;
   runtimeProfile?: string;
@@ -874,6 +878,8 @@ export function parseAskCommandOptions(
   const parsed = parseContextRootPrefix(args, defaultCurrentDirectory);
   let agentName: string | null = null;
   let requestId: string | undefined;
+  let completion: ScoutCompletionRequest | undefined;
+  let relation: ScoutCompletionRelation | undefined;
   let targetLabel: string | null = null;
   let existingTargetHandle: string | undefined;
   let runtimeProfile: string | undefined;
@@ -904,6 +910,23 @@ export function parseAskCommandOptions(
 
   for (let index = 0; index < parsed.args.length; index += 1) {
     const current = parsed.args[index] ?? "";
+    if (current === "--completion" || current.startsWith("--completion=")) {
+      const value = parseFlagValue(parsed.args, index, "--completion");
+      if (value.value !== "explicit") throw new ScoutCliError("--completion must be explicit");
+      completion = { mode: "explicit" };
+      index = value.nextIndex;
+      continue;
+    }
+    if (current === "--join-to" || current.startsWith("--join-to=")
+      || current === "--continue-for" || current.startsWith("--continue-for=")) {
+      const flag = current.startsWith("--join-to") ? "--join-to" : "--continue-for";
+      const value = parseFlagValue(parsed.args, index, flag);
+      if (relation) throw new ScoutCliError("--join-to and --continue-for are mutually exclusive and may appear only once");
+      if (!value.value.trim()) throw new ScoutCliError(`${flag} requires a parent flight id`);
+      relation = { kind: flag === "--join-to" ? "joined" : "continuation", parentFlightId: value.value.trim() };
+      index = value.nextIndex;
+      continue;
+    }
     if (current === "--request-id" || current.startsWith("--request-id=")) {
       const value = parseFlagValue(parsed.args, index, "--request-id");
       requestId = value.value.trim();
@@ -1173,6 +1196,8 @@ export function parseAskCommandOptions(
     agentName,
     ...(targetLabel ? { targetLabel } : {}),
     ...(requestId ? { requestId } : {}),
+    ...(completion ? { completion } : {}),
+    ...(relation ? { relation } : {}),
     ...(existingTargetHandle ? { existingTargetHandle } : {}),
     ...(runtimeProfile ? { runtimeProfile } : {}),
     ...(runtimeLiteral ? { runtimeLiteral } : {}),

@@ -59,7 +59,7 @@ Usage:
   scout session fork <session-id> [prompt]   Fork a recorded session into a new one
   scout session fork --last [prompt]         Fork the most recent recorded session
   scout session touched <session-id>         Show files observed in a session
-  scout session send <session-id> <text>      Type into a live session where it runs
+  scout session send <session-id> <text>      Type into a live session (--harness codex --draft fills without sending)
   scout session transfer [<pid>] [--name <tmux>] [--alias @x] [--dry-run] [--no-reattach]
                                             Move a live Claude/Grok TUI into tmux, same session
   scout session pin [--session <codex-thread-id>] [--title <name>]
@@ -1148,6 +1148,7 @@ async function runSessionForkAction(context: ScoutCommandContext, args: string[]
   let last = false;
   let all = false;
   let promptFile: string | undefined;
+  let draft = false;
   const positionals: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -1446,28 +1447,33 @@ function renderSessionTransfer(payload: SessionTransferPayload): string {
 
 const IN_PLACE_REFUSALS: Record<string, string> = {
   not_live: "isn't open in Herdr, Orca, tmux, or a terminal tab on this machine; nothing was sent",
+  draft_unsupported: "does not support draft mode",
   session_blocked: "is waiting on a prompt in its terminal; answer that first, then send again",
   in_place_failed: "is open, but Scout couldn't type into it",
-  scout_app_unavailable: "is open in the ChatGPT app; open the Scout app on this Mac to send into it",
-  scout_app_accessibility: "is open in the ChatGPT app; turn on Scout › Settings › System › Send replies into open apps",
+  scout_app_unavailable: "is open in the ChatGPT app; open the Scout app on this Mac to send, or use session send --harness codex --draft to fill without sending",
+  scout_app_accessibility: "is open in the ChatGPT app; turn on Scout › Settings › System › Send replies into open apps, or use --harness codex --draft",
 };
 
 export function renderInPlaceDelivery(sessionId: string, result: InPlaceDelivery): string {
+  if (result.ok && result.delivered === "draft") return `draft filled for ${sessionId} in ${result.location}; not sent`;
   if (result.ok) return `sent to ${sessionId} in ${result.location}`;
   const reason = IN_PLACE_REFUSALS[result.code] ?? "couldn't be reached";
   const where = "location" in result ? ` (${result.location})` : "";
-  const detail = result.code === "in_place_failed" ? `: ${result.detail}` : "";
+  const detail = "detail" in result ? `: ${result.detail}` : "";
   return `session ${sessionId} ${reason}${where}${detail}`;
 }
 
 async function runSessionSendAction(context: ScoutCommandContext, args: string[]): Promise<void> {
   let harness: string | undefined;
   let promptFile: string | undefined;
+  let draft = false;
   const positionals: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
-    if (arg === "--harness" || arg === "--prompt-file") {
+    if (arg === "--draft") {
+      draft = true;
+    } else if (arg === "--harness" || arg === "--prompt-file") {
       const value = args[index + 1];
       index += 1;
       if (!value) throw new ScoutCliError(`${arg} needs a value`);
@@ -1492,7 +1498,7 @@ async function runSessionSendAction(context: ScoutCommandContext, args: string[]
   const own = process.env.CLAUDE_CODE_SESSION_ID?.trim() || process.env.CODEX_THREAD_ID?.trim();
   if (sessionId === own) throw new ScoutCliError("that is the session you are running in; nothing was sent");
 
-  const result = await deliverInPlace({ sessionId, harness: harness ?? null, body });
+  const result = await deliverInPlace({ sessionId, harness: harness ?? null, body, ...(draft ? { mode: "draft" as const } : {}) });
   context.output.writeValue({ sessionId, ...result }, () => renderInPlaceDelivery(sessionId, result));
   if (!result.ok) process.exitCode = 1;
 }

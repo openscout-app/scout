@@ -438,7 +438,7 @@ function applyJournalEntryToStore(
     case "invocation.dispatch_job.record":
       return [];
     case "flight.record":
-      return store.recordFlight(entry.flight);
+      return store.recordFlight(entry.flight, { preserveCurrent: entry.preserveCurrent });
     case "collaboration.record":
       return store.recordCollaborationRecord(entry.record);
     case "collaboration.event.record":

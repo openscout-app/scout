@@ -1515,3 +1515,22 @@ test("unconfirmed permission actuation is not a refused decision", async () => {
   expect(result.response.status).toBe(502);
   expect(result.body).toEqual({ error: "Acknowledgement timed out", outcome: "unconfirmed" });
 });
+
+test("explicit asks cannot forward an alias payload after wire normalization", async () => {
+  let forwarded = 0;
+  const h = createHarness({ forwardRouteAliasRequest: async () => { forwarded++; return { status: 202, body: {} }; } });
+  const result = await requestRouter(h, "POST", "/v1/deliver", { body: { requestId: "stable", intent: "explicit_consult", body: "inspect", completion: { mode: "explicit" },
+    target: { kind: "route_alias", alias: "worker", scope: { nodeId: "remote" } } } });
+  expect(result.response.status).toBe(400); expect(forwarded).toBe(0); expect(h.deliverCalls).toEqual([]);
+});
+
+test("explicit reply endpoint requires typed identity and stable requestId before posting", async () => {
+  const h = createHarness(); const posted: any[] = [];
+  h.deps.brokerService.postConversationMessage = async (message: any) => { posted.push(message); return { ok: true, message, deliveries: [] }; };
+  const body = { id: "ignored", requestId: "stable", actorId: "worker", metadata: { completionReply: { kind: "progress", invocationId: "i", flightId: "f", revision: 0 } } };
+  expect((await requestRouter(h, "POST", "/v1/messages/reply", { body: { ...body, requestId: undefined } })).response.status).toBe(400);
+  expect((await requestRouter(h, "POST", "/v1/messages/reply", { body: { ...body, metadata: {} } })).response.status).toBe(400);
+  expect(posted).toEqual([]);
+  expect((await requestRouter(h, "POST", "/v1/messages/reply", { body })).response.status).toBe(200);
+  expect(posted[0].id).toStartWith("msg.request."); expect(posted[0].metadata.completionReply.kind).toBe("progress");
+});

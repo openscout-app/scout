@@ -101,12 +101,18 @@ function createStore() {
     appended,
     projected,
     store,
+    durableStore,
+    async promote(invocation: InvocationRequest, flight: FlightRecord, output: string | undefined) {
+      const prepared = store.prepareTerminalWorkPromotion(flight, invocation);
+      await runtime.upsertFlight(prepared);
+      await store.promoteInvocationFlightToWork(invocation, prepared, output);
+    },
   };
 }
 
 describe("BrokerWorkItemStore", () => {
   test("records delivery work items and created events in one durable commit", async () => {
-    const { runtime, appended, projected, store } = createStore();
+    const { runtime, appended, projected, store, durableStore, promote } = createStore();
 
     const result = await store.recordDeliveryWorkItemIfNeeded({
       payload: testPayload(),
@@ -135,6 +141,7 @@ describe("BrokerWorkItemStore", () => {
       "collaboration.record",
       "collaboration.event.record",
     ]);
+    await durableStore.flushProjectedEntries();
     expect(projected[0]).toEqual(appended[0]);
     expect(runtime.collaborationRecord("work-1")).toEqual(expect.objectContaining({
       id: "work-1",
@@ -200,7 +207,7 @@ describe("BrokerWorkItemStore", () => {
   });
 
   test("moves requested work to review when its invocation completes", async () => {
-    const { runtime, appended, projected, store } = createStore();
+    const { runtime, appended, projected, store, durableStore, promote } = createStore();
     await store.recordDeliveryWorkItemIfNeeded({
       payload: testPayload(),
       requestId: "deliver-1",
@@ -210,7 +217,7 @@ describe("BrokerWorkItemStore", () => {
       createdAt: 100,
     });
 
-    await store.promoteInvocationFlightToWork(
+    await promote(
       testInvocation(),
       testFlight({ output: "All broker tests stayed green." }),
       "All broker tests stayed green.",
@@ -237,6 +244,7 @@ describe("BrokerWorkItemStore", () => {
     expect(appended[1]?.map((entry) => entry.kind)).toEqual([
       "collaboration.record",
       "collaboration.event.record",
+      "flight.record",
     ]);
     expect(appended[1]?.[1]).toEqual(expect.objectContaining({
       kind: "collaboration.event.record",
@@ -246,11 +254,12 @@ describe("BrokerWorkItemStore", () => {
         summary: "All broker tests stayed green.",
       }),
     }));
+    await durableStore.flushProjectedEntries();
     expect(projected[1]).toEqual(appended[1]);
   });
 
   test("completes self-driven work that does not require acceptance", async () => {
-    const { runtime, store } = createStore();
+    const { runtime, store, promote } = createStore();
     await store.recordDeliveryWorkItemIfNeeded({
       payload: testPayload({
         workItem: {
@@ -266,7 +275,7 @@ describe("BrokerWorkItemStore", () => {
       createdAt: 100,
     });
 
-    await store.promoteInvocationFlightToWork(
+    await promote(
       testInvocation({ requesterId: "agent-1" }),
       testFlight({ requesterId: "agent-1" }),
       "Maintenance complete.",
@@ -280,7 +289,7 @@ describe("BrokerWorkItemStore", () => {
   });
 
   test("moves failed work to an explicit requester-owned waiting state", async () => {
-    const { runtime, store } = createStore();
+    const { runtime, store, promote } = createStore();
     await store.recordDeliveryWorkItemIfNeeded({
       payload: testPayload(),
       requestId: "deliver-1",
@@ -290,7 +299,7 @@ describe("BrokerWorkItemStore", () => {
       createdAt: 100,
     });
 
-    await store.promoteInvocationFlightToWork(
+    await promote(
       testInvocation(),
       testFlight({ state: "failed", output: undefined, error: "Sandbox stopped." }),
       "Sandbox stopped.",
@@ -309,7 +318,7 @@ describe("BrokerWorkItemStore", () => {
   });
 
   test("records cancellation as a terminal work-item transition", async () => {
-    const { runtime, store } = createStore();
+    const { runtime, store, promote } = createStore();
     await store.recordDeliveryWorkItemIfNeeded({
       payload: testPayload(),
       requestId: "deliver-1",
@@ -319,7 +328,7 @@ describe("BrokerWorkItemStore", () => {
       createdAt: 100,
     });
 
-    await store.promoteInvocationFlightToWork(
+    await promote(
       testInvocation(),
       testFlight({ state: "cancelled" }),
       "Cancelled by operator.",

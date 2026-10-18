@@ -54,7 +54,8 @@ export type InPlaceVia = "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
 export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "terminal"];
 
 export type InPlaceDelivery =
-  | { ok: true; via: InPlaceVia; location: string }
+  | { ok: true; via: InPlaceVia; location: string; delivered?: "draft" }
+  | { ok: false; code: "draft_unsupported"; detail: string }
   /** The session is live but can't take words right now (e.g. a permission prompt is up). */
   | { ok: false; code: "session_blocked"; via: InPlaceVia; location: string }
   /** The session is live in a place Scout found but couldn't type into. */
@@ -62,12 +63,14 @@ export type InPlaceDelivery =
   /** Live in an app only the Scout app can reach, and the Scout app can't right now. */
   | { ok: false; code: "scout_app_unavailable" | "scout_app_accessibility"; via: InPlaceVia; location: string }
   /** No live place holds this session. */
-  | { ok: false; code: "not_live" };
+  | { ok: false; code: "not_live" }
+  /** Exact session identity could not be established before any input. */
+  | { ok: false; code: "session_runtime_unobserved" | "session_ambiguous" };
 
-export type HerdrPaneMatch = { session: string; paneId: string; status: string | null };
+export type HerdrPaneMatch = { session: string; paneId: string; status: string | null; harness?: string; sessionKind?: string };
 
 export type DeliverInPlaceDeps = {
-  findHerdrPane?: (sessionId: string) => Promise<HerdrPaneMatch | null>;
+  findHerdrPane?: (sessionId: string, harness?: string | null) => Promise<HerdrPaneMatch | null>;
   promptHerdr?: (match: HerdrPaneMatch, body: string) => Promise<void>;
   findClaudeRecord?: (sessionId: string) => Promise<ClaudeSessionRecord | null>;
   /** Pids of processes holding a Codex thread, other than the ChatGPT app. */
@@ -85,6 +88,8 @@ export type DeliverInPlaceDeps = {
   typeIntoTty?: (tty: string, body: string) => Promise<void>;
   /** Whether the ChatGPT app's Codex holds this thread's writer lock. */
   codexHeldByApp?: (sessionId: string) => Promise<boolean>;
+  /** Opens only the exact thread link; never submits. */
+  draftCodexApp?: (sessionId: string, body: string) => Promise<void>;
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
@@ -129,16 +134,39 @@ type Candidates = {
 };
 
 export async function deliverInPlace(
-  input: { sessionId: string; harness?: string | null; body: string },
+  input: { sessionId: string; harness?: string | null; body: string; requireExactHarness?: boolean; mode?: "submit" | "draft" },
   deps: DeliverInPlaceDeps = {},
 ): Promise<InPlaceDelivery> {
   const { sessionId, body } = input;
   const harness = input.harness?.trim().toLowerCase() || null;
 
+  // Draft is deliberately handled before any terminal or Accessibility actuator.
+  // A missing harness must not accidentally turn a draft into a submitted prompt.
+  if (input.mode === "draft") {
+    if (harness !== "codex") return { ok: false, code: "draft_unsupported", detail: "Draft mode requires --harness codex and an app-held thread; nothing was sent." };
+    const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => false);
+    if (!held) return { ok: false, code: "not_live" };
+    try {
+      await (deps.draftCodexApp ?? draftCodexApp)(sessionId, body);
+      return { ok: true, delivered: "draft", via: "scout-app", location: "the ChatGPT app’s Codex composer (not sent)" };
+    } catch (error) {
+      return { ok: false, code: "in_place_failed", via: "scout-app", location: "the ChatGPT app’s Codex composer", detail: errorText(error) };
+    }
+  }
+
   const candidates: Candidates = { herdr: null, orca: null, tmux: null, terminalPid: null };
 
   // Herdr names the session itself when its integration is installed.
-  candidates.herdr = await (deps.findHerdrPane ?? findHerdrPaneForSession)(sessionId).catch(() => null);
+  if (input.requireExactHarness && !harness) return { ok: false, code: "session_runtime_unobserved" };
+  try {
+    candidates.herdr = await (deps.findHerdrPane ?? findHerdrPaneForSession)(sessionId, input.requireExactHarness ? harness : undefined);
+  } catch (error) {
+    if (input.requireExactHarness) return { ok: false, code: errorText(error).startsWith("session_ambiguous:") ? "session_ambiguous" : "session_runtime_unobserved" };
+  }
+  if (input.requireExactHarness && candidates.herdr
+    && (candidates.herdr.harness !== harness || candidates.herdr.sessionKind !== "id")) {
+    return { ok: false, code: "session_runtime_unobserved" };
+  }
 
   // The process holding the session, and the panes its environment names.
   const pids: number[] = [];
@@ -272,7 +300,8 @@ async function promptOrcaCandidate(
   }
 }
 
-export async function findHerdrPaneForSession(sessionId: string): Promise<HerdrPaneMatch | null> {
+export async function findHerdrPaneForSession(sessionId: string, harness?: string | null): Promise<HerdrPaneMatch | null> {
+  const matches: HerdrPaneMatch[] = [];
   const sessions = await readHerdrSessions({ maxAgeMs: 0 });
   for (const session of sessions) {
     if (!session.running) continue;
@@ -282,13 +311,20 @@ export async function findHerdrPaneForSession(sessionId: string): Promise<HerdrP
       for (const tab of workspace.tabs) {
         for (const pane of tab.panes) {
           if (pane.agentSession?.value === sessionId) {
-            return { session: session.name, paneId: pane.paneId, status: pane.agentStatus ?? null };
+            const match = { session: session.name, paneId: pane.paneId, status: pane.agentStatus ?? null,
+              harness: pane.agentSession.agent, sessionKind: pane.agentSession.kind };
+            if (!harness) return match;
+            matches.push(match);
           }
         }
       }
     }
   }
-  return null;
+  const exact = matches.filter(match => match.harness === harness && match.sessionKind === "id");
+  if (exact.length > 1) throw new Error("session_ambiguous: multiple Herdr panes report this native session and harness");
+  // Return an unmatched observation for strict callers to refuse; absence of
+  // matching identity must not be confused with proof that nothing is live.
+  return exact[0] ?? matches[0] ?? null;
 }
 
 async function locateProcessHost(pid: number): Promise<ProcessHostLocation | null> {
@@ -387,6 +423,12 @@ export async function codexThreadHeldByChatGPTApp(sessionId: string): Promise<bo
   return (await codexThreadLockHolders(sessionId)).some((holder) => holder.command.includes(CHATGPT_APP));
 }
 
+/** The URL handler fills the composer; no Accessibility grant or Return key. */
+async function draftCodexApp(sessionId: string, body: string): Promise<void> {
+  const link = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(body)}`;
+  await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
+}
+
 async function typeIntoCodexApp(
   sessionId: string,
   body: string,
@@ -400,8 +442,7 @@ async function typeIntoCodexApp(
   // 1. The app's own thread link picks the thread by id and fills its
   //    composer. `-u` keeps `open` a plain URL open; a lone argument is
   //    rerouted to scoutd's file-reveal verb, which refuses URLs.
-  const link = `codex://threads/${encodeURIComponent(sessionId)}?prompt=${encodeURIComponent(body)}`;
-  await execSystemFile("open", ["-u", link], { timeoutMs: 5_000, maxStdoutBytes: 4 * 1024 });
+  await draftCodexApp(sessionId, body);
   await new Promise((resolve) => setTimeout(resolve, CODEX_APP_OPEN_SETTLE_MS));
 
   // 2. The Scout app anchors on content (the one composer holding exactly

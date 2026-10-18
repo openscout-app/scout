@@ -561,8 +561,9 @@ ForInvocation` settles that debt for the transports that can be asked directly
 }
 
 function invocationHasExplicitRuntime(invocation: InvocationRequest): boolean {
+  // On an exact session, harness narrows endpoint lookup; it is not a model observation requirement.
   return Boolean(
-    invocation.execution?.harness?.trim()
+    (invocation.execution?.harness?.trim() && !invocationTargetSessionId(invocation))
     || invocation.execution?.model?.trim()
     || invocation.execution?.reasoningEffort?.trim()
     || invocation.execution?.placement,

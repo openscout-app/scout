@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { isIdempotentMessageRetry } from "../../../../../packages/runtime/src/broker-message-idempotency.ts";
+import type { MessageRecord } from "@openscout/protocol";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +32,7 @@ import {
   buildScoutLabelBrief,
   buildScoutLabelFeed,
   deliverScoutAsk,
+  replyToScoutMessage,
   isReusableBrokerRegisteredTargetAgent,
   listScoutAgents,
   loadScoutBrokerContext,
@@ -4315,6 +4318,179 @@ describe("scoutAskHandler preflight diagnostics", () => {
       body: "hi",
       currentDirectory: "/tmp",
     })).rejects.toThrow("connection refused");
+  });
+});
+
+
+describe("explicit completion client fences", () => {
+  const completion = { mode: "explicit" as const };
+  const replyCompletion = { kind: "final" as const, invocationId: "inv-1", flightId: "flt-1", revision: 3 };
+  const command = { senderId: "operator", target: { kind: "agent_id" as const, agentId: "agent-1" },
+    body: "Review this", currentDirectory: "/tmp", completion, requestId: "ask-1" };
+
+  test("rejects unsupported capability before delivering or registering a sender", async () => {
+    useIsolatedOpenScoutHome();
+    const requested: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requested.push(`${request.method} ${new URL(request.url).pathname}`);
+      return jsonResponse({ id: "node-1", capabilities: ["broker"] });
+    }) as typeof fetch;
+    await expect(deliverScoutAsk({ ...command, senderResolution: "legacy" })).rejects.toThrow("explicit-completion/1");
+    expect(requested).toEqual(["GET /v1/node"]);
+  });
+
+  test("fences typed asks on the wire and returns own and parent revisions", async () => {
+    useIsolatedOpenScoutHome();
+    let payload: Record<string, any> | undefined;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/v1/node") {
+        return jsonResponse({ id: "node-1", capabilities: ["explicit-completion/1"] });
+      }
+      expect(new URL(request.url).pathname).toBe("/v1/deliver");
+      payload = await request.json() as Record<string, any>;
+      return jsonResponse({ kind: "delivery", accepted: true,
+        conversation: { id: "dm.test" }, message: { id: "msg-1" },
+        flight: { id: "flt-1", invocationId: "inv-1", targetAgentId: "agent-1", state: "queued",
+          metadata: { completion: { version: 1, revision: 0, obligations: [] },
+            parentCompletion: { flightId: "flt-parent", revision: 2 } } } });
+    }) as typeof fetch;
+    const receipt = await scoutAskHandler({ senderId: "operator", to: "id:agent-1", body: "Review this",
+      requestId: "child-1", completion, relation: { kind: "joined", parentFlightId: "flt-parent" },
+      senderContext: { agentId: "operator" }, currentDirectory: "/tmp" });
+    expect(payload).toMatchObject({ intent: "explicit_consult", requestId: "child-1", completion,
+      relation: { kind: "joined", parentFlightId: "flt-parent" } });
+    expect(receipt).toMatchObject({ ok: true, completion: { version: 1, revision: 0, obligations: [],
+      invocationId: "inv-1", flightId: "flt-1" },
+      parentCompletion: { flightId: "flt-parent", revision: 2 } });
+  });
+
+  test("CLI generates a retry key and sends completion relation flags through the command handler", async () => {
+    const workspaceRoot = useIsolatedOpenScoutHome();
+    let payload: Record<string, any> | undefined;
+    const diagnostics: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/v1/node") {
+        return jsonResponse({ id: "node-1", capabilities: ["explicit-completion/1"] });
+      }
+      expect(new URL(request.url).pathname).toBe("/v1/deliver");
+      payload = await request.json() as Record<string, any>;
+      return jsonResponse({ kind: "delivery", accepted: true, conversation: { id: "dm.test" }, message: { id: "msg-1" },
+        flight: { id: "flt-1", invocationId: "inv-1", targetAgentId: "agent-1", state: "queued",
+          metadata: { completion: { version: 1, revision: 0, obligations: [] } } } });
+    }) as typeof fetch;
+    await runAskCommand(createScoutCommandContext({ cwd: workspaceRoot, env: {}, stdout: () => {},
+      stderr: (message) => { diagnostics.push(message); } }),
+      ["--as", "operator", "--to", "id:agent-1", "--completion", "explicit", "--join-to", "parent-1", "--notify", "Review"]);
+    expect(payload).toMatchObject({ intent: "explicit_consult", completion, relation: { kind: "joined", parentFlightId: "parent-1" } });
+    expect(payload?.requestId).toMatch(/^ask-/);
+    expect(diagnostics.some((line) => line.includes(payload!.requestId))).toBe(true);
+  });
+
+  test("rejects launch and alias routes and missing relation identity before network effects", async () => {
+    useIsolatedOpenScoutHome();
+    let requests = 0;
+    globalThis.fetch = (async () => { requests++; throw new Error("unexpected network"); }) as unknown as typeof fetch;
+    for (const target of [{ to: "alias:review" }, { to: "reviewer" }, { projectPath: "/tmp/project" },
+      { runtimeProfile: "opus" }, { to: "id:agent-1", harness: "codex" as const }]) {
+      const result = await scoutAskHandler({ senderId: "operator", body: "Review", completion, ...target });
+      expect(result.error?.code).toBe("invalid_request");
+    }
+    const missingId = await scoutAskHandler({ senderId: "operator", to: "id:agent-1", body: "Review",
+      relation: { kind: "joined", parentFlightId: "parent" } });
+    expect(missingId.error?.message).toContain("stable requestId");
+    expect(requests).toBe(0);
+  });
+
+  function mockReplyBroker(options: { capability?: boolean; replyStatus?: number; post?: (message: MessageRecord) => Response } = {}) {
+    useIsolatedOpenScoutHome();
+    const snapshot = createRuntimeRegistrySnapshot();
+    snapshot.actors["agent-1"] = { id: "agent-1", kind: "agent", displayName: "Worker" };
+    snapshot.conversations["dm.test"] = { id: "dm.test", kind: "direct", title: "Review", visibility: "private", shareMode: "local",
+      authorityNodeId: "node-1", participantIds: ["operator", "agent-1"] };
+    snapshot.messages["msg-original"] = { id: "msg-original", conversationId: "dm.test", actorId: "operator",
+      originNodeId: "node-1", class: "agent", body: "Review", visibility: "private", policy: "durable", createdAt: 1 };
+    const posts: { path: string; body: Record<string, any> }[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === "/health") return jsonResponse({ ok: true, nodeId: "node-1" });
+      if (path === "/v1/node") return jsonResponse({ id: "node-1", capabilities: options.capability === false ? [] : ["explicit-completion/1"] });
+      if (path === "/v1/snapshot") return jsonResponse(snapshot);
+      if (request.method === "POST") {
+        const body = await request.json() as Record<string, any>;
+        posts.push({ path, body });
+        if (options.post) return options.post(body as MessageRecord);
+        return options.replyStatus ? jsonResponse({ error: "old broker" }, options.replyStatus) : jsonResponse({ ok: true, message: body });
+      }
+      return jsonResponse({ error: "unknown" }, 404);
+    }) as typeof fetch;
+    return posts;
+  }
+  const reply = { senderId: "agent-1", body: "Finished", conversationId: "dm.test", replyToMessageId: "msg-original",
+    completion: replyCompletion, requestId: "final-1", currentDirectory: "/tmp" };
+
+  test("retries typed replies on the dedicated endpoint with stable message and return identities", async () => {
+    const posts = mockReplyBroker();
+    const first = await replyToScoutMessage({ ...reply, createdAtMs: 100 });
+    const retry = await replyToScoutMessage({ ...reply, createdAtMs: 200 });
+    expect(posts.map((post) => post.path)).toEqual(["/v1/messages/reply", "/v1/messages/reply"]);
+    expect(first.messageId).toBe(retry.messageId);
+    expect(posts[0]?.body).toMatchObject({ requestId: "final-1", metadata: { completionReply: replyCompletion } });
+    expect(posts[0]?.body.metadata).toEqual(posts[1]?.body.metadata);
+  });
+
+  test("attachment replies reconcile a lost receipt and still reject changed content with the same retry key", async () => {
+    let stored: MessageRecord | undefined;
+    const posts = mockReplyBroker({ post: (incoming) => {
+      // The HTTP route canonicalizes the client key before the real broker retry predicate.
+      const message = { ...incoming, metadata: { ...incoming.metadata, clientMessageId: incoming.id } };
+      if (!stored) {
+        stored = message;
+        return jsonResponse({ error: "accepted but receipt lost" }, 503);
+      }
+      if (!isIdempotentMessageRetry(stored, message)) return jsonResponse({ error: "conflicting retry" }, 400);
+      return jsonResponse({ ok: true, message: stored, duplicate: true });
+    } });
+    const attachments = [{ mediaType: "text/plain", url: "https://example.test/result.txt" },
+      { id: "caller-supplied", mediaType: "image/png", url: "https://example.test/chart.png" }];
+    await expect(replyToScoutMessage({ ...reply, attachments, createdAtMs: 100 })).rejects.toThrow();
+    const retry = await replyToScoutMessage({ ...reply, attachments, createdAtMs: 200 });
+    expect(retry.messageId).toBe(stored!.id);
+    expect(posts[0]!.body.attachments).toEqual(posts[1]!.body.attachments);
+    expect(stored!.attachments?.[1]?.id).toBe("caller-supplied");
+    await expect(replyToScoutMessage({ ...reply, attachments: [{ ...attachments[0]!, url: "https://example.test/changed.txt" }, attachments[1]!] }))
+      .rejects.toThrow();
+    expect(stored!.attachments?.[0]?.url).toBe("https://example.test/result.txt");
+  });
+
+  test("typed replies fail closed without a broker context and perform no writes", async () => {
+    useIsolatedOpenScoutHome();
+    const methods: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      methods.push(new Request(input, init).method);
+      throw new Error("broker offline");
+    }) as unknown as typeof fetch;
+    await expect(replyToScoutMessage(reply)).rejects.toThrow("broker context is unavailable");
+    expect(methods).not.toContain("POST");
+  });
+
+  test("does not downgrade typed replies when capability is absent or the broker is replaced", async () => {
+    let posts = mockReplyBroker({ capability: false });
+    await expect(replyToScoutMessage(reply)).rejects.toThrow("explicit-completion/1");
+    expect(posts).toEqual([]);
+    posts = mockReplyBroker({ replyStatus: 404 });
+    await expect(replyToScoutMessage(reply)).rejects.toThrow();
+    expect(posts.map((post) => post.path)).toEqual(["/v1/messages/reply"]);
+  });
+
+  test("keeps legacy threaded replies on their existing endpoint", async () => {
+    const posts = mockReplyBroker({ capability: false });
+    await replyToScoutMessage({ ...reply, completion: undefined, requestId: undefined });
+    expect(posts.map((post) => post.path)).toEqual(["/v1/messages"]);
+    expect(posts[0]?.body.metadata.completionReply).toBeUndefined();
   });
 });
 

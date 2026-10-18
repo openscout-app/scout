@@ -87,7 +87,9 @@ test("runtime, publication, projection and acknowledgement wait for file sync", 
     expect(acknowledged).toBe(false); expect(effects).toEqual([]);
     expect([...journal.retiredActorIds()]).toEqual([]);
   } finally { release.resolve(); await committed; open.mockRestore(); }
-  expect(acknowledged).toBe(true); expect(effects).toEqual(["committed", "runtime", "projection"]);
+  expect(acknowledged).toBe(true);
+  await store.flushProjectedEntries();
+  expect(effects).toEqual(["committed", "runtime", "projection"]);
 });
 
 test("failed sync rejects the whole batch and repairs before a later commit", async () => {
