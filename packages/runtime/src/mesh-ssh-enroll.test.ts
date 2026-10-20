@@ -213,6 +213,14 @@ describe("enrollViaSsh mutual exchange", () => {
     expect(calls.filter((call) => call.stdin)).toHaveLength(1);
   });
 
+  test("untyped callers cannot put an unchecked tier into the remote command", async () => {
+    const { exec, calls } = captureExec(() => ({ stdout: "", stderr: "should not execute", exitCode: 1 }));
+    const tier = "observe;echo unsafe" as never;
+    await expect(enrollViaSsh({ target: "ssh://remote", localCard: cardFor(freshIdentity(), "local"), tier, exec }))
+      .rejects.toMatchObject({ reason: "invalid-tier" });
+    expect(calls).toHaveLength(0);
+  });
+
   test("old or unproven remotes are refused before sending a grant", async () => {
     const localCard = cardFor(freshIdentity(), "local"), remoteCard = cardFor(freshIdentity(), "remote");
     for (const help of [

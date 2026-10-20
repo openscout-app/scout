@@ -56,6 +56,7 @@ export class SshEnrollError extends Error {
   constructor(
     readonly reason:
       | "invalid-target"
+      | "invalid-tier"
       | "invalid-card"
       | "self-enrollment"
       | "ssh-failed"
@@ -393,6 +394,9 @@ export async function enrollViaSsh(input: {
 }): Promise<SshEnrollResult> {
   const target = parseSshEnrollTarget(input.target);
   const tier = input.tier ?? SSH_ENROLL_DEFAULT_TIER;
+  if (tier !== "observe" && tier !== "control") {
+    throw new SshEnrollError("invalid-tier", "SSH enrollment tier must be observe or control; no SSH command was sent.");
+  }
   const timeoutMs = input.timeoutMs ?? SSH_ENROLL_DEFAULT_TIMEOUT_MS;
   const exec = input.exec ?? defaultSshExec;
   const now = input.now ?? Date.now();
