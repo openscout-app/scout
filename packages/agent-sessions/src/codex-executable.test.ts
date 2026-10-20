@@ -117,12 +117,17 @@ describe("Codex executable inventory", () => {
     const root = mkdtempSync(join(tmpdir(), "openscout-codex-bounded-slow-"));
     tempPaths.add(root);
     const executable = fakeCodex(root, "999.0.0");
-    writeFileSync(executable, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`);
+    writeFileSync(executable, "#!/bin/sh\nexec /bin/sleep 30\n");
     const validRoot = join(root, "valid");
     mkdirSync(validRoot);
     const valid = fakeCodex(validRoot, "999.1.0");
+    // Keep fixture startup cheap. The probe budget must allow macOS executable
+    // validation while still bounding the whole hung-probe operation below one second.
+    writeFileSync(valid, "#!/bin/sh\nprintf 'codex-cli 999.1.0\\n'\n");
+    const timeoutMs = 500;
     const startedAt = Date.now();
-    expect(await resolveCodexExecutableAsync({ HOME: root, PATH: [root, validRoot].join(delimiter) }, { timeoutMs: 80 })).toBe(valid);
+    expect(await resolveCodexExecutableAsync({ HOME: root, PATH: [root, validRoot].join(delimiter) }, { timeoutMs })).toBe(valid);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(timeoutMs);
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     await expect(resolveCodexExecutableAsync({ HOME: root, PATH: root }, { signal: AbortSignal.abort() })).rejects.toThrow();
   });
