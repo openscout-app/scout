@@ -19,7 +19,7 @@ test("source CLI validates before broker maintenance, including global flags and
       }));`);
     const run = (args: string[]) => spawnSync(process.execPath, ["--preload", preload, resolve(import.meta.dir, "main.ts"), ...args], {
       cwd: dir, encoding: "utf8", timeout: 10_000,
-      env: { ...process.env, HOME: home, OPENSCOUT_CONTROL_HOME: join(home, "control"), OPENSCOUT_SUPPORT_DIR: join(home, "support"), OPENSCOUT_CONTROL_PLANE_DB: join(home, "db.sqlite"), OPENSCOUT_SETUP_CWD: dir },
+      env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", HOME: home, OPENSCOUT_CONTROL_HOME: join(home, "control"), OPENSCOUT_SUPPORT_DIR: join(home, "support"), OPENSCOUT_CONTROL_PLANE_DB: join(home, "db.sqlite"), OPENSCOUT_SETUP_CWD: dir },
     });
     for (const args of [
       ["app", "help"], ["app", "restart", "--help"], ["help", "setup"], ["--help", "up"],
