@@ -1537,3 +1537,19 @@ describe("explicit completion local rollout", () => {
     }
   });
 });
+
+test("pure operator-signal rejection releases its receipt before any delivery effect", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "scout-pre-effect-delivery-"));
+  try {
+    const ledger = new BrokerRequestReceipts(directory);
+    const harness = createHarness({ requestReceipts: ledger });
+    const payload: ScoutDeliverRequest = { requestId: "pure-validation", body: "notice", intent: "consult",
+      targetLabel: "@operator", caller: { actorId: "agent-1", nodeId: "node-1" },
+      operatorSignal: { kind: "notify", blocking: false, replyExpectation: "none" } };
+    for (let i = 0; i < 2; i++) await expect(harness.service.accept(payload)).rejects.toThrow("operator signals must target the operator directly");
+    expect((await ledger.get("agent-1", "pure-validation", "deliver"))?.state).toBe("retryable");
+    expect(harness.localAgentSyncReasons).toEqual([]);
+    expect(harness.postedMessages).toEqual([]);
+    expect(harness.acceptedInvocations).toEqual([]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

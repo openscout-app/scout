@@ -9,7 +9,20 @@ export function canonicalRequest(value: unknown): string {
   if (value && typeof value === "object") return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canonicalRequest(v)}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }
-export type RequestReceipt = { requesterId: string; requestId: string; operation: string; fingerprint: string; state: "unknown" | "done"; result?: unknown };
+/** Only operation owners may raise this, after proving that NO local or remote
+ * effect occurred. Transport errors alone are never proof. */
+export class RetryablePreEffectFailure extends Error {
+  override readonly name = "RetryablePreEffectFailure";
+}
+/** Durable evidence proves the operation failed, rather than an unknown outcome. */
+export class ProvenRequestFailure extends Error {
+  override readonly name = "ProvenRequestFailure";
+  constructor(message: string, readonly code: string, readonly evidence: string) {
+    super(message);
+    if (!code.trim() || !evidence.trim()) throw new TypeError("proven failures require a code and evidence");
+  }
+}
+export type RequestReceipt = { requesterId: string; requestId: string; operation: string; fingerprint: string; state: "unknown" | "done" | "retryable" | "failed"; result?: unknown; failure?: { message: string; code: string; evidence: string } };
 type ReceiptLease = { resize: (bytes: number) => void; release: () => void };
 export type BrokerRequestReceiptOptions = {
   maxOperations?: number;
@@ -72,8 +85,13 @@ export class BrokerRequestReceipts {
         || typeof record.requestId !== "string" || !record.requestId.trim()
         || typeof record.operation !== "string" || !record.operation.trim()
         || typeof record.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(record.fingerprint)
-        || (record.state !== "unknown" && record.state !== "done")
+        || (!["unknown", "done", "retryable", "failed"].includes(record.state as string))
         || this.path(record.requesterId, record.requestId, record.operation) !== path) throw corrupt();
+      if (record.state === "failed") {
+        const failure = record.failure as RequestReceipt["failure"];
+        if (!failure || typeof failure.message !== "string" || typeof failure.code !== "string" || !failure.code.trim()
+          || typeof failure.evidence !== "string" || !failure.evidence.trim()) throw corrupt();
+      }
       // Only an absent file means no reservation. Invalid data or a receipt
       // copied from another key must never authorize fresh execution.
       return record as RequestReceipt;
@@ -149,13 +167,21 @@ export class BrokerRequestReceipts {
     const pending = Promise.resolve().then(async () => {
       const record = await this.read(key, lease);
       if (!record) throw new Error("cannot recover an unreserved request");
-      if (record.state === "done") return record;
+      if (record.state === "done" || record.state === "failed") return record;
+      if (record.state === "retryable") throw new Error("cannot reconcile a released pre-effect reservation");
       const recovered: RequestReceipt = { ...record, state: "done", result };
       await this.save(recovered, lease);
       return recovered;
     }).finally(() => { this.running.delete(key); lease.release(); });
     this.running.set(key, { promise: pending });
     return pending;
+  }
+  private replay<T>(receipt: RequestReceipt): T {
+    if (receipt.state === "failed") {
+      const failure = receipt.failure!;
+      throw new ProvenRequestFailure(failure.message, failure.code, failure.evidence);
+    }
+    return receipt.result as T;
   }
   async run<T>(requesterId: string, requestId: string, operation: string, payload: unknown, execute: () => Promise<T>, reconcile?: () => Promise<T | null>, admit?: () => (() => void)): Promise<T> {
     if (!requesterId || !requestId.trim() || requestId.length > 256) throw new Error("invalid requester/request id");
@@ -175,19 +201,21 @@ export class BrokerRequestReceipts {
       if (active.fingerprint) checkFingerprint(active.fingerprint);
       const receipt = await active.promise;
       checkFingerprint(receipt.fingerprint);
-      return receipt.result as T;
+      return this.replay<T>(receipt);
     }
     const ownedLease = lease!;
     const pending = Promise.resolve().then(async (): Promise<RequestReceipt> => {
       const prior = await this.read(key, ownedLease);
       if (prior) {
         checkFingerprint(prior.fingerprint);
-        if (prior.state === "done") return prior;
-        const recovered = await reconcile?.();
-        if (recovered === undefined || recovered === null) throw new Error("request_outcome_unknown: reconcile this request; do not replace it");
-        const receipt: RequestReceipt = { ...prior, state: "done", result: recovered };
-        await this.save(receipt, ownedLease);
-        return receipt;
+        if (prior.state === "done" || prior.state === "failed") return prior;
+        if (prior.state === "unknown") {
+          const recovered = await reconcile?.();
+          if (recovered === undefined || recovered === null) throw new Error("request_outcome_unknown: reconcile this request; do not replace it");
+          const receipt: RequestReceipt = { ...prior, state: "done", result: recovered };
+          await this.save(receipt, ownedLease);
+          return receipt;
+        }
       }
       const record: RequestReceipt = { requesterId, requestId, operation, fingerprint, state: "unknown" };
       // Actual command admission follows the read so completed receipts remain
@@ -195,13 +223,27 @@ export class BrokerRequestReceipts {
       const release = admit?.();
       try {
         await this.save(record, ownedLease);
-        const result = await execute();
+        let result: T;
+        try { result = await execute(); }
+        catch (error) {
+          if (error instanceof RetryablePreEffectFailure) {
+            // Retain the content binding; the next same-content call must first
+            // durably reserve unknown again, before invoking the operation.
+            await this.save({ ...record, state: "retryable" }, ownedLease);
+          } else if (error instanceof ProvenRequestFailure) {
+            const receipt: RequestReceipt = { ...record, state: "failed",
+              failure: { message: error.message, code: error.code, evidence: error.evidence } };
+            await this.save(receipt, ownedLease);
+            return receipt;
+          }
+          throw error;
+        }
         const receipt: RequestReceipt = { ...record, state: "done", result };
         await this.save(receipt, ownedLease);
         return receipt;
       } finally { release?.(); }
     }).finally(() => { this.running.delete(key); ownedLease.release(); });
     this.running.set(key, { fingerprint, promise: pending });
-    return (await pending).result as T;
+    return this.replay<T>(await pending);
   }
 }

@@ -50,7 +50,7 @@ import {
 } from "./scout-dispatcher.js";
 import { sessionActorAlias } from "./session-alias.js";
 import { endpointMatchesTargetSessionAddress, runtimeSessionAddressForSessionId } from "./runtime-session-address.js";
-import type { BrokerRequestReceipts } from "./broker-request-receipts.js";
+import { RetryablePreEffectFailure, type BrokerRequestReceipts } from "./broker-request-receipts.js";
 
 type EnsureBrokerDeliveryConversationInput = {
   requesterId: string;
@@ -488,19 +488,20 @@ export class BrokerDeliveryAcceptanceService {
     const operatorSignal = payload.operatorSignal
       ? brokerOperatorSignalSchema.parse(payload.operatorSignal)
       : undefined;
+    // These validations precede registration sync, work creation and all delivery effects.
     if (operatorSignal) {
       if (!this.options.isOperatorDeliveryTarget(payload)) {
-        throw new Error("operator signals must target the operator directly");
+        throw new RetryablePreEffectFailure("operator signals must target the operator directly");
       }
       if (payload.intent !== "tell") {
-        throw new Error("operator signals must use tell intent");
+        throw new RetryablePreEffectFailure("operator signals must use tell intent");
       }
       if (
         payload.channel?.trim()
         || payload.target?.kind === "channel"
         || payload.target?.kind === "broadcast"
       ) {
-        throw new Error("operator signals cannot use channels or broadcast routing");
+        throw new RetryablePreEffectFailure("operator signals cannot use channels or broadcast routing");
       }
       if (
         payload.ensureAwake !== undefined
@@ -510,7 +511,7 @@ export class BrokerDeliveryAcceptanceService {
         || payload.projectAgent !== undefined
         || payload.invocationMetadata !== undefined
       ) {
-        throw new Error("operator signals cannot carry work or invocation lifecycle fields");
+        throw new RetryablePreEffectFailure("operator signals cannot carry work or invocation lifecycle fields");
       }
     }
     const isLocalScoutProductTarget = this.options.isLocalScoutProductTarget(payload);

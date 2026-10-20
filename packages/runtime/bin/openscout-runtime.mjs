@@ -63,9 +63,10 @@ if (lifecycleCommands.has(command)) {
 }
 
 
-if (!(command in sourceMain)) {
-  console.error(`Unknown openscout-runtime command: ${command}`);
-  process.exit(1);
+if (!Object.hasOwn(sourceMain, command)) {
+  // EX_CONFIG; consumed by scout-base without parsing human stderr.
+  console.error(JSON.stringify({ code: "unsupported_runtime_command", command, exitCode: 78 }));
+  process.exit(78);
 }
 
 const processName = processNames[command] ?? "scout-runtime";

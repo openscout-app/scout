@@ -224,3 +224,32 @@ test("failed initial parent flush retains every new ancestor for an asynchronous
     expect(ledger.status().pendingOperations).toBe(0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+import { RetryablePreEffectFailure, ProvenRequestFailure } from "./broker-request-receipts.js";
+test("pre-effect failure releases only the reservation, preserving fingerprint across restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scout-pre-effect-"));
+  try {
+    const ledger = new BrokerRequestReceipts(dir);
+    await expect(ledger.run("op", "id", "send", { body: "a" }, async () => {
+      throw new RetryablePreEffectFailure("admission refused before any effect");
+    })).rejects.toBeInstanceOf(RetryablePreEffectFailure);
+    const reopened = new BrokerRequestReceipts(dir);
+    expect((await reopened.get("op", "id", "send"))?.state).toBe("retryable");
+    await expect(reopened.run("op", "id", "send", { body: "b" }, async () => "bad")).rejects.toThrow("different content");
+    let executions = 0;
+    const run = () => reopened.run("op", "id", "send", { body: "a" }, async () => { executions++; return "ok"; });
+    expect(await Promise.all([run(), run()])).toEqual(["ok", "ok"]);
+    expect(executions).toBe(1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test("proven failure is terminal and replays evidence, never invoking reconciliation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scout-proven-failure-"));
+  try {
+    let executions = 0;
+    const run = () => new BrokerRequestReceipts(dir).run("op", "id", "send", {}, async () => {
+      executions++; throw new ProvenRequestFailure("rejected", "denied", "canonical rejection record reject-1");
+    }, async () => { throw Error("must not reconcile"); });
+    for (let i = 0; i < 2; i++) await expect(run()).rejects.toMatchObject({ code: "denied", evidence: "canonical rejection record reject-1" });
+    expect(executions).toBe(1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

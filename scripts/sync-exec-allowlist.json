@@ -978,5 +978,12 @@
     "category": "test",
     "reason": "isolated fixture processes validate shell quoting and bounded log pipes under Bun, Node, and bundled source; never runs on a server request path",
     "owner": "agent-sessions"
+  },
+  {
+    "path": "packages/runtime/src/room-listening-supervisor.test.ts",
+    "symbol": "Bun.spawn",
+    "category": "test",
+    "reason": "runs the runtime entrypoint with an unknown command to assert it exits 78 before importing any daemon",
+    "owner": "runtime"
   }
 ]

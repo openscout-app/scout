@@ -244,7 +244,7 @@ import { findHarnessEntry } from "./harness-catalog.js";
 import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
-import { BrokerRequestReceipts } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, RetryablePreEffectFailure } from "./broker-request-receipts.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
   closeServer,
@@ -2295,34 +2295,38 @@ async function createProjectSessionForDelivery(
       trustedNodeIds: new Set(trustedPeerStore?.listTrustedPeers().flatMap((peer) => peer.nodeId ? [peer.nodeId] : []) ?? []),
       isReachable: isReachableMeshNode,
     });
+    // Host resolution precedes every effect of this request: no actor, conversation,
+    // message, session or peer call exists yet. Only the idempotent local-agent
+    // registry refresh has run, which is not caused by this request. So these
+    // refusals are pre-effect, and the same request ID may be retried once fixed.
     if (resolution.kind === "local") {
       if (!isLocalDirectory(resolve(expandHomePath(input.projectPath)))) {
-        throw new Error(`--on ${host} is this machine, and ${input.projectPath} is not a folder here.`);
+        throw new RetryablePreEffectFailure(`--on ${host} is this machine, and ${input.projectPath} is not a folder here.`);
       }
       return createCardlessProjectSessionForDelivery(localInput);
     }
     if (resolution.kind === "ambiguous") {
-      throw new Error(
+      throw new RetryablePreEffectFailure(
         `--on ${host} matches more than one machine: `
         + resolution.nodes.map((node) => `${scoutSessionHostForNode(node)} (${node.id}${node.id === nodeId ? ", this machine" : ""})`).join(", ")
         + ". Use the node id with --on.",
       );
     }
     if (resolution.kind === "unknown") {
-      throw new Error(
+      throw new RetryablePreEffectFailure(
         `--on ${host}: no mesh machine by that name.`
         + (resolution.knownHosts.length ? ` Known machines: ${resolution.knownHosts.join(", ")}.` : " This broker knows no mesh peers yet.")
         + " See them with `scout machines`.",
       );
     }
     if (resolution.kind === "not_trusted") {
-      throw new Error(
+      throw new RetryablePreEffectFailure(
         `--on ${host}: ${scoutSessionHostForNode(resolution.node)} is in the mesh but not a trusted peer, so Scout will not start work there. `
         + "The operator can enroll it with `scout mesh enroll`.",
       );
     }
     if (resolution.kind === "unreachable") {
-      throw new Error(
+      throw new RetryablePreEffectFailure(
         `--on ${host}: ${scoutSessionHostForNode(resolution.node)} is trusted but not reachable right now`
         + (resolution.node.lastSeenAt ? ` (last seen ${new Date(resolution.node.lastSeenAt).toISOString()})` : "")
         + ". Check it with `scout mesh peers`.",

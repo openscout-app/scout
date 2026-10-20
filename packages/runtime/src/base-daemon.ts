@@ -3,7 +3,7 @@ import { openScoutInstanceBootstrap } from "./instance-bootstrap.js";
 import { createRoomListeningSupervisor } from "./room-listening-supervisor.js";
 import type { RuntimeErrnoError } from "./portable-types.js";
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, writeFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -273,6 +273,14 @@ function spawnBroker(): void {
 
 // A sibling base child: broker restarts do not cycle room accumulation.
 const roomListeningSupervisor = createRoomListeningSupervisor({
+  runtimeRevision: () => [runtimeEntrypoint(config), join(config.runtimePackageDir, "package.json"),
+    join(config.runtimePackageDir, "dist/room-listening-daemon.js"), join(config.runtimePackageDir, "src/room-listening-daemon.ts")]
+    .map(path => { try { const stat = statSync(path); return `${path}:${stat.ino}:${stat.size}:${stat.mtimeMs}`; } catch { return `${path}:missing`; } }).join("|"),
+  statusChanged: status => {
+    // Local supervisor state, not a broker-owned coordination record.
+    try { writeFileSync(join(config.controlHome, "room-listening-status.json"), JSON.stringify({ ...status, updatedAt: Date.now() }) + "\n"); }
+    catch (error) { warn("could not persist room listening status", error); }
+  },
   spawn: () => {
     if (!config.bunExecutable) throw new Error("Bun is required for room listening");
     const stdout = logFile("room-listening.stdout.log"), stderr = logFile("room-listening.stderr.log");
