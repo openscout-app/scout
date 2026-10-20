@@ -75,8 +75,19 @@ class FixtureEndToEnd(unittest.TestCase):
         home = self.dir / "cli-client" / "state"
         _, key = self.run_cli(home, "key")
         entry = ROOT.parents[1] / "apps" / "desktop" / "bin" / "scout.ts"
-        env = {**os.environ, "OPENSCOUT_INSTANCE": "prod", "OPENSCOUT_BROKER_URL": f"http://127.0.0.1:{self.admin}",
-               "OPENSCOUT_HOME": str(self.dir / "owner"), "SCOUT_HOME": str(self.dir / "owner")}
+        owner_home = self.dir / "owner"
+        owner_home.mkdir()
+        # Do not inherit a supervisor's live homes, pointers, or exec bridge.
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("OPENSCOUT_", "SCOUT_"))}
+        env.update({"HOME": str(owner_home), "XDG_CONFIG_HOME": str(owner_home / "config"),
+                    "XDG_CACHE_HOME": str(owner_home / "cache"), "OPENSCOUT_INSTANCE": "prod",
+                    "OPENSCOUT_HOME": str(owner_home), "SCOUT_HOME": str(owner_home),
+                    "OPENSCOUT_CONTROL_HOME": str(owner_home / "control"),
+                    "OPENSCOUT_SUPPORT_DIRECTORY": str(owner_home / "support"),
+                    "OPENSCOUT_BROKER_HOST": "127.0.0.1", "OPENSCOUT_BROKER_PORT": str(self.admin),
+                    "OPENSCOUT_BROKER_URL": f"http://127.0.0.1:{self.admin}",
+                    "BUN_RUNTIME_TRANSPILER_CACHE_PATH": str(owner_home / "cache" / "bun")})
 
         def owner(*args):
             result = subprocess.run(["bun", str(entry), "mesh", "guests", *args, "--json"],
