@@ -161,7 +161,7 @@ function readInstalled(root: string, name: string): ScoutExtension | undefined {
     return refuse(command, `is built for extension API ${String(manifest.api ?? "(none)")}; this scout supports API ${[...SUPPORTED_EXTENSION_APIS].join(", ")}. Update scout or the extension.`, summary);
   }
   const problem = untrustedChain(realRoot, realDir, realCommand);
-  if (problem) return refuse(command, `cannot be trusted: ${problem}. Fix its permissions (chmod o-w) before Scout will run it.`, summary);
+  if (problem) return refuse(command, `cannot be trusted: ${problem}. Fix its ownership and remove write permission for others before Scout will run it.`, summary);
   return { name, command, summary, root };
 }
 
