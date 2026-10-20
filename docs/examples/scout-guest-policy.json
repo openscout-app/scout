@@ -1,0 +1,15 @@
+{
+  "tagOwners": { "tag:scout-guest": ["autogroup:admin"] },
+  "hosts": { "scout-runtime": "100.64.0.10", "other-node": "100.64.0.20" },
+  "grants": [
+    { "src": ["tag:scout-guest"], "dst": ["scout-runtime"], "ip": ["tcp:43110"] }
+  ],
+  "tests": [
+    {
+      "src": "tag:scout-guest",
+      "proto": "tcp",
+      "accept": ["scout-runtime:43110"],
+      "deny": ["scout-runtime:22", "scout-runtime:43111", "other-node:22", "other-node:43110"]
+    }
+  ]
+}
