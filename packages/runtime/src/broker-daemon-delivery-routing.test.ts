@@ -246,7 +246,7 @@ describe("broker daemon delivery routing", () => {
     expect(followup.receipt?.bindingRef).toBe(followup.bindingRef);
   }, 15_000);
 
-  test("replays broker-owned delivery messages invocations and flights after restart", async () => {
+  test("replays broker-owned work and reconciles its lost executor after restart", async () => {
     const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
     const firstHarness = await broker.startBroker({ controlHome });
 
@@ -297,6 +297,13 @@ describe("broker daemon delivery routing", () => {
     expect(response.flight?.id).toBe(response.receipt?.flightId);
     expect(response.flight?.state).toBe("queued");
 
+    // The fake executor is real and asynchronous. Capture a proven dispatched
+    // state before restart rather than racing its pending -> running transition.
+    await broker.waitFor(
+      () => broker.getJson<{ flight: { state: string } }>(firstHarness.baseUrl, `/v1/invocations/${response.flight?.invocationId}`),
+      snapshot => snapshot.flight?.state === "running",
+    );
+
     firstHarness.child.kill();
     await firstHarness.child.exited.catch(() => {});
     broker.harnesses.delete(firstHarness);
@@ -312,10 +319,11 @@ describe("broker daemon delivery routing", () => {
       body: "Survive a broker restart.",
     }));
 
-    const invocationSnapshot = await broker.getJson<{
+    const invocationSnapshot = await broker.waitFor(() => broker.getJson<{
       invocation: { id: string; targetAgentId: string } | null;
-      flight: { id: string; invocationId: string; targetAgentId: string; state: string } | null;
-    }>(secondHarness.baseUrl, `/v1/invocations/${response.flight?.invocationId}`);
+      flight: { id: string; invocationId: string; targetAgentId: string; state: string; error?: string } | null;
+    }>(secondHarness.baseUrl, `/v1/invocations/${response.flight?.invocationId}`),
+      snapshot => snapshot.flight?.state === "failed");
 
     expect(invocationSnapshot.invocation).toEqual(expect.objectContaining({
       id: response.flight?.invocationId,
@@ -325,7 +333,9 @@ describe("broker daemon delivery routing", () => {
       id: response.flight?.id,
       invocationId: response.flight?.invocationId,
       targetAgentId: "durable-ghost",
+      state: "failed",
     }));
+    expect(invocationSnapshot.flight?.error).toContain("without a live broker task");
 
     const lifecycle = await broker.getJson<{
       invocationId: string;
@@ -338,16 +348,25 @@ describe("broker daemon delivery routing", () => {
       targetAgentId: "durable-ghost",
     }));
 
-    const deliveries = await broker.getJson<Array<{ messageId: string; targetId: string; status: string }>>(
-      secondHarness.baseUrl,
-      `/v1/deliveries?messageId=${encodeURIComponent(response.message?.id ?? "")}&targetId=durable-ghost`,
+    // The flight commits before reconciliation writes its linked delivery.
+    // Wait for that durable outcome, not just the earlier flight transition.
+    const deliveries = await broker.waitFor(
+      () => broker.getJson<Array<{
+        messageId: string; targetId: string; status: string;
+        metadata?: { flightId?: string; flightState?: string; failureDetail?: string };
+      }>>(secondHarness.baseUrl,
+        `/v1/deliveries?messageId=${encodeURIComponent(response.message?.id ?? "")}&targetId=durable-ghost`),
+      rows => rows.some(delivery => delivery.messageId === response.message?.id
+        && delivery.targetId === "durable-ghost" && delivery.status === "failed"
+        && delivery.metadata?.flightId === response.flight?.id
+        && delivery.metadata?.flightState === "failed"
+        && delivery.metadata?.failureDetail?.includes("without a live broker task")),
     );
-    // Recovery may already have resumed this durable delivery by the time the
-    // API read completes; both states retain the original delivery identity.
-    const recovered = deliveries.find(delivery => delivery.messageId === response.message?.id
-      && delivery.targetId === "durable-ghost");
-    expect(recovered).toBeDefined();
-    expect(["pending", "running"]).toContain(recovered!.status);
+    expect(deliveries).toContainEqual(expect.objectContaining({
+      messageId: response.message?.id,
+      targetId: "durable-ghost",
+      status: "failed",
+    }));
   }, 20_000);
 
   test("routes operator and message refs as replies instead of failed deliveries", async () => {

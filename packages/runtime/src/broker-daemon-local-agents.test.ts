@@ -751,9 +751,20 @@ for await (const line of rl) {
     mkdirSync(projectRoot, { recursive: true });
     broker.writeRelayAgentRegistry(supportDirectory, {});
 
+    // Capability-only stubs: these tests queue work and never execute a harness.
+    // Do not let a developer's installed binaries decide admission.
+    const fakeBin = join(controlHome, "capability-bin");
+    mkdirSync(fakeBin, { recursive: true });
+    for (const name of ["codex", "claude", "tmux"]) {
+      const path = join(fakeBin, name);
+      writeFileSync(path, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+    }
     const harness = await broker.startBroker({
       controlHome,
       env: {
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        OPENSCOUT_CODEX_BIN: join(fakeBin, "codex"),
+        CODEX_BIN: join(fakeBin, "codex"),
         OPENSCOUT_SUPPORT_DIRECTORY: supportDirectory,
         OPENSCOUT_CORE_AGENTS: "",
         OPENSCOUT_LOCAL_AGENT_SYNC_INTERVAL_MS: "0",
@@ -847,9 +858,20 @@ for await (const line of rl) {
       },
     });
 
+    // Capability-only stubs: these tests queue work and never execute a harness.
+    // Do not let a developer's installed binaries decide admission.
+    const fakeBin = join(controlHome, "capability-bin");
+    mkdirSync(fakeBin, { recursive: true });
+    for (const name of ["codex", "claude", "tmux"]) {
+      const path = join(fakeBin, name);
+      writeFileSync(path, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+    }
     const harness = await broker.startBroker({
       controlHome,
       env: {
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        OPENSCOUT_CODEX_BIN: join(fakeBin, "codex"),
+        CODEX_BIN: join(fakeBin, "codex"),
         OPENSCOUT_SUPPORT_DIRECTORY: supportDirectory,
         OPENSCOUT_CORE_AGENTS: "",
         OPENSCOUT_LOCAL_AGENT_SYNC_INTERVAL_MS: "0",
@@ -988,8 +1010,8 @@ for await (const line of rl) {
         nodeId: harness.nodeId,
       },
       target: {
-        kind: "agent_id",
-        agentId: "hudson.test-node",
+        kind: "channel",
+        channel: "shared",
       },
       body: "trigger registry sync",
       intent: "tell",

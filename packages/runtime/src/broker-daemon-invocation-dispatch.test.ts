@@ -162,7 +162,10 @@ describe("broker daemon invocation dispatch", () => {
     broker.temporaryDirectories.add(fakeBin);
     const tmuxLogPath = broker.writeFakeTmuxBin(fakeBin);
     const sessionId = "relay-card-active-claude";
+    const preload = join(fakeBin, "prime-tmux.ts");
+    writeFileSync(preload, `import { readTmuxSessionExists } from ${JSON.stringify(join(import.meta.dir, "system-probes/index.ts"))}; await readTmuxSessionExists(${JSON.stringify(sessionId)});`);
     const harness = await broker.startBroker({
+      preload,
       env: {
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
         OPENSCOUT_FAKE_TMUX_LOG: tmuxLogPath,
@@ -343,6 +346,98 @@ describe("broker daemon invocation dispatch", () => {
     // /lifecycle now returns the raw flight state (the projected "dispatching"
     // vocabulary was removed in ask-overbuild Phase 2), matching snapshot.flight.state.
     expect(["waking", "queued"]).toContain(lifecycle.state);
+    expect(lifecycle.flightId).toBe(snapshot.flight?.id);
+  }, 20_000);
+
+  test("reconciles a dispatched invocation after its executor is lost on restart", async () => {
+    const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
+    const firstHarness = await broker.startBroker({ controlHome });
+    await broker.seedBasicConversation(firstHarness);
+
+    await broker.postJson(firstHarness.baseUrl, "/v1/agents", {
+      id: "ghost",
+      kind: "agent",
+      definitionId: "ghost",
+      displayName: "Ghost",
+      handle: "ghost",
+      labels: ["test"],
+      selector: "@ghost",
+      defaultSelector: "@ghost",
+      metadata: { source: "test" },
+      agentClass: "general",
+      capabilities: ["chat", "invoke"],
+      wakePolicy: "on_demand",
+      homeNodeId: firstHarness.nodeId,
+      authorityNodeId: firstHarness.nodeId,
+      advertiseScope: "local",
+    });
+
+    await broker.seedHangingReceiver(firstHarness, "ghost");
+
+    await broker.postJson(firstHarness.baseUrl, "/v1/invocations", {
+      id: "inv-restart-1",
+      requesterId: "operator",
+      requesterNodeId: firstHarness.nodeId,
+      targetAgentId: "ghost",
+      action: "consult",
+      task: "survive restart?",
+      conversationId: "channel.shared",
+      ensureAwake: true,
+      stream: false,
+      createdAt: Date.now(),
+      metadata: { source: "test" },
+    });
+
+    await broker.waitFor(
+      () => broker.getJson<{ flight: { state: string } }>(firstHarness.baseUrl, "/v1/invocations/inv-restart-1"),
+      snapshot => snapshot.flight?.state === "running",
+    );
+
+    firstHarness.child.kill();
+    await firstHarness.child.exited.catch(() => {});
+    broker.harnesses.delete(firstHarness);
+
+    const secondHarness = await broker.startBroker({ controlHome });
+    const snapshot = await broker.waitFor(() => broker.getJson<{
+      invocation: { id: string; targetAgentId: string } | null;
+      flight: {
+        id: string;
+        invocationId: string;
+        targetAgentId: string;
+        state: string;
+        metadata?: {
+          dispatchOutcome?: {
+            status?: string;
+            reason?: string;
+          };
+        };
+      } | null;
+    }>(secondHarness.baseUrl, "/v1/invocations/inv-restart-1"), snapshot => snapshot.flight?.state === "failed");
+
+    expect(snapshot.invocation).toEqual(expect.objectContaining({
+      id: "inv-restart-1",
+      targetAgentId: "ghost",
+    }));
+    expect(snapshot.flight).toEqual(expect.objectContaining({
+      invocationId: "inv-restart-1",
+      targetAgentId: "ghost",
+    }));
+    expect(snapshot.flight?.state).toBe("failed");
+
+    const lifecycle = await broker.getJson<{
+      invocationId: string;
+      flightId: string;
+      state: string;
+      targetAgentId: string;
+    }>(secondHarness.baseUrl, "/v1/invocations/inv-restart-1/lifecycle");
+
+    expect(lifecycle).toEqual(expect.objectContaining({
+      invocationId: "inv-restart-1",
+      targetAgentId: "ghost",
+    }));
+    // /lifecycle now returns the raw flight state (the projected "dispatching"
+    // vocabulary was removed in ask-overbuild Phase 2), matching snapshot.flight.state.
+    expect(lifecycle.state).toBe("failed");
     expect(lifecycle.flightId).toBe(snapshot.flight?.id);
   }, 20_000);
 

@@ -1,3 +1,4 @@
+import { decodeJournalLine } from "./broker-journal-framing.js";
 import { EventEmitter } from "node:events";
 import { writeBrokerSnapshot } from "./broker-snapshot-response.js";
 import { createRuntimeRegistrySnapshot } from "./registry.js";
@@ -8,7 +9,6 @@ import { join } from "node:path";
 import type { MessageRecord } from "@openscout/protocol";
 import { BrokerMessageBodyCache, BrokerMessageBodyCacheUnavailable } from "./broker-message-body-cache.js";
 import { FileBackedBrokerJournal } from "./broker-journal.js";
-import { decodeJournalLine } from "./broker-journal-framing.js";
 import { createInMemoryControlRuntime } from "./broker.js";
 import { BrokerDurableStore } from "./broker-durable-store.js";
 import { BrokerDurableRecordStore } from "./broker-durable-record-store.js";
@@ -65,7 +65,8 @@ test("live durable commits install cached records in runtime while preserving ca
   const input=message("live","exact live body");await records.recordMessage(input);
   expect(Object.getOwnPropertyDescriptor(runtime.message("live")!,"body")?.get).toBeFunction();
   expect(runtime.message("live")!.body).toBe(input.body);
-  expect(decodeJournalLine(readFileSync(path,"utf8").split("\n")[0]!)).toContainEqual({kind:"message.record",message:input});
+  const entries=readFileSync(path,"utf8").trimEnd().split("\n").flatMap(decodeJournalLine);
+  expect(entries.find(entry => entry.kind === "message.record" && entry.message.id === input.id)).toEqual({kind:"message.record",message:input});
   const durableRead=await journal.readCanonicalMessage(input.id);
   expect(durableRead.kind).toBe("found");
   if(durableRead.kind==="found")expect(durableRead.value).toEqual(input);
