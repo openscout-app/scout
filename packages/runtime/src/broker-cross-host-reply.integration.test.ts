@@ -152,8 +152,8 @@ test("mesh authority rejects conflicting duplicate replies and completes only an
 test("mesh executor rejects replacement anchors on duplicate invocations but repairs the persisted anchor without dispatch", async () => {
   const fixture = authorityFixture();
   const executor = await startAuthorityFixture(fixture);
-  const endpoint: AgentEndpoint = { id: "endpoint-authority-test", agentId: fixture.invocation.targetAgentId, nodeId: executor.nodeId, harness: "claude", transport: "tmux", state: "idle", sessionId: fixture.invocation.targetAgentId, metadata: { cardless: true } };
-  await broker.postJson(executor.baseUrl, "/v1/endpoints", endpoint);
+  // Duplicate-anchor repair needs a real receiver, not a nonexistent tmux session.
+  await broker.seedHangingReceiver(executor, fixture.invocation.targetAgentId);
   // The retained invocation has no message yet, as with an older mesh bundle.
   const altered = { ...fixture.invocation, messageId: "msg-other", requesterId: "other-requester" };
   const message = { ...fixture.request, id: altered.messageId, actorId: altered.requesterId };
