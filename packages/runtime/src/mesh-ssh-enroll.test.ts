@@ -144,12 +144,15 @@ describe("enrollViaSsh mutual exchange", () => {
       if (remoteCmd.join(" ") === "scout mesh card --json") {
         return { stdout: JSON.stringify(remoteCard), stderr: "", exitCode: 0 };
       }
-      if (remoteCmd.join(" ") === "scout mesh trust install-grant -") {
+      if (remoteCmd.includes("--help")) {
+        return { stdout: "scout mesh trust install-grant - [--tier <tier>]", stderr: "", exitCode: 0 };
+      }
+      if (remoteCmd.join(" ") === "scout mesh trust install-grant - --tier control --json") {
         expect(input.stdin).toBeTruthy();
         const pushed = JSON.parse(input.stdin!) as SignedNodeCard;
         installedOnRemote.push(pushed);
         return {
-          stdout: JSON.stringify({ peer: { keyId: pushed.keyId, grantedVia: "ssh" } }),
+          stdout: JSON.stringify({ peer: { keyId: pushed.keyId, tier: "control", grantedVia: "ssh" } }),
           stderr: "",
           exitCode: 0,
         };
@@ -177,8 +180,10 @@ describe("enrollViaSsh mutual exchange", () => {
     });
     expect(result.remoteCard.keyId).toBe(remoteCard.keyId);
 
-    // Both ssh calls used argv arrays with -p and destination; no shell string.
-    expect(calls).toHaveLength(2);
+    expect(result.remoteGrant).toEqual({ keyId: localCard.keyId, tier: "control" });
+
+    // All ssh calls used argv arrays with -p and destination; no shell string.
+    expect(calls).toHaveLength(3);
     for (const call of calls) {
       expect(call.argv[0]).toBe("ssh");
       expect(call.argv).toContain("-p");
@@ -187,8 +192,58 @@ describe("enrollViaSsh mutual exchange", () => {
       expect(call.argv.some((part) => part.includes(" "))).toBe(false);
     }
     expect(calls[0]!.argv.slice(-4)).toEqual(["scout", "mesh", "card", "--json"]);
-    expect(calls[1]!.argv.slice(-5)).toEqual(["scout", "mesh", "trust", "install-grant", "-"]);
-    expect(calls[1]!.stdin).toContain(localCard.keyId);
+    expect(calls[1]!.argv.slice(-5)).toEqual(["scout", "mesh", "trust", "install-grant", "--help"]);
+    expect(calls[1]!.stdin).toBeUndefined();
+    expect(calls[2]!.argv.slice(-8)).toEqual(["scout", "mesh", "trust", "install-grant", "-", "--tier", "control", "--json"]);
+    expect(calls[2]!.stdin).toContain(localCard.keyId);
+  });
+
+  test("observe is requested and confirmed on both sides", async () => {
+    const localCard = cardFor(freshIdentity(), "local");
+    const remoteCard = cardFor(freshIdentity(), "remote");
+    const { exec, calls } = captureExec((input) => {
+      if (input.argv.includes("card")) return { stdout: JSON.stringify(remoteCard), stderr: "", exitCode: 0 };
+      if (input.argv.includes("--help")) return { stdout: "scout mesh trust install-grant - [--tier <tier>]", stderr: "", exitCode: 0 };
+      expect(input.argv.slice(-3)).toEqual(["--tier", "observe", "--json"]);
+      return { stdout: JSON.stringify({ peer: { keyId: localCard.keyId, tier: "observe" } }), stderr: "", exitCode: 0 };
+    });
+    const result = await enrollViaSsh({ target: "ssh://remote", localCard, tier: "observe", exec });
+    expect(result.localGrant.tier).toBe("observe");
+    expect(result.remoteGrant).toEqual({ keyId: localCard.keyId, tier: "observe" });
+    expect(calls.filter((call) => call.stdin)).toHaveLength(1);
+  });
+
+  test("old or unproven remotes are refused before sending a grant", async () => {
+    const localCard = cardFor(freshIdentity(), "local"), remoteCard = cardFor(freshIdentity(), "remote");
+    for (const help of [
+      { stdout: "scout mesh trust install-grant -", stderr: "", exitCode: 0 },
+      { stdout: "scout mesh enroll --tier observe\nscout mesh trust install-grant -", stderr: "", exitCode: 0 },
+      { stdout: "", stderr: "unknown command install-grant", exitCode: 2 },
+    ]) {
+      const { exec, calls } = captureExec((input) => input.argv.includes("card")
+        ? { stdout: JSON.stringify(remoteCard), stderr: "", exitCode: 0 } : help);
+      await expect(enrollViaSsh({ target: "ssh://remote", localCard, tier: "observe", exec })).rejects.toMatchObject({ reason: "remote-upgrade-required", message: expect.stringContaining("Upgrade Scout") });
+      expect(calls.some((call) => call.stdin)).toBe(false);
+    }
+  });
+
+  test("zero exit with an unconfirmed remote tier/key never returns a local grant", async () => {
+    const localCard = cardFor(freshIdentity(), "local"), remoteCard = cardFor(freshIdentity(), "remote");
+    for (const receipt of ["", "not-json", "null", JSON.stringify({ peer: { keyId: localCard.keyId } }),
+      JSON.stringify({ peer: { keyId: localCard.keyId, tier: "control" } }),
+      JSON.stringify({ peer: { keyId: remoteCard.keyId, tier: "observe" } })]) {
+      const { exec } = captureExec((input) => ({ stdout: input.argv.includes("card") ? JSON.stringify(remoteCard)
+        : input.argv.includes("--help") ? "scout mesh trust install-grant - [--tier <tier>]" : receipt, stderr: "", exitCode: 0 }));
+      await expect(enrollViaSsh({ target: "ssh://remote", localCard, tier: "observe", exec })).rejects.toMatchObject({ reason: "remote-tier-unconfirmed" });
+    }
+  });
+
+  test("a remote rejecting --tier receives a clear upgrade error without local enrollment", async () => {
+    const localCard = cardFor(freshIdentity(), "local"), remoteCard = cardFor(freshIdentity(), "remote");
+    const { exec } = captureExec((input) => input.argv.includes("card") ? { stdout: JSON.stringify(remoteCard), stderr: "", exitCode: 0 }
+      : input.argv.includes("--help") ? { stdout: "scout mesh trust install-grant - [--tier <tier>]", stderr: "", exitCode: 0 }
+      : { stdout: "", stderr: "unknown flag --tier", exitCode: 2 });
+    await expect(enrollViaSsh({ target: "ssh://remote", localCard, tier: "observe", exec })).rejects.toMatchObject({ reason: "remote-upgrade-required" });
   });
 
   test("invalid remote card aborts before install-grant — no half-enrollment", async () => {
@@ -226,6 +281,7 @@ describe("enrollViaSsh mutual exchange", () => {
       if (remoteCmd.includes("card")) {
         return { stdout: JSON.stringify({ card: remoteCard }), stderr: "", exitCode: 0 };
       }
+      if (remoteCmd.includes("--help")) return { stdout: "scout mesh trust install-grant - [--tier <tier>]", stderr: "", exitCode: 0 };
       return { stdout: "", stderr: "grant refused", exitCode: 2 };
     });
 

@@ -382,7 +382,7 @@ export async function runMeshEnrollCommand(context: ScoutCommandContext, args: s
           tier: options.tier,
         });
         context.output.writeValue(
-          { peer, remote: result.remoteCard, target: result.target },
+          { peer, remote: result.remoteCard, target: result.target, localTier: peer.tier, remoteTier: result.remoteGrant.tier },
           () =>
             [
               `SSH enrolled ${peer.label} — ${peer.tier} (via ssh)`,
@@ -392,7 +392,9 @@ export async function runMeshEnrollCommand(context: ScoutCommandContext, args: s
                 ? `  TLS pin: ${peer.tlsSpkiFingerprint.slice(0, 16)}…`
                 : "  TLS pin: (none on card)",
               `  Destination: ${result.target.destination}${result.target.port ? `:${result.target.port}` : ""}`,
-              "  Mutual: remote accepted our card; local grant installed.",
+              `  Local grant for remote key: ${peer.tier}`,
+              `  Remote grant for our key: ${result.remoteGrant.tier}`,
+              "  Mutual: remote confirmed the requested tier; local grant installed.",
             ].join("\n"),
         );
       } catch (error) {
