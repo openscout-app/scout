@@ -124,6 +124,9 @@ describe("instance env at user-facing spawns", () => {
     const dir = mkdtempSync(join(tmpdir(), "openscout-tmux-server-env-"));
     const socket = join(dir, "sock");
     const outFile = join(dir, "pane-env");
+    const previousProbesSocket = process.env.OPENSCOUT_PROBES_SOCKET;
+    // This case checks the local spawner; native scoutd has separate conformance coverage.
+    process.env.OPENSCOUT_PROBES_SOCKET = join(dir, "absent-probes.sock");
     // A dev web/broker process: pinned instance + derived env + pointer.
     const serviceEnv = {
       PATH: process.env.PATH,
@@ -148,6 +151,8 @@ describe("instance env at user-facing spawns", () => {
       expect(pane).not.toMatch(/^OPENSCOUT_INSTANCE=/m);
       expect(pane).not.toMatch(/^OPENSCOUT_BROKER_PORT=/m);
     } finally {
+      if (previousProbesSocket === undefined) delete process.env.OPENSCOUT_PROBES_SOCKET;
+      else process.env.OPENSCOUT_PROBES_SOCKET = previousProbesSocket;
       Bun.spawnSync(["tmux", "-S", socket, "kill-server"]);
       rmSync(dir, { recursive: true, force: true });
     }
