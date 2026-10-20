@@ -128,4 +128,6 @@ export interface TranscriptSource {
   ): Promise<DiscoveredTranscript[]> | DiscoveredTranscript[];
   parseLine(line: string, ctx: TailContext): TailEvent | null;
   parseFile?(text: string, ctx: TailContext): TailEvent | TailEvent[] | null;
+  /** Locate one exact session outside the discovery activity window. */
+  findTranscript?(sessionRef: string): DiscoveredTranscript | null;
 }

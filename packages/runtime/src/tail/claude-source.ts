@@ -561,6 +561,7 @@ export const ClaudeSource: TranscriptSource = {
   parseLine(line: string, ctx: TailContext): TailEvent | null {
     return parseClaudeLine(line, ctx);
   },
+  findTranscript: findClaudeTranscript,
 };
 
 function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscript {
@@ -584,4 +585,68 @@ function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscri
     mtimeMs: file.mtimeMs,
     size: file.size,
   };
+}
+
+/**
+ * One session's transcript regardless of its age: `<project>/<session>.jsonl`,
+ * or a child worker's `<project>/<parent>/subagents/agent-<id>.jsonl` (its
+ * session id is its agent id, so only the parent's folder can say where it is).
+ */
+export function findClaudeTranscript(sessionId: string): DiscoveredTranscript | null {
+  const ref = sessionId.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(ref)) return null;
+  const root = projectsRoot();
+  let projectDirs: string[];
+  try {
+    projectDirs = readdirSync(root);
+  } catch {
+    return null;
+  }
+  for (const entry of projectDirs) {
+    const path = join(root, entry, `${ref}.jsonl`);
+    try {
+      const stats = statSync(path);
+      if (!stats.isFile()) continue;
+      return claudeTranscriptForFile({ path, mtimeMs: stats.mtimeMs, size: stats.size });
+    } catch {
+      continue;
+    }
+  }
+  return /^[a-zA-Z0-9]+$/u.test(ref) ? findClaudeSubagentTranscript(root, projectDirs, ref) : null;
+}
+
+/** A child worker's transcript, filed under its parent session; parent and cwd as discovery reads them. */
+function findClaudeSubagentTranscript(root: string, projectDirs: string[], agentId: string): DiscoveredTranscript | null {
+  for (const entry of projectDirs) {
+    const projectDir = join(root, entry);
+    let sessions: string[];
+    try {
+      sessions = readdirSync(projectDir);
+    } catch {
+      continue;
+    }
+    for (const parent of sessions) {
+      const path = join(projectDir, parent, "subagents", `agent-${agentId}.jsonl`);
+      let stats: ReturnType<typeof statSync>;
+      try {
+        stats = statSync(path);
+      } catch {
+        continue;
+      }
+      if (!stats.isFile()) continue;
+      const parentPath = join(projectDir, `${parent}.jsonl`);
+      let parentSessionId = parent;
+      let cwd = fallbackCwdForPath(path);
+      try {
+        const parentStats = statSync(parentPath);
+        const parentMeta = readClaudeMetadata({ path: parentPath, mtimeMs: parentStats.mtimeMs, size: parentStats.size });
+        parentSessionId = parentMeta.sessionId ?? parent;
+        cwd = parentMeta.cwd ?? fallbackCwdForPath(parentPath);
+      } catch {
+        // the parent's own transcript is gone; the folder still names it
+      }
+      return claudeTranscriptForFile({ path, mtimeMs: stats.mtimeMs, size: stats.size, parentSessionId, subagentId: agentId, cwd });
+    }
+  }
+  return null;
 }

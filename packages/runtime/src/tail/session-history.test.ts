@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,4 +47,38 @@ describe("exact session Tail history", () => {
       expect(await readTailEventsForSession("another-task", { discovery, includeAllSources: true })).toBeNull();
     });
   }
+  test("finds an old Claude subagent under its parent's folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "scout-old-subagent-"));
+    directories.push(root);
+    const previousRoot = process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT;
+    process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT = root;
+    try {
+      const parentId = "9b1f63d2-5c1e-4c55-8d0e-0c3a7a4f2e11";
+      const project = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-work-project");
+      const subagents = join(project, parentId, "subagents");
+      mkdirSync(subagents, { recursive: true });
+      const parentPath = join(project, `${parentId}.jsonl`);
+      writeFileSync(parentPath, JSON.stringify({
+        type: "assistant", timestamp: "2026-10-11T15:09:01.000Z", sessionId: parentId, cwd: "/work/project",
+        message: { id: "message-1", content: [{ type: "text", text: "the parent" }] },
+      }) + "\n");
+      const childPath = join(subagents, "agent-worker123.jsonl");
+      writeFileSync(childPath, JSON.stringify({
+        type: "assistant", timestamp: "2026-10-11T15:10:01.000Z", sessionId: parentId, cwd: "/work/project",
+        message: { id: "message-2", content: [{ type: "text", text: "the child's reply" }] },
+      }) + "\n");
+      const threeDaysAgo = (Date.now() - 3 * 24 * 60 * 60 * 1000) / 1000;
+      utimesSync(parentPath, threeDaysAgo, threeDaysAgo);
+      utimesSync(childPath, threeDaysAgo, threeDaysAgo);
+
+      const result = await readTailEventsForSession("worker123", { discovery: { generatedAt: Date.now(), processes: [], transcripts: [], totals: { total: 0, scoutManaged: 0, hudsonManaged: 0, unattributed: 0, transcripts: 0 } }, includeAllSources: true });
+      expect(result?.events.map((event) => event.summary)).toEqual(["the child's reply"]);
+      expect(result?.transcript.parentSessionId).toBe(parentId);
+      expect(await readTailEventsForSession("worker123", { discovery: { generatedAt: Date.now(), processes: [], transcripts: [], totals: { total: 0, scoutManaged: 0, hudsonManaged: 0, unattributed: 0, transcripts: 0 } } })).toBeNull();
+    } finally {
+      if (previousRoot === undefined) delete process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT;
+      else process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT = previousRoot;
+    }
+  });
+
 });

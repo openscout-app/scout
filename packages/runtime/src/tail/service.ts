@@ -1864,10 +1864,11 @@ export async function readTailEventsForSession(
 
   const discovery = options?.discovery
     ?? await getTailDiscovery(options?.forceDiscovery ?? false);
+  const allowsSource = (source: string) => Boolean(options?.includeAllSources) || NATIVE_TAIL_SOURCES.has(source);
   const transcript = discovery.transcripts.find(
-    (candidate) => (options?.includeAllSources || NATIVE_TAIL_SOURCES.has(candidate.source))
+    (candidate) => allowsSource(candidate.source)
       && transcriptMatchesSessionRef(candidate, normalizedRef),
-  );
+  ) ?? locateTranscriptOutsideDiscovery(normalizedRef, Boolean(options?.includeAllSources), allowsSource);
   if (!transcript) return null;
 
   const limit = options?.limit ?? 2_000;
@@ -1878,4 +1879,48 @@ export async function readTailEventsForSession(
   }
 
   return { transcript, events };
+}
+
+const LOCATED_TRANSCRIPT_TTL_MS = 30_000;
+/** Shorter for a miss: a just-started run writes its rollout a moment later. */
+const LOCATED_TRANSCRIPT_MISS_TTL_MS = 10_000;
+const LOCATED_TRANSCRIPT_LIMIT = 256;
+const locatedTranscripts = new Map<string, { transcript: DiscoveredTranscript | null; checkedAt: number }>();
+
+/**
+ * Exact-session lookup past discovery. Discovery keeps only transcripts touched
+ * within its window (a day) and the newest few hundred, so a task that finished
+ * two days ago is not in it, however recently someone opens its page. Each
+ * source that can find a transcript by id is asked directly. Answers are kept
+ * briefly because an empty Task tail retries every few seconds.
+ */
+function locateTranscriptOutsideDiscovery(
+  normalizedRef: string,
+  includeAllSources: boolean,
+  allowsSource: (source: string) => boolean,
+): DiscoveredTranscript | null {
+  const key = `${includeAllSources ? "all" : "native"}\u0000${normalizedRef}`;
+  const now = Date.now();
+  const cached = locatedTranscripts.get(key);
+  const ttl = cached?.transcript ? LOCATED_TRANSCRIPT_TTL_MS : LOCATED_TRANSCRIPT_MISS_TTL_MS;
+  if (cached && now - cached.checkedAt < ttl) return cached.transcript;
+
+  let transcript: DiscoveredTranscript | null = null;
+  for (const source of sources) {
+    if (!source.findTranscript || !allowsSource(source.name)) continue;
+    try {
+      transcript = source.findTranscript(normalizedRef);
+    } catch {
+      transcript = null;
+    }
+    if (transcript) break;
+  }
+  locatedTranscripts.delete(key);
+  locatedTranscripts.set(key, { transcript, checkedAt: now });
+  while (locatedTranscripts.size > LOCATED_TRANSCRIPT_LIMIT) {
+    const oldest = locatedTranscripts.keys().next().value;
+    if (oldest === undefined) break;
+    locatedTranscripts.delete(oldest);
+  }
+  return transcript;
 }
