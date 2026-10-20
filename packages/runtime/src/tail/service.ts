@@ -5,6 +5,8 @@ import { StringDecoder } from "node:string_decoder";
 
 import { redactSecrets, redactSecretsDeep } from "@openscout/agent-sessions/secret-redaction";
 
+import { readClaudeSessionRecords, type ClaudeSessionRecord } from "../claude-session-records.js";
+
 import { ClaudeSource } from "./claude-source.js";
 import { CodexSource } from "./codex-source.js";
 import { CursorSource } from "./cursor-source.js";
@@ -957,6 +959,34 @@ function reconcilePersistedObservedSessions(
   }
 }
 
+/** Join by native id, never cwd or pid; a newer pid record replaces all older status fields. */
+export function joinClaudeRegistryStatus(
+  transcripts: DiscoveredTranscript[],
+  records: ClaudeSessionRecord[],
+): DiscoveredTranscript[] {
+  const newest = new Map<string, ClaudeSessionRecord>();
+  for (const record of records) {
+    const prior = newest.get(record.sessionId);
+    const rank = (r: ClaudeSessionRecord) => r.statusUpdatedAt ?? r.updatedAt ?? 0;
+    if (!prior || rank(record) > rank(prior)
+      || (rank(record) === rank(prior) && record.pid > prior.pid)) newest.set(record.sessionId, record);
+  }
+  return transcripts.map((transcript) => {
+    if (transcript.source !== "claude") return transcript;
+    const record = transcript.sessionId ? newest.get(transcript.sessionId) : null;
+    return {
+      ...transcript,
+      status: record?.status ?? null,
+      statusUpdatedAt: record?.statusUpdatedAt ?? null,
+      waitingFor: record?.waitingFor ?? null,
+      attention: record?.waitingFor ? {
+        kind: "ask" as const, source: "registry" as const,
+        reason: record.waitingFor, since: record.statusUpdatedAt ?? record.updatedAt ?? null,
+      } : null,
+    };
+  });
+}
+
 async function refreshDiscovery(
   scope: TailDiscoveryScope = "shallow",
   options: { pruneMissing: boolean } = { pruneMissing: scope !== "hot" },
@@ -1103,8 +1133,10 @@ async function refreshDiscovery(
     );
   }
 
-  const allTranscripts = [...knownTranscripts.values()]
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const allTranscripts = joinClaudeRegistryStatus(
+    [...knownTranscripts.values()].sort((a, b) => b.mtimeMs - a.mtimeMs),
+    await readClaudeSessionRecords().catch(() => []),
+  );
 
   let scoutManaged = 0;
   let hudsonManaged = 0;

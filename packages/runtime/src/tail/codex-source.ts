@@ -1,6 +1,6 @@
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   buildParentChain,
@@ -227,7 +227,23 @@ function walkRecentJsonlFiles(
   return found;
 }
 
+/** The index is append-only: the last entry for an id wins. */
+function readCodexTitles(): Map<string, string | null> {
+  const titles = new Map<string, string | null>();
+  for (const root of codexSessionRoots()) {
+    try {
+      for (const line of readFileSync(join(dirname(root), "session_index.jsonl"), "utf8").split("\n")) {
+        const entry = parseJsonRecord(line);
+        if (typeof entry?.id !== "string") continue;
+        titles.set(entry.id, typeof entry.thread_name === "string" ? entry.thread_name.trim() || null : null);
+      }
+    } catch { /* Index absent or being replaced; transcripts still discoverable. */ }
+  }
+  return titles;
+}
+
 function discoverCodexTranscripts(scope: TailDiscoveryScope): DiscoveredTranscript[] {
+  const titles = readCodexTitles();
   const byPath = new Map<string, TranscriptFileStat>();
   for (const root of codexSessionRoots()) {
     for (const file of walkRecentJsonlFiles(root, scope)) {
@@ -238,24 +254,27 @@ function discoverCodexTranscripts(scope: TailDiscoveryScope): DiscoveredTranscri
   return [...byPath.values()]
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, discoveryLimit(scope))
-    .map((file) => {
-      const meta = readCodexMetadata(file);
-      const sessionId = meta.sessionId
-        ?? sessionIdFromCodexPath(file.path);
-      return {
-        source: SOURCE_NAME,
-        transcriptPath: file.path,
-        sessionId,
-        parentSessionId: meta.parentSessionId ?? null,
-        subagentId: meta.parentSessionId ? sessionId : null,
-        agentNickname: meta.agentNickname ?? null,
-        cwd: meta.cwd,
-        project: meta.cwd ? basename(meta.cwd) : "(unknown)",
-        harness: "unattributed",
-        mtimeMs: file.mtimeMs,
-        size: file.size,
-      };
-    });
+    .map((file) => codexTranscriptForFile(file, titles));
+}
+
+function codexTranscriptForFile(file: TranscriptFileStat, titles?: Map<string, string | null>): DiscoveredTranscript {
+  const meta = readCodexMetadata(file);
+  const sessionId = meta.sessionId
+    ?? sessionIdFromCodexPath(file.path);
+  return {
+    source: SOURCE_NAME,
+    transcriptPath: file.path,
+    sessionId,
+    parentSessionId: meta.parentSessionId ?? null,
+    subagentId: meta.parentSessionId ? sessionId : null,
+    agentNickname: meta.agentNickname ?? null,
+    title: (titles ?? readCodexTitles()).get(sessionId) ?? null,
+    cwd: meta.cwd,
+    project: meta.cwd ? basename(meta.cwd) : "(unknown)",
+    harness: "unattributed",
+    mtimeMs: file.mtimeMs,
+    size: file.size,
+  };
 }
 
 function sessionIdFromCodexPath(filePath: string): string {
@@ -365,10 +384,18 @@ function reasoningText(payload: Record<string, unknown>): string {
     .join("\n\n"));
 }
 
+function completedItem(payload: Record<string, unknown>): Record<string, unknown> {
+  return metadataRecord(payload.item) ?? payload;
+}
+
+function completedItemType(item: Record<string, unknown>): string {
+  return String(item.type ?? item.kind ?? "").replace(/[_-]/gu, "").toLowerCase();
+}
+
 function codexKind(entryType: string, payloadType: string, payload: Record<string, unknown>): TailEventKind {
   if (entryType === "response_item") {
     if (payloadType === "message") {
-      return payload.role === "user" ? "user" : "assistant";
+      return payload.role === "user" ? "user" : payload.role === "assistant" ? "assistant" : "system";
     }
     if (payloadType === "function_call" || payloadType === "custom_tool_call" || payloadType === "web_search_call") {
       return "tool";
@@ -377,6 +404,12 @@ function codexKind(entryType: string, payloadType: string, payload: Record<strin
       return "tool-result";
     }
     if (payloadType === "reasoning") return "system";
+  }
+  if ((entryType === "event_msg" && payloadType === "item_completed") || entryType === "item_completed") {
+    const type = completedItemType(completedItem(payload));
+    if (type === "agentmessage") return "assistant";
+    if (["commandexecution", "mcptoolcall", "filechange"].includes(type)) return "tool-result";
+    return "system";
   }
   if (entryType === "event_msg") {
     if (payloadType.endsWith("_end")) return "tool-result";
@@ -397,6 +430,21 @@ function summarizeCodex(entryType: string, payloadType: string, payload: Record<
     const model = typeof payload.model === "string" ? payload.model : "";
     const effort = typeof payload.effort === "string" ? payload.effort : "";
     return clip(`turn context${model ? ` · ${model}` : ""}${effort ? ` · ${effort}` : ""}`);
+  }
+  if ((entryType === "event_msg" && payloadType === "item_completed") || entryType === "item_completed") {
+    const item = completedItem(payload);
+    const type = completedItemType(item);
+    if (type === "agentmessage") return textFromContent(item.content) || stringifyValue(item.text) || "[assistant]";
+    if (type === "commandexecution") {
+      const cmd = item.command ?? item.cmd ?? item.argv;
+      return clip(formatToolResult(item.aggregated_output ?? item.output, Array.isArray(cmd) ? cmd.join(" ") : stringifyValue(cmd)));
+    }
+    if (type === "mcptoolcall") return clip(`${String(item.server ?? "mcp")} · ${String(item.tool ?? item.name ?? "tool")}`);
+    if (type === "filechange") {
+      const paths = Array.isArray(item.changes) ? item.changes.map((change) => metadataRecord(change)?.path).filter(Boolean) : [];
+      return clip(`file change · ${paths.join(", ") || stringifyValue(item.paths)}`);
+    }
+    return clip(`[${String(item.type ?? item.kind ?? "item_completed")}]`);
   }
   if (entryType === "event_msg") {
     if (payloadType === "task_started") return "task started";
@@ -448,7 +496,7 @@ function parseCodexLine(line: string, ctx: TailContext): TailEvent | null {
   const record = parseJsonRecord(line.trim());
   if (!record) return null;
   const entryType = typeof record.type === "string" ? record.type : "other";
-  const payload = metadataRecord(record.payload) ?? {};
+  const payload = metadataRecord(record.payload) ?? record;
   const payloadType = typeof payload.type === "string" ? payload.type : "";
   const sessionId = typeof payload.id === "string" && entryType === "session_meta"
     ? payload.id

@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   __testing,
+  joinClaudeRegistryStatus,
   INTERNAL_TAIL_SESSION_OFFLINE_SUMMARY,
   INTERNAL_TAIL_SESSION_STALLED_SUMMARY,
   readRecentLiveEvents,
@@ -913,4 +914,27 @@ describe("tail transcript replay memo", () => {
     });
     expect(loads).toBe(258);
   });
+});
+
+test("discovery joins the newest registry status by native id, and clears missing records", () => {
+  const transcript: DiscoveredTranscript = {
+    source: "claude", sessionId: "native", transcriptPath: "/native.jsonl",
+    cwd: "/repo", project: "repo", harness: "unattributed", mtimeMs: 1, size: 1,
+  };
+  const record = (pid: number, statusUpdatedAt: number, status: "busy" | "shell", waitingFor: string | null = null) => ({
+    pid, sessionId: "native", statusUpdatedAt, status, waitingFor,
+    cwd: null, startedAt: null, procStart: null, kind: null, entrypoint: null,
+    version: null, tmux: null, name: null, nameSource: null, recordPath: "/registry.json",
+  });
+  const [joined] = joinClaudeRegistryStatus([transcript], [
+    record(1, 200, "shell", " permission "), record(2, 100, "busy"),
+  ]);
+  expect(joined).toMatchObject({ status: "shell", statusUpdatedAt: 200,
+    waitingFor: " permission ", attention: { source: "registry", kind: "ask", reason: " permission ", since: 200 } });
+  expect(joinClaudeRegistryStatus([joined!], [record(3, 300, "busy")])[0]?.attention).toBeNull();
+  expect(joinClaudeRegistryStatus([joined!], [])[0]).toMatchObject({
+    status: null, statusUpdatedAt: null, waitingFor: null, attention: null,
+  });
+  expect(joinClaudeRegistryStatus([{ ...transcript, source: "codex" }], [record(1, 200, "busy")])[0]?.status).toBeUndefined();
+  expect(joinClaudeRegistryStatus([{ ...transcript, sessionId: "child", parentSessionId: "native" }], [record(1, 200, "busy")])[0]?.status).toBeNull();
 });

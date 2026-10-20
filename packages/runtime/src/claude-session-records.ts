@@ -36,6 +36,10 @@ export type ClaudeSessionRecord = {
   tmux: ClaudeTmuxLocation | null;
   name: string | null;
   nameSource: string | null;
+  status?: "busy" | "idle" | "shell" | "waiting" | null;
+  statusUpdatedAt?: number | null;
+  updatedAt?: number | null;
+  waitingFor?: string | null;
   recordPath: string;
 };
 
@@ -114,6 +118,11 @@ export function parseClaudeSessionRecord(raw: string, recordPath: string): Claud
     tmux: parseClaudeTmuxLocation(record.tmux),
     name: stringField(record.name),
     nameSource: stringField(record.nameSource),
+    status: ["busy", "idle", "shell", "waiting"].includes(String(record.status))
+      ? record.status as ClaudeSessionRecord["status"] : null,
+    statusUpdatedAt: numberField(record.statusUpdatedAt),
+    updatedAt: numberField(record.updatedAt),
+    waitingFor: typeof record.waitingFor === "string" ? record.waitingFor : null,
     recordPath,
   };
 }
@@ -136,7 +145,7 @@ export async function readBoundedClaudeFile(path: string, maxBytes = 64 * 1024):
   }
 }
 
-/** Used only for exact-native wake discovery, never for catalog rendering. */
+/** Harness-owned identity/status snapshot; also used for exact-native wake discovery. */
 export async function readClaudeSessionRecords(options: { directory?: string } = {}): Promise<ClaudeSessionRecord[]> {
   const directory = options.directory ?? resolveClaudeSessionRecordsDirectory();
   let entries;

@@ -54,6 +54,16 @@ export type DiscoveredProcess = {
 };
 
 export type DiscoveredTranscript = {
+  /** Harness-native title (custom title > agent name > AI title; newest of each wins). */
+  title?: string | null;
+  /** Claude registry values, without inferred busy/idle semantics. */
+  status?: "busy" | "idle" | "shell" | "waiting" | null;
+  statusUpdatedAt?: number | null;
+  waitingFor?: string | null;
+  attention?: { kind: "ask"; source: "herdr" | "registry"; reason?: string | null; since?: number | null } | null;
+  /** Claude workflow run containing this child transcript. */
+  workflowRunId?: string | null;
+
   source: string;
   transcriptPath: string;
   sessionId: string | null;

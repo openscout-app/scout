@@ -16,9 +16,9 @@ describe("formatToolCall", () => {
     expect(summary).toBe("sed -n '1,180p' design/studio/components/studies/PhoneFrame.tsx");
   });
 
-  test("Claude Bash → bare command", () => {
+  test("Claude Bash prefers description", () => {
     expect(formatToolCall("Bash", { command: "./node_modules/.bin/tsc --noEmit", description: "typecheck" }))
-      .toBe("./node_modules/.bin/tsc --noEmit");
+      .toBe("typecheck");
   });
 
   test("file tools show the last two path segments, folding $HOME", () => {
@@ -73,5 +73,19 @@ describe("summarizeToolResult", () => {
       "}",
     ].join("\n");
     expect(summarizeToolResult(output)).toBe("{ \"name\": \"openscout\", \"version\": \"0.2.72\" } (4 lines)");
+  });
+});
+
+describe("native now-line summaries", () => {
+  test("unwraps code-mode exec_command without evaluating JavaScript", () => {
+    expect(formatToolCall("exec", 'const r = await tools.exec_command({cmd: "git diff --stat", max_output_tokens: 50}); text(r);')).toBe("git diff --stat");
+    expect(formatToolCall("functions.exec", "text(await tools.exec_command({cmd: 'echo \\'hello\\''}));")).toBe("echo 'hello'");
+    expect(formatToolCall("exec", 'text(await tools.mcp__scout__lookup({query: "arrivals"}));')).toBe("mcp__scout__lookup arrivals");
+    expect(formatToolCall("exec", { code: 'await tools.exec_command({cmd: "bun test"})' })).toBe("bun test");
+    expect(formatToolCall("exec", 'await tools.exec_command({cmd: `echo ${secret}`})')).toBe("exec_command");
+  });
+  test("Bash falls back to command for missing or blank description", () => {
+    expect(formatToolCall("Bash", { command: "pwd" })).toBe("pwd");
+    expect(formatToolCall("Bash", { command: "pwd", description: " " })).toBe("pwd");
   });
 });

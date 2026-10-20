@@ -72,6 +72,31 @@ function isShellTool(name: string): boolean {
   return n.includes("exec") || n === "shell" || n === "bash" || n === "local_shell" || n === "run";
 }
 
+/** Read literal arguments only. Never execute the code-mode wrapper. */
+function codeModeSummary(code: string): string | null {
+  const literal = String.raw`("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\x60(?:\\.|[^\x60\\])*\x60)`;
+  const decode = (value: string): string | null => {
+    if (value.startsWith('"')) {
+      try { return JSON.parse(value) as string; } catch { return null; }
+    }
+    if (value.startsWith("`") && value.includes("${")) return null;
+    return value.slice(1, -1).replace(/\\([\\'"`nrt])/gu, (_, char: string) =>
+      ({ n: "\n", r: "\r", t: "\t" }[char] ?? char));
+  };
+  // Prefer the actual shell command even if the wrapper has text()/Promise.all().
+  const command = new RegExp(String.raw`(?:tools|functions)\.exec_command\s*\(\s*\{[\s\S]{0,4096}?\b["']?cmd["']?\s*:\s*${literal}`, "u").exec(code);
+  if (command?.[1]) {
+    const value = decode(command[1]);
+    if (value) return oneLine(value);
+  }
+  const call = /(?:tools|functions)\.([A-Za-z_][\w]*)\s*\(/u.exec(code);
+  if (!call) return null;
+  const args = code.slice(call.index + call[0].length, call.index + call[0].length + 4096);
+  const arg = new RegExp(String.raw`^\s*(?:\{\s*["']?[\w]+["']?\s*:\s*)?${literal}`, "u").exec(args);
+  const value = arg?.[1] ? decode(arg[1]) : null;
+  return value ? `${call[1]} ${oneLine(value, 100)}` : call[1]!;
+}
+
 /**
  * One clean line for a tool call: `Read views/scout-tail.tsx`,
  * `Grep data-scout-skin`, or a bare command for shell tools. The tool name is
@@ -81,6 +106,16 @@ export function formatToolCall(rawName: string, rawInput: unknown): string {
   const name = (rawName || "tool").trim();
   const input = parseMaybeJson(rawInput);
   const obj = asRecord(input);
+
+  if (name === "exec" || name === "functions.exec") {
+    const code = typeof input === "string" ? input : obj ? firstString(obj, ["code", "input"]) : null;
+    const summary = code ? codeModeSummary(code) : null;
+    if (summary) return summary;
+  }
+  if (name.toLowerCase() === "bash" && obj) {
+    const description = firstString(obj, ["description"]);
+    if (description) return oneLine(description);
+  }
 
   if (!obj) {
     if (typeof input === "string" && input.trim()) {

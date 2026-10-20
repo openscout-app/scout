@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1506,4 +1506,119 @@ describe("textless thinking blocks", () => {
     const event = parse([{ type: "thinking", thinking: "Weigh the two fixes.", signature: "x" }]);
     expect(event?.summary).toBe("[thinking] Weigh the two fixes.");
   });
+});
+
+describe("Harness-native transcript metadata", () => {
+  test("captures timestamp-less Claude titles and discovers workflow children of cold parents", async () => {
+    const project = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-tmp-metadata");
+    const parent = join(project, "parent.jsonl");
+    const workflow = join(project, "parent", "subagents", "workflows", "run-123");
+    mkdirSync(workflow, { recursive: true });
+    const records = [
+      { type: "user", sessionId: "parent", cwd: "/tmp/arrivals", timestamp: new Date().toISOString(), message: { content: "hello" } },
+      { type: "ai-title", aiTitle: "AI first" },
+      { type: "agent-name", agentName: "Agent first" },
+      { type: "custom-title", customTitle: "Custom first" },
+      { type: "custom-title", customTitle: "Custom newest" },
+      { type: "ai-title", aiTitle: "AI newer but lower priority" },
+    ];
+    writeFileSync(parent, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    writeFileSync(join(workflow, "agent-abc123.jsonl"), JSON.stringify({
+      type: "assistant", timestamp: new Date().toISOString(), message: { content: "working" },
+    }) + "\n");
+    const old = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(parent, old, old);
+    const discovery = await ClaudeSource.discoverTranscripts([], "shallow");
+    expect(discovery.find((t) => t.subagentId === "abc123")).toMatchObject({
+      parentSessionId: "parent", workflowRunId: "run-123", sessionId: "abc123", cwd: "/tmp/arrivals",
+    });
+    utimesSync(parent, new Date(), new Date());
+    expect((await ClaudeSource.discoverTranscripts([])).find((t) => t.sessionId === "parent")?.title).toBe("Custom newest");
+    expect((await ClaudeSource.discoverTranscripts([])).find((t) => t.sessionId === "parent")?.title).toBe("Custom newest");
+  });
+
+  test("Claude title falls back from agent name to AI title and refreshes on append", async () => {
+    const project = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-tmp-titles");
+    mkdirSync(project, { recursive: true });
+    const path = join(project, "titles.jsonl");
+    writeFileSync(path, '{"type":"ai-title","aiTitle":"First"}\n');
+    expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("First");
+    writeFileSync(path, '{"type":"ai-title","aiTitle":"First"}\n{"type":"agent-name","agentName":"Named"}\n');
+    expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("Named");
+  });
+
+  test("Codex index uses the newest entry and tolerates partial lines", async () => {
+    const root = process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT!;
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "rollout.jsonl"), JSON.stringify({
+      type: "session_meta", payload: { id: "codex-native", cwd: "/tmp/arrivals" },
+    }));
+    writeFileSync(join(root, "..", "session_index.jsonl"), [
+      '{"id":"codex-native","thread_name":"Old"}',
+      '{"id":"codex-native","thread_name":"New title"}',
+      '{"id":',
+    ].join("\n"));
+    expect((await CodexSource.discoverTranscripts([]))[0]?.title).toBe("New title");
+  });
+
+  test("Codex completed items preserve data and classify messages, commands, MCP and files", () => {
+    const ctx = makeContext("codex", { source: "codex", sessionId: "native", transcriptPath: "/tmp/codex.jsonl",
+      cwd: "/tmp", project: "tmp", harness: "unattributed", mtimeMs: 1, size: 1 });
+    const items = [
+      { type: "CommandExecution", command: ["git", "status"], exit_code: 0, duration_ms: 10, aggregated_output: "clean" },
+      { type: "AgentMessage", text: "Done", phase: "final" },
+      { type: "agent_message", text: "Checking", phase: "commentary" },
+      { type: "McpToolCall", server: "scout", tool: "lookup", arguments: { query: "hello" } },
+      { type: "FileChange", changes: [{ path: "src/file.ts", kind: "update" }] },
+      { type: "Reasoning", text: "reason" }, { type: "SubAgentActivity" },
+    ];
+    const kinds = ["tool-result", "assistant", "assistant", "tool-result", "tool-result", "system", "system"];
+    items.forEach((item, i) => {
+      const raw = { type: "event_msg", timestamp: "2026-10-15T12:00:00Z", payload: { type: "item_completed", item } };
+      const event = CodexSource.parseLine(JSON.stringify(raw), ctx)!;
+      expect(event.kind).toBe(kinds[i]!);
+      expect(event.raw).toEqual(raw);
+      if (i === 0) expect(event.summary).toContain("git status");
+      if (i === 4) expect(event.summary).toContain("src/file.ts");
+    });
+    expect(CodexSource.parseLine(JSON.stringify({ type: "response_item", payload: {
+      type: "message", role: "developer", content: [{ type: "input_text", text: "instructions" }],
+    } }), ctx)?.kind).toBe("system");
+    for (const type of ["task_complete", "turn_aborted"]) {
+      const raw = { type: "event_msg", payload: { type, duration_ms: 123, last_agent_message: "recap", reason: "interrupt" } };
+      const event = CodexSource.parseLine(JSON.stringify(raw), ctx)!;
+      expect(event.raw).toEqual(raw);
+      expect(event.summary).toStartWith(type === "task_complete" ? "task complete" : "turn aborted");
+    }
+  });
+
+  test("Claude turn end and recap keep raw fields and native child timestamps", () => {
+    const ctx = makeContext("claude", { source: "claude", sessionId: "child", subagentId: "child",
+      transcriptPath: "/tmp/agent-child.jsonl", cwd: "/tmp", project: "tmp", harness: "unattributed", mtimeMs: Date.now(), size: 1 });
+    for (const subtype of ["turn_duration", "away_summary"]) {
+      const raw = { type: "system", subtype, durationMs: 2345, summary: "Work recap", timestamp: "2026-10-15T12:00:00Z" };
+      const event = ClaudeSource.parseLine(JSON.stringify(raw), ctx)!;
+      expect(event.raw).toEqual(raw);
+      expect(event.kind).toBe("system");
+      expect(event.ts).toBe(Date.parse(raw.timestamp));
+      expect(event.summary).toContain(subtype === "turn_duration" ? "2345" : "Work recap");
+    }
+    expect(ClaudeSource.parseLine(JSON.stringify({ type: "assistant", timestamp: "2026-10-15T12:00:00Z", message: { content: [
+      { type: "tool_use", name: "Bash", input: { command: "git status", description: "Check working tree" } },
+    ] } }), ctx)?.summary).toBe("Check working tree");
+  });
+});
+
+test("title metadata reads the bounded tail and retains titles as appends push them out of that tail", async () => {
+  const project = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-tmp-tail-titles");
+  mkdirSync(project, { recursive: true });
+  const path = join(project, "tail-title.jsonl");
+  writeFileSync(path, [
+    JSON.stringify({ type: "user", sessionId: "tail-title", cwd: "/tmp", timestamp: "2026-10-15T12:00:00Z" }),
+    JSON.stringify({ type: "padding", value: "x".repeat(300_000) }),
+    JSON.stringify({ type: "custom-title", customTitle: "From tail" }),
+  ].join("\n") + "\n");
+  expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("From tail");
+  appendFileSync(path, JSON.stringify({ type: "padding", value: "x".repeat(600_000) }) + "\n");
+  expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("From tail");
 });

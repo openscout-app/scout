@@ -32,9 +32,14 @@ type TranscriptMetadata = {
   cwd: string | null;
   sessionId: string | null;
   lastEventAt: number | null;
+  aiTitle?: string | null;
+  customTitle?: string | null;
+  agentName?: string | null;
+  title?: string | null;
 };
 
 type ClaudeTranscriptFile = TranscriptFileStat & {
+  workflowRunId?: string;
   parentSessionId?: string;
   subagentId?: string;
   cwd?: string | null;
@@ -81,7 +86,7 @@ function listClaudeSubagentFiles(dir: string): string[] {
   } catch {
     return [];
   }
-  return entries.filter((entry) => /^agent-[a-zA-Z0-9]+\.jsonl$/u.test(entry));
+  return entries.filter((entry) => /^agent-[a-zA-Z0-9_-]+\.jsonl$/u.test(entry));
 }
 
 function pickMostRecentJsonl(dir: string): string | null {
@@ -185,19 +190,27 @@ function parseJsonRecord(line: string): Record<string, unknown> | null {
 function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
   const cached = metadataCache.get(file.path);
   if (cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size) {
-    return {
-      cwd: cached.cwd,
-      sessionId: cached.sessionId,
-      lastEventAt: cached.lastEventAt,
-    };
+    return cached;
   }
 
+  const titles: Pick<TranscriptMetadata, "aiTitle" | "customTitle" | "agentName"> =
+    cached && cached.size <= file.size
+      ? { aiTitle: cached.aiTitle, customTitle: cached.customTitle, agentName: cached.agentName }
+      : {};
+  const captureTitle = (record: Record<string, unknown>) => {
+    const key = record.type === "custom-title" ? "customTitle"
+      : record.type === "agent-name" ? "agentName" : record.type === "ai-title" ? "aiTitle" : null;
+    if (!key) return;
+    const value = record[key] ?? record.title;
+    if (typeof value === "string" && value.trim()) titles[key] = value.trim();
+  };
   const head = readFileHead(file.path);
   let cwd: string | null = null;
   let sessionId: string | null = null;
   for (const line of head.split(/\r?\n/)) {
     const record = parseJsonRecord(line.trim());
     if (!record) continue;
+    if (!cached || cached.size > file.size) captureTitle(record);
     cwd ??= typeof record.cwd === "string" && record.cwd.trim()
       ? record.cwd
       : null;
@@ -207,12 +220,15 @@ function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
         : typeof record.session_id === "string" && record.session_id.trim()
           ? record.session_id
           : null;
-    if (cwd && sessionId) break;
   }
 
   const tail = readFileTail(file);
   const tailLines = tail.content.split(/\r?\n/);
   if (!tail.startsAtBeginning) tailLines.shift();
+  for (const line of tailLines) {
+    const record = parseJsonRecord(line.trim());
+    if (record) captureTitle(record);
+  }
   let lastEventAt: number | null = null;
   for (let index = tailLines.length - 1; index >= 0; index -= 1) {
     const record = parseJsonRecord(tailLines[index]?.trim() ?? "");
@@ -221,7 +237,10 @@ function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
     if (lastEventAt != null) break;
   }
 
-  return rememberMetadata(file, { cwd, sessionId, lastEventAt });
+  return rememberMetadata(file, {
+    cwd, sessionId, lastEventAt, ...titles,
+    title: titles.customTitle ?? titles.agentName ?? titles.aiTitle ?? null,
+  });
 }
 
 function decodeProjectDir(dirName: string): string | null {
@@ -271,20 +290,29 @@ function listRecentClaudeProjectTranscripts(
       try {
         const stats = statSync(path);
         const subagentsDir = join(projectDir, basename(path, ".jsonl"), "subagents");
-        const activeSubagents: Array<{ path: string; mtimeMs: number; size: number; id: string }> = [];
-        for (const subagentFile of listClaudeSubagentFiles(subagentsDir)) {
-          const subagentPath = join(subagentsDir, subagentFile);
-          try {
-            const subagentStats = statSync(subagentPath);
-            if (subagentStats.mtimeMs < cutoff) continue;
-            activeSubagents.push({
-              path: subagentPath,
-              mtimeMs: subagentStats.mtimeMs,
-              size: subagentStats.size,
-              id: subagentFile.slice("agent-".length, -".jsonl".length),
-            });
-          } catch {
-            continue;
+        const activeSubagents: Array<{ path: string; mtimeMs: number; size: number; id: string; workflowRunId?: string }> = [];
+        const directories: Array<{ path: string; workflowRunId?: string }> = [{ path: subagentsDir }];
+        try {
+          for (const run of readdirSync(join(subagentsDir, "workflows"), { withFileTypes: true })) {
+            if (run.isDirectory()) directories.push({ path: join(subagentsDir, "workflows", run.name), workflowRunId: run.name });
+          }
+        } catch { /* No workflow directory on most sessions. */ }
+        for (const directory of directories) {
+          for (const subagentFile of listClaudeSubagentFiles(directory.path)) {
+            const subagentPath = join(directory.path, subagentFile);
+            try {
+              const subagentStats = statSync(subagentPath);
+              if (subagentStats.mtimeMs < cutoff) continue;
+              activeSubagents.push({
+                path: subagentPath,
+                mtimeMs: subagentStats.mtimeMs,
+                size: subagentStats.size,
+                workflowRunId: directory.workflowRunId,
+                id: subagentFile.slice("agent-".length, -".jsonl".length),
+              });
+            } catch {
+              continue;
+            }
           }
         }
         if (stats.mtimeMs < cutoff && activeSubagents.length === 0) continue;
@@ -304,6 +332,7 @@ function listRecentClaudeProjectTranscripts(
             size: subagent.size,
             parentSessionId,
             subagentId: subagent.id,
+            workflowRunId: subagent.workflowRunId,
             cwd,
           });
         }
@@ -445,6 +474,12 @@ function summaryForType(rawType: string, obj: Record<string, unknown>, blocks: u
     const last = typeof obj.lastPrompt === "string" ? obj.lastPrompt : "";
     return clip(`last-prompt: ${last}`);
   }
+  if (rawType === "system" && obj.subtype === "turn_duration") {
+    return `turn duration · ${String(obj.durationMs ?? "?")} ms`;
+  }
+  if (rawType === "system" && obj.subtype === "away_summary") {
+    return clip(`away summary · ${String(obj.summary ?? obj.text ?? obj.content ?? "")}`);
+  }
   if (rawType === "system" && typeof obj.text === "string") {
     return clip(obj.text);
   }
@@ -478,10 +513,8 @@ function parseClaudeLine(line: string, ctx: TailContext): TailEvent | null {
       ? obj.session_id
       : "";
 
-  // Claude's child-agent journals omit wall-clock timestamps entirely. Their
-  // file mtime is still a trustworthy observation time; give each record a
-  // stable, ordered instant near it so the lane can render the actual prompt,
-  // tool work, and reply instead of a blank mtime-only card.
+  // Current child-agent journals carry timestamps. Older timestamp-less
+  // variants use mtime only as a fallback; native timestamps always win.
   const inferredSubagentTimestamp = ctx.transcript.subagentId
     && Number.isFinite(ctx.transcript.mtimeMs)
     ? ctx.transcript.mtimeMs + ctx.lineOffset
@@ -523,28 +556,32 @@ export const ClaudeSource: TranscriptSource = {
   discoverTranscripts(_processes: DiscoveredProcess[], scope: TailDiscoveryScope = "shallow"): DiscoveredTranscript[] {
     const root = projectsRoot();
     if (!existsSync(root)) return [];
-    return listRecentClaudeProjectTranscripts(root, scope).map((file) => {
-      const meta = readClaudeMetadata(file);
-      const cwd = file.cwd ?? meta.cwd ?? fallbackCwdForPath(file.path);
-      const sessionId = file.subagentId
-        ?? meta.sessionId
-        ?? basename(file.path).replace(/\.jsonl$/, "");
-      return {
-        source: SOURCE_NAME,
-        transcriptPath: file.path,
-        sessionId,
-        parentSessionId: file.parentSessionId ?? null,
-        subagentId: file.subagentId ?? null,
-        cwd,
-        project: cwd ? basename(cwd) : projectDirNameForPath(file.path) ?? "(unknown)",
-        harness: "unattributed",
-        lastEventAt: meta.lastEventAt,
-        mtimeMs: file.mtimeMs,
-        size: file.size,
-      };
-    });
+    return listRecentClaudeProjectTranscripts(root, scope).map(claudeTranscriptForFile);
   },
   parseLine(line: string, ctx: TailContext): TailEvent | null {
     return parseClaudeLine(line, ctx);
   },
 };
+
+function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscript {
+  const meta = readClaudeMetadata(file);
+  const cwd = file.cwd ?? meta.cwd ?? fallbackCwdForPath(file.path);
+  const sessionId = file.subagentId
+    ?? meta.sessionId
+    ?? basename(file.path).replace(/\.jsonl$/, "");
+  return {
+    source: SOURCE_NAME,
+    transcriptPath: file.path,
+    sessionId,
+    parentSessionId: file.parentSessionId ?? null,
+    subagentId: file.subagentId ?? null,
+    workflowRunId: file.workflowRunId ?? null,
+    title: meta.title ?? null,
+    cwd,
+    project: cwd ? basename(cwd) : projectDirNameForPath(file.path) ?? "(unknown)",
+    harness: "unattributed",
+    lastEventAt: meta.lastEventAt,
+    mtimeMs: file.mtimeMs,
+    size: file.size,
+  };
+}

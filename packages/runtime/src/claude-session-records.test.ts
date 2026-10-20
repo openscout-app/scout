@@ -240,3 +240,16 @@ test("a missing tmux session is stale evidence, while command failures retain di
   await expect(execSystemFile(process.execPath, ["-e", "process.stderr.write('diagnostic'); process.exit(7)"], { timeoutMs: 2000 }))
     .rejects.toMatchObject({ code: "exit", exitCode: 7, stderr: "diagnostic" });
 });
+
+test("preserves native registry status timestamps and waitingFor verbatim", () => {
+  for (const status of ["busy", "idle", "shell", "waiting"]) {
+    const parsed = parseClaudeSessionRecord(JSON.stringify({
+      pid: 123, sessionId: "native", status,
+      statusUpdatedAt: 1792000000100, updatedAt: 1792000000200,
+      waitingFor: "  permission: Bash\n",
+    }), "/records/123.json");
+    expect(parsed).toMatchObject({ status, statusUpdatedAt: 1792000000100,
+      updatedAt: 1792000000200, waitingFor: "  permission: Bash\n" });
+  }
+  expect(parseClaudeSessionRecord('{"pid":123,"sessionId":"native","status":"unknown"}', "/records/123.json")?.status).toBeNull();
+});
