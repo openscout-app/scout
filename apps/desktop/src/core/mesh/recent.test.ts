@@ -8,7 +8,7 @@ import { loadScoutRecent, projectScoutRecentEntries, type ScoutRecentDeps } from
 
 const now = 1_800_000_000_000;
 const mini = { id: "mini-id", name: "arts-mini", hostName: "arts-mini.local", brokerUrl: "http://advertised-mini:43110" } as NodeDefinition;
-const archie = { id: "archie-id", name: "archie", brokerUrl: "http://archie:43110", lastSeenAt: 1 } as NodeDefinition;
+const archie = { id: "archie-id", name: "archie", brokerUrl: "http://archie:43110", lastSeenAt: Date.now() } as NodeDefinition;
 
 function state(node = mini): MeshNodeStateReport {
   return {
@@ -272,4 +272,17 @@ test("scoped live reads send encoded filters and reject unrelated rows from olde
   expect(machine.entries.map((e) => e.id)).toEqual(["agent-1"]);
   expect(machine.noTimestamp.map((e) => e.id)).toEqual(["endpoint-1"]);
   expect(report.scope).toContain("older peers may cap before filtering");
+});
+
+test("dormant nodes are hidden and --all never probes them; explicit names still resolve", async () => {
+  const dormant = { ...archie, lastSeenAt: Date.now() - 13 * 86400000 };
+  const { deps, calls } = fixture([dormant]);
+  const { loadMachineNodeStates } = await import("./recent.ts");
+  expect((await loadMachineNodeStates({}, deps)).machines).toHaveLength(1);
+  const all = await loadMachineNodeStates({ all: true }, deps);
+  expect(all.machines).toHaveLength(2);
+  expect(all.machines[1]).toMatchObject({ status: "unavailable" });
+  expect(calls.some(call => call.startsWith(dormant.brokerUrl!))).toBe(false);
+  await loadMachineNodeStates({ machine: dormant.id }, deps);
+  expect(calls.some(call => call.startsWith(dormant.brokerUrl!))).toBe(true);
 });

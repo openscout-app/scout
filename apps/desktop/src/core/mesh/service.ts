@@ -1,3 +1,4 @@
+import { visibleMeshNodes } from "@openscout/runtime/mesh-peer-filter";
 import type { NodeDefinition } from "@openscout/protocol";
 import { meshPeerFetch } from "@openscout/runtime";
 import { requestScoutBrokerJson } from "@openscout/runtime/broker-api";
@@ -218,7 +219,7 @@ async function loadMeshTrustSection(
   }
 }
 
-export async function loadMeshStatus(): Promise<MeshStatusReport> {
+export async function loadMeshStatus(options: { all?: boolean } = {}): Promise<MeshStatusReport> {
   const brokerUrl = resolveScoutBrokerUrl();
   const [health, context, tailscale] = await Promise.all([
     readScoutBrokerHealth(brokerUrl),
@@ -227,7 +228,7 @@ export async function loadMeshStatus(): Promise<MeshStatusReport> {
   ]);
 
   const localNode = context?.node ?? null;
-  const nodes = context?.snapshot.nodes ?? {};
+  const nodes = visibleMeshNodes(context?.snapshot.nodes ?? {}, { ...options, localNodeId: localNode?.id });
   const meshId = health.meshId ?? localNode?.meshId ?? null;
   const trust = await loadMeshTrustSection(brokerUrl, health.reachable);
   const warnings = computeWarnings(health, localNode, nodes, tailscale);
@@ -235,8 +236,8 @@ export async function loadMeshStatus(): Promise<MeshStatusReport> {
   return { brokerUrl, health, localNode, meshId, nodes, tailscale, trust, warnings };
 }
 
-export async function loadMeshDoctorReport(): Promise<MeshDoctorReport> {
-  const status = await loadMeshStatus();
+export async function loadMeshDoctorReport(options: { all?: boolean } = {}): Promise<MeshDoctorReport> {
+  const status = await loadMeshStatus(options);
   return { ...status, envVars: readMeshEnvVars() };
 }
 
@@ -390,7 +391,7 @@ function resolveMeshPingUrls(target: string, nodes: Record<string, NodeDefinitio
   ]);
 }
 
-export async function loadMeshNodes(): Promise<{
+export async function loadMeshNodes(options: { all?: boolean } = {}): Promise<{
   brokerUrl: string;
   localNodeId: string | null;
   nodes: Record<string, NodeDefinition>;
@@ -400,6 +401,6 @@ export async function loadMeshNodes(): Promise<{
   return {
     brokerUrl,
     localNodeId: context?.node.id ?? null,
-    nodes: context?.snapshot.nodes ?? {},
+    nodes: visibleMeshNodes(context?.snapshot.nodes ?? {}, { ...options, localNodeId: context?.node.id }),
   };
 }

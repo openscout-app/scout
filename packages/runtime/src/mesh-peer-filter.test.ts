@@ -50,3 +50,16 @@ describe("mesh-peer-filter", () => {
     expect(isCurrentMeshPeerNode(missingBrokerUrl, { localNodeId, meshId: "openscout" })).toBe(false);
   });
 });
+
+import { isDormantMeshNode, visibleMeshNodes, MESH_HOST_DORMANT_MS } from "./mesh-peer-filter.js";
+test("dormancy boundary and display dedup do not mutate discovery or routing", () => {
+  const now = Date.now();
+  const old = { id: "old", name: "old", brokerUrl: "https://host", lastSeenAt: now - MESH_HOST_DORMANT_MS } as NodeDefinition;
+  const fresh = { ...old, id: "fresh", lastSeenAt: now };
+  expect(isDormantMeshNode(old, now - 1)).toBe(false);
+  expect(isDormantMeshNode(old, now)).toBe(true);
+  expect(visibleMeshNodes({ old }, { now })).toEqual({});
+  expect(visibleMeshNodes({ old }, { now, all: true })).toEqual({ old });
+  expect(visibleMeshNodes({ old, fresh }, { now, all: true })).toEqual({ fresh });
+  expect(old.id).toBe("old");
+});

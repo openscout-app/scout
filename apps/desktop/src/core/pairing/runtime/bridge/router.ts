@@ -700,7 +700,8 @@ const mobileRouter = t.router({
     .query(({ input }) => getScoutMobileRuntimeCapabilities(input?.projectRoot)),
 
   meshNodes: procedure
-    .query(() => getMobileMeshNodes()),
+    .input(z.object({ all: z.boolean().optional() }).optional())
+    .query(({ input }) => getMobileMeshNodes(input)),
 
   inbox: procedure
     .query(({ ctx }) => ({

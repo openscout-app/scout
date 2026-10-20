@@ -4,7 +4,7 @@ import { loadScoutMeshOverview, renderScoutMeshOverviewLines, type ScoutMeshOver
 
 export function renderHostsCommandHelp(): string {
   return [
-    "Usage: scout hosts [<host>] [--json]",
+    "Usage: scout hosts [<host>] [--all] [--json]",
     "",
     "The machines in your mesh, read live (3s each): what each is doing, the projects",
     "it holds, and the ask that starts work there. A machine that does not answer is",
@@ -45,11 +45,11 @@ export async function runHostsCommand(context: ScoutCommandContext, args: string
     context.output.writeText(renderHostsCommandHelp());
     return;
   }
-  const positional = args.filter((arg) => !arg.startsWith("--"));
-  const unknown = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--") && arg !== "--all");
+  const unknown = args.filter((arg) => arg.startsWith("--") && arg !== "--all");
   if (unknown.length > 0) throw new ScoutCliError(`unexpected flag for hosts: ${unknown[0]} (see scout hosts --help)`);
   if (positional.length > 1) throw new ScoutCliError("scout hosts takes at most one host name");
   const machine = positional[0];
-  const overview = await loadScoutMeshOverview(machine ? { machine } : {});
+  const overview = await loadScoutMeshOverview({ machine, all: args.includes("--all") });
   context.output.writeValue(overview, (value) => renderHosts(value, Boolean(machine)));
 }

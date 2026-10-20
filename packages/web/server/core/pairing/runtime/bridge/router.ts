@@ -1046,7 +1046,8 @@ const mobileRouter = t.router({
     .query(() => getMobileMeshStatus()),
 
   meshNodes: procedure
-    .query(() => getMobileMeshNodes()),
+    .input(z.object({ all: z.boolean().optional() }).optional())
+    .query(({ input }) => getMobileMeshNodes(undefined, input)),
 
   inbox: procedure
     .query(async ({ ctx }) => ({

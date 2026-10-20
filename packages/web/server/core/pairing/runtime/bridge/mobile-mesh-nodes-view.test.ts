@@ -96,3 +96,18 @@ describe("buildMobileMeshNodes", () => {
     expect(result.nodes[0]!.agents.total).toBe(0);
   });
 });
+
+test("dormant visibility and URL aliases affect display only", () => {
+  const stale = node("old", "old-name", NOW - 13 * 24 * HOUR, { brokerUrl: "https://peer" });
+  const current = node("new", "new-name", NOW, { brokerUrl: "https://peer/" });
+  const source = input({ nodes: { old: stale } });
+  expect(buildMobileMeshNodes(source).nodes).toEqual([]);
+  expect(buildMobileMeshNodes({ ...source, all: true }).nodes[0]?.id).toBe("old");
+  const both = buildMobileMeshNodes(input({ all: true, nodes: { old: stale, new: current },
+    agents: { a: agent("a", "old"), b: agent("b", "new") } }));
+  expect(both.nodes).toHaveLength(1);
+  expect(both.nodes[0]?.id).toBe("new");
+  expect(both.nodes[0]?.nodeIds).toEqual(["new", "old"]);
+  expect(both.nodes[0]?.agents.total).toBe(2);
+  expect(stale.id).toBe("old");
+});

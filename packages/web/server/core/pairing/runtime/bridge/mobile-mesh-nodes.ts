@@ -9,11 +9,13 @@ import { buildMobileMeshNodes, type MobileMeshNodesResponse } from "./mobile-mes
  */
 export async function getMobileMeshNodes(
   loadContext: () => ReturnType<typeof loadScoutBrokerContext> = () => loadScoutBrokerContext(),
+  options: { all?: boolean } = {},
 ): Promise<MobileMeshNodesResponse | null> {
   const context = await loadContext();
   if (!context) return null;
   const snapshot = context.snapshot;
   return buildMobileMeshNodes({
+    all: options.all,
     localNodeId: context.node?.id ?? null,
     nodes: snapshot.nodes ?? {},
     agents: snapshot.agents ?? {},

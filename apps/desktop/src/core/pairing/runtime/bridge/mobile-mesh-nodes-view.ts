@@ -1,3 +1,4 @@
+import { isDormantMeshNode } from "@openscout/runtime/mesh-peer-filter";
 // The phone's view of the broker's mesh nodes (`mobile/mesh/nodes`).
 //
 // Pure: a projection of the broker snapshot's node registry, with the agents
@@ -23,6 +24,7 @@ import type {
 } from "@openscout/protocol";
 
 export type MobileMeshNodesInput = {
+  all?: boolean;
   localNodeId: string | null;
   nodes: Record<string, NodeDefinition>;
   agents: Record<string, AgentDefinition>;
@@ -168,8 +170,14 @@ export function buildMobileMeshNodes(input: MobileMeshNodesInput): MobileMeshNod
   const kept = new Map<string, NodeDefinition>();
   const idsByHost = new Map<string, string[]>();
   const hostByNodeId = new Map<string, string>();
-  for (const node of Object.values(input.nodes)) {
-    const key = meshHostKey(node.hostName || node.name || node.id);
+  const hostByUrl = new Map<string, string>();
+  const candidates = Object.values(input.nodes).sort((a, b) =>
+    (b.lastSeenAt ?? b.registeredAt ?? 0) - (a.lastSeenAt ?? a.registeredAt ?? 0));
+  for (const node of candidates) {
+    if (!input.all && node.id !== localNodeId && isDormantMeshNode(node, now)) continue;
+    const url = node.brokerUrl?.replace(/\/$/, "");
+    const key = (url ? hostByUrl.get(url) : undefined) ?? meshHostKey(node.hostName || node.name || node.id);
+    if (url) hostByUrl.set(url, key);
     if (!key) continue;
     hostByNodeId.set(node.id, key);
     idsByHost.set(key, [...(idsByHost.get(key) ?? []), node.id]);

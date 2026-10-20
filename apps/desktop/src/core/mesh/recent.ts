@@ -1,3 +1,4 @@
+import { isDormantMeshNode, visibleMeshNodes } from "@openscout/runtime/mesh-peer-filter";
 import { epochMs, type NodeDefinition } from "@openscout/protocol";
 import { requestScoutBrokerJson } from "@openscout/runtime/broker-api";
 import { resolveBrokerSocketPathForBaseUrl } from "@openscout/runtime/broker-process-manager";
@@ -204,11 +205,14 @@ export type ScoutMachineNodeState = {
   local: boolean;
 } & ({ status: "ok"; report: MeshNodeStateReport } | { status: "unavailable"; error: string });
 
-export type ScoutMachineNodeStateOptions = { machine?: string; nodeIds?: string[]; projectRoot?: string; agentId?: string };
+export type ScoutMachineNodeStateOptions = { all?: boolean; machine?: string; nodeIds?: string[]; projectRoot?: string; agentId?: string };
 
 /**
  * Read node-state from every machine this broker knows (or the selected ones),
- * each under its own deadline. Shared by `scout check` and the mesh overview.
+ * each under its own deadline. Shared by `scout check`, `scout hosts` and
+ * route_context through the mesh overview. This is the owner of their 3s
+ * per-host probe; inventory evidence shaping never performs this request.
+ * Dormant records stay in the inventory but only an explicit name probes them.
  */
 export async function loadMachineNodeStates(
   options: ScoutMachineNodeStateOptions = {},
@@ -219,7 +223,7 @@ export async function loadMachineNodeStates(
   const peerFetch = deps.peerFetch ?? createMeshPeerFetch({ log: () => {} });
   const { localNode, knownNodes } = await loadScoutMachineInventory(deps);
   const nodes = Object.values({ ...knownNodes, [localNode.id]: localNode });
-  const selected = (options.machine ? resolveScoutMachines(nodes, options.machine) : nodes)
+  const selected = (options.machine ? resolveScoutMachines(nodes, options.machine) : Object.values(visibleMeshNodes(Object.fromEntries(nodes.map(node => [node.id, node])), { localNodeId: localNode.id, all: options.all })))
     .filter((node) => !options.nodeIds || options.nodeIds.includes(node.id));
   const query = new URLSearchParams();
   if (options.projectRoot) query.set("projectRoot", options.projectRoot);
@@ -227,6 +231,9 @@ export async function loadMachineNodeStates(
   const path = NODE_STATE_PATH + (query.size ? `?${query}` : "");
   const machines = await Promise.all(selected.map(async (node): Promise<ScoutMachineNodeState> => {
     const identity = { node, nodeId: node.id, nodeName: node.name ?? null, local: node.id === localNode.id };
+    if (!options.machine && !identity.local && isDormantMeshNode(node)) {
+      return { ...identity, status: "unavailable", error: `dormant; last seen ${Math.floor((Date.now() - (node.lastSeenAt ?? node.registeredAt ?? 0)) / 86400000)} days ago; run scout mesh ping ${node.name ?? node.id} to probe explicitly` };
+    }
     try {
       const report = await withinDeadline(timeoutMs, async (signal) => {
         if (identity.local) return requireNodeState(await readLocal(path, signal), node.id);

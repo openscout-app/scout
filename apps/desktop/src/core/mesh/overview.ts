@@ -42,7 +42,7 @@ export function startWorkCommand(host: string, projectRoot?: string): string {
 }
 
 export async function loadScoutMeshOverview(
-  options: { machine?: string } = {},
+  options: { machine?: string; all?: boolean } = {},
   deps: ScoutRecentDeps = {},
 ): Promise<ScoutMeshOverview> {
   const { machines: states } = await loadMachineNodeStates(options, deps);

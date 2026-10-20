@@ -67,19 +67,19 @@ export async function runMeshCommand(context: ScoutCommandContext, args: string[
   switch (subcommand) {
     case "":
     case "status": {
-      const report = await loadMeshStatus();
+      const report = await loadMeshStatus({ all: args.includes("--all") });
       context.output.writeValue(report, renderMeshStatus);
       return;
     }
 
     case "doctor": {
-      const report = await loadMeshDoctorReport();
+      const report = await loadMeshDoctorReport({ all: args.includes("--all") });
       context.output.writeValue(report, renderMeshDoctor);
       return;
     }
 
     case "nodes": {
-      const result = await loadMeshNodes();
+      const result = await loadMeshNodes({ all: args.includes("--all") });
       context.output.writeValue(result, renderMeshNodes);
       return;
     }

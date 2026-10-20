@@ -6,11 +6,12 @@ import { buildMobileMeshNodes, type MobileMeshNodesResponse } from "./mobile-mes
  * `scout mesh nodes` reads), one per host, with the agents the broker
  * attributes to each. Null when the broker can't be read.
  */
-export async function getMobileMeshNodes(): Promise<MobileMeshNodesResponse | null> {
+export async function getMobileMeshNodes(options: { all?: boolean } = {}): Promise<MobileMeshNodesResponse | null> {
   const context = await loadScoutBrokerContext();
   if (!context) return null;
   const snapshot = context.snapshot;
   return buildMobileMeshNodes({
+    all: options.all,
     localNodeId: context.node?.id ?? null,
     nodes: snapshot.nodes ?? {},
     agents: snapshot.agents ?? {},
