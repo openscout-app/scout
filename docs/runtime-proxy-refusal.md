@@ -41,6 +41,10 @@ also construct fresh headers. `packages/runtime/src/broker-api.ts` adds
 accept/content-type headers. The regression suite exercises that client
 against the real gate to preserve local web access. The separate phone relay
 forwards selected headers to the web surface, not wholesale to the broker.
+The local tail/events WebSocket path in `packages/web/server/index.ts` also
+constructs a new upstream connection to `/trpc` without browser headers. Its
+peer-doorway branch forwards only selected headers to a peer web server, not
+the local runtime. Vite asset proxying is a separate dev-server path.
 
 ## Limits
 

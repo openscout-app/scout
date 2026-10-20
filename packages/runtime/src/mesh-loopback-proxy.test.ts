@@ -83,11 +83,11 @@ describe("loopback proxy refusal", () => {
   });
   test("WebSocket proxy evidence is refused before an upgrade", async () => {
     const f = await runtime();
-    let reply = "";
-    const socket = { remoteAddress: "127.0.0.1", end: (data: string) => { reply += data; } } as unknown as Duplex;
+    let reply = "", destroyed = false;
+    const socket = { remoteAddress: "127.0.0.1", end: (data: string, flushed: () => void) => { reply += data; flushed(); }, destroy: () => { destroyed = true; } } as unknown as Duplex;
     const request = { method: "GET", url: "/trpc", headers: { "x-forwarded-host": "node.example.ts.net" } } as IncomingMessage;
     expect(f.gate.gateUpgrade(request, socket)).toBe(false);
-    expect(reply).toContain("403 Forbidden"); expect(f.handled()).toBe(0);
+    expect(reply).toContain("403 Forbidden"); expect(destroyed).toBe(true); expect(f.handled()).toBe(0);
   });
 });
 

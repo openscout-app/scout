@@ -780,7 +780,7 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
     gateUpgrade(request, socket) {
       if (refusesLoopbackHttpProxy(classifyMeshTransport((socket as { remoteAddress?: string }).remoteAddress), request.headers)) {
         socket.end("HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-type: application/json\r\n\r\n" +
-          JSON.stringify({ error: LOOPBACK_HTTP_PROXY_REFUSAL, detail: LOOPBACK_HTTP_PROXY_DETAIL }));
+          JSON.stringify({ error: LOOPBACK_HTTP_PROXY_REFUSAL, detail: LOOPBACK_HTTP_PROXY_DETAIL }), () => socket.destroy());
         return false;
       }
       if (deps.localAdminKey || request.url?.startsWith(`${IROH_INGRESS_PREFIX}/`)) { socket.write("HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n"); socket.destroy(); return false; }
