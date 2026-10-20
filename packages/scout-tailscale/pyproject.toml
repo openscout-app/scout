@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scout-tailscale"
-version = "0.3.1"
+version = "0.3.2"
 description = "Direct, owner-approved guest access to Scout machines over a private network."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -4,8 +4,10 @@ Direct, owner-approved guest access to an owner's Scout machines over a
 private network (Tailscale). The client holds an Ed25519 key; the owner approves the matching
 code in Scout on their Mac, which installs a scoped grant on its own broker.
 Every request is signed and sent over TLS pinned to the node's signed card.
-The hosted service coordinates pairing and discovery; agent tasks and replies
-travel directly to the approved machine.
+Hosted profile mode coordinates pairing and discovery; agent tasks and replies
+travel directly to the approved machine. Out-of-band bootstrap mode needs no
+hosted Scout service: the owner installs a grant locally and shares the signed
+bootstrap, while the guest verifies the node key independently.
 
 Protocol: `scout-guest/1`. This standalone client is MIT-licensed; see [LICENSE](LICENSE).
 
@@ -17,26 +19,27 @@ request and message. Queued retries recheck grant validity before proceeding.
 
 ## Install
 
-Requires macOS or Linux and Python 3.11+. The only dependency is `cryptography>=42,<51`
-(tested on 42.0.8 and 50.0.1). Never use `sudo` or `--break-system-packages`.
+Source release candidate: **0.3.2, not published by this change**. See
+[CHANGELOG.md](CHANGELOG.md) and the maintainer [release checklist](RELEASE.md).
+A version bump or local build is not evidence that a public release exists.
+No candidate download URL is asserted here. Obtain the reviewed wheel and
+checksums through a trusted channel until maintainers publish a release.
+This pilot client uses its own version, not the main Scout version. Do not
+install a similarly named PyPI/npm package or replace the full `scout` CLI.
 
-Download the wheel and SHA-256 checksums from the canonical
-[0.3.1 GitHub release](https://github.com/oscout/scout/releases/tag/scout-tailscale-v0.3.1).
-This pilot client has its own version and is not published on PyPI or npm.
-Do not install a similarly named registry package.
+Requires macOS or Linux and Python 3.11+. The only runtime dependency is
+`cryptography>=42,<51`. Never use sudo pip or `--break-system-packages`.
+Check the release's exact requirements and artifact identity before installing.
+Checksums verify bytes, not the identity of an untrusted checksum publisher.
 
 Before upgrading, check `command -v scout-tailscale` and
 `scout-tailscale --version`. Keep the existing environment, `SCOUT_TAILSCALE_HOME`,
-identity, pins and proxy settings. Install the verified wheel into that same
-isolated environment; installing the client does not pair or grant access.
-
-For a fresh installation, download and verify the exact release bytes:
+identity, pins and proxy settings. Installing the client does not pair or grant
+access. For a fresh installation from reviewed local files:
 
 ```sh
-curl -fL -O https://github.com/oscout/scout/releases/download/scout-tailscale-v0.3.1/scout_tailscale-0.3.1-py3-none-any.whl &&
-curl -fL -O https://github.com/oscout/scout/releases/download/scout-tailscale-v0.3.1/SHA256SUMS &&
 shasum -a 256 -c SHA256SUMS &&
-uv tool install ./scout_tailscale-0.3.1-py3-none-any.whl &&
+uv tool install ./scout_tailscale-0.3.2-py3-none-any.whl &&
 scout-tailscale --version
 ```
 
@@ -45,17 +48,38 @@ If uv is unavailable, use a dedicated virtualenv:
 ```sh
 shasum -a 256 -c SHA256SUMS &&
 python3 -m venv "$HOME/.local/share/scout-tailscale" &&
-"$HOME/.local/share/scout-tailscale/bin/python" -m pip install ./scout_tailscale-0.3.1-py3-none-any.whl &&
+"$HOME/.local/share/scout-tailscale/bin/python" -m pip install --only-binary=:all: ./scout_tailscale-0.3.2-py3-none-any.whl &&
 "$HOME/.local/share/scout-tailscale/bin/scout-tailscale" --version
 ```
 
-Use the installed executable's full path if its directory is not on PATH.
-For a local development build, run `python -m build --wheel` in this package;
-a local wheel is not evidence of an official public release.
+Use the executable's full path if its directory is not on PATH. The Linux
+admission and no-hosted-service guide is
+[here](https://github.com/oscout/scout/blob/main/docs/linux-tailnet-guest.md);
+ship those instructions only after their CLI prerequisites are merged.
 
-## Use
+## Without hosted pairing
 
-The owner needs Scout running on the destination Mac and a published
+On the guest, run `scout-tailscale --json key` and share only `publicKey`.
+The owner installs a grant using a runtime-local admin client, for example
+`scout mesh guests grant` in a Scout build containing that command, and exports
+its bootstrap as JSON. This command is not in Scout 0.3.9. Verify the node key
+through a separate trusted channel, then import the owner's file:
+
+```sh
+scout-tailscale connect --bootstrap grant.json --node-key '<verified-node-key-id>' --endpoint '<advertised-https-endpoint>' --proxy direct
+scout-tailscale who
+```
+
+The bootstrap must include `bootstrap`, `allowed_targets`, and `expires_at`.
+The runtime must already expose its authenticated mesh TLS endpoint on the
+private network. Never expose privileged loopback through Serve or Funnel.
+Bootstrap import verifies the signed card, pins TLS, and requires a signed
+reachability probe before reporting connected. It neither enrolls a Tailscale
+node nor creates a Scout grant. No hosted payload or bootstrap fallback occurs.
+
+## Hosted profile mode
+
+For this separate mode, the owner needs Scout running on the destination Mac and a published
 `oscout.net` profile with assistant requests enabled. Replace `<owner>` with
 that profile's handle. The owner approves the matching code and permitted
 agent IDs on that Mac; Tailscale reachability alone does not grant access.

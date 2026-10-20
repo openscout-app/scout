@@ -338,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     connect = sub.add_parser("connect", help="request access from a profile owner and pair")
     connect.add_argument("--owner", help="profile, e.g. https://oscout.net/arach")
-    connect.add_argument("--bootstrap", help="pair from a bootstrap file delivered out of band (fixtures)")
+    connect.add_argument("--bootstrap", help="pair from a bootstrap file delivered out of band")
     connect.add_argument("--node-key", help="with --bootstrap: the node key id, from a separate trusted channel")
     connect.add_argument("--endpoint", help="one of the endpoints the node's signed card lists")
     connect.add_argument("--name", default=platform.node().split(".")[0].lower() or "scout-guest", help="how you appear to the owner")
