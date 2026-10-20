@@ -34,6 +34,15 @@ export type TestConversationIdentity = {
   participantIds?: string[];
 };
 
+// A port the OS just confirmed free. A random pick in 38000-40000 sat inside
+// Linux's ephemeral range, so CI runners' own outgoing connections took it.
+function freePort(): number {
+  const probe = Bun.serve({ hostname: DEFAULT_BROKER_HOST, port: 0, fetch: () => new Response() });
+  const { port } = probe;
+  probe.stop(true);
+  return port;
+}
+
 export function createBrokerDaemonTestHarness() {
   function expectOpaqueDirectConversation(
     conversation: TestConversationIdentity | undefined,
@@ -118,7 +127,7 @@ export function createBrokerDaemonTestHarness() {
     preload?: string;
   } = {}): Promise<BrokerHarness> {
     const controlHome = input.controlHome ?? mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
-    const port = 38000 + Math.floor(Math.random() * 2000);
+    const port = freePort();
     const baseUrl = buildDefaultBrokerUrl(DEFAULT_BROKER_HOST, port);
     const localAdminKey = input.protectedLocal ? randomBytes(32).toString("hex") : undefined;
     const adminKeyFile = join(controlHome, "admin-key");

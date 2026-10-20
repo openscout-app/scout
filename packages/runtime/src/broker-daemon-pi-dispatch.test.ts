@@ -91,8 +91,11 @@ rl.on("line", line => {
           value => ["completed", "failed"].includes(value.flights[continued.flight.id]?.state));
         expect(resumed.flights[continued.flight.id].state).toBe("completed");
         expect(continued.targetAgentId).toBe(receipt.targetAgentId);
-        const messages = Object.values(snapshot.messages) as any[];
-        expect(messages.some(m => m.body === flight.output && m.actorId === receipt.targetAgentId)).toBe(true);
+        // The reply message can land just after its flight reads completed, so wait for it.
+        const isReply = (m: any) => m.body === flight.output && m.actorId === receipt.targetAgentId;
+        const replied = await broker.waitFor(() => broker.getJson<any>(harness.baseUrl, "/v1/snapshot"),
+          value => (Object.values(value.messages) as any[]).some(isReply));
+        expect((Object.values(replied.messages) as any[]).some(isReply)).toBe(true);
         const args = JSON.parse(readFileSync(argvLog, "utf8"));
         expect(args.slice(0, 6)).toEqual(["--mode", "rpc", "--model", "fixture/fixture-model", "--thinking", "off"]);
       }
