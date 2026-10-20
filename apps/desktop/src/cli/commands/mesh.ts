@@ -25,6 +25,9 @@ import {
   runMeshTrustCommand,
 } from "./mesh-trust.ts";
 
+import { resolveScoutBrokerUrl } from "../../core/broker/service.ts";
+import { runMeshGuestsCommand } from "./mesh-guests.ts";
+
 const MESH_HELP = `scout mesh — Mesh status and diagnostics
 
 Subcommands:
@@ -51,6 +54,9 @@ Scoped identity and resource access:
 
 Approvals across machines:
   scout mesh approvals    Share this Mac's permission requests with a peer, or watch theirs
+
+Direct guest access:
+  scout mesh guests       List, grant, or revoke key-bound guest access (--help)
 
 Legacy machine trust (docs/proposals/mesh-trust-cone.md):
   scout mesh peers        List trusted peers
@@ -152,6 +158,10 @@ export async function runMeshCommand(context: ScoutCommandContext, args: string[
       await runMeshApprovalsCommand(context, args.slice(1));
       return;
     }
+
+    case "guests":
+      await runMeshGuestsCommand(context, args.slice(1), { brokerUrl: resolveScoutBrokerUrl() });
+      return;
 
     case "peers":
       await runMeshPeersCommand(context, args.slice(1));

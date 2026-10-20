@@ -71,6 +71,35 @@ class FixtureEndToEnd(unittest.TestCase):
                                     "--endpoint", f"https://127.0.0.1:{self.port}")
         self.assertEqual((code, result.get("verified")), (0, True), result)
 
+    def test_scout_mesh_guests_exports_a_usable_bootstrap_and_revokes(self):
+        home = self.dir / "cli-client" / "state"
+        _, key = self.run_cli(home, "key")
+        entry = ROOT.parents[1] / "apps" / "desktop" / "bin" / "scout.ts"
+        env = {**os.environ, "OPENSCOUT_INSTANCE": "prod", "OPENSCOUT_BROKER_URL": f"http://127.0.0.1:{self.admin}",
+               "OPENSCOUT_HOME": str(self.dir / "owner"), "SCOUT_HOME": str(self.dir / "owner")}
+
+        def owner(*args):
+            result = subprocess.run(["bun", str(entry), "mesh", "guests", *args, "--json"],
+                                    check=True, capture_output=True, text=True, env=env, timeout=20)
+            return json.loads(result.stdout)
+
+        claim = owner("grant", key["publicKey"], "--label", "CLI guest", "--agent", "fixture.echo",
+                      "--expires-at", str(int(time.time() * 1000) + 60_000), "--request-id", "cli-bootstrap")
+        self.assertEqual(claim["allowed_targets"], ["fixture.echo"])
+        self.assertIsInstance(claim["expires_at"], str)
+        path = self.dir / "cli-bootstrap.json"
+        path.write_text(json.dumps(claim))
+        code, connected = self.run_cli(home, "connect", "--bootstrap", str(path),
+                                       "--node-key", self.info["nodeKeyId"],
+                                       "--endpoint", f"https://127.0.0.1:{self.port}", "--proxy", "direct")
+        self.assertEqual((code, connected.get("verified")), (0, True), connected)
+        code, result = self.run_cli(home, "ask", "--to", "fixture.echo", "--wait", "20", "CLI bootstrap")
+        self.assertEqual((code, result["state"]), (0, "completed"), result)
+        self.assertTrue(owner("revoke", "--request-id", "cli-bootstrap")["ok"])
+        with self.assertRaises(GuestError) as caught:
+            GuestClient(Store(home)).ask("fixture.echo", "revoked", "cli-revoked-1")
+        self.assertEqual(caught.exception.status, 401)
+
     def test_ask_and_result_through_the_real_gate(self):
         home = self.dir / "client-a" / "state"
         self.enroll(home, "e2e-a")

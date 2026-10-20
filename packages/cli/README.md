@@ -49,6 +49,12 @@ Installing the package does not silently start services. `scout setup`
 configures the local broker, starts it only when unhealthy, and verifies its own
 outcome. `scout doctor` remains optional later troubleshooting.
 
+## Direct guest access
+
+Use `scout mesh guests` to list, grant, and revoke key-bound guest access to
+selected agents without a hosted service. See the [direct guest guide](../../docs/mesh-guests.md)
+for bootstrap export, client import, expiry, and revocation.
+
 ## Make your first handoff: Claude Code or Codex
 
 From your repository, ask for a small, read-only task. The selected harness

@@ -8,7 +8,8 @@ export function shouldEnsureBrokerUptodateForCommand(command: string | null, arg
   if (command === "who" || command === "check" || command === "recent" || command === "where" || command === "locate" || command === "route" || command === "hosts" || command === "whoami") return false;
   // scout-base supervises the mesh bridge; a bridge (re)start that restarts the
   // broker service would take down its own supervisor.
-  if (command === "mesh" && args[0] === "bridge") return false;
+  // Guest administration is HTTP-only and must not manage the broker lifecycle.
+  if (command === "mesh" && (args[0] === "bridge" || args[0] === "guests")) return false;
   // Local-only knowledge search does not need broker maintenance, and the web
   // download commands only restart the web server, never the broker.
   if (command === "web") return false;
