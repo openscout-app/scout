@@ -23,6 +23,7 @@ import { applyInvocationStatusPatch } from "./broker-local-invocation-helpers.js
 import { BrokerLocalInvocationService } from "./broker-local-invocation-service.js";
 import { BrokerInvocationResultDeliveryService, matchesPendingInvocationResultReply, invocationResultMessageId } from "./broker-invocation-result-delivery-service.js";
 import { DispatchStalledError } from "./dispatch-stalled.js";
+import { DeliveryBlockedError } from "./delivery-blocked.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
 function testAgent(input: Partial<AgentDefinition> = {}): AgentDefinition {
@@ -1039,6 +1040,32 @@ describe("BrokerLocalInvocationService", () => {
         lastFailureStage: "dispatch_stalled",
         lastError: "tmux dispatch for session session-live left the prompt in the composer after submit + 1 retry.",
       }),
+    }));
+    expect(harness.statusMessages).toHaveLength(1);
+  });
+
+  test("a logged-out harness fails the ask with the reason and keeps the endpoint routable", async () => {
+    const harness = createHarness({
+      endpoint: testEndpoint({ id: "endpoint-tmux", transport: "tmux", state: "idle" }),
+      invokeError: new DeliveryBlockedError({
+        stage: "harness_not_logged_in",
+        summary: "Claude Code is not logged in.",
+        message: "Claude Code in this terminal is not logged in.",
+      }),
+      now: 32_000,
+    });
+
+    harness.seedFlight(testFlight());
+    await harness.service.execute(testInvocation());
+
+    expect(harness.persistedFlights.at(-1)).toEqual(expect.objectContaining({
+      state: "failed",
+      summary: expect.stringContaining("Claude Code is not logged in."),
+      metadata: expect.objectContaining({ failureStage: "harness_not_logged_in" }),
+    }));
+    expect(harness.persistedEndpoints.at(-1)).toEqual(expect.objectContaining({
+      state: "idle",
+      metadata: expect.objectContaining({ lastFailureStage: "harness_not_logged_in" }),
     }));
     expect(harness.statusMessages).toHaveLength(1);
   });

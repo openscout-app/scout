@@ -32,10 +32,14 @@ import {
   assertScoutAgentNameForWrite,
   epochMs,
   isScoutReservedAgentName,
+  isScoutSessionHandle,
   normalizeAgentSelectorSegment,
+  parseScoutSessionHostAddress,
 } from "@openscout/protocol";
 
 import { DispatchStalledError } from "./dispatch-stalled.js";
+import { DeliveryBlockedError } from "./delivery-blocked.js";
+import { runtimeSessionHandleForEndpoint } from "./runtime-session-handle.js";
 import {
   claudeTranscriptPathForSession,
   observeClaudeSessionForTmuxSession,
@@ -4037,6 +4041,26 @@ export function tmuxPaneTailBlockingHarnessDialog(paneTail: string): string | nu
   return null;
 }
 
+/**
+ * Claude Code answers a prompt with "Not logged in · Please run /login" when
+ * its worker has no usable credentials, then shows "Not logged in · Run
+ * /login" in the status line above an idle composer. No reply will ever come,
+ * so the ask fails with the login step instead of reporting "still working".
+ * Only the lines just above the composer count, so an agent quoting the text
+ * earlier in its transcript is not mistaken for the error.
+ */
+export function tmuxPaneTailHarnessLoginError(paneTail: string): string | null {
+  const lines = stripTerminalControlSequences(paneTail).split(/\r?\n/);
+  const anchor = findActiveTmuxComposerAnchor(lines);
+  if (!anchor) return null;
+  const aboveComposer = lines.slice(Math.max(0, anchor.index - 8), anchor.index);
+  const loggedOut = aboveComposer.some((line) =>
+    /^\s*⎿\s*Not logged in\s*·\s*Please run \/login\s*$/i.test(line)
+    || /^\s{8,}Not logged in\s*·\s*Run \/login\s*$/i.test(line));
+  if (!loggedOut || !tmuxPaneTailShowsReadyComposer(paneTail)) return null;
+  return "Claude Code in this terminal is not logged in. Run `claude` on this machine, use /login, then send the ask again.";
+}
+
 export function tmuxPaneTailShowsReadyComposer(paneTail: string): boolean {
   if (tmuxPaneTailBlockingHarnessDialog(paneTail)) {
     return false;
@@ -4247,10 +4271,28 @@ export function exactClaudeNativeSessionForDelivery(endpoint: AgentEndpoint, inv
   if (endpoint.transport !== "tmux" || endpoint.harness !== "claude") return null;
   const target = invocation.execution?.targetSessionId?.trim()
     || (typeof invocation.metadata?.targetSessionId === "string" ? invocation.metadata.targetSessionId.trim() : "");
+  const nativeId = endpointMetadataString(endpoint, "nativeSessionId") ?? endpointMetadataString(endpoint, "externalSessionId");
+  // A `sess.<token>[@host]` address names a Scout session, not a Claude id.
+  // When it names this endpoint, continue the endpoint's own native session;
+  // the live-process check below still verifies it before anything is typed.
+  const handle = parseScoutSessionHostAddress(target)?.handle ?? (isScoutSessionHandle(target) ? target : null);
+  if (handle) {
+    if (runtimeSessionHandleForEndpoint(endpoint) !== handle) {
+      throw new DeliveryBlockedError({
+        stage: "exact_session_mismatch",
+        summary: "The session address does not name this terminal's session.",
+        message: `Exact Claude continuation target ${target} does not name session ${endpoint.id}; no task was sent.`,
+      });
+    }
+    if (nativeId) return nativeId;
+    if (endpoint.metadata?.flatDispatch === true) {
+      throw new Error("Exact Claude continuation has no native session id; no task was sent.");
+    }
+    return null;
+  }
   const stableSelectors = [endpoint.id, endpoint.sessionId, endpointMetadataString(endpoint, "tmuxSession")];
   if (target && !stableSelectors.includes(target)) return target;
   if (endpoint.metadata?.flatDispatch !== true) return null;
-  const nativeId = endpointMetadataString(endpoint, "nativeSessionId") ?? endpointMetadataString(endpoint, "externalSessionId");
   if (!nativeId) throw new Error("Exact Claude continuation has no native session id; no task was sent.");
   return nativeId;
 }
@@ -4269,7 +4311,11 @@ export async function requireClaudeNativeSessionBeforeDelivery(
     const observed = await options.observe();
     if (observed) {
       if (observed.sessionId !== nativeSessionId) {
-        throw new Error(`Exact Claude continuation expected session ${nativeSessionId}, but the live tmux process owns ${observed.sessionId}; no task was sent.`);
+        throw new DeliveryBlockedError({
+          stage: "exact_session_mismatch",
+          summary: "This terminal is running a different Claude session than the one asked for.",
+          message: `Exact Claude continuation expected session ${nativeSessionId}, but the live tmux process owns ${observed.sessionId}; no task was sent.`,
+        });
       }
       return;
     }
@@ -6522,23 +6568,40 @@ export async function invokeLocalAgentEndpoint(
         ? null
         : `tmux session ${onlineRecord.tmuxSession} exited before ${agentRuntimeId} replied.`
       : undefined,
+    blockedError: onlineRecord.transport === "tmux" && onlineRecord.harness === "claude" && onlineRecord.tmuxSession
+      ? async () => claudeLoginBlockedError(await captureTmuxPaneTail(onlineRecord.tmuxSession, 40).catch(() => ""))
+      : undefined,
   });
   return { output, ...await observedSessionMetadata() };
 }
 
-async function waitForLocalAgentReply(input: {
+function claudeLoginBlockedError(paneTail: string): DeliveryBlockedError | null {
+  const message = tmuxPaneTailHarnessLoginError(paneTail);
+  return message
+    ? new DeliveryBlockedError({ stage: "harness_not_logged_in", summary: "Claude Code is not logged in.", message })
+    : null;
+}
+
+export async function waitForLocalAgentReply(input: {
   agentRuntimeId: string;
   invocation: InvocationRequest;
   flightId: string;
   askedAt: number;
   timeoutSeconds: number;
   exitedError?: () => Promise<string | null>;
+  /** The harness is alive but will never reply (for example, logged out). */
+  blockedError?: () => Promise<DeliveryBlockedError | null>;
+  readSnapshot?: () => Promise<unknown>;
   permissionWait?: () => Promise<boolean>;
 }): Promise<string> {
   let deadline = Date.now() + input.timeoutSeconds * 1000;
   let nextLivenessCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
+  let nextBlockedCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
   while (Date.now() <= deadline) {
-    const output = localAgentReplyFromSnapshot(await readBrokerReplySnapshot(), input);
+    // One slow snapshot read on a busy runtime is not the agent failing; skip
+    // this poll and let the deadline bound the wait.
+    const snapshot = await (input.readSnapshot ?? readBrokerReplySnapshot)().catch(() => null);
+    const output = snapshot ? localAgentReplyFromSnapshot(snapshot, input) : null;
     if (output !== null) return output;
 
     if (input.permissionWait) {
@@ -6549,6 +6612,11 @@ async function waitForLocalAgentReply(input: {
       nextLivenessCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
       const exited = await input.exitedError();
       if (exited) throw new Error(exited);
+    }
+    if (input.blockedError && Date.now() >= nextBlockedCheckAt) {
+      nextBlockedCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
+      const blocked = await input.blockedError();
+      if (blocked) throw blocked;
     }
 
     await sleep(500);
@@ -6599,6 +6667,9 @@ async function invokeAttachedLiveTerminalEndpoint(
     askedAt,
     timeoutSeconds: invocation.timeoutMs ? Math.max(30, Math.floor(invocation.timeoutMs / 1000)) : 300,
     exitedError: async () => await isAttachedLiveTerminalEndpointAlive(endpoint) ? null : goneError,
+    blockedError: harness === "claude" && endpoint.transport !== "ghostty"
+      ? async () => claudeLoginBlockedError(await captureTmuxPaneTail(endpoint.pane!, 40).catch(() => ""))
+      : undefined,
   });
   return { output };
 }

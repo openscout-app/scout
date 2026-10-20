@@ -34,6 +34,7 @@ import {
   resolveLocalAgentScoutCliPath,
   startLocalAgent,
   stripLocalAgentReplyMetadata,
+  waitForLocalAgentReply,
   waitForReadyComposer,
 } from "./local-agents";
 import { buildCardlessSessionEndpoint } from "./broker-cardless-session";
@@ -1367,6 +1368,21 @@ describe("terminal broker reply capture", () => {
   });
   test("retains legacy tagged reply compatibility", () => {
     expect(localAgentReplyFromSnapshot({ messages: { reply: { class: "agent", actorId: "session-mini", body: "[ask:legacy-marker] done", createdAt: 11_000 } } }, input)).toBe("done");
+  });
+  test("a slow snapshot read skips one poll instead of failing the ask", async () => {
+    const reply = { class: "agent", actorId: input.agentRuntimeId, conversationId: "chn-smoke", replyToMessageId: "msg-smoke", body: "done", createdAt: 11_000 };
+    let reads = 0;
+    const output = await waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => {
+        reads += 1;
+        if (reads === 1) throw new DOMException("The operation timed out.", "TimeoutError");
+        return { messages: { reply } };
+      },
+    });
+    expect(output).toBe("done");
+    expect(reads).toBe(2);
   });
 });
 

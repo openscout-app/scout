@@ -6,6 +6,7 @@ import {
   buildTmuxPasteBufferArgs,
   tmuxPaneTailBlockingHarnessDialog,
   tmuxPaneTailContainsPromptFragment,
+  tmuxPaneTailHarnessLoginError,
   tmuxPaneTailShowsReadyComposer,
   tmuxVerifyDeadlineMs,
 } from "./local-agents";
@@ -370,5 +371,49 @@ describe("Claude folder-trust dialog", () => {
 
   test("an ordinary ready composer is not blocking", () => {
     expect(tmuxPaneTailBlockingHarnessDialog(paneTail(["❯ ", "─".repeat(40)]))).toBeNull();
+  });
+});
+
+// Representative logged-out Claude terminal, with synthetic task and session data.
+const claudeLoggedOutPane = paneTail([
+  "❯ New broker ask from operator. Task: Inspect the test fixture.",
+  "  Report the result.",
+  "  ⎿  Not logged in · Please run /login",
+  "",
+  "✻ Crunched for 2s · done 8:51 PM",
+  "",
+  `${" ".repeat(132)}Not logged in · Run /login`,
+  `${"─".repeat(120)} session-example-relay-agent ─`,
+  "❯ ",
+  "─".repeat(160),
+  "  Scout | Claude | example-project",
+  "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+]);
+
+describe("Claude login error", () => {
+  test("a logged-out worker is reported with the login step", () => {
+    expect(tmuxPaneTailHarnessLoginError(claudeLoggedOutPane)).toContain("/login");
+  });
+
+  test("the transcript line alone is enough", () => {
+    const withoutStatus = claudeLoggedOutPane.split("\n").filter((line) => !line.endsWith("Run /login")).join("\n");
+    expect(tmuxPaneTailHarnessLoginError(withoutStatus)).toContain("not logged in");
+  });
+
+  test("an agent quoting the error far above the composer is not logged out", () => {
+    const quoted = paneTail([
+      "⏺ The pane showed:",
+      "  ⎿  Not logged in · Please run /login",
+      ...Array.from({ length: 12 }, (_, index) => `  finding ${index}`),
+      "─".repeat(40),
+      "❯ ",
+      "─".repeat(40),
+    ]);
+    expect(tmuxPaneTailHarnessLoginError(quoted)).toBeNull();
+  });
+
+  test("a working pane is not logged out", () => {
+    const working = claudeLoggedOutPane.replace("❯ \n", "❯ \n✻ Thinking… (esc to interrupt)\n");
+    expect(tmuxPaneTailHarnessLoginError(working)).toBeNull();
   });
 });

@@ -45,6 +45,7 @@ import type { PairingInvocationResult } from "./pairing-session-agents.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 import { isRequesterWaitTimeoutError } from "./requester-timeout.js";
 import { isDispatchStalledError } from "./dispatch-stalled.js";
+import { isDeliveryBlockedError } from "./delivery-blocked.js";
 import { isCodexAppServerExitError, isCodexThreadHeldExternallyError } from "./codex-app-server.js";
 import { sessionAliasAckSummary } from "./session-alias.js";
 import { createInvocationResultReplyIntent, invocationResultMessageId } from "./broker-invocation-result-delivery-service.js";
@@ -820,6 +821,36 @@ export class BrokerLocalInvocationService {
 
       if (stalledFlight) {
         await this.options.postInvocationStatusMessage(invocation, stalledFlight);
+      }
+      return;
+    }
+
+    if (isDeliveryBlockedError(error)) {
+      // The process is alive; it just cannot take this ask. Fail the flight with
+      // the reason and keep the endpoint routable, as for a stalled dispatch.
+      const blockedFlight = this.currentFlightIsTerminal(invocation.id)
+        ? null
+        : await this.options.transitionInvocation(invocation.id, {
+          state: "failed",
+          summary: `${target.displayName}: ${error.summary}`,
+          error: message,
+          completedAt: this.now(),
+          metadata: { failureStage: error.stage },
+        });
+
+      await this.options.persistEndpoint({
+        ...runningEndpoint,
+        state: priorEndpointState,
+        metadata: {
+          ...(runningEndpoint.metadata ?? {}),
+          lastError: message,
+          lastFailedAt: this.now(),
+          lastFailureStage: error.stage,
+        },
+      });
+
+      if (blockedFlight) {
+        await this.options.postInvocationStatusMessage(invocation, blockedFlight);
       }
       return;
     }

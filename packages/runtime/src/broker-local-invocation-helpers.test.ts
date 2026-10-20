@@ -496,6 +496,10 @@ describe("broker local invocation helpers", () => {
     expect(staleWorkingFlightReason(snapshot, snapshot.flights.working!, {
       isInvocationActive: () => false,
     })).toBe("endpoint replayed was replayed active for invocation invocation-1 without a live broker task");
+    const timedOut = { ...snapshot.flights.working!, metadata: { ...snapshot.flights.working!.metadata, requesterTimedOut: true } };
+    expect(staleWorkingFlightReason(snapshot, timedOut, {
+      isInvocationActive: () => false,
+    })).toBeNull();
   });
 
   test("newer work on another session cannot supersede a flight for the same agent", () => {
