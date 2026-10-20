@@ -24,7 +24,7 @@ function liveRouteInventory(): string[] {
 
 // GET routes that mutate broker state — they must never be readable by a
 // remote observe-tier peer, regardless of method.
-const MUTATING_GET_ROUTES = ["GET /v1/repo-watch/warm"];
+const MUTATING_GET_ROUTES = ["GET /v1/repo-watch/warm", "GET /v1/request-receipts/:id"];
 
 describe("mesh route matrix", () => {
   test("classifies every inventory route exactly once, with a known tier", () => {
@@ -78,6 +78,11 @@ describe("mesh route matrix", () => {
       expect(grantSatisfiesRouteTier("observe", tier)).toBe(false);
       expect(grantSatisfiesRouteTier("control", tier)).toBe(false);
     }
+  });
+
+  test("permission decisions and receipt recovery remain machine-local", () => {
+    expect(meshRouteTierFor("POST", "/v1/permissions/decide")).toBe("local");
+    expect(meshRouteTierFor("GET", "/v1/request-receipts/request-1")).toBe("local");
   });
 
   test("runtime lookup resolves parameterized routes and denies unknown routes by default", () => {

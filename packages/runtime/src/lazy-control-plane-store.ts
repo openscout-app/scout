@@ -144,8 +144,15 @@ class SharedStoreDatabase implements ControlPlaneSqliteTransactionalDatabase {
   transaction<TArgs extends unknown[], TResult>(
     callback: (...args: TArgs) => TResult,
   ): (...args: TArgs) => TResult {
-    return (...args: TArgs): TResult => this.transactionalDatabase()
-      .transaction(callback)(...args);
+    return (...args: TArgs): TResult => {
+      const transaction = this.transactionalDatabase().transaction(callback) as
+        ((...args: TArgs) => TResult) & { immediate?: (...args: TArgs) => TResult };
+      // Coordination writes share WAL with the projection worker. Reserve the
+      // writer before reading: a deferred read snapshot cannot upgrade after a
+      // concurrent commit (SQLITE_BUSY), regardless of busy_timeout. Bun exposes
+      // .immediate; the portable Node adapter already uses BEGIN IMMEDIATE.
+      return (transaction.immediate ?? transaction)(...args);
+    };
   }
 
   private database(): ControlPlaneSqliteDatabase {

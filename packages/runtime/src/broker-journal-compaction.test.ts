@@ -1,5 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { appendFile, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileBackedBrokerJournal, type BrokerJournalEntry } from "./broker-journal.js";
@@ -112,6 +113,56 @@ test("receipt markers survive restart compaction until their exact prefix has ap
   const currentBoundary = await restored.captureReplayBoundary();
   await restored.compactIfNeeded({ ...compact, historicalCleanupApplied: true, historicalCleanupBoundary: currentBoundary });
   expect((await restored.readEntries()).filter(entry => entry.kind === "history.rotate")).toHaveLength(1);
+});
+
+test("receipt cleanup rejects a prior rewrite generation even when the filesystem reuses its inode", async () => {
+  const { journal, path } = await setup();
+  const realStat = fsPromises.stat;
+  const stated = spyOn(fsPromises, "stat").mockImplementation((async (...args: Parameters<typeof fsPromises.stat>) => {
+    const source = await realStat(...args);
+    return args[0] === path ? Object.assign(source, { dev: 123, ino: 456 }) : source;
+  }) as typeof fsPromises.stat);
+  const realOpen = fsPromises.open;
+  const opened = spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+    const file = await realOpen(...args);
+    if (args[0] === path && args[1] === "r") {
+      const realStat = file.stat.bind(file);
+      // Deterministically model Linux inode reuse across both atomic rewrites.
+      file.stat = (async (...options: Parameters<typeof file.stat>) =>
+        Object.assign(await realStat(...options), { dev: 123, ino: 456 })) as typeof file.stat;
+    }
+    return file;
+  });
+  try {
+    const evicted = { messageIds: [], invocationIds: [], flightIds: [], deliveryIds: [], deliveryAttemptIds: [], collaborationEventIds: [] };
+    const receipt = { partition: "a".repeat(64), records: [], payloadBytes: 0 };
+    await journal.appendEntries({ kind: "history.rotate", cutoff: 1, rotatedAt: 1, evicted, publications: [receipt] });
+    const legacyBoundary = await journal.captureReplayBoundary();
+    expect(legacyBoundary.fileIdentity).toBe("123:456");
+    await journal.appendEntries({ kind: "history.rotate", cutoff: 2, rotatedAt: 2, evicted, publications: [receipt] });
+    await journal.appendEntries({ kind: "history.rotate", cutoff: 3, rotatedAt: 3, evicted });
+    await journal.compactIfNeeded(compact);
+    const firstGeneration = await journal.captureReplayBoundary();
+    const restored = new FileBackedBrokerJournal(path, { compactionPolicy: { minimumReclaimBytes: 1 } });
+    await restored.load();
+    // An old receipt-cleanup proof must not gain authority when dev:ino repeats.
+    await restored.compactIfNeeded({ ...compact, historicalCleanupApplied: true, historicalCleanupBoundary: legacyBoundary });
+    expect((await restored.readEntries()).filter(entry => entry.kind === "history.rotate")).toHaveLength(3);
+    expect(firstGeneration.fileIdentity).toStartWith("123:456:");
+    await expect(restored.replay(() => {}, legacyBoundary)).rejects.toThrow("journal_replay_boundary_changed");
+    // The same rule applies to proofs captured after the header migration.
+    await restored.compactIfNeeded({ ...compact, historicalCleanupApplied: true, historicalCleanupBoundary: firstGeneration });
+    expect((await restored.readEntries()).filter(entry => entry.kind === "history.rotate")).toHaveLength(3);
+    const current = await restored.captureReplayBoundary();
+    expect(current.fileIdentity).not.toBe(firstGeneration.fileIdentity);
+    await expect(restored.replay(() => {}, firstGeneration)).rejects.toThrow("journal_replay_boundary_changed");
+    await restored.appendEntries(actor(4));
+    expect((await restored.captureReplayBoundary()).fileIdentity).toBe(current.fileIdentity);
+    await restored.compactIfNeeded({ ...compact, historicalCleanupApplied: true, historicalCleanupBoundary: current });
+    expect((await restored.readEntries()).filter(entry => entry.kind === "history.rotate")).toHaveLength(1);
+    const lines = (await readFile(path, "utf8")).trimEnd().split("\n").map(line => JSON.parse(line));
+    expect(lines.filter(line => line.kind === "journal.generation")).toHaveLength(1);
+  } finally { opened.mockRestore(); stated.mockRestore(); }
 });
 
 test("receipt cleanup byte proof includes blank lines and never authorizes a newer marker", async () => {

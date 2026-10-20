@@ -35,7 +35,7 @@ describe("broker daemon core routes", () => {
         terminalRelay?: { managedBy?: string; state?: string; healthy?: boolean | null };
         localEdge?: { managedBy?: string; state?: string; healthy?: boolean | null };
       };
-      projection?: { state?: string; detail?: string | null; worker?: { pendingRequests: number; replay: { bytes: number; fullReplays: number; tailReplays: number } } };
+      projection?: { state?: string; detail?: string | null; worker?: { pendingRequests: number; dirty: boolean; replay: { bytes: number; fullReplays: number; tailReplays: number } } };
       counts?: { collaborationRecords?: number };
     }>(harness.baseUrl, "/health");
 
@@ -65,6 +65,7 @@ describe("broker daemon core routes", () => {
       healthy: null,
     }));
     expect(health.projection).toEqual(expect.objectContaining({ state: "ready", detail: null }));
+    expect(health.projection?.worker?.dirty).toEqual(expect.any(Boolean));
     expect(health.projection?.worker?.pendingRequests).toBeGreaterThanOrEqual(0);
     expect(health.projection?.worker?.replay.bytes).toBeGreaterThanOrEqual(0);
     expect(health.projection?.worker?.replay.fullReplays).toBeGreaterThanOrEqual(1);

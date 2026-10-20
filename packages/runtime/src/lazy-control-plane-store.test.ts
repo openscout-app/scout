@@ -1,3 +1,7 @@
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import { BrokerRouteAliasStore } from "./broker-route-alias-store.js";
@@ -53,6 +57,34 @@ describe("LazyControlPlaneStore", () => {
     expect(second).not.toBe(first);
     expect(openings).toBe(2);
     shared.close();
+  });
+
+  test("coordination transactions reserve the WAL writer before reading", () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-coordination-writer-"));
+    const writer = new Database(join(root, "state.sqlite"));
+    const projection = new Database(join(root, "state.sqlite"));
+    try {
+      writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE counter(value INTEGER); INSERT INTO counter VALUES(0)");
+      projection.exec("PRAGMA busy_timeout=0");
+      const shared = new LazyControlPlaneStore(() => ({ ...fakeStore(), writerDb: writer }));
+      let competingWriterBlocked = false;
+      const update = shared.routeAliasDatabase.transaction(() => {
+        writer.query("SELECT value FROM counter").get();
+        // The projection worker can commit on another connection between the
+        // coordination read and write. A deferred transaction cannot upgrade
+        // that stale read snapshot, even with busy_timeout configured.
+        try { projection.query("UPDATE counter SET value=value+10").run(); }
+        catch (error) { competingWriterBlocked = (error as { code?: string }).code === "SQLITE_BUSY"; }
+        writer.query("UPDATE counter SET value=value+1").run();
+        return "committed";
+      });
+      expect(update()).toBe("committed");
+      expect(competingWriterBlocked).toBe(true);
+      expect(writer.query("SELECT value FROM counter").get()).toEqual({ value: 1 });
+      // The reservation is released, so the worker can make progress afterward.
+      projection.query("UPDATE counter SET value=value+10").run();
+      expect(writer.query("SELECT value FROM counter").get()).toEqual({ value: 11 });
+    } finally { projection.close(); writer.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
   test("closing an unused provider does not construct its store", () => {

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileBackedBrokerJournal, type BrokerJournalEntry } from "./broker-journal.js";
 import { BrokerDurableStore } from "./broker-durable-store.js";
-import { decodeJournalLine, encodeJournalEntries, JOURNAL_FRAME_LIMITS, journalLines } from "./broker-journal-framing.js";
+import { decodeJournalLine, encodeJournalEntries, encodeJournalGeneration, JOURNAL_FRAME_LIMITS, journalLines } from "./broker-journal-framing.js";
 import { HistoryLeaf } from "./message-history/store.js";
 
 const roots: string[] = [];
@@ -38,6 +38,18 @@ test("checksum/count/nested-frame failures do not expose an earlier valid entry"
   expect(() => decodeJournalLine(JSON.stringify({ ...frame, payload: frame.payload.replace("one", "two") }))).toThrow("invalid_journal_batch");
   const payload = JSON.stringify([entries[0], { kind: "journal.batch" }]);
   expect(() => decodeJournalLine(JSON.stringify({ ...frame, payload, sha256: createHash("sha256").update(payload).digest("hex") }))).toThrow("invalid_journal_batch_entries");
+});
+
+test("generation headers are physical metadata and cannot be nested in an accepted batch", () => {
+  const header = encodeJournalGeneration();
+  expect(decodeJournalLine(header)).toEqual([]);
+  expect(encodeJournalGeneration()).not.toBe(header);
+  const value = JSON.parse(header);
+  expect(() => decodeJournalLine(JSON.stringify({ ...value, version: 2 }))).toThrow("unsupported_journal_generation");
+  expect(() => decodeJournalLine(JSON.stringify({ ...value, id: "not-a-generation" }))).toThrow("unsupported_journal_generation");
+  const payload = JSON.stringify([entries[0], value]);
+  expect(() => decodeJournalLine(JSON.stringify({ kind: "journal.batch", version: 1, count: 2,
+    sha256: createHash("sha256").update(payload).digest("hex"), payload }))).toThrow("invalid_journal_batch_entries");
 });
 
 test("bounded scans reject oversized records instead of certifying truncated history", async () => {

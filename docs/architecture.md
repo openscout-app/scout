@@ -301,16 +301,20 @@ with a visible error at the byte bound or an unsupported frame version rather
 than silently certifying missing history. Legacy oversized records require a
 deliberate reader/migration decision. Compaction preserves logical ordering and
 replay barriers, syncs its replacement file, renames it, and syncs the directory.
-It can emit ordinary singleton lines because publication replaces the whole
-file atomically.
+Each replacement starts with a `journal.generation` header containing `version: 1`
+and a fresh UUID. The header is physical framing metadata, not a domain record
+or replay barrier. Logical replay skips it. Each subsequent rewrite replaces the
+header; appends leave it unchanged. Legacy journals without a header remain
+readable and acquire one on their first rewrite. Compaction can emit ordinary
+singleton lines because publication replaces the whole file atomically.
 
 The live SQLite projection runs in a worker. A canonical commit signals a scalar
 dirty revision; it does not retain the accepted payload in a promise queue.
 The worker captures a committed journal boundary and replays its suffix in
 transactions bounded by 128 work units and 1 MiB of encoded records. One legal
 record above that byte budget runs alone. A completed cursor is reused only
-while the journal's device/inode identity matches; atomic replacement causes a
-barrier-based rescan. Flush captures one revision, so continuous new traffic
+while the journal's device/inode and rewrite-generation identity match. Atomic
+replacement causes a barrier-based rescan even if the filesystem reuses an inode. Flush captures one revision, so continuous new traffic
 cannot prevent that boundary from completing. Worker requests and waiting reads
 have fixed admission limits. SQLite and artifact CPU work, historical
 publication, and event compression stay off the broker's command loop.
@@ -341,7 +345,8 @@ while keeping the SQLite source. A canonical rotation marker authorizes replay
 to remove only an unchanged row with the same indexed historical payload. This
 keeps publication repeatable after a crash before the marker. Cleanup markers
 survive startup compaction; live compaction removes them only within a captured
-byte boundary whose projection cleanup completed on the same journal inode.
+byte boundary whose projection cleanup completed on the same journal generation.
+An inode match alone cannot authorize receipt removal.
 Failed publication or verification keeps the working copy.
 
 Broker replay, the disk message history index, and `scoutd` native projections

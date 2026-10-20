@@ -133,6 +133,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/repo-watch/snapshot": "local",
   // mutates despite being a GET — never observe
   "GET /v1/repo-watch/warm": "local",
+  // Receipt recovery exposes requester results and may persist recovered state.
   "GET /v1/request-receipts/:id": "local",
   "GET /v1/roles/assignments": "local",
   "GET /v1/roles/catalog": "local",
@@ -201,6 +202,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/nodes": "local",
   "POST /v1/pairing/attach": "local",
   "POST /v1/pairing/detach": "local",
+  // Operator authorization; the handler also refuses remote transport.
   "POST /v1/permissions/decide": "local",
   "POST /v1/rendezvous/match": "local",
   "POST /v1/repo-watch/warm": "local",

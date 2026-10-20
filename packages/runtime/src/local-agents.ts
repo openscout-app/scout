@@ -1,4 +1,6 @@
 import { hasExplicitCompletion } from "@openscout/protocol";
+import { isExternalSessionEndpoint } from "./external-session-transport.js";
+import { isA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { hasManagedPermissionContext } from "./managed-permission.js";
 import { parseTmuxPermission, waitForTmuxPermission } from "./tmux-permission.js";
 import { SUPPORTED_LOCAL_AGENT_HARNESSES } from "./local-agent-harnesses.js";
@@ -3046,6 +3048,12 @@ export async function isLocalAgentSessionAliveAsync(sessionName: string): Promis
 }
 
 export function isLocalAgentEndpointAlive(endpoint: AgentEndpoint): boolean {
+  // These endpoints are owned by a receive transport, not a local harness
+  // process. Provider rejection is recorded by that transport after dispatch.
+  if (isExternalSessionEndpoint(endpoint) || isA2AHttpEndpoint(endpoint)) {
+    return ["online", "idle", "active", "waiting", "working"].includes(endpoint.state);
+  }
+
   if (endpoint.transport === "pairing_bridge") {
     return endpoint.state !== "offline";
   }
