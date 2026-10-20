@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.3.2"
 description = "Direct, owner-approved guest access to Scout machines over a private network."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 # Ed25519 and certificate parsing. The upper bound is deliberate: widen it
 # only after the signing vectors and pin tests pass on the new major.
 dependencies = ["cryptography>=42,<51"]

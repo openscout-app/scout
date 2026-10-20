@@ -6,6 +6,7 @@
 - Make CLI bootstrap help describe manual enrollment, not only fixtures.
 - Replace assumed release URLs with explicit candidate status and verified
   local-wheel installation until a release is approved.
+- Use SPDX MIT metadata and include the unchanged LICENSE with setuptools 77+.
 - Add a release checklist and metadata consistency tests.
 
 Protocol remains `scout-guest/1`. Python remains 3.11 or newer, with

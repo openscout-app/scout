@@ -18,6 +18,8 @@ class ReleaseMetadata(unittest.TestCase):
         self.assertEqual(PROTOCOL, "scout-guest/1")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], ["cryptography>=42,<51"])
+        self.assertEqual(project["license"], "MIT")
+        self.assertEqual(project["license-files"], ["LICENSE"])
         self.assertEqual(project["scripts"], {"scout-tailscale": "scout_tailscale.cli:main"})
 
     def test_docs_do_not_claim_candidate_is_published(self):
