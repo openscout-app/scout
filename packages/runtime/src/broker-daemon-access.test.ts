@@ -15,7 +15,12 @@ test("scoped signed daemon roundtrip: no discovery leaks, no message wake, owned
   const node = await broker.getJson<{ card: { keyId: string; capabilities: string[] } }>(h.baseUrl, "/v1/node");
   expect(node.card.capabilities).toContain("scout-access/1");
   const relayed = await fetch(h.baseUrl + "/v1/snapshot", { headers: { "x-forwarded-for": "127.0.0.1", "x-openscout-local-admin": "wrong" } });
-  expect(relayed.status).toBe(401);
+  expect(relayed.status).toBe(403);
+  expect(await relayed.json()).toMatchObject({ error: "loopback_proxy_refused" });
+  // Preserve the original malformed-admin-proof denial independently of the
+  // proxy rule, which now takes precedence when forwarding evidence exists.
+  const invalidAdmin = await fetch(h.baseUrl + "/v1/snapshot", { headers: { "x-openscout-local-admin": "wrong" } });
+  expect(invalidAdmin.status).toBe(401);
   const legacyProxy = await fetch(h.baseUrl + "/v1/mesh/web-request", { method: "POST", body: "{}" });
   expect(legacyProxy.status).toBe(401);
   const f = accessTestFixture(node.card.keyId);
