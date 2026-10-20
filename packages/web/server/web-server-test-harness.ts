@@ -54,6 +54,7 @@ export const originalOperatorName = process.env.OPENSCOUT_OPERATOR_NAME;
 export const originalOpenAIKey = process.env.OPENAI_API_KEY;
 export const originalOpenAIModel = process.env.OPENAI_MODEL;
 export const originalScoutbotAssistantModel = process.env.OPENSCOUT_SCOUTBOT_ASSISTANT_MODEL;
+const originalScoutbotProcess = process.env.OPENSCOUT_SCOUTBOT_PROCESS;
 export const originalProbesSocket = process.env.OPENSCOUT_PROBES_SOCKET;
 export const sendScoutMessageCalls: Array<Record<string, unknown>> = [];
 export const sendScoutConversationMessageCalls: Array<Record<string, unknown>> = [];
@@ -991,6 +992,8 @@ export function installWebServerTestHooks(): void {
     chatMarkReadCalls.length = 0;
     globalThis.fetch = originalFetch;
     process.env.HOME = originalHome;
+    // Route fixtures bootstrap their own runner, not the managed process of the launching service.
+    delete process.env.OPENSCOUT_SCOUTBOT_PROCESS;
     if (originalOpenScoutHome === undefined) {
       delete process.env.OPENSCOUT_HOME;
     } else {
@@ -1138,6 +1141,8 @@ export function installWebServerTestHooks(): void {
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalScoutbotProcess === undefined) delete process.env.OPENSCOUT_SCOUTBOT_PROCESS;
+    else process.env.OPENSCOUT_SCOUTBOT_PROCESS = originalScoutbotProcess;
     if (originalOpenScoutHome === undefined) {
       delete process.env.OPENSCOUT_HOME;
     } else {
