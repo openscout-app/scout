@@ -14,6 +14,10 @@ async function runSessionJson(args: string[], cwd = "/Users/test/dev/openscout")
     env: {
       ...process.env,
       HOME: "/Users/test",
+      SCOUT_HOME: undefined,
+      OPENSCOUT_HOME: undefined,
+      ZELLIJ_SOCKET_DIR: undefined,
+      OPENSCOUT_ZELLIJ_SOCKET_DIR: undefined,
     },
     outputMode: "json",
     stdout(line) {

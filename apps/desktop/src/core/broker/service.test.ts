@@ -648,6 +648,8 @@ function useIsolatedOpenScoutHome(): string {
   const home = mkdtempSync(join(tmpdir(), "openscout-desktop-broker-"));
   testDirectories.add(home);
   process.env.HOME = home;
+  // Identity overrides are explicit inputs, not ambient test-runner identity.
+  delete process.env.OPENSCOUT_AGENT;
   process.env.OPENSCOUT_HOME = join(home, ".openscout");
   process.env.OPENSCOUT_SUPPORT_DIRECTORY = join(
     home,
