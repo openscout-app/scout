@@ -911,27 +911,41 @@ struct JournalProjection {
 
 impl JournalProjection {
     fn apply_line(&mut self, line: &str) -> bool {
-        if line.trim_end_matches('\n').len() > MAX_JOURNAL_FRAME_BYTES { return false; }
+        if line.trim_end_matches('\n').len() > MAX_JOURNAL_FRAME_BYTES {
+            return false;
+        }
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return false;
         };
         if value.get("kind").and_then(Value::as_str) == Some("journal.batch") {
-            let Some(payload) = value.get("payload").and_then(Value::as_str) else { return false; };
+            let Some(payload) = value.get("payload").and_then(Value::as_str) else {
+                return false;
+            };
             let checksum = format!("{:x}", Sha256::digest(payload.as_bytes()));
             if value.get("version").and_then(Value::as_u64) != Some(1)
-                || value.get("sha256").and_then(Value::as_str) != Some(checksum.as_str()) {
+                || value.get("sha256").and_then(Value::as_str) != Some(checksum.as_str())
+            {
                 return false;
             }
             // Unknown payload fields can contain JavaScript lone surrogates.
             // Parse only the kind before reducing the native subset; a message
             // body must not make an unrelated agent in this batch disappear.
             #[derive(Deserialize)]
-            struct EntryKind { kind: String }
-            let Ok(entries) = serde_json::from_str::<Vec<&serde_json::value::RawValue>>(payload) else { return false; };
-            if entries.is_empty() || entries.len() > MAX_JOURNAL_BATCH_ENTRIES
+            struct EntryKind {
+                kind: String,
+            }
+            let Ok(entries) = serde_json::from_str::<Vec<&serde_json::value::RawValue>>(payload)
+            else {
+                return false;
+            };
+            if entries.is_empty()
+                || entries.len() > MAX_JOURNAL_BATCH_ENTRIES
                 || value.get("count").and_then(Value::as_u64) != Some(entries.len() as u64)
-                || !entries.iter().all(|entry| serde_json::from_str::<EntryKind>(entry.get())
-                    .is_ok_and(|entry| entry.kind != "journal.batch")) {
+                || !entries.iter().all(|entry| {
+                    serde_json::from_str::<EntryKind>(entry.get())
+                        .is_ok_and(|entry| entry.kind != "journal.batch")
+                })
+            {
                 return false;
             }
             // Decode/validate the whole frame before changing this projection.
@@ -1410,9 +1424,14 @@ impl JournalCursor {
         let mut material_change = false;
         // Bound both allocations and this poll to the captured file length.
         while self.offset < metadata.len() {
-            let limit = usize::try_from((metadata.len() - self.offset).min(bytes.len() as u64)).unwrap();
-            let read = file.read(&mut bytes[..limit]).map_err(|error| error.to_string())?;
-            if read == 0 { break; }
+            let limit =
+                usize::try_from((metadata.len() - self.offset).min(bytes.len() as u64)).unwrap();
+            let read = file
+                .read(&mut bytes[..limit])
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
             for chunk in bytes[..read].split_inclusive(|byte| *byte == b'\n') {
                 if self.pending.len() + chunk.len() > MAX_JOURNAL_FRAME_BYTES + 1 {
                     return Err("journal_frame_byte_limit".to_string());
@@ -1454,7 +1473,8 @@ mod tests {
 
     fn batch(payload: &str, count: usize) -> String {
         serde_json::json!({"kind":"journal.batch", "version":1, "count":count,
-            "sha256":format!("{:x}", Sha256::digest(payload.as_bytes())), "payload":payload}).to_string()
+            "sha256":format!("{:x}", Sha256::digest(payload.as_bytes())), "payload":payload})
+        .to_string()
     }
 
     #[test]
@@ -1488,17 +1508,30 @@ mod tests {
     #[test]
     fn journal_cursor_waits_for_complete_frame_and_keeps_utf8_across_polls() {
         use std::io::Write;
-        let path = std::env::temp_dir().join(format!("scout-native-frame-{}-{}", std::process::id(), epoch_ms()));
-        let frame = batch(r#"[{"kind":"agent.upsert","agent":{"id":"雪"}},{"kind":"agent.upsert","agent":{"id":"two"}}]"#, 2) + "\n";
+        let path = std::env::temp_dir().join(format!(
+            "scout-native-frame-{}-{}",
+            std::process::id(),
+            epoch_ms()
+        ));
+        let frame = batch(
+            r#"[{"kind":"agent.upsert","agent":{"id":"雪"}},{"kind":"agent.upsert","agent":{"id":"two"}}]"#,
+            2,
+        ) + "\n";
         let split = frame.find('雪').unwrap() + 1;
         fs::write(&path, &frame.as_bytes()[..split]).unwrap();
         let mut cursor = JournalCursor::default();
         let mut projection = JournalProjection::default();
-        assert!(cursor.read_updates(&path, &mut projection).unwrap().is_none());
+        assert!(cursor
+            .read_updates(&path, &mut projection)
+            .unwrap()
+            .is_none());
         assert!(projection.agents.is_empty());
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(&frame.as_bytes()[split..]).unwrap();
-        assert!(cursor.read_updates(&path, &mut projection).unwrap().is_some());
+        assert!(cursor
+            .read_updates(&path, &mut projection)
+            .unwrap()
+            .is_some());
         assert!(projection.agents.contains_key("雪"));
         assert!(projection.agents.contains_key("two"));
         assert!(cursor.pending.is_empty());

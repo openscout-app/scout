@@ -13,7 +13,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn temp_dir() -> PathBuf {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let dir = std::env::temp_dir().join(format!("scoutd-tmux-env-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -80,7 +83,10 @@ fn tmux_new_session_verb_strips_instance_env_from_the_tmux_process() {
         "OPENSCOUT_SUPPORT_DIRECTORY=",
         "OPENSCOUT_CONTROL_HOME=",
     ] {
-        assert!(!tmux_env.lines().any(|line| line.starts_with(key)), "{key} leaked into tmux");
+        assert!(
+            !tmux_env.lines().any(|line| line.starts_with(key)),
+            "{key} leaked into tmux"
+        );
     }
     assert!(tmux_env.lines().any(|line| line == "SCOUT_KEEP_ME=1"));
     let _ = fs::remove_dir_all(dir);
