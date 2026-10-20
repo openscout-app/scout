@@ -13,6 +13,8 @@ import {
 
 const originalControlHome = process.env.OPENSCOUT_CONTROL_HOME;
 const originalHome = process.env.HOME;
+const fixtureHomeKeys = ["SCOUT_HOME", "OPENSCOUT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"] as const;
+const originalFixtureHomes = Object.fromEntries(fixtureHomeKeys.map(key => [key, process.env[key]]));
 const originalSupportDirectory = process.env.OPENSCOUT_SUPPORT_DIRECTORY;
 const originalPath = process.env.PATH;
 const originalGhBin = process.env.OPENSCOUT_GH_BIN;
@@ -27,12 +29,19 @@ const originalMinimaxRemainsJson = process.env.OPENSCOUT_MINIMAX_REMAINS_JSON;
 const tempPaths = new Set<string>();
 
 beforeEach(() => {
+  // Each case supplies HOME; do not scan the launching agent's harness stores.
+  for (const key of fixtureHomeKeys) delete process.env[key];
+  delete process.env.OPENSCOUT_SUPPORT_DIRECTORY;
   delete process.env.MINIMAX_API_KEY;
   delete process.env.MINIMAX_TOKEN;
   delete process.env.OPENSCOUT_MINIMAX_REMAINS_JSON;
 });
 
 afterEach(() => {
+  for (const [key, value] of Object.entries(originalFixtureHomes)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   closeDb();
   resetServiceBudgetsCache();
 
