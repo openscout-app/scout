@@ -1,10 +1,10 @@
 # scout-tailscale
 
 Direct, owner-approved guest access to an owner's Scout machines over a
-private network (Tailscale). The client holds an Ed25519 key; the owner approves the matching
-code in Scout on their Mac, which installs a scoped grant on its own broker.
-Every request is signed and sent over TLS pinned to the node's signed card.
-Hosted profile mode coordinates pairing and discovery; agent tasks and replies
+private network (Tailscale). The client holds an Ed25519 key; the owner installs
+a scoped grant on their own runtime. Every request is signed and sent over TLS
+pinned to the node's signed card. Hosted profile mode uses matching-code approval
+in the Mac app and coordinates pairing and discovery; agent tasks and replies
 travel directly to the approved machine. Out-of-band bootstrap mode needs no
 hosted Scout service: the owner installs a grant locally and shares the signed
 bootstrap, while the guest verifies the node key independently.
