@@ -12,6 +12,7 @@ let agentObservePayload: AgentObservePayload | null = null;
 let sessionObservePayload: SessionRefObservePayload | null = null;
 let requestedSessionRefs: string[] = [];
 const originalHome = process.env.HOME;
+const originalProbesSocket = process.env.OPENSCOUT_PROBES_SOCKET;
 
 const agents: WebAgent[] = [
   {
@@ -77,6 +78,8 @@ afterAll(() => {
 beforeEach(() => {
   const home = makeTempRoot("openscout-work-materials-home-");
   process.env.HOME = home;
+  // Git probes must fall back locally, not contact an operator-owned scoutd.
+  process.env.OPENSCOUT_PROBES_SOCKET = join(home, "absent-probes.sock");
   agentObservePayload = null;
   sessionObservePayload = null;
   requestedSessionRefs = [];
@@ -85,6 +88,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (originalProbesSocket === undefined) delete process.env.OPENSCOUT_PROBES_SOCKET;
+  else process.env.OPENSCOUT_PROBES_SOCKET = originalProbesSocket;
   if (originalHome === undefined) {
     delete process.env.HOME;
   } else {
