@@ -1,3 +1,4 @@
+import { LOOPBACK_HTTP_PROXY_POLICY } from "./mesh-loopback-proxy.js";
 /**
  * Read-only ingress inventory for the broker's privileged loopback deployment.
  * A clean snapshot is NOT evidence of isolation: unknown/reconfigured relays can
@@ -28,6 +29,7 @@ export type MeshAccessIngressRelay = {
 };
 export type MeshAccessIngressPosture = {
   enforced: boolean;
+  localHttpProxyPolicy: typeof LOOPBACK_HTTP_PROXY_POLICY;
   observedAt: number;
   deployment: "privileged-loopback";
   activation: "blocked" | "permitted";
@@ -143,7 +145,7 @@ export async function inspectMeshAccessIngressPosture(
   for (const [result, source] of [[serve, "tailscale:serve-status"], [funnel, "tailscale:funnel-status"]] as const) {
     const config = result.ok ? parsedObject(result.stdout) : undefined;
     if (!config) evidence(items.tailscale, "unknown", source, "Tailscale serve/funnel configuration could not be established (missing CLI, daemon, permission, timeout, or invalid output).");
-    else if (hasConfiguration(config)) evidence(items.tailscale, "active", source, "Tailscale reports serve/funnel configuration; tailnet reachability is not scoped principal authentication.");
+    else if (hasConfiguration(config)) evidence(items.tailscale, "active", source, "Tailscale reports serve/funnel configuration. Local HTTP requests carrying proxy headers are refused, including upgrades. TCP forwarding or a relay stripping these headers remains indistinguishable from a local client without protected ingress.");
     else items.tailscale.proof.push(`${source}:empty`);
   }
   const processRows = processes.ok ? processes.stdout.split(/\r?\n/).filter((line) => line.trim()).map((line) => /^\s*(\d+)\s+(.+)$/.exec(line)) : [];
@@ -175,6 +177,7 @@ export async function inspectMeshAccessIngressPosture(
     }
   }
   return {
+    localHttpProxyPolicy: LOOPBACK_HTTP_PROXY_POLICY,
     enforced: protectedLocalIngress, observedAt: input.now ?? Date.now(), deployment: "privileged-loopback", activation: protectedLocalIngress ? "permitted" : "blocked",
     relays,
     reason: protectedLocalIngress

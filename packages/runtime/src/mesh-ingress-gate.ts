@@ -1,3 +1,4 @@
+import { refusesLoopbackHttpProxy, LOOPBACK_HTTP_PROXY_DETAIL, LOOPBACK_HTTP_PROXY_REFUSAL } from "./mesh-loopback-proxy.js";
 import { IROH_INGRESS_PREFIX, IROH_MESH_PATHS, irohDestinationKeyId } from "./iroh-peer-auth.js";
 import { verifyLocalAdminRequest, LOCAL_ADMIN_HEADER } from "./mesh-access-local-auth.js";
 import type { AccessProof } from "./mesh-access.js";
@@ -573,6 +574,13 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
     async gateHttpRequest(request, response, next) {
       let transport = requestTransport(request);
       const remoteAddress = request.socket?.remoteAddress;
+      // Refuse proxy evidence on the physical local transport before any admin
+      // proof, public route, or verify-warn handling can restore local trust.
+      if (refusesLoopbackHttpProxy(classifyMeshTransport(remoteAddress), request.headers)) {
+        request.resume();
+        json(response, 403, { error: LOOPBACK_HTTP_PROXY_REFUSAL, detail: LOOPBACK_HTTP_PROXY_DETAIL });
+        return;
+      }
       const url = new URL(request.url ?? "/", "http://localhost");
       const method = request.method ?? "GET";
       const headers = peerAuthHeadersFrom(request.headers);
@@ -770,6 +778,11 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
     },
 
     gateUpgrade(request, socket) {
+      if (refusesLoopbackHttpProxy(classifyMeshTransport((socket as { remoteAddress?: string }).remoteAddress), request.headers)) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-type: application/json\r\n\r\n" +
+          JSON.stringify({ error: LOOPBACK_HTTP_PROXY_REFUSAL, detail: LOOPBACK_HTTP_PROXY_DETAIL }));
+        return false;
+      }
       if (deps.localAdminKey || request.url?.startsWith(`${IROH_INGRESS_PREFIX}/`)) { socket.write("HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n"); socket.destroy(); return false; }
       const remoteAddress = (socket as { remoteAddress?: string }).remoteAddress;
       const transport = requestTransport(request, remoteAddress);

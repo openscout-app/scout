@@ -13,6 +13,7 @@ const item = (report: MeshAccessIngressPosture, id: string) => report.relays.fin
 describe("scoped access ingress posture", () => {
   test("clean snapshots cannot prove privileged loopback isolated or authorize activation", async () => {
     const report = await inspectMeshAccessIngressPosture(options, probe());
+    expect(report.localHttpProxyPolicy).toBe("reject-forwarding-headers");
     expect(report.enforced).toBe(false);
     expect(report.activation).toBe("blocked");
     expect(report.observedAt).toBe(12345);
@@ -57,6 +58,9 @@ describe("scoped access ingress posture", () => {
   test("tailscale serve/funnel JSON is inspected and missing or invalid evidence stays unknown", async () => {
     const active = await inspectMeshAccessIngressPosture(options, probe({ tailscale: '{"Web":{"host:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:43120"}}}}}' }));
     expect(item(active, "tailscale-serve-funnel").status).toBe("active");
+    expect(item(active, "tailscale-serve-funnel").reason).toContain("are refused");
+    expect(item(active, "tailscale-serve-funnel").reason).toContain("TCP forwarding");
+    expect(active.activation).toBe("blocked");
     const invalid = await inspectMeshAccessIngressPosture(options, probe({ tailscale: "not-json" }));
     expect(item(invalid, "tailscale-serve-funnel").status).toBe("unknown");
     const unreadable = await inspectMeshAccessIngressPosture(options, probe({ fail: true }));
