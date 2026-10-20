@@ -978,5 +978,12 @@
     "category": "test",
     "reason": "isolated fixture processes validate shell quoting and bounded log pipes under Bun, Node, and bundled source; never runs on a server request path",
     "owner": "agent-sessions"
+  },
+  {
+    "path": "apps/desktop/src/cli/extensions.test.ts",
+    "symbol": "spawnSync",
+    "category": "test",
+    "reason": "uses /bin/chmod to preserve the sticky bit while testing extension ancestor permissions; Bun chmodSync drops it",
+    "owner": "cli"
   }
 ]

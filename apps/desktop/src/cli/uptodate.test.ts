@@ -26,6 +26,7 @@ describe("CLI broker update check", () => {
     expect(shouldEnsureBrokerUptodateForCommand("where", ["index"])).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("hosts")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("whoami")).toBe(false);
+    expect(shouldEnsureBrokerUptodateForCommand("extensions")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("web", ["install"])).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("report")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("feedback")).toBe(false);

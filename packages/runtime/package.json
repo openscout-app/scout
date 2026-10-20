@@ -331,6 +331,12 @@
       "import": "./dist/local-config.js",
       "default": "./dist/local-config.js"
     },
+    "./scout-home": {
+      "bun": "./src/scout-home.ts",
+      "types": "./dist/scout-home.d.ts",
+      "import": "./dist/scout-home.js",
+      "default": "./dist/scout-home.js"
+    },
     "./open-scout-network": {
       "bun": "./src/open-scout-network.ts",
       "types": "./dist/open-scout-network.d.ts",

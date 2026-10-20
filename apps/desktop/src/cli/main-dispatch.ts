@@ -9,7 +9,9 @@ import { runAskWithOptions } from "./commands/ask.ts";
 import { loadScoutCommandHandler } from "./commands/index.ts";
 import { renderScoutHelp } from "./help.ts";
 import { parseImplicitAskCommandOptions } from "./options.ts";
-import { findScoutCommandRegistration, unknownScoutCommandMessage } from "./registry.ts";
+import { findScoutCommandRegistration, missingScoutExtensionMessage, unknownScoutCommandMessage } from "./registry.ts";
+import { findScoutExtension, runScoutExtension, scoutExtensionEnv } from "./extensions.ts";
+import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
 import {
   normalizeCliBinaryMtimeMs,
   shouldEnsureBrokerUptodateForCommand,
@@ -70,6 +72,22 @@ async function main() {
     throw new ScoutCliError(command === "need"
       ? "scout need has been replaced by scout operator --question <text>"
       : "scout attention has been replaced by scout status --all --blocked; use scout diff for repository changes");
+  }
+  if (!registration || registration.provider === "extension") {
+    // Built-ins are never shadowed; extensions fill verbs the core does not own.
+    const extension = findScoutExtension(command, context.env);
+    if (extension?.refused) throw new ScoutCliError(extension.refused);
+    if (extension) {
+      process.exitCode = await runScoutExtension(extension, commandArgs, scoutExtensionEnv({
+        env: context.env,
+        extension,
+        cliVersion: SCOUT_APP_VERSION,
+        outputMode: input.outputMode === "json" ? "json" : "plain",
+        brokerUrl: context.env.OPENSCOUT_BROKER_URL?.trim() || resolveBrokerControlUrl(),
+      }));
+      return;
+    }
+    if (registration) throw new ScoutCliError(missingScoutExtensionMessage(registration));
   }
   if (!registration) {
     if (commandArgs.includes("--help") || commandArgs.includes("-h")) {

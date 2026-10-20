@@ -1,10 +1,25 @@
 import { QUICK_LINKS } from "../../../../packages/cli/bin/lifecycle-preflight.mjs";
 import {
   listScoutDeprecatedCommands,
+  listScoutExtensionCommands,
   listScoutPrimaryCommands,
 } from "./registry.ts";
+import { listScoutExtensions, type ScoutExtension } from "./extensions.ts";
 
-export function renderScoutHelp(version = "0.2.19", detail = false): string {
+export function renderScoutExtensionLines(installed: ScoutExtension[]): string {
+  const byName = new Map(installed.map((extension) => [extension.name, extension]));
+  const known = listScoutExtensionCommands().map((command) => {
+    const extension = byName.get(command.name);
+    byName.delete(command.name);
+    const state = !extension ? " (not installed)" : extension.refused ? " (cannot run)" : "";
+    return `  ${command.name.padEnd(12, " ")} ${extension?.summary ?? command.summary}${state}`;
+  });
+  const others = [...byName.values()].map((extension) =>
+    `  ${extension.name.padEnd(12, " ")} ${extension.summary ?? extension.command}${extension.refused ? " (cannot run)" : ""}`);
+  return [...known, ...others].join("\n");
+}
+
+export function renderScoutHelp(version = "0.2.19", detail = false, extensions: ScoutExtension[] = listScoutExtensions()): string {
   if (!detail) return [
     `scout ${version} — coordinate local AI agents`,
     "",
@@ -37,6 +52,7 @@ export function renderScoutHelp(version = "0.2.19", detail = false): string {
   const commandLines = listScoutPrimaryCommands()
     .map((command) => `  ${command.name.padEnd(12, " ")} ${command.summary}`)
     .join("\n");
+  const extensionLines = renderScoutExtensionLines(extensions);
   const deprecatedLines = listScoutDeprecatedCommands()
     .map((command) => `  ${command.name.padEnd(12, " ")} ${command.summary}`)
     .join("\n");
@@ -51,6 +67,7 @@ export function renderScoutHelp(version = "0.2.19", detail = false): string {
     "Commands:",
     commandLines,
     ...(deprecatedLines ? ["", "Deprecated aliases:", deprecatedLines] : []),
+    ...(extensionLines ? ["", "Extensions:", extensionLines] : []),
     "",
     "Global flags:",
     '  --json        Structured JSON (doctor: NDJSON stream; last object has phase "complete")',

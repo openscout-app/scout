@@ -5,7 +5,7 @@ export function normalizeCliBinaryMtimeMs(value: number): number {
 export function shouldEnsureBrokerUptodateForCommand(command: string | null, args: string[] = []): boolean {
   if (!command || command === "doctor" || command === "quarantine" || args.includes("--help") || args.includes("-h")) return false;
   // Read-only roster/live inspection must not restart what it is observing.
-  if (command === "who" || command === "check" || command === "recent" || command === "where" || command === "locate" || command === "route" || command === "hosts" || command === "whoami") return false;
+  if (command === "who" || command === "check" || command === "recent" || command === "where" || command === "locate" || command === "route" || command === "hosts" || command === "whoami" || command === "extensions") return false;
   // scout-base supervises the mesh bridge; a bridge (re)start that restarts the
   // broker service would take down its own supervisor.
   if (command === "mesh" && args[0] === "bridge") return false;

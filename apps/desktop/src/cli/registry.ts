@@ -5,6 +5,9 @@ export type ScoutCommandRegistration = {
   status?: "stable" | "deprecated";
   canonicalName?: string;
   deprecationMessage?: string;
+  /** Provided by an installed extension (`scout-<name>`), not built in. `install` says how to get it. */
+  provider?: "extension";
+  install?: string;
 };
 
 export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
@@ -66,6 +69,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "update", summary: "Update this machine, or report on named machines" },
   { name: "config", summary: "View or set user config (name, handle, agent name pool, etc.)" },
   { name: "machines", summary: "The computers Scout can see — mesh nodes, tailnet peers, LAN neighbours" },
+  { name: "extensions", summary: "List installed CLI extensions" },
   { name: "mesh", summary: "Mesh status, diagnostics, and trust-cone peers/enrollment" },
   {
     name: "monitor",
@@ -81,7 +85,16 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
 ];
 
 export function listScoutPrimaryCommands(): ScoutCommandRegistration[] {
-  return SCOUT_COMMANDS.filter((command) => !command.hidden && (command.status ?? "stable") === "stable");
+  return SCOUT_COMMANDS.filter((command) => !command.hidden && !command.provider && (command.status ?? "stable") === "stable");
+}
+
+/** Verbs Scout knows about but leaves to extensions. */
+export function listScoutExtensionCommands(): ScoutCommandRegistration[] {
+  return SCOUT_COMMANDS.filter((command) => command.provider === "extension");
+}
+
+export function missingScoutExtensionMessage(command: ScoutCommandRegistration): string {
+  return `scout ${command.name} is provided by an extension that is not installed. ${command.install ?? ""}`.trim();
 }
 
 export function listScoutDeprecatedCommands(): ScoutCommandRegistration[] {

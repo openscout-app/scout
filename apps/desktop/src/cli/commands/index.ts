@@ -36,6 +36,7 @@ export type ScoutCommandName =
   | "match"
   | "mcp"
   | "menu"
+  | "extensions"
   | "mesh"
   | "monitor"
   | "pair"
@@ -128,6 +129,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./mcp.ts")).runMcpCommand;
     case "menu":
       return (await import("./menu.ts")).runMenuCommand;
+    case "extensions":
+      return (await import("./extensions.ts")).runExtensionsCommand;
     case "mesh":
       return (await import("./mesh.ts")).runMeshCommand;
     case "monitor":
