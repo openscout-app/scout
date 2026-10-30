@@ -117,6 +117,23 @@ export class BrokerPermissionService {
   }
 
   /**
+   * The operator stops waiting on an open request to them: a permission request
+   * no session here waits on, or a question an agent asked. Sends nothing to any
+   * session. A request a session still waits on is answered, not dismissed.
+   */
+  async dismiss(id: string): Promise<void> {
+    // A rebind under way decides whether a session still waits on this request.
+    await this.adopting.get(id)?.catch(() => undefined);
+    const record = this.deps.read(id);
+    if (!record || record.state !== "open") throw new PermissionRequestEndedError("Request is already settled.", false);
+    if (record.ownerId !== this.deps.operatorId) throw new Error("Only requests to the operator can be dismissed.");
+    const pending = this.pending.get(id);
+    if (pending?.busy) throw new Error("Permission request is already being answered.");
+    if (pending && !pending.done) throw new Error("The session is still waiting on this request. Allow or deny it.");
+    await this.close(id, "Dismissed by the operator", "declined");
+  }
+
+  /**
    * Rebinds or settles every open request of this host that nothing waits on.
    * Runs after a restart and on a sweep, so no record outlives its prompt.
    */

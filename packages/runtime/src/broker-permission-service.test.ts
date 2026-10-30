@@ -267,6 +267,56 @@ describe("requests that outlive their waiter", () => {
     await expect(h.service.decide(record.id, "v", "project")).rejects.toThrow("tmux timed out");
   });
 
+  test("the operator can dismiss a request whose lookup keeps failing, and nothing is sent", async () => {
+    const h = harness({ reattach: async () => { throw new Error("tmux timed out"); } });
+    const record = orphan(h, trust);
+    await h.service.reconcile();
+    await h.service.dismiss(record.id);
+    expect(h.records.get(record.id)).toMatchObject({ state: "declined", answer: "Dismissed by the operator", answeredById: "operator" });
+    expect(h.lookups).toEqual(["pane"]);
+    await expect(h.service.decide(record.id, "v", "project")).rejects.toBeInstanceOf(PermissionRequestEndedError);
+    await expect(h.service.dismiss(record.id)).rejects.toBeInstanceOf(PermissionRequestEndedError);
+  });
+
+  test("another host's request can be dismissed here, without a lookup", async () => {
+    const h = harness({ localInvocation: false });
+    const remote = orphan(h, trust, { nodeId: "other" });
+    await h.service.dismiss(remote.id);
+    expect(h.records.get(remote.id)?.state).toBe("declined");
+    expect(h.lookups).toEqual([]);
+  });
+
+  test("a request its session still waits on is answered, not dismissed", async () => {
+    const live = pane(trust); const h = harness({ reattach: live.reattach });
+    const record = orphan(h, parseTmuxPermission(trust, "/tmp/project")!.text);
+    await h.service.reconcile();
+    await expect(h.service.dismiss(record.id)).rejects.toThrow("still waiting");
+    expect(h.records.get(record.id)?.state).toBe("open");
+    await h.service.decide(record.id, parseTmuxPermission(trust)!.version, "project");
+    expect(live.state.sent).toEqual([["Down", "Enter"]]);
+  });
+
+  test("an agent's question to the operator can be dismissed; a request to someone else cannot", async () => {
+    const h = harness();
+    const question = (id: string, ownerId: string): QuestionRecord => {
+      const record: QuestionRecord = {
+        id, kind: "question", state: "open", acceptanceState: "none", title: "Which branch?", summary: "Which branch?",
+        createdById: "agent", askedById: "agent", ownerId, nextMoveOwnerId: ownerId, conversationId: "chn-test",
+        createdAt: 1, updatedAt: 1, metadata: { operatorNeedMessageId: "msg-1", requestKind: "question" },
+      };
+      assertValidCollaborationRecord(record);
+      h.records.set(id, record);
+      return record;
+    };
+    const asked = question("operator-question:msg-1", "operator");
+    await h.service.dismiss(asked.id);
+    expect(h.records.get(asked.id)).toMatchObject({ state: "declined", answer: "Dismissed by the operator" });
+    const other = question("question-2", "agent-2");
+    await expect(h.service.dismiss(other.id)).rejects.toThrow("Only requests to the operator");
+    expect(h.records.get(other.id)?.state).toBe("open");
+    await expect(h.service.dismiss("missing")).rejects.toBeInstanceOf(PermissionRequestEndedError);
+  });
+
   test("a recorded prompt matches its pane without the cursor", () => {
     for (const text of [trust, tool]) {
       const shown = parseTmuxPermission(text, "/tmp/project")!;

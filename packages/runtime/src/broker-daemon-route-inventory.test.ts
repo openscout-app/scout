@@ -204,6 +204,7 @@ const expectedRouteInventory = [
   "POST /v1/missions/:id/log",
   "POST /v1/native-session-attention",
   "POST /v1/nodes",
+  "POST /v1/operator-requests/dismiss",
   "POST /v1/operator/notify-with-attachment",
   "POST /v1/pairing/attach",
   "POST /v1/pairing/detach",

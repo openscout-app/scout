@@ -218,8 +218,18 @@ raised it has ended, so an answer goes only to the session. Otherwise the runtim
 declines the record and records why. A decision on a record with no waiter tries
 the same rebinding first. When nothing can answer the request, the route returns
 `410` with `outcome: "ended"` and `sessionOpen`. A record with a recorded
-actuation attempt is never rebound, and records from another node are never
-touched.
+actuation attempt is never rebound, and the sweep never touches records from
+another node.
+
+The operator can always end an open request to them. `POST
+/v1/operator-requests/dismiss` with `{ requestId }` is machine-local like
+decide. It declines the record with the answer "Dismissed by the operator" and
+sends nothing to any session. It takes permission requests, including one whose
+session lookup keeps failing or one from a node that is gone, and the
+`operator-question:` records of questions agents ask the operator. A permission
+request that a session still waits on is refused with `409`: answer it with a
+decision instead. A record that is already settled returns `410` with
+`outcome: "ended"`.
 
 Permission scope is not invented:
 

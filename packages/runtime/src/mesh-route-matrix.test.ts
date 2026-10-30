@@ -99,8 +99,9 @@ describe("mesh route matrix", () => {
     }
   });
 
-  test("permission decisions and receipt recovery remain machine-local", () => {
+  test("permission decisions, request dismissals and receipt recovery remain machine-local", () => {
     expect(meshRouteTierFor("POST", "/v1/permissions/decide")).toBe("local");
+    expect(meshRouteTierFor("POST", "/v1/operator-requests/dismiss")).toBe("local");
     expect(meshRouteTierFor("GET", "/v1/request-receipts/request-1")).toBe("local");
   });
 

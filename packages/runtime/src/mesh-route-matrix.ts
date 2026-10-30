@@ -220,6 +220,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/messages/reply": "local",
   "POST /v1/missions/:id/log": "local",
   "POST /v1/nodes": "local",
+  // Operator authorization; the handler also refuses remote transport.
+  "POST /v1/operator-requests/dismiss": "local",
   "POST /v1/pairing/attach": "local",
   "POST /v1/pairing/detach": "local",
   // Operator authorization; the handler also refuses remote transport.

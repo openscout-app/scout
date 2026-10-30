@@ -1564,6 +1564,27 @@ test("unconfirmed permission actuation is not a refused decision", async () => {
   expect(result.body).toEqual({ error: "Acknowledgement timed out", outcome: "unconfirmed" });
 });
 
+test("request dismissal is machine-local; a settled request is ended and a waited-on one refused", async () => {
+  const dismissed: string[] = [];
+  const dismiss = async (id: string) => {
+    if (id === "settled") throw new PermissionRequestEndedError("Request is already settled.", false);
+    if (id === "live") throw new Error("The session is still waiting on this request. Allow or deny it.");
+    dismissed.push(id);
+  };
+  const harness = createHarness({ permissionService: { dismiss } as unknown as NonNullable<BrokerHttpRouterDeps["permissionService"]> });
+  const result = await requestRouter(harness, "POST", "/v1/operator-requests/dismiss", { body: { requestId: "permission-1" } });
+  expect(result.response.status).toBe(200); expect(dismissed).toEqual(["permission-1"]);
+  const remote = await requestRouter(harness, "POST", "/v1/operator-requests/dismiss", { body: { requestId: "permission-2" }, transportContext: { transport: "remote" } });
+  expect(remote.response.status).toBe(403);
+  const missing = await requestRouter(harness, "POST", "/v1/operator-requests/dismiss", { body: {} });
+  expect(missing.response.status).toBe(409);
+  const settled = await requestRouter(harness, "POST", "/v1/operator-requests/dismiss", { body: { requestId: "settled" } });
+  expect(settled.response.status).toBe(410); expect(settled.body).toEqual({ error: "Request is already settled.", outcome: "ended" });
+  const live = await requestRouter(harness, "POST", "/v1/operator-requests/dismiss", { body: { requestId: "live" } });
+  expect(live.response.status).toBe(409); expect(live.body.outcome).toBe("refused");
+  expect(dismissed).toEqual(["permission-1"]);
+});
+
 test("explicit asks cannot forward an alias payload after wire normalization", async () => {
   let forwarded = 0;
   const h = createHarness({ forwardRouteAliasRequest: async () => { forwarded++; return { status: 202, body: {} }; } });

@@ -597,6 +597,21 @@ export function createBrokerHttpRouter(
     }
     return;
   }
+  if (method === "POST" && url.pathname === "/v1/operator-requests/dismiss") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    try {
+      const body = await readRequestBody<{ requestId?: unknown }>(request);
+      if (typeof body.requestId !== "string" || !body.requestId) throw new Error("requestId is required");
+      if (!deps.permissionService) throw new Error("Dismissing requests is unavailable");
+      await deps.permissionService.dismiss(body.requestId);
+      json(response, 200, { ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended" });
+      else json(response, 409, { error: message, outcome: "refused" });
+    }
+    return;
+  }
 
   if (url.pathname.startsWith("/v1/mesh/approvals/") || url.pathname.startsWith("/v1/approvals/remote")) {
     if (await handleBrokerMeshApprovalsRoute(request, response, url, method, deps.meshApprovals ?? {})) return;
