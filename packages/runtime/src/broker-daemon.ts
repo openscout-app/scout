@@ -57,6 +57,7 @@ import { applyWSSHandler } from "@trpc/server/adapters/ws";
 import type { RuntimeHttpRequestLike, RuntimeHttpResponseLike } from "./portable-types.js";
 
 import { brokerRouter } from "./broker-trpc-router.js";
+import { brokerOperatorSignalSchema } from "./broker-command-boundary-schemas.js";
 
 import {
   type ActorIdentity,
@@ -72,6 +73,7 @@ import {
   type QuestionRecord,
   type ScoutDispatchEnvelope,
   type ScoutDispatchRecord,
+  type ScoutOperatorSignal,
   AGENT_HARNESSES,
   scoutSessionHostForNode,
   mintChannelId,
@@ -819,6 +821,7 @@ const meshHttpService = new BrokerMeshHttpService({
     knownInvocations.set(invocation.id, invocation);
   },
   completeInvocationsForBrokerReply: (message) => messageService.completeInvocationsForBrokerReply(message),
+  trackOperatorQuestion: trackMeshOperatorQuestion,
   localEndpointForActor: (actorId) => Object.values(runtime.snapshot().endpoints).find((endpoint) =>
     endpoint.agentId === actorId
     && endpoint.nodeId === nodeId
@@ -2681,15 +2684,43 @@ async function postConversationMessage(
   duplicate?: boolean;
 }> {
   const result = await messageService.postConversationMessage(message);
-  if (message.actorId === operatorActorId && message.replyToMessageId) {
-    const record = runtime.collaborationRecord(`operator-question:${message.replyToMessageId}`);
-    if (record?.kind === "question" && record.state === "open" && record.conversationId === message.conversationId) {
-      await recordCollaborationDurably({ ...record, state: "closed", answer: message.body,
-        answeredById: operatorActorId, answeredAt: message.createdAt, closedAt: message.createdAt,
-        nextMoveOwnerId: undefined, updatedAt: message.createdAt });
-    }
-  }
+  await settleOperatorQuestion(message);
   return result;
+}
+
+// Each host that holds a question to the operator keeps its own record of it,
+// so a question asked on another host can be dismissed here, and an answer
+// given on another host settles it here.
+async function recordOperatorQuestion(message: MessageRecord, signal: ScoutOperatorSignal): Promise<void> {
+  if (signal.kind !== "need" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  await recordCollaborationDurably({
+    id: `operator-question:${message.id}`, kind: "question", state: "open", acceptanceState: "none",
+    title: signal.requestKind === "permission" ? "Permission request" : signal.question,
+    summary: signal.question, createdById: message.actorId, askedById: message.actorId,
+    ownerId: operatorActorId, nextMoveOwnerId: operatorActorId, conversationId: message.conversationId,
+    createdAt: message.createdAt, updatedAt: message.createdAt,
+    metadata: { operatorNeedMessageId: message.id, requestKind: signal.requestKind ?? "question" },
+  });
+}
+
+async function settleOperatorQuestion(message: MessageRecord): Promise<void> {
+  if (message.actorId !== operatorActorId || !message.replyToMessageId) return;
+  const record = runtime.collaborationRecord(`operator-question:${message.replyToMessageId}`);
+  if (record?.kind === "question" && record.state === "open" && record.conversationId === message.conversationId) {
+    await recordCollaborationDurably({ ...record, state: "closed", answer: message.body,
+      answeredById: operatorActorId, answeredAt: message.createdAt, closedAt: message.createdAt,
+      nextMoveOwnerId: undefined, updatedAt: message.createdAt });
+  }
+}
+
+/** A message another host sent here: a question to the operator, or the operator's answer to one. */
+async function trackMeshOperatorQuestion(message: MessageRecord): Promise<void> {
+  const signal = brokerOperatorSignalSchema.safeParse(message.metadata?.operatorSignal);
+  if (signal.success && message.actorId !== operatorActorId) {
+    await recordOperatorQuestion(message, signal.data);
+    return;
+  }
+  await settleOperatorQuestion(message);
 }
 
 async function postInvocationStatusMessage(
@@ -3017,17 +3048,7 @@ const deliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
   acceptInvocation: acceptInvocationDurably,
   dispatchAcceptedInvocation,
   queueOperatorDeliveryIssue: (input) => operatorAttentionService.queueDeliveryIssue(input),
-  recordOperatorNeed: async (message, signal) => {
-    if (signal.kind !== "need" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
-    await recordCollaborationDurably({
-      id: `operator-question:${message.id}`, kind: "question", state: "open", acceptanceState: "none",
-      title: signal.requestKind === "permission" ? "Permission request" : signal.question,
-      summary: signal.question, createdById: message.actorId, askedById: message.actorId,
-      ownerId: operatorActorId, nextMoveOwnerId: operatorActorId, conversationId: message.conversationId,
-      createdAt: message.createdAt, updatedAt: message.createdAt,
-      metadata: { operatorNeedMessageId: message.id, requestKind: signal.requestKind ?? "question" },
-    });
-  },
+  recordOperatorNeed: recordOperatorQuestion,
   queueOperatorSignal: (input) => operatorAttentionService.queueOperatorSignal(input),
   warn: (message, detail) => console.warn(message, detail),
 });
