@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { registrySubstanceChanged } from "./registry-liveness.js";
+import { registrySubstanceChanged, registrySubstanceKey } from "./registry-liveness.js";
 test("the allowlist does not hide endpoint state, keys, capabilities, scope or arbitrary timestamped evidence", () => {
   for (const kind of ["node", "actor", "agent", "endpoint"] as const) {
     expect(registrySubstanceChanged(kind, { metadata: { lastSeenAt: 1 } }, { metadata: { lastSeenAt: 2 } })).toBe(false);
@@ -34,4 +34,12 @@ test("repeated stale/failure observations keep transitions and replacement ident
   }
   expect(registrySubstanceChanged("endpoint", { state: "idle", metadata: { lastError: "offline" } }, { state: "idle", metadata: { lastError: "offline", lastFailedAt: 1 } })).toBe(true);
   expect(registrySubstanceChanged("actor", { metadata: { staleAt: 1 } }, { metadata: { staleAt: 2 } })).toBe(true);
+});
+
+test("a substance key ignores liveness and key order but not state", () => {
+  const endpoint = { id: "e1", state: "idle", metadata: { lastSeenAt: 1, source: "local" } };
+  expect(registrySubstanceKey("endpoint", { metadata: { source: "local", lastSeenAt: 2 }, state: "idle", id: "e1" }))
+    .toBe(registrySubstanceKey("endpoint", endpoint));
+  expect(registrySubstanceKey("endpoint", { ...endpoint, state: "offline" })).not.toBe(registrySubstanceKey("endpoint", endpoint));
+  expect(registrySubstanceKey("agent", undefined)).toBe("");
 });

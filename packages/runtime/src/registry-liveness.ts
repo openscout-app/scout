@@ -4,7 +4,8 @@ export type RegistryRecordKind = "node" | "actor" | "agent" | "endpoint";
 
 /** Explicit liveness allowlist, NOT a recursive timestamp scrubber. In particular
  * registeredAt, createdAt, updatedAt, keys, state and observation evidence matter.
- * Durable journal/projection upserts still retain the complete, current record. */
+ * A node update that is liveness only stays in memory; the journal is
+ * rewritten only as its signed card nears expiry (isNodeLivenessOnlyUpdate). */
 function substantiveRecord(kind: RegistryRecordKind, record: object, renewal: boolean, repeatedFailure: boolean): unknown {
   const value = { ...record } as Record<string, unknown>;
   if (kind === "node") {
@@ -44,6 +45,17 @@ function normalize(value: unknown): unknown {
     .map(([k, v]) => [k, normalize(v)] as const)
     .filter(([k, v]) => k !== "metadata" || v == null || Object.keys(v as object).length > 0);
   return Object.fromEntries(entries);
+}
+
+/** Stable key of a record's substance, for change detection without a prior copy. */
+export function registrySubstanceKey(kind: RegistryRecordKind, record: object | undefined): string {
+  return record ? JSON.stringify(sortedKeys(substantiveRecord(kind, record, false, false))) : "";
+}
+
+function sortedKeys(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedKeys((value as Record<string, unknown>)[key])]));
 }
 
 export function registrySubstanceChanged(kind: RegistryRecordKind, previous: object | undefined, next: object): boolean {

@@ -1212,6 +1212,42 @@ describe("registry liveness is durable state, not event history", () => {
     await durableStore.flushProjectedEntries();
   });
 
+  test("a re-signed node card is liveness: memory follows it, the journal does not until the card is half spent", async () => {
+    const root = mkdtempSync(join(tmpdir(), "openscout-node-liveness-")); tempRoots.add(root);
+    const journalPath = join(root, "journal");
+    const journal = new FileBackedBrokerJournal(journalPath); await journal.load();
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    const durableStore = new BrokerDurableStore({ journal, projection: { async applyEntries() { return []; } }, threadEvents: { publish() {} } });
+    const records = new BrokerDurableRecordStore({ runtime, durableStore, knownInvocations: new Map(),
+      journaledNode: (id) => journal.journaledNode(id) });
+    const ttl = 86_400_000;
+    const card = (issuedAt: number, n: number) => ({ nodeId: "peer", label: "peer", publicKey: "key", keyId: "key-id", fingerprint: "fp",
+      version: "test", capabilities: [], endpoints: [], issuedAt, expiresAt: issuedAt + ttl, nonce: `n${n}`, signature: `s${n}` });
+    const node = (seenAt: number, n: number, brokerUrl = "http://peer.test") => ({ ...testNode(), id: "peer", meshId: "mesh-1",
+      advertiseScope: "local" as const, registeredAt: 1, brokerUrl, lastSeenAt: seenAt, card: card(seenAt, n) });
+    const lines = async () => (await Bun.file(journalPath).text()).split("\n").filter(line => line.includes("\"node.upsert\"")).length;
+
+    // The runtime can hold a node the journal has never seen (its own, at
+    // startup). The first durable write must reach the journal regardless.
+    await runtime.upsertNode(node(500, 0));
+    await records.upsertNode(node(1_000, 1));
+    expect(await lines()).toBe(1);
+    // A probe every minute for an hour re-signs the card each time.
+    for (let minute = 1; minute <= 60; minute++) await records.upsertNode(node(1_000 + minute * 60_000, minute + 1));
+    expect(await lines()).toBe(1);
+    expect(runtime.peek().nodes.peer?.lastSeenAt).toBe(1_000 + 60 * 60_000);
+    // Half the journaled card's lifetime later, the journal takes one renewal.
+    await records.upsertNode(node(1_000 + ttl / 2, 100));
+    expect(await lines()).toBe(2);
+    // A real change is written at once.
+    await records.upsertNode(node(1_000 + ttl / 2 + 60_000, 101, "http://moved.test"));
+    expect(await lines()).toBe(3);
+    const reloaded = new FileBackedBrokerJournal(journalPath); await reloaded.load();
+    const restored = reloaded.snapshot().nodes.peer as ReturnType<typeof node> | undefined;
+    expect(restored?.brokerUrl).toBe("http://moved.test");
+    expect(restored!.card.expiresAt).toBeGreaterThan(1_000 + ttl);
+  });
+
   test("restart and fresh SQLite projection retain latest liveness without heartbeat events", async () => {
     const root = mkdtempSync(join(tmpdir(), "openscout-liveness-replay-")); tempRoots.add(root);
     const journalPath = join(root, "journal");

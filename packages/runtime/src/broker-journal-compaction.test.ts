@@ -68,11 +68,37 @@ test("live compaction drops only records named by committed rotation markers", a
 test("compaction scan budget preserves original bytes and leaves no partial file", async () => {
   const { journal, root, path } = await setup();
   const before = await readFile(path);
-  expect((await journal.compactIfNeeded({ ...compact, maxEntries: 1 })).state).toBe("budget");
+  // A scan stops only between frames; one that cannot finish the first frame changes nothing.
+  expect((await journal.compactIfNeeded({ ...compact, maxEntries: 0 })).state).toBe("budget");
   expect(await readFile(path)).toEqual(before);
   expect((await readdir(root)).filter(name => name.endsWith(".tmp"))).toEqual([]);
   expect((await journal.compactIfNeeded({ ...compact, maxTrackedKeys: 0 })).state).toBe("budget");
   expect(await readFile(path)).toEqual(before);
+});
+
+test("a scan that reaches its key cap folds the prefix it read and the next passes finish the rest", async () => {
+  const { journal, path } = await setup();
+  const evicted = (id: string) => ({ messageIds: [id], invocationIds: [], flightIds: [], deliveryIds: [], deliveryAttemptIds: [], collaborationEventIds: [] });
+  for (let index = 0; index < 8; index++) {
+    await journal.appendEntries(message(`m${index}`));
+    await journal.appendEntries({ kind: "history.rotate", cutoff: 1_800_000_000_000 + index, rotatedAt: 1_800_000_000_000 + index, evicted: evicted(`m${index}`) });
+  }
+  await journal.appendEntries(message("tail"));
+  const before = Object.keys(journal.snapshot().messages).sort();
+  const sizeBefore = (await readFile(path)).byteLength;
+  const first = await journal.compactIfNeeded({ ...compact, maxTrackedKeys: 4 });
+  expect(first.state).toBe("compacted");
+  expect(first.reason.endsWith("_prefix")).toBe(true);
+  expect((await readFile(path)).byteLength).toBeLessThan(sizeBefore);
+  let passes = 1;
+  while (passes < 20 && (await journal.compactIfNeeded({ ...compact, maxTrackedKeys: 4 })).state === "compacted") passes++;
+  expect(passes).toBeGreaterThan(1);
+  const entries = await journal.readEntries();
+  expect(entries.filter(entry => entry.kind === "history.rotate").length).toBeLessThanOrEqual(3);
+  expect(entries.filter(entry => entry.kind === "message.record").map(entry => (entry as { message: { id: string } }).message.id))
+    .not.toContain("m0");
+  const restored = new FileBackedBrokerJournal(path); await restored.load();
+  expect(Object.keys(restored.snapshot().messages).sort()).toEqual(before);
 });
 
 test("only explicitly archived control events can leave the canonical journal", async () => {
@@ -178,4 +204,20 @@ test("receipt cleanup byte proof includes blank lines and never authorizes a new
   await journal.appendEntries({ kind: "history.rotate", cutoff: 3, rotatedAt: 3, evicted });
   await journal.compactIfNeeded({ ...compact, historicalCleanupApplied: true, historicalCleanupBoundary });
   expect((await journal.readEntries()).filter(entry => entry.kind === "history.rotate").map(entry => entry.cutoff)).toEqual([2, 3]);
+});
+
+test("a scan budget that lands inside a batch keeps every entry of that batch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scout-live-compact-")); cleanup.push(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "journal.jsonl");
+  const journal = new FileBackedBrokerJournal(path, { compactionPolicy: { minimumReclaimBytes: 1 } });
+  await journal.load();
+  const upsert = (id: string, name: string): BrokerJournalEntry => ({ kind: "actor.upsert", actor: { id, kind: "agent", displayName: name } });
+  await journal.appendEntries(upsert("a", "1"));
+  await journal.appendEntries(upsert("a", "2"));
+  await journal.appendEntries([upsert("b", "1"), upsert("c", "1"), upsert("d", "1")]);
+  const result = await journal.compactIfNeeded({ ...compact, maxEntries: 3 });
+  expect(result.state).toBe("compacted");
+  const restored = new FileBackedBrokerJournal(path); await restored.load();
+  expect(Object.keys(restored.snapshot().actors).sort()).toEqual(["a", "b", "c", "d"]);
+  expect(restored.snapshot().actors.a?.displayName).toBe("2");
 });

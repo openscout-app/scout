@@ -14,6 +14,7 @@ import { createReadStream } from "node:fs";
 import { appendFile, mkdir, open, readdir, rename, stat, truncate, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname } from "node:path";
+import { ControlEventHydrator, ControlEventThinner, type ControlEventPayloadRecord } from "./broker-journal-event-refs.js";
 import { decodeJournalLine, encodeJournalEntries, encodeJournalGeneration, journalGenerationId, JOURNAL_GENERATION_KIND, journalLines, JournalFrameLimitError, UnsupportedJournalFrameError } from "./broker-journal-framing.js";
 
 import type {
@@ -92,7 +93,7 @@ export type BrokerJournalEntry =
   | { kind: "durable.attempt.record"; attempt: DurableAttempt }
   | { kind: "durable.checkpoint.record"; checkpoint: DurableCheckpoint }
   | { kind: "durable.signal.record"; signal: DurableSignal }
-  | { kind: "control.event.record"; event: ControlEvent }
+  | { kind: "control.event.record"; event: ControlEvent; payloadRecord?: ControlEventPayloadRecord }
   | { kind: "journal.replay_barrier"; barrier: BrokerJournalReplayBarrier }
   | {
       kind: "delivery.status.update";
@@ -515,6 +516,10 @@ export class FileBackedBrokerJournal {
   private readonly filePath: string;
   private readonly quarantine: BrokerQuarantine;
   private readonly warnedQuarantine = new Set<string>();
+  private readonly eventThinner = new ControlEventThinner();
+  /** Hydrators at the end of recent passes, so a tail pass resolves records written before its cursor. */
+  private readonly passHydrators = new Map<string, ControlEventHydrator>();
+  private unresolvedEventRecords = 0;
 
   quarantineStatus() { return this.quarantine.status(); }
   listQuarantine(options: QuarantineListOptions = {}) { return this.quarantine.list(options); }
@@ -629,33 +634,51 @@ export class FileBackedBrokerJournal {
     const maximumMs = finite(options.maxDurationMs, 30_000);
     const budgetError = new Error("journal_compaction_budget");
     const checkBudget = () => { options.signal?.throwIfAborted(); if (Date.now() - start > maximumMs) throw budgetError; };
+    // The scan stops at its share of the budget and compacts the prefix it
+    // read. A prefix is exactly the journal as it stood when it ended there,
+    // so the rewrite keeps every later byte verbatim; markers only ever drop
+    // entries before them. The next turn continues from the folded prefix.
+    const scanDeadline = start + maximumMs / 3;
+    const scanStop = new Error("journal_compaction_scan_stop");
     const latest = new Map<string, number>(), encodedBytes = new Map<string, number>();
     const rotations: AppliedHistoryRotation[] = [];
-    let estimatedReclaimBytes = 0, trackedRotationIds = 0;
+    let estimatedReclaimBytes = 0, trackedRotationIds = 0, scannedEndByte = 0, stoppedEarly = false;
     let cleanupThroughIndex = -1;
     const cleanupBoundary = options.historicalCleanupApplied ? options.historicalCleanupBoundary : undefined;
     const legacyRotations = [...this.appliedRotations];
     try {
-      await this.visitEntries(async (entry, index, bytes, physicalEndByte) => {
-        if (cleanupBoundary?.fileIdentity && cleanupBoundary.fileIdentity === boundary.fileIdentity && physicalEndByte <= cleanupBoundary.endByteExclusive) cleanupThroughIndex = index;
-        checkBudget();
-        if (index >= maximumEntries) throw budgetError;
-        if (index % 128 === 0) await yieldReadTurn();
-        const key = dedupeKey(entry);
-        if (key) {
-          estimatedReclaimBytes += encodedBytes.get(key) ?? 0;
-          latest.set(key, index); encodedBytes.set(key, bytes);
-          if (latest.size + trackedRotationIds > maximumKeys) throw budgetError;
-        }
-        if (entry.kind === "history.rotate") {
-          const rotation = entry.evicted ? { cutoff: entry.cutoff, ...historyRotationPlanFromMarker(entry.evicted) }
-            : legacyRotations.find(value => value.cutoff === entry.cutoff);
-          if (!rotation) throw new Error("journal_compaction_rotation_coverage_unavailable");
-          rotations.push(rotation);
-          for (const [key, value] of Object.entries(rotation)) if (key !== "cutoff" && value instanceof Set) trackedRotationIds += value.size;
-          if (latest.size + trackedRotationIds > maximumKeys) throw budgetError;
-        }
-      }, boundary);
+      try {
+        await this.visitEntries(async (entry, index, bytes, physicalEndByte, frameStart) => {
+          options.signal?.throwIfAborted();
+          // Stop only between physical frames: every entry of a frame reports
+          // the frame's end byte, so a partial frame would fold its unread
+          // entries away. A frame holds at most a few thousand entries.
+          if (frameStart && (index >= maximumEntries || Date.now() > scanDeadline)) throw scanStop;
+          if (index % 128 === 0) await yieldReadTurn();
+          const key = dedupeKey(entry);
+          let rotation: AppliedHistoryRotation | undefined, rotationIds = 0;
+          if (entry.kind === "history.rotate") {
+            rotation = entry.evicted ? { cutoff: entry.cutoff, ...historyRotationPlanFromMarker(entry.evicted) }
+              : legacyRotations.find(value => value.cutoff === entry.cutoff);
+            if (!rotation) throw new Error("journal_compaction_rotation_coverage_unavailable");
+            for (const [field, value] of Object.entries(rotation)) if (field !== "cutoff" && value instanceof Set) rotationIds += value.size;
+          }
+          const newKeys = key !== null && !latest.has(key) ? 1 : 0;
+          if (frameStart && latest.size + newKeys + trackedRotationIds + rotationIds > maximumKeys) throw scanStop;
+          if (cleanupBoundary?.fileIdentity && cleanupBoundary.fileIdentity === boundary.fileIdentity && physicalEndByte <= cleanupBoundary.endByteExclusive) cleanupThroughIndex = index;
+          if (key) {
+            estimatedReclaimBytes += encodedBytes.get(key) ?? 0;
+            latest.set(key, index); encodedBytes.set(key, bytes);
+          }
+          if (rotation) { rotations.push(rotation); trackedRotationIds += rotationIds; }
+          scannedEndByte = physicalEndByte;
+        }, boundary);
+      } catch (error) {
+        if (error !== scanStop) throw error;
+        stoppedEarly = true;
+      }
+      if (stoppedEarly && scannedEndByte === 0) return report("budget", "scan_budget", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
+      const scanned: BrokerJournalReplayBoundary = stoppedEarly ? { ...boundary, endByteExclusive: scannedEndByte } : boundary;
       const lastRotation = latest.get("history.rotate");
       if (lastRotation !== undefined) {
         const remaining = [...rotations];
@@ -664,15 +687,21 @@ export class FileBackedBrokerJournal {
           if (index >= lastRotation) return;
           if (entry.kind === "history.rotate") { remaining.shift(); return; }
           if (historyRotationDropsEntry(remaining, entry) === "all") estimatedReclaimBytes += bytes;
-        }, boundary);
+        }, scanned);
       }
       const reason = journalCompactionReason(boundary.endByteExclusive, estimatedReclaimBytes, this.compactionPolicy);
-      if (!reason) return report("skipped", "insufficient_reclaim", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
-      await this.rewriteCompactedEntries(latest, boundary.endByteExclusive, { boundary, rotations, dedupeFlights: false, checkBudget, cleanupThroughIndex });
+      if (!reason) {
+        // A stopped scan that found nothing to fold cannot make progress: say so.
+        if (stoppedEarly) return report("budget", "scan_budget", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
+        return report("skipped", "insufficient_reclaim", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
+      }
+      await this.rewriteCompactedEntries(latest, scanned.endByteExclusive, { boundary: scanned, rotations, dedupeFlights: false, checkBudget, cleanupThroughIndex });
       // Generation refresh notices the inode change. Existing captures keep
       // their prior generation alive until their readers release it.
       await this.messageHistory?.refresh();
-      return report("compacted", reason, boundary.endByteExclusive, (await stat(this.filePath)).size, estimatedReclaimBytes);
+      // A folded prefix continues on the next maintenance turn, not after the interval.
+      if (stoppedEarly) this.lastLiveCompactionAt = 0;
+      return report("compacted", stoppedEarly ? `${reason}_prefix` : reason, boundary.endByteExclusive, (await stat(this.filePath)).size, estimatedReclaimBytes);
     } catch (error) {
       if (error === budgetError) return report("budget", "scan_budget", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
       throw error;
@@ -1054,6 +1083,9 @@ export class FileBackedBrokerJournal {
     }
   }
 
+  /** Events whose referenced record line was gone when read (0 in a healthy journal). */
+  unresolvedEventRecordCount(): number { return this.unresolvedEventRecords; }
+
   messageBodyCacheStatus() {
     return this.messageBodyCache?.status() ?? { enabled: false };
   }
@@ -1164,6 +1196,11 @@ export class FileBackedBrokerJournal {
     return cloneSnapshot(this.state.snapshot);
   }
 
+  /** The node record this journal last accepted, without copying the snapshot. Read only. */
+  journaledNode(nodeId: string): Readonly<NodeDefinition> | undefined {
+    return this.state.snapshot.nodes[nodeId];
+  }
+
   verificationRecords(plan: HistoryRotationPlan): BrokerJournalVerificationRecords {
     const snapshot = this.state.snapshot;
     const flights = [...plan.flightIds].flatMap(id => snapshot.flights[id] ? [snapshot.flights[id]!] : []);
@@ -1219,9 +1256,11 @@ export class FileBackedBrokerJournal {
         preparationError = error;
         return;
       }
-      const payload = encodeJournalEntries(retained);
+      const encoded = this.eventThinner.encode(retained);
+      const payload = encodeJournalEntries(encoded.entries);
       if (this.memoryMaintenance) acceptedEncodedBytes = Buffer.byteLength(payload, "utf8");
       await this.appendLines(payload);
+      encoded.commit();
       for (const entry of prepared) {
         this.apply(entry);
       }
@@ -1642,6 +1681,7 @@ export class FileBackedBrokerJournal {
       index: number,
       encodedLineBytes: number,
       physicalEndByte: number,
+      frameStart: boolean,
     ) => void | Promise<void>,
     options: { endByteExclusive?: number; startByteInclusive?: number; fileIdentity?: string } = {},
   ): Promise<JournalVisitReport> {
@@ -1657,6 +1697,9 @@ export class FileBackedBrokerJournal {
     const maintenance = this.memoryMaintenance?.beginReplay();
     let file: Awaited<ReturnType<typeof open>> | undefined;
     let index = 0;
+    let hydrator: ControlEventHydrator | undefined;
+    let passIdentity: string | undefined;
+    let passEnd = options.startByteInclusive ?? 0;
     const report: JournalVisitReport = {
       rawLines: 0,
       validEntries: 0,
@@ -1668,8 +1711,12 @@ export class FileBackedBrokerJournal {
       if (!Number.isSafeInteger(start) || start < 0 || (start > 0 && !options.fileIdentity)) throw new Error("invalid_journal_tail_cursor");
       file = await open(this.filePath, "r");
       const source = await file.stat();
-      if ((options.fileIdentity && await replayFileIdentity(file, source) !== options.fileIdentity)
+      const identity = await replayFileIdentity(file, source);
+      if ((options.fileIdentity && identity !== options.fileIdentity)
         || (endByteExclusive !== undefined && source.size < endByteExclusive)) throw new Error("journal_replay_boundary_changed");
+      const resumed = start > 0 ? this.passHydrators.get(`${identity}@${start}`) : undefined;
+      hydrator = resumed ? resumed.clone() : new ControlEventHydrator();
+      passIdentity = identity;
       if (endByteExclusive !== undefined && start >= endByteExclusive) return report;
       const end = endByteExclusive ?? source.size;
       let physicalEndByte = start;
@@ -1685,6 +1732,7 @@ export class FileBackedBrokerJournal {
       }
       for await (const { raw, bytes: encodedLineBytes } of journalLines(chunks())) {
         physicalEndByte += encodedLineBytes;
+        passEnd = physicalEndByte;
         const rawLine = raw.toString("utf8");
         report.rawLines += 1;
         // Broker journal appends always use one-byte LF terminators. Reuse the
@@ -1737,11 +1785,17 @@ export class FileBackedBrokerJournal {
         // overhead for compaction estimates without charging its bytes N times.
         const perEntryBytes = Math.floor(encodedLineBytes / entries.length);
         for (let ordinal = 0; ordinal < entries.length; ordinal++) {
-          await visitor(entries[ordinal]!, index, perEntryBytes + (ordinal === 0 ? encodedLineBytes % entries.length : 0), physicalEndByte);
+          await visitor(hydrator!.decode(entries[ordinal]!), index, perEntryBytes + (ordinal === 0 ? encodedLineBytes % entries.length : 0), physicalEndByte, ordinal === 0);
           index += 1;
           report.validEntries += 1;
         }
         maintenance?.add(encodedLineBytes);
+      }
+      if (hydrator && passIdentity) {
+        this.unresolvedEventRecords += hydrator.unresolved;
+        hydrator.unresolved = 0;
+        this.passHydrators.set(`${passIdentity}@${passEnd}`, hydrator);
+        while (this.passHydrators.size > 4) this.passHydrators.delete(this.passHydrators.keys().next().value!);
       }
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error
@@ -1791,6 +1845,9 @@ export class FileBackedBrokerJournal {
       pendingBytes = 0;
     };
     const lastFlightById = new Map<string, FlightRecord>();
+    // Re-thin against the records this output retains: an event whose record
+    // line is dropped here is written complete.
+    const eventThinner = new ControlEventThinner();
     const compactedCurrentFlightIds = new Map<string, string>();
     // Every history.rotate marker applied during the scan kept its eviction
     // sets in `appliedRotations`. A record line is dropped when ANY rotation
@@ -1848,7 +1905,7 @@ export class FileBackedBrokerJournal {
           // the deleted row (and its references) in the store permanently.
         }
 
-        const line = `${JSON.stringify(writeEntry)}\n`;
+        const line = `${JSON.stringify(eventThinner.encodeOne(writeEntry))}\n`;
         pendingLines.push(line);
         pendingBytes += Buffer.byteLength(line, "utf8");
         if (pendingBytes >= 64 * 1024) await flushOutput();
@@ -1882,6 +1939,9 @@ export class FileBackedBrokerJournal {
         await writeCompactionOutput("rename", () => rename(temporaryPath, this.filePath));
         await this.syncDirectory();
         this.appendPrefix = "";
+        // The rewrite may drop record lines the writer remembers. Reference
+        // only records written after it.
+        this.eventThinner.reset();
       };
       if (prefixBytes === undefined) await publish();
       else {

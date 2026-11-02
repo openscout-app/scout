@@ -39,6 +39,7 @@ import { memoryMaintenanceFromEnv } from "./broker-memory-maintenance.js";
 import { scoutbotIsolationMetadata } from "./scoutbot-isolation.js";
 import { randomUUID } from "node:crypto";
 import { BrokerCommandAdmission, BrokerStorageMonitor } from "./broker-storage-pressure.js";
+import { BrokerHealthResponder, brokerHealthSocketPath } from "./broker-health-responder.js";
 import { BrokerStorageMaintenance } from "./broker-storage-maintenance.js";
 import { ControlPlaneHistoryReader, historicalRecordKey } from "./control-plane-history-store.js";
 import { constrainHistoryRotationBatch, selectHistoryRotationBatch } from "./history-rotation-batch.js";
@@ -117,8 +118,8 @@ import {
   registryRetentionPlan,
 } from "./broker-registry-retention.js";
 import {
-  resolveArchiveWeeks,
-  resolveRetentionWeeks,
+  resolveArchiveDays,
+  resolveRetentionDays,
   retentionCutoff,
 } from "./retention-clock.js";
 import { planHistoryRotation, refineVerifiedRotation } from "./history-rotation.js";
@@ -293,6 +294,7 @@ import { BrokerInvocationDispatchService } from "./broker-invocation-dispatch-se
 import { BrokerCommandService } from "./broker-command-service.js";
 import { BrokerChannelInviteService } from "./broker-channel-invite-service.js";
 import { BrokerDispatchRecoveryService } from "./broker-dispatch-recovery-service.js";
+import { registrySubstanceKey } from "./registry-liveness.js";
 import {
   brokerActorDisplayName as resolveBrokerActorDisplayName,
   brokerRouteKind,
@@ -414,6 +416,11 @@ const nodeName = process.env.OPENSCOUT_NODE_NAME ?? hostname();
 const tailnetName = process.env.TAILSCALE_TAILNET ?? undefined;
 const brokerSocketPath = process.env.OPENSCOUT_BROKER_SOCKET_PATH
   ?? resolveBrokerServiceConfig().brokerSocketPath;
+// Health is a cache read on its own thread: runtime work never delays it.
+const healthResponder = new BrokerHealthResponder({
+  socketPath: brokerHealthSocketPath(brokerSocketPath),
+  log: (message) => console.warn(`[openscout-runtime] ${message}`),
+});
 let nodeId = process.env.OPENSCOUT_NODE_ID?.trim() ?? "";
 const tailnetWebHosts = readTailscaleSelfWebHostsSync();
 // The named web doorway this node answers for — same resolution the local edge
@@ -464,13 +471,13 @@ const relayAgentIdleTtlMs = Number.parseInt(
   process.env.OPENSCOUT_RELAY_AGENT_IDLE_TTL_MS ?? String(DEFAULT_RELAY_AGENT_SESSION_IDLE_TTL_MS),
   10,
 );
-// Registry retention reaps rotation-old unreferenced registrations. The week
-// clock (OPENSCOUT_RETENTION_WEEKS, default 2 live calendar weeks) is the one
+// Registry retention reaps rotation-old unreferenced registrations. The day
+// clock (OPENSCOUT_RETENTION_DAYS, default 7 days before today) is the one
 // clock; OPENSCOUT_REGISTRY_RETENTION_MS remains only as an explicit rolling
 // override — 0 disables the sweep entirely, any positive value is clamped to
 // a one-hour floor.
-const retentionWeeks = resolveRetentionWeeks(process.env);
-const archiveWeeks = resolveArchiveWeeks(process.env);
+const retentionDays = resolveRetentionDays(process.env);
+const archiveDays = resolveArchiveDays(process.env);
 const registryRetentionOverrideMs = (() => {
   const raw = process.env.OPENSCOUT_REGISTRY_RETENTION_MS;
   if (raw === undefined || raw.trim() === "") return undefined;
@@ -480,7 +487,7 @@ const registryRetentionOverrideMs = (() => {
   return Math.max(60 * 60_000, parsed);
 })();
 if (registryRetentionOverrideMs !== undefined) {
-  console.log(`[openscout-runtime] OPENSCOUT_REGISTRY_RETENTION_MS=${registryRetentionOverrideMs} overrides the week-based retention clock (OPENSCOUT_RETENTION_WEEKS=${retentionWeeks})`);
+  console.log(`[openscout-runtime] OPENSCOUT_REGISTRY_RETENTION_MS=${registryRetentionOverrideMs} overrides the day-based retention clock (OPENSCOUT_RETENTION_DAYS=${retentionDays})`);
 }
 const runtimeHeartbeatIntervalMs = 30_000;
 const repoWatchServeCacheTtlMs = Number.parseInt(process.env.OPENSCOUT_REPO_WATCH_CACHE_TTL_MS ?? "1200000", 10);
@@ -551,7 +558,7 @@ const memoryMaintenance = memoryMaintenanceFromEnv(process.env);
 const historyCount=(value:string|undefined,fallback:number)=>{const n=Number(value);return Number.isSafeInteger(n)&&n>0?n:fallback;};
 // Experimental until the full packaged memory budget passes.
 const messageHistory=process.env.OPENSCOUT_BROKER_DISK_HISTORY !== "1" ? undefined : await BrokerMessageHistory.create(journalPath,{snapshotReaders:historyCount(process.env.OPENSCOUT_BROKER_HISTORY_SNAPSHOT_READERS,2),coldReaders:historyCount(process.env.OPENSCOUT_BROKER_HISTORY_COLD_READERS,4)});
-if (messageHistory && retentionWeeks > 0) {
+if (messageHistory && retentionDays > 0) {
   console.warn("[openscout-runtime] history rotation: message eviction is not implemented under OPENSCOUT_BROKER_DISK_HISTORY; messages are retained until that lands");
 }
 const journal = new FileBackedBrokerJournal(journalPath, {
@@ -857,6 +864,7 @@ const operatorActorId = "operator";
 let attachmentService: BrokerAttachmentService | undefined;
 let attachmentBlobStore: AttachmentBlobStore | undefined;
 const durableRecords = new BrokerDurableRecordStore({
+  journaledNode: (nodeId) => journal.journaledNode(nodeId),
   assertMessageAdmission: message => {
     if (!message.attachments?.some(a => a.blob !== undefined)) return;
     if (!attachmentService) throw new AttachmentError("attachments_unavailable");
@@ -1610,12 +1618,12 @@ async function sweepIdleCardlessSessions(): Promise<void> {
  */
 async function sweepRegistryRetention(): Promise<void> {
   if (registryRetentionOverrideMs === 0) return;
-  if (registryRetentionOverrideMs === undefined && retentionWeeks <= 0) return;
-  // The boundary is recomputed per sweep: the week clock means a new cutoff
-  // only when the calendar week rolls over; the ms override stays rolling.
+  if (registryRetentionOverrideMs === undefined && retentionDays <= 0) return;
+  // The boundary is recomputed per sweep: retention is a rolling window, so
+  // each sweep moves the cutoff forward by the time elapsed since the last.
   const cutoff = registryRetentionOverrideMs !== undefined
     ? Date.now() - registryRetentionOverrideMs
-    : retentionCutoff(Date.now(), retentionWeeks);
+    : retentionCutoff(Date.now(), retentionDays);
   // SQLite's actors.created_at is authoritative age evidence for rows
   // journaled before actor upserts carried createdAt.
   let actorCreatedAtById: Map<string, number> | undefined;
@@ -1707,10 +1715,10 @@ async function sweepRegistryRetention(): Promise<void> {
 let historyRotationCursor: string | null = null;
 let historyRotationPressure: unknown = null;
 async function rotateHistory(): Promise<number> {
-  if (shuttingDown || retentionWeeks <= 0 || sqliteDisabled) {
+  if (shuttingDown || retentionDays <= 0 || sqliteDisabled) {
     return 0;
   }
-  const cutoff = retentionCutoff(Date.now(), retentionWeeks);
+  const cutoff = retentionCutoff(Date.now(), retentionDays);
   const countsOf = (plan: {
     messageIds: ReadonlySet<string>;
     invocationIds: ReadonlySet<string>;
@@ -1845,8 +1853,8 @@ async function rotateHistory(): Promise<number> {
 }
 
 async function archiveDispatchJobs(): Promise<number> {
-  if (shuttingDown || retentionWeeks <= 0 || sqliteDisabled) return 0;
-  const cutoff = retentionCutoff(Date.now(), retentionWeeks);
+  if (shuttingDown || retentionDays <= 0 || sqliteDisabled) return 0;
+  const cutoff = retentionCutoff(Date.now(), retentionDays);
   const jobs = journal.captureArchivableInvocationDispatchJobs({ cutoff });
   if (!jobs.length) return 0;
   const records = journal.dispatchJobHistoricalRecords(jobs);
@@ -1874,13 +1882,13 @@ async function archiveDispatchJobs(): Promise<number> {
 // Export one bounded page per maintenance turn on the projection worker.
 // Free SQLite pages are reused; a whole-file VACUUM belongs to offline upkeep.
 async function archiveControlPlane(): Promise<number> {
-  if (shuttingDown || archiveWeeks <= 0 || !sharedControlPlaneStore) return 0;
+  if (shuttingDown || archiveDays <= 0 || !sharedControlPlaneStore) return 0;
   const boundary = await durableStore.awaitProjectionBoundary();
   if (!boundary.ok) {
     throw new Error(`Control-plane archive deferred: ${boundary.reason}`);
   }
   if (shuttingDown) return 0;
-  const cutoff = retentionCutoff(Date.now(), archiveWeeks);
+  const cutoff = retentionCutoff(Date.now(), archiveDays);
   const archived = await projection.archiveEvents({
     cutoff,
     archiveDir: controlPlaneArchiveDirectory(), pageSize: 1000, maxPages: 1,
@@ -2856,7 +2864,8 @@ const invocationDispatchService = new BrokerInvocationDispatchService({
 });
 
 const dispatchRecoveryService = new BrokerDispatchRecoveryService({
-  runtimeSnapshot: () => runtime.snapshot(),
+  // Read-only view: recovery reads flights per job and must not copy the registry each time.
+  runtimeSnapshot: () => runtime.peek(),
   dispatchJobs: () => journal.listRecoverableInvocationDispatchJobs({ limit: 5000 }),
   dispatchJobForInvocation: (invocationId) => journal.getInvocationDispatchJobForInvocation(invocationId),
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
@@ -2867,6 +2876,13 @@ const dispatchRecoveryService = new BrokerDispatchRecoveryService({
   runDispatchJob: (job, invocation) => invocationDispatchService.runDispatchJob(job, invocation),
   requeueDispatchJob: (job, invocation, flight) => invocationDispatchService.requeueDispatchJob(job, invocation, flight),
   dispatchAcceptedInvocation: (invocation) => invocationDispatchService.dispatchAcceptedInvocation(invocation),
+  endpointWakeKey: (agentId) => {
+    const view = runtime.peek();
+    const endpoints = Object.values(view.endpoints).filter((endpoint) => endpoint.agentId === agentId)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((endpoint) => registrySubstanceKey("endpoint", endpoint));
+    return [registrySubstanceKey("agent", view.agents[agentId]), registrySubstanceKey("actor", view.actors[agentId]), ...endpoints].join("\n");
+  },
   log: (message) => console.log(message),
   warn: (message) => console.warn(message),
 });
@@ -3573,6 +3589,12 @@ try {
   // bind controller (never a 0.0.0.0 plaintext default).
   await listenTcp(server, { host: isLoopbackHost(host) || host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host, port });
   await listenUnixSocket(socketServer, brokerSocketPath);
+  // Started only after the TCP bind proved this process owns the instance, so
+  // a second runtime can never replace the live one's health socket.
+  await healthResponder.start().then(
+    () => healthResponder.markReady({ nodeId, brokerUrl }),
+    (error) => console.warn("[openscout-runtime] health responder did not start; /health stays on the runtime sockets:", error),
+  );
   tailscaleListenerGuard.start();
   startupTrafficGate.markListening();
 
@@ -3764,8 +3786,32 @@ try {
   throw error;
 }
 
-void storageMonitor.refresh();
-setInterval(() => { void storageMonitor.refresh(); }, 30_000).unref();
+const MB = 1024 * 1024;
+const storageFileLabels: Record<string, string> = {
+  journal: "journal", database: "database", databaseWal: "database log", historicalIndex: "history index",
+  quarantine: "quarantine", quarantineWal: "quarantine log",
+};
+/** Raise or clear the flags of work that can fall behind. Health stays up. */
+function reportStorageHealthFlags(): void {
+  const storage = storageMonitor.status();
+  const over = Object.entries(storage.files).filter(([, file]) => file.aboveWarning)
+    .map(([name, file]) => `${storageFileLabels[name] ?? name} ${Math.round(file.bytes / MB)} MB over its ${Math.round(file.warningBytes / MB)} MB limit`);
+  if (storage.state === "critical" && storage.freeDiskBytes !== null) {
+    over.unshift(`free disk ${Math.round(storage.freeDiskBytes / MB)} MB, below the ${Math.round(storage.minimumFreeDiskBytes / MB)} MB reserve for durable writes`);
+  }
+  healthResponder.report("storage", over.length ? over.join("; ") : null);
+  const compaction = journal.liveCompactionStatus();
+  healthResponder.report("journal_compaction", compaction?.state === "budget"
+    ? `stopped at its scan budget after ${compaction.durationMs} ms; ${Math.round(compaction.sourceBytes / MB)} MB journal not compacted`
+    : null);
+  const maintenance = storageMaintenance.status();
+  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? maintenance.lastError ?? "failed" : null);
+}
+const refreshStorageStatus = () => storageMonitor.refresh().then(reportStorageHealthFlags, (error) => {
+  console.warn("[openscout-runtime] storage status refresh failed:", error);
+});
+void refreshStorageStatus();
+setInterval(() => { void refreshStorageStatus(); }, 30_000).unref();
 
 const otlpReceiver = localAdminKey ? undefined : await startBrokerOtlpReceiver(controlHome);
 
@@ -3951,6 +3997,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
     console.warn("[openscout-runtime] jetstream shutdown failed:", error);
   });
   peerDelivery.stop();
+  await healthResponder.stop();
   meshRendezvousPublisher?.stop();
   await meshBindController?.stop().catch(() => undefined);
   irohBridgeService?.stop();

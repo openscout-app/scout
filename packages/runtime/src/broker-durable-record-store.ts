@@ -28,6 +28,7 @@ import {
 import { isDeepStrictEqual } from "node:util";
 
 import type { BrokerJournalEntry } from "./broker-journal.js";
+import { registrySubstanceChanged } from "./registry-liveness.js";
 import type { BrokerInvocationDispatchJob } from "./broker-dispatch-job.js";
 import type {
   RuntimeActorIdentity,
@@ -83,6 +84,8 @@ export type BrokerDurableRecordStoreOptions = {
   durableStore: DurableStore;
   knownInvocations: Map<string, InvocationRequest>;
   invocationDispatchJobFor?: (jobId: string) => BrokerInvocationDispatchJob | null;
+  /** The node record the journal last accepted. Without it every node update is journaled. */
+  journaledNode?: (nodeId: string) => NodeDefinition | undefined;
   /**
    * Authoritative membership lookup (SQLite conversation_members), queried
    * before an agent/actor delete so the journaled entry carries the delete
@@ -172,6 +175,31 @@ function comparableEndpointWithoutHeartbeatMetadata(endpoint: AgentEndpoint): un
   });
 }
 
+/** Without a signed card, the journaled copy of a node stays at most this old. */
+const NODE_LIVENESS_JOURNAL_MAX_AGE_MS = 12 * 60 * 60_000;
+
+/**
+ * True when `next` differs from the journaled node only by liveness: a newer
+ * lastSeenAt and a forward renewal of the same signed card. The journal is
+ * written again once the journaled card has used half its lifetime, so the
+ * copy a restart reads back is never expired.
+ */
+export function isNodeLivenessOnlyUpdate(journaled: NodeDefinition, next: NodeDefinition): boolean {
+  if (registrySubstanceChanged("node", journaled, next)) return false;
+  const before = (journaled as { card?: Record<string, unknown> }).card;
+  const after = (next as { card?: Record<string, unknown> }).card;
+  const issuedBefore = before?.issuedAt, expiresBefore = before?.expiresAt, issuedAfter = after?.issuedAt;
+  if (typeof issuedBefore === "number" && typeof expiresBefore === "number" && typeof issuedAfter === "number"
+    && [issuedBefore, expiresBefore, issuedAfter].every(Number.isFinite) && expiresBefore > issuedBefore) {
+    return issuedAfter - issuedBefore < (expiresBefore - issuedBefore) / 2;
+  }
+  if (before || after) return false;
+  const seenBefore = journaled.lastSeenAt, seenAfter = next.lastSeenAt;
+  return typeof seenBefore === "number" && typeof seenAfter === "number"
+    && Number.isFinite(seenBefore) && Number.isFinite(seenAfter)
+    && seenAfter - seenBefore < NODE_LIVENESS_JOURNAL_MAX_AGE_MS;
+}
+
 export function isEndpointLastSeenHeartbeat(
   previous: AgentEndpoint | undefined,
   next: AgentEndpoint,
@@ -234,6 +262,15 @@ export class BrokerDurableRecordStore {
     options: DurableCommitOptions = {},
   ): Promise<void> => {
     await this.options.durableStore.runWrite(async () => {
+      // Compare with what the journal accepted, never with memory: the
+      // runtime can hold a node (its own, at startup) the journal has not seen.
+      const journaled = this.options.journaledNode?.(node.id);
+      if (journaled && isNodeLivenessOnlyUpdate(journaled, node)) {
+        // Discovery re-signs every peer's card on each probe. That is
+        // liveness, not new data: keep it in memory and leave the journal alone.
+        await this.options.runtime.upsertNode(node);
+        return;
+      }
       await this.options.durableStore.commitEntries(
         { kind: "node.upsert", node },
         async () => {

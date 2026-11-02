@@ -93,8 +93,8 @@ verification.
 
 This is an explicit allowlist, not recursive timestamp removal. Creation,
 registration, lifecycle and observed-runtime timestamps remain substantive.
-No historical events are deleted by this change; the existing four-week
-control-plane archive policy still governs retained event history.
+No historical events are deleted by this change; the rolling
+retention window still governs retained event history.
 
 ### Why consumers do not need per-minute registry events
 
@@ -123,3 +123,29 @@ and error retention; the queue writes through the bounded sink. Rotation is
 synchronous in the owning process so pending appends cannot race a rename.
 The tmux pipe is self-contained and works in packaged server bundles
 under Bun and Node ESM. Inactive historical logs are not swept retroactively.
+
+## Control events reference their record
+
+Most control events announce the record their command just journaled:
+`flight.updated` carries the flight, `message.posted` the message,
+`invocation.requested` the invocation. When an event's record equals the record
+line the journal wrote last for that id, the event line stores its envelope and
+`payloadRecord: { field, id, sha256 }` instead of a second copy
+(`broker-journal-event-refs.ts`).
+
+- Every journal reader restores the copy before a visitor sees the entry, so
+  the SQLite projection, compaction, history rotation and diagnostics receive
+  complete events. The digest proves the restored record is the one the event
+  carried.
+- A tail replay continues from the records its previous pass held, so a record
+  written just before the replay cursor still resolves.
+- Compaction re-thins against the records its output retains. An event whose
+  record line is dropped is written complete.
+- An event whose record line is gone is read as `{ id }` with
+  `recordUnavailable: true`, never as a different version.
+  `unresolvedEventRecordCount()` reports how often this happened; it is 0 in a
+  healthy journal.
+- Registry events (`node.upserted` and similar) keep their copies: compaction
+  keeps only the latest registry upsert, so an older version is not there to
+  reference.
+
