@@ -1,6 +1,7 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutInstanceBootstrap } from "./instance-bootstrap.js";
 import { createRoomListeningSupervisor } from "./room-listening-supervisor.js";
+import { webStartRequestHeaders } from "./web-start-context.js";
 import type { RuntimeErrnoError } from "./portable-types.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, writeFileSync, statSync } from "node:fs";
@@ -609,11 +610,7 @@ async function startWebWhenBrokerIsReady(): Promise<void> {
       const scheme = forwardedProtoForEdgeScheme(edgeConfig.scheme);
       const response = await fetch(new URL("/v1/web/start", brokerControlUrl), {
         method: "POST",
-        headers: {
-          accept: "application/json",
-          "x-forwarded-host": edgeConfig.portalHost,
-          "x-forwarded-proto": scheme,
-        },
+        headers: { accept: "application/json", ...webStartRequestHeaders(edgeConfig.portalHost, scheme) },
         signal: AbortSignal.timeout(15_000),
       });
       const body = await response.json() as { ok?: boolean; pid?: number | null; error?: string | null };

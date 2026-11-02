@@ -1,4 +1,5 @@
 export * from "./local-edge-trust.js";
+import { WEB_START_HOST_HEADER, WEB_START_SCHEME_HEADER } from "./web-start-context.js";
 import {
   DEFAULT_SCOUT_WEB_PORTAL_HOST,
   DEFAULT_SCOUT_WEB_VITE_HMR_PATH,
@@ -587,6 +588,21 @@ export function renderOpenScoutStartPage(config: OpenScoutLocalEdgeConfig): stri
 </html>`;
 }
 
+// The runtime's loopback gate refuses forwarding headers, which Caddy adds
+// to every proxied request. The web start and status routes admit only
+// loopback callers, who can reach the runtime directly, so they drop those
+// headers and name the portal host in the web start headers instead.
+function renderCaddyWebStartProxy(upstream: string): string {
+  return `    reverse_proxy ${upstream} {\n`
+    + `      header_up -X-Forwarded-For\n`
+    + `      header_up -X-Forwarded-Host\n`
+    + `      header_up -X-Forwarded-Proto\n`
+    + `      header_up -Via\n`
+    + `      header_up ${WEB_START_HOST_HEADER} {host}\n`
+    + `      header_up ${WEB_START_SCHEME_HEADER} {scheme}\n`
+    + `    }\n`;
+}
+
 function renderCaddyDefaultRouteBlock(
   config: OpenScoutLocalEdgeConfig,
   route: OpenScoutLocalEdgeRoute,
@@ -603,7 +619,7 @@ function renderCaddyDefaultRouteBlock(
     + `  }\n`
     + `  handle @openscout_web_start_local {\n`
     + `    rewrite * /v1/web/start\n`
-    + `    reverse_proxy ${config.brokerUpstream}\n`
+    + renderCaddyWebStartProxy(config.brokerUpstream)
     + `  }\n`
     + `  handle /__openscout/web/start {\n`
     + `    respond "Forbidden" 403\n`
@@ -614,7 +630,7 @@ function renderCaddyDefaultRouteBlock(
     + `  }\n`
     + `  handle @openscout_web_status_local {\n`
     + `    rewrite * /v1/web/status\n`
-    + `    reverse_proxy ${config.brokerUpstream}\n`
+    + renderCaddyWebStartProxy(config.brokerUpstream)
     + `  }\n`
     + `  handle /__openscout/web/status {\n`
     + `    respond "Forbidden" 403\n`

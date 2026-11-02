@@ -1,3 +1,4 @@
+import { WEB_START_HOST_HEADER, WEB_START_SCHEME_HEADER } from "./web-start-context.js";
 import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } from "./host-web-request.js";
 import type { RuntimeChildProcessLike, RuntimeEnv, RuntimeHttpRequestLike, RuntimeSpawnFunction } from "./portable-types.js";
 import { spawn } from "node:child_process";
@@ -139,17 +140,15 @@ export function webStartContextFromRequest(
   request: Pick<RuntimeHttpRequestLike, "headers">,
   trustedHosts: Set<string> = new Set(),
 ): WebStartContext {
-  const forwardedHost = Array.isArray(request.headers["x-forwarded-host"])
-    ? request.headers["x-forwarded-host"][0]
-    : request.headers["x-forwarded-host"];
-  const forwardedProto = Array.isArray(request.headers["x-forwarded-proto"])
-    ? request.headers["x-forwarded-proto"][0]
-    : request.headers["x-forwarded-proto"];
-  const trustedHost = normalizeTrustedWebHost(forwardedHost, trustedHosts);
+  const header = (name: string) => {
+    const value = request.headers[name];
+    return Array.isArray(value) ? value[0] : value;
+  };
+  const trustedHost = normalizeTrustedWebHost(header(WEB_START_HOST_HEADER), trustedHosts);
   if (!trustedHost) {
     return {};
   }
-  const proto = forwardedProto?.trim().toLowerCase() === "https" ? "https" : "http";
+  const proto = header(WEB_START_SCHEME_HEADER)?.trim().toLowerCase() === "https" ? "https" : "http";
   return {
     publicOrigin: `${proto}://${trustedHost}`,
     trustedHost,

@@ -141,6 +141,18 @@ describe("OpenScout local edge", () => {
     expect(caddyfile).toContain("path /__openscout/web/start\n    remote_ip 127.0.0.1 ::1");
     expect(caddyfile).toContain("handle /__openscout/web/start {\n    respond \"Forbidden\" 403");
     expect(caddyfile).toContain("path /__openscout/web/status\n    remote_ip 127.0.0.1 ::1");
+    // The runtime's loopback gate refuses forwarding headers, so the start and
+    // status proxies drop the ones Caddy adds and name the host in their own.
+    const runtimeProxy = "    reverse_proxy 127.0.0.1:43110 {\n"
+      + "      header_up -X-Forwarded-For\n"
+      + "      header_up -X-Forwarded-Host\n"
+      + "      header_up -X-Forwarded-Proto\n"
+      + "      header_up -Via\n"
+      + "      header_up x-openscout-web-host {host}\n"
+      + "      header_up x-openscout-web-scheme {scheme}\n"
+      + "    }\n";
+    expect(caddyfile).toContain("rewrite * /v1/web/start\n" + runtimeProxy);
+    expect(caddyfile).toContain("rewrite * /v1/web/status\n" + runtimeProxy);
     expect(caddyfile).toContain("handle /__openscout/web/status {\n    respond \"Forbidden\" 403");
   });
 
