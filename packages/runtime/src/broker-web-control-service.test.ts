@@ -61,10 +61,10 @@ describe("BrokerWebControlService", () => {
     }), trustedHosts)).toEqual({});
   });
 
-  test("derives web start context from forwarded headers", () => {
+  test("derives web start context from the web start headers", () => {
     const context = webStartContextFromRequest(fakeRequest({
-      "x-forwarded-host": "mesh.example.test",
-      "x-forwarded-proto": "https",
+      "x-openscout-web-host": "mesh.example.test",
+      "x-openscout-web-scheme": "https",
     }), new Set(["mesh.example.test"]));
 
     expect(context).toEqual({
@@ -72,7 +72,14 @@ describe("BrokerWebControlService", () => {
       trustedHost: "mesh.example.test",
     });
     expect(webStartContextFromRequest(fakeRequest({
-      "x-forwarded-host": "evil.example.test",
+      "x-openscout-web-host": "evil.example.test",
+      "x-openscout-web-scheme": "https",
+    }), new Set(["mesh.example.test"]))).toEqual({});
+  });
+
+  test("ignores forwarding headers, which the loopback gate refuses", () => {
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-forwarded-host": "mesh.example.test",
       "x-forwarded-proto": "https",
     }), new Set(["mesh.example.test"]))).toEqual({});
   });
