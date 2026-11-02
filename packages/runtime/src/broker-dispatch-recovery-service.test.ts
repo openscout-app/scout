@@ -6,7 +6,11 @@ import type {
 } from "@openscout/protocol";
 
 import type { BrokerInvocationDispatchJob } from "./broker-dispatch-job.js";
-import { BrokerDispatchRecoveryService } from "./broker-dispatch-recovery-service.js";
+import {
+  BrokerDispatchRecoveryService,
+  ENDPOINT_WAIT_INITIAL_MS,
+  ENDPOINT_WAIT_MAX_MS,
+} from "./broker-dispatch-recovery-service.js";
 
 function invocation(input: Partial<InvocationRequest> = {}): InvocationRequest {
   return {
@@ -60,6 +64,8 @@ function createService(input: {
   onRunJob?: (job: BrokerInvocationDispatchJob) => void | Promise<void>;
   onRequeueJob?: (job: BrokerInvocationDispatchJob) => void | Promise<void>;
   onDispatch?: (invocation: InvocationRequest) => void | Promise<void>;
+  endpointWakeKey?: (agentId: string) => string;
+  now?: () => number;
 }): {
   dispatched: InvocationRequest[];
   logs: string[];
@@ -96,9 +102,10 @@ function createService(input: {
       dispatched.push(nextInvocation);
       await input.onDispatch?.(nextInvocation);
     },
+    endpointWakeKey: input.endpointWakeKey,
     log: (message) => logs.push(message),
     warn: (message) => warnings.push(message),
-    now: () => 10_000,
+    now: input.now ?? (() => 10_000),
   });
   return { dispatched, logs, runJobs, requeuedJobs, service, warnings };
 }
@@ -576,5 +583,90 @@ describe("BrokerDispatchRecoveryService", () => {
     });
     expect(harness.dispatched).toEqual([]);
     expect(harness.warnings).toHaveLength(1);
+  });
+
+  describe("parks waiting for a runnable endpoint", () => {
+    function waitHarness(kind: "legacy" | "job") {
+      let now = 10_000;
+      let key = "agent-1 v1";
+      const flights = { "flight-1": deferredFlight("no_runnable_endpoint") };
+      const harness = createService({
+        flights,
+        dispatchJobs: kind === "job" ? [dispatchJob({ state: "completed", attempts: 1 })] : [],
+        endpointWakeKey: () => key,
+        now: () => now,
+      });
+      const attempts = () => harness.dispatched.length + harness.requeuedJobs.length;
+      return {
+        harness, flights, attempts,
+        at: (next: number) => { now = next; },
+        setKey: (next: string) => { key = next; },
+        pass: (reason: string) => harness.service.recoverQueuedFlights({ reason }),
+      };
+    }
+
+    test.each(["legacy", "job"] as const)("a %s park is not retried while the agent's registry inputs are unchanged", async (kind) => {
+      const h = waitHarness(kind);
+      await h.pass("queued_retry_sweep");
+      expect(h.attempts()).toBe(1);
+      await h.pass("queued_retry_sweep");
+      await h.pass("endpoint_online");
+      expect(h.attempts()).toBe(1);
+      h.at(10_000 + ENDPOINT_WAIT_INITIAL_MS - 1);
+      await h.pass("queued_retry_sweep");
+      expect(h.attempts()).toBe(1);
+      h.at(10_000 + ENDPOINT_WAIT_INITIAL_MS);
+      await h.pass("queued_retry_sweep");
+      expect(h.attempts()).toBe(2);
+      expect(h.harness.service.endpointWaits().get("invocation-1")?.delayMs).toBe(2 * ENDPOINT_WAIT_INITIAL_MS);
+    });
+
+    test("a change to the agent's registry inputs retries at once and resets the backoff", async () => {
+      const h = waitHarness("legacy");
+      await h.pass("queued_retry_sweep");
+      await h.pass("queued_retry_sweep");
+      expect(h.attempts()).toBe(1);
+      h.setKey("agent-1 v2");
+      await h.pass("endpoint_online");
+      expect(h.attempts()).toBe(2);
+      expect(h.harness.service.endpointWaits().get("invocation-1")?.delayMs).toBe(ENDPOINT_WAIT_INITIAL_MS);
+    });
+
+    test("startup retries every park once", async () => {
+      const h = waitHarness("legacy");
+      await h.pass("queued_retry_sweep");
+      await h.pass("startup");
+      expect(h.attempts()).toBe(2);
+    });
+
+    test("the backoff stops widening at its maximum", async () => {
+      const h = waitHarness("legacy");
+      let now = 10_000;
+      for (let attempt = 0; attempt < 12; attempt++) {
+        h.at(now);
+        await h.pass("queued_retry_sweep");
+        now = h.harness.service.endpointWaits().get("invocation-1")!.retryAt;
+      }
+      expect(h.attempts()).toBe(12);
+      expect(h.harness.service.endpointWaits().get("invocation-1")?.delayMs).toBe(ENDPOINT_WAIT_MAX_MS);
+    });
+
+    test("a wait is dropped once the flight leaves the park", async () => {
+      const h = waitHarness("legacy");
+      await h.pass("queued_retry_sweep");
+      expect(h.harness.service.endpointWaits().size).toBe(1);
+      h.flights["flight-1"] = flight({ state: "running" });
+      await h.pass("queued_retry_sweep");
+      expect(h.harness.service.endpointWaits().size).toBe(0);
+    });
+
+    test("a park for a held thread keeps its own retry cadence", async () => {
+      const h = waitHarness("legacy");
+      h.flights["flight-1"] = deferredFlight("thread_held_externally");
+      await h.pass("queued_retry_sweep");
+      await h.pass("queued_retry_sweep");
+      expect(h.attempts()).toBe(2);
+      expect(h.harness.service.endpointWaits().size).toBe(0);
+    });
   });
 });

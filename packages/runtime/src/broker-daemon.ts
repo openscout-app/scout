@@ -294,6 +294,7 @@ import { BrokerInvocationDispatchService } from "./broker-invocation-dispatch-se
 import { BrokerCommandService } from "./broker-command-service.js";
 import { BrokerChannelInviteService } from "./broker-channel-invite-service.js";
 import { BrokerDispatchRecoveryService } from "./broker-dispatch-recovery-service.js";
+import { registrySubstanceKey } from "./registry-liveness.js";
 import {
   brokerActorDisplayName as resolveBrokerActorDisplayName,
   brokerRouteKind,
@@ -2863,7 +2864,8 @@ const invocationDispatchService = new BrokerInvocationDispatchService({
 });
 
 const dispatchRecoveryService = new BrokerDispatchRecoveryService({
-  runtimeSnapshot: () => runtime.snapshot(),
+  // Read-only view: recovery reads flights per job and must not copy the registry each time.
+  runtimeSnapshot: () => runtime.peek(),
   dispatchJobs: () => journal.listRecoverableInvocationDispatchJobs({ limit: 5000 }),
   dispatchJobForInvocation: (invocationId) => journal.getInvocationDispatchJobForInvocation(invocationId),
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
@@ -2874,6 +2876,13 @@ const dispatchRecoveryService = new BrokerDispatchRecoveryService({
   runDispatchJob: (job, invocation) => invocationDispatchService.runDispatchJob(job, invocation),
   requeueDispatchJob: (job, invocation, flight) => invocationDispatchService.requeueDispatchJob(job, invocation, flight),
   dispatchAcceptedInvocation: (invocation) => invocationDispatchService.dispatchAcceptedInvocation(invocation),
+  endpointWakeKey: (agentId) => {
+    const view = runtime.peek();
+    const endpoints = Object.values(view.endpoints).filter((endpoint) => endpoint.agentId === agentId)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((endpoint) => registrySubstanceKey("endpoint", endpoint));
+    return [registrySubstanceKey("agent", view.agents[agentId]), registrySubstanceKey("actor", view.actors[agentId]), ...endpoints].join("\n");
+  },
   log: (message) => console.log(message),
   warn: (message) => console.warn(message),
 });

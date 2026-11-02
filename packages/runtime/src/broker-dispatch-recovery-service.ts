@@ -36,6 +36,13 @@ export type BrokerDispatchRecoveryServiceDeps = {
     flight: FlightRecord,
   ) => Promise<void>;
   dispatchAcceptedInvocation?: (invocation: InvocationRequest) => Promise<void>;
+  /**
+   * Fingerprint of the registry inputs that decide whether an agent has a
+   * runnable endpoint (agent, actor, endpoints; liveness excluded). A delivery
+   * parked for no_runnable_endpoint is retried at once when it changes, and
+   * otherwise only on a widening backoff. Without it, every pass retries.
+   */
+  endpointWakeKey?: (agentId: string) => string;
   log?: (message: string) => void;
   warn?: (message: string) => void;
   now?: () => number;
@@ -64,6 +71,20 @@ export function deferredDispatchCheckedAt(flight: FlightRecord | undefined): num
     ? deferred.checkedAt : null;
 }
 
+/** A pre-submission park that waits for the target to gain a runnable endpoint. */
+export function isAwaitingRunnableEndpoint(flight: FlightRecord | undefined): boolean {
+  if (flight?.state !== "queued") return false;
+  const outcome = flight.metadata?.dispatchOutcome;
+  if (!outcome || typeof outcome !== "object" || Array.isArray(outcome)) return false;
+  const deferred = outcome as Record<string, unknown>;
+  return deferred.status === "queued_until_online" && deferred.reason === "no_runnable_endpoint";
+}
+
+export const ENDPOINT_WAIT_INITIAL_MS = 60_000;
+export const ENDPOINT_WAIT_MAX_MS = 60 * 60_000;
+
+type EndpointWait = { flightId: string; key: string; retryAt: number; delayMs: number };
+
 function hasUnconsumedDeferral(job: BrokerInvocationDispatchJob, flight: FlightRecord): boolean {
   const checkedAt = deferredDispatchCheckedAt(flight);
   return checkedAt !== null && checkedAt >= job.createdAt && checkedAt > (job.lastDeferredAt ?? 0);
@@ -72,6 +93,8 @@ function hasUnconsumedDeferral(job: BrokerInvocationDispatchJob, flight: FlightR
 export class BrokerDispatchRecoveryService {
   readonly #recoveringInvocationIds = new Set<string>();
   readonly #deferredInvocations = new Map<string, number>();
+  /** In memory only: a restart retries every park once, at startup. */
+  readonly #endpointWaits = new Map<string, EndpointWait>();
 
   constructor(private readonly deps: BrokerDispatchRecoveryServiceDeps) {}
 
@@ -95,6 +118,35 @@ export class BrokerDispatchRecoveryService {
     return true;
   }
 
+  /**
+   * Retrying a park for no_runnable_endpoint against the same registry inputs
+   * repeats work that cannot succeed and appends job and flight records each
+   * time. Retry when the inputs change; otherwise back off to ENDPOINT_WAIT_MAX_MS.
+   */
+  #endpointWaitAllows(invocationId: string, agentId: string, flight: FlightRecord | undefined, now: number, reason: string): boolean {
+    if (!this.deps.endpointWakeKey || reason === "startup" || !isAwaitingRunnableEndpoint(flight)) return true;
+    const wait = this.#endpointWaits.get(invocationId);
+    return !wait || now >= wait.retryAt || wait.key !== this.deps.endpointWakeKey(agentId);
+  }
+
+  #noteEndpointAttempt(invocationId: string, agentId: string, flight: FlightRecord | undefined, now: number): void {
+    if (!this.deps.endpointWakeKey || !flight || !isAwaitingRunnableEndpoint(flight)) {
+      this.#endpointWaits.delete(invocationId);
+      return;
+    }
+    const key = this.deps.endpointWakeKey(agentId);
+    const previous = this.#endpointWaits.get(invocationId);
+    const delayMs = previous && previous.key === key
+      ? Math.min(previous.delayMs * 2, ENDPOINT_WAIT_MAX_MS)
+      : ENDPOINT_WAIT_INITIAL_MS;
+    this.#endpointWaits.set(invocationId, { flightId: flight.id, key, retryAt: now + delayMs, delayMs });
+  }
+
+  /** Test and diagnostics view of the in-memory endpoint waits. */
+  endpointWaits(): ReadonlyMap<string, Readonly<EndpointWait>> {
+    return this.#endpointWaits;
+  }
+
   async recoverQueuedFlights(input: {
     reason: string;
     agentId?: string;
@@ -105,6 +157,9 @@ export class BrokerDispatchRecoveryService {
     // running lease must not turn its queued flight into a legacy invocation.
     const jobInvocationIds = new Set(allJobs.map((job) => job.invocationId));
     const snapshot = this.deps.runtimeSnapshot();
+    for (const [invocationId, wait] of this.#endpointWaits) {
+      if (!isAwaitingRunnableEndpoint(snapshot.flights[wait.flightId])) this.#endpointWaits.delete(invocationId);
+    }
     const jobs = allJobs
       .filter((job) => {
         const flight = snapshot.flights[job.flightId];
@@ -118,12 +173,14 @@ export class BrokerDispatchRecoveryService {
       })
       .filter((job) => !input.agentId || job.targetAgentId === input.agentId)
       .filter((job) => !this.#isDeferred(job.invocationId, now))
+      .filter((job) => this.#endpointWaitAllows(job.invocationId, job.targetAgentId, snapshot.flights[job.flightId], now, input.reason))
       .sort((left, right) => left.createdAt - right.createdAt);
     const queued = Object.values(snapshot.flights)
       .filter((flight) => flight.state === "queued" || flight.state === "waking")
       .filter((flight) => !input.agentId || flight.targetAgentId === input.agentId)
       .filter((flight) => !jobInvocationIds.has(flight.invocationId))
       .filter((flight) => !this.#isDeferred(flight.invocationId, now))
+      .filter((flight) => this.#endpointWaitAllows(flight.invocationId, flight.targetAgentId, flight, now, input.reason))
       .sort((left, right) => flightSortTime(left) - flightSortTime(right));
     const result: BrokerDispatchRecoveryResult = {
       considered: jobs.length + queued.length,
@@ -172,6 +229,7 @@ export class BrokerDispatchRecoveryService {
           this.deps.log?.(
             `[openscout-runtime] requeuing deferred dispatch job ${job.id} for ${job.targetAgentId} (${input.reason})`,
           );
+          this.#noteEndpointAttempt(invocation.id, job.targetAgentId, currentFlight, now);
           await this.deps.requeueDispatchJob(job, invocation, currentFlight);
           result.dispatched += 1;
           continue;
@@ -179,6 +237,7 @@ export class BrokerDispatchRecoveryService {
         this.deps.log?.(
           `[openscout-runtime] recovering dispatch job ${job.id} for ${job.targetAgentId} (${input.reason})`,
         );
+        this.#noteEndpointAttempt(invocation.id, job.targetAgentId, currentFlight, now);
         await this.deps.runDispatchJob(job, invocation);
         result.dispatched += 1;
       } catch (error) {
@@ -221,6 +280,7 @@ export class BrokerDispatchRecoveryService {
         this.deps.log?.(
           `[openscout-runtime] recovering legacy queued flight ${flight.id} for ${flight.targetAgentId} (${input.reason})`,
         );
+        this.#noteEndpointAttempt(invocation.id, flight.targetAgentId, currentFlight, now);
         await this.deps.dispatchAcceptedInvocation(invocation);
         result.dispatched += 1;
       } catch (error) {

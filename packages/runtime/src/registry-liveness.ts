@@ -47,6 +47,17 @@ function normalize(value: unknown): unknown {
   return Object.fromEntries(entries);
 }
 
+/** Stable key of a record's substance, for change detection without a prior copy. */
+export function registrySubstanceKey(kind: RegistryRecordKind, record: object | undefined): string {
+  return record ? JSON.stringify(sortedKeys(substantiveRecord(kind, record, false, false))) : "";
+}
+
+function sortedKeys(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedKeys((value as Record<string, unknown>)[key])]));
+}
+
 export function registrySubstanceChanged(kind: RegistryRecordKind, previous: object | undefined, next: object): boolean {
   if (!previous) return true;
   const before = previous as Record<string, any>, after = next as Record<string, any>;
