@@ -14,6 +14,7 @@ import { createReadStream } from "node:fs";
 import { appendFile, mkdir, open, readdir, rename, stat, truncate, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname } from "node:path";
+import { ControlEventHydrator, ControlEventThinner, type ControlEventPayloadRecord } from "./broker-journal-event-refs.js";
 import { decodeJournalLine, encodeJournalEntries, encodeJournalGeneration, journalGenerationId, JOURNAL_GENERATION_KIND, journalLines, JournalFrameLimitError, UnsupportedJournalFrameError } from "./broker-journal-framing.js";
 
 import type {
@@ -92,7 +93,7 @@ export type BrokerJournalEntry =
   | { kind: "durable.attempt.record"; attempt: DurableAttempt }
   | { kind: "durable.checkpoint.record"; checkpoint: DurableCheckpoint }
   | { kind: "durable.signal.record"; signal: DurableSignal }
-  | { kind: "control.event.record"; event: ControlEvent }
+  | { kind: "control.event.record"; event: ControlEvent; payloadRecord?: ControlEventPayloadRecord }
   | { kind: "journal.replay_barrier"; barrier: BrokerJournalReplayBarrier }
   | {
       kind: "delivery.status.update";
@@ -515,6 +516,10 @@ export class FileBackedBrokerJournal {
   private readonly filePath: string;
   private readonly quarantine: BrokerQuarantine;
   private readonly warnedQuarantine = new Set<string>();
+  private readonly eventThinner = new ControlEventThinner();
+  /** Hydrators at the end of recent passes, so a tail pass resolves records written before its cursor. */
+  private readonly passHydrators = new Map<string, ControlEventHydrator>();
+  private unresolvedEventRecords = 0;
 
   quarantineStatus() { return this.quarantine.status(); }
   listQuarantine(options: QuarantineListOptions = {}) { return this.quarantine.list(options); }
@@ -1075,6 +1080,9 @@ export class FileBackedBrokerJournal {
     }
   }
 
+  /** Events whose referenced record line was gone when read (0 in a healthy journal). */
+  unresolvedEventRecordCount(): number { return this.unresolvedEventRecords; }
+
   messageBodyCacheStatus() {
     return this.messageBodyCache?.status() ?? { enabled: false };
   }
@@ -1245,9 +1253,11 @@ export class FileBackedBrokerJournal {
         preparationError = error;
         return;
       }
-      const payload = encodeJournalEntries(retained);
+      const encoded = this.eventThinner.encode(retained);
+      const payload = encodeJournalEntries(encoded.entries);
       if (this.memoryMaintenance) acceptedEncodedBytes = Buffer.byteLength(payload, "utf8");
       await this.appendLines(payload);
+      encoded.commit();
       for (const entry of prepared) {
         this.apply(entry);
       }
@@ -1683,6 +1693,9 @@ export class FileBackedBrokerJournal {
     const maintenance = this.memoryMaintenance?.beginReplay();
     let file: Awaited<ReturnType<typeof open>> | undefined;
     let index = 0;
+    let hydrator: ControlEventHydrator | undefined;
+    let passIdentity: string | undefined;
+    let passEnd = options.startByteInclusive ?? 0;
     const report: JournalVisitReport = {
       rawLines: 0,
       validEntries: 0,
@@ -1694,8 +1707,12 @@ export class FileBackedBrokerJournal {
       if (!Number.isSafeInteger(start) || start < 0 || (start > 0 && !options.fileIdentity)) throw new Error("invalid_journal_tail_cursor");
       file = await open(this.filePath, "r");
       const source = await file.stat();
-      if ((options.fileIdentity && await replayFileIdentity(file, source) !== options.fileIdentity)
+      const identity = await replayFileIdentity(file, source);
+      if ((options.fileIdentity && identity !== options.fileIdentity)
         || (endByteExclusive !== undefined && source.size < endByteExclusive)) throw new Error("journal_replay_boundary_changed");
+      const resumed = start > 0 ? this.passHydrators.get(`${identity}@${start}`) : undefined;
+      hydrator = resumed ? resumed.clone() : new ControlEventHydrator();
+      passIdentity = identity;
       if (endByteExclusive !== undefined && start >= endByteExclusive) return report;
       const end = endByteExclusive ?? source.size;
       let physicalEndByte = start;
@@ -1711,6 +1728,7 @@ export class FileBackedBrokerJournal {
       }
       for await (const { raw, bytes: encodedLineBytes } of journalLines(chunks())) {
         physicalEndByte += encodedLineBytes;
+        passEnd = physicalEndByte;
         const rawLine = raw.toString("utf8");
         report.rawLines += 1;
         // Broker journal appends always use one-byte LF terminators. Reuse the
@@ -1763,11 +1781,17 @@ export class FileBackedBrokerJournal {
         // overhead for compaction estimates without charging its bytes N times.
         const perEntryBytes = Math.floor(encodedLineBytes / entries.length);
         for (let ordinal = 0; ordinal < entries.length; ordinal++) {
-          await visitor(entries[ordinal]!, index, perEntryBytes + (ordinal === 0 ? encodedLineBytes % entries.length : 0), physicalEndByte);
+          await visitor(hydrator!.decode(entries[ordinal]!), index, perEntryBytes + (ordinal === 0 ? encodedLineBytes % entries.length : 0), physicalEndByte);
           index += 1;
           report.validEntries += 1;
         }
         maintenance?.add(encodedLineBytes);
+      }
+      if (hydrator && passIdentity) {
+        this.unresolvedEventRecords += hydrator.unresolved;
+        hydrator.unresolved = 0;
+        this.passHydrators.set(`${passIdentity}@${passEnd}`, hydrator);
+        while (this.passHydrators.size > 4) this.passHydrators.delete(this.passHydrators.keys().next().value!);
       }
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error
@@ -1817,6 +1841,9 @@ export class FileBackedBrokerJournal {
       pendingBytes = 0;
     };
     const lastFlightById = new Map<string, FlightRecord>();
+    // Re-thin against the records this output retains: an event whose record
+    // line is dropped here is written complete.
+    const eventThinner = new ControlEventThinner();
     const compactedCurrentFlightIds = new Map<string, string>();
     // Every history.rotate marker applied during the scan kept its eviction
     // sets in `appliedRotations`. A record line is dropped when ANY rotation
@@ -1874,7 +1901,7 @@ export class FileBackedBrokerJournal {
           // the deleted row (and its references) in the store permanently.
         }
 
-        const line = `${JSON.stringify(writeEntry)}\n`;
+        const line = `${JSON.stringify(eventThinner.encodeOne(writeEntry))}\n`;
         pendingLines.push(line);
         pendingBytes += Buffer.byteLength(line, "utf8");
         if (pendingBytes >= 64 * 1024) await flushOutput();

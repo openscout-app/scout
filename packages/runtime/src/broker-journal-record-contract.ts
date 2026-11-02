@@ -67,7 +67,8 @@ export function journalEntryProblem(value: unknown): { reason: string; structura
     case "durable.checkpoint.record": valid = strings(entry.checkpoint, ["actionId", "name"]) && Number.isFinite(entry.checkpoint.createdAt); break;
     case "durable.signal.record": valid = strings(entry.signal, ["actionId", "name"]) && Number.isFinite(entry.signal.emittedAt); break;
     case "scout.dispatch.record": valid = identified(entry.dispatch); break;
-    case "control.event.record": valid = identified(entry.event) && strings(entry.event, ["kind", "actorId"]) && Number.isFinite(entry.event.ts) && object(entry.event.payload); break;
+    case "control.event.record": valid = identified(entry.event) && strings(entry.event, ["kind", "actorId"]) && Number.isFinite(entry.event.ts) && object(entry.event.payload)
+      && (entry.payloadRecord === undefined || (strings(entry.payloadRecord, ["id", "sha256"]) && ["flight", "message", "invocation"].includes(entry.payloadRecord.field))); break;
     case "journal.replay_barrier":
       return identified(entry.barrier) && typeof entry.barrier.projectionId === "string" ? null : { reason: "invalid_replay_barrier", structural: true };
     case "history.rotate":
