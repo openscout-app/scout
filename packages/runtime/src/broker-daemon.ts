@@ -189,6 +189,7 @@ import {
 import { replacePersistedActiveObservedSessionSeeds } from "./tail/service.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
+import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
 import { ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths, controlPlaneArchiveDirectory } from "./support-paths.js";
 import { expandHomePath } from "./tool-resolution.js";
 import {
@@ -970,9 +971,22 @@ const durableActionHttpService = new BrokerDurableActionHttpService({
   heartbeatDurableAction: heartbeatDurableActionDurably,
   getDurableAction: (actionId) => journal.getDurableAction(actionId),
 });
+const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
+const workLifecycles = new BrokerWorkLifecycleService({
+  registry: workLifecycleRegistry,
+  durableStore,
+  runtime,
+  listEvents: options => journal.listCollaborationEvents(options),
+  childrenOf: recordId => Object.values(runtime.peek().collaborationRecords).filter(record => record.parentId === recordId),
+  createId: createRuntimeId,
+  operatorActorId,
+});
 const workItemStore = new BrokerWorkItemStore({
   runtime,
   durableStore,
+  placeWorkChange: (before, after, context) => before.kind === "work_item" && after.kind === "work_item"
+    ? placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context)
+    : { record: after },
   durableFlight: (flightId) => journal.getFlight(flightId),
   durableWorkItem: (workId) => journal.getCollaborationRecord(workId),
   createId: createRuntimeId,
@@ -3208,6 +3222,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 }
 
 const routeRequest = createBrokerHttpRouter({
+  workLifecycles,
   attachments: {
     service: attachmentService, nodeId,
     notifyOperator: createOperatorAttachmentNotifier({

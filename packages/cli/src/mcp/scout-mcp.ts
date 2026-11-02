@@ -77,6 +77,9 @@ import {
   type OutgoingAttachmentInput,
   type ScoutManagedLocalSessionAttachment,
   updateScoutWorkItem,
+  moveScoutWorkItem,
+  reviewScoutWorkMove,
+  readScoutWorkLifecycles,
   waitForScoutFlight,
   type ScoutAskByIdResult,
   type ScoutAskResult,
@@ -590,6 +593,9 @@ type ScoutMcpDependencies = {
   updateWorkItem: (
     input: ScoutWorkItemUpdate,
   ) => Promise<ScoutTrackedWorkItem | null>;
+  moveWorkItem?: typeof moveScoutWorkItem;
+  reviewWorkMove?: typeof reviewScoutWorkMove;
+  readWorkLifecycles?: typeof readScoutWorkLifecycles;
   waitForFlight: (
     baseUrl: string,
     flightId: string,
@@ -3219,6 +3225,9 @@ function defaultScoutMcpDependencies(
         source,
       }),
     updateWorkItem: (input) => updateScoutWorkItem(input),
+    moveWorkItem: (input) => moveScoutWorkItem(input),
+    reviewWorkMove: (input) => reviewScoutWorkMove(input),
+    readWorkLifecycles: (workId) => readScoutWorkLifecycles(workId),
     waitForFlight: (baseUrl, flightId, options) =>
       waitForScoutFlight(baseUrl, flightId, options),
     getFlight: (baseUrl, flightId) => loadScoutFlight(baseUrl, flightId),
@@ -6344,6 +6353,144 @@ export function createScoutMcpServer(options: {
         content: createTextContent(structuredContent),
         structuredContent,
       };
+    },
+  );
+
+  const workMoveResultSchema = z.object({
+    senderId: z.string(),
+    applied: z.boolean(),
+    verdict: z.enum(["allow", "deny", "hold", "consult"]),
+    from: z.string(),
+    to: z.string(),
+    state: z.string(),
+    review: z.string(),
+    reasons: z.array(z.string()),
+    moveId: z.string().nullable(),
+    revision: z.number().nullable(),
+  });
+
+  server.registerTool(
+    "work_move",
+    {
+      title: "Move Scout Work",
+      description:
+        "Move a work item to another station of its lifecycle. The runtime runs the lifecycle's checks: allow applies the move, hold and consult record it without moving, deny explains why. Moves into stations with review criteria are applied and marked for review. Use work_lifecycle first to see the stations open to the item. Use dryRun to check without recording.",
+      inputSchema: z.object({
+        currentDirectory: z.string().optional(),
+        senderId: z.string().optional(),
+        workId: z.string(),
+        to: z.string().describe("Target station id, for example doing, waiting, review, done, dropped."),
+        note: z.string().optional().describe("Why. Required by some stations, for example dropping work."),
+        waitingOn: z.object({
+          label: z.string(),
+          kind: z.enum(["actor", "work_item", "approval", "artifact", "condition"]).optional(),
+          targetId: z.string().optional(),
+        }).optional().describe("What the item waits on. Required for waiting stations."),
+        evidence: z.array(z.object({ kind: z.string(), ref: z.string() })).optional().describe("Links that back the move, for example a PR or a test run."),
+        claim: z.boolean().optional().describe("Become the owner before the checks run."),
+        dryRun: z.boolean().optional(),
+      }),
+      outputSchema: workMoveResultSchema,
+      annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ currentDirectory, senderId, workId, to, note, waitingOn, evidence, claim, dryRun }) => {
+      const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
+      const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const result = await (deps.moveWorkItem ?? moveScoutWorkItem)({
+        workId, to, note, waitingOn, evidence, claim, dryRun, actorId: resolvedSenderId,
+      });
+      const structuredContent = {
+        senderId: resolvedSenderId,
+        applied: result.applied,
+        verdict: result.decision.verdict,
+        from: result.decision.from,
+        to: result.decision.to,
+        state: result.decision.toState,
+        review: result.decision.review,
+        reasons: result.decision.reasons
+          .filter((reason) => reason.outcome === "fail")
+          .map((reason) => `${reason.shadow ? "shadow " : ""}${reason.effect}: ${reason.message}`),
+        moveId: result.move?.id ?? null,
+        revision: result.move?.revision ?? null,
+      };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "work_review",
+    {
+      title: "Review Scout Work Move",
+      description:
+        "Settle a move that is pending review: confirm it, reopen it (the item goes back to where it came from), or consult (ask a person). Pass the revision you judged; if the item moved since, the review is recorded as stale and changes nothing.",
+      inputSchema: z.object({
+        currentDirectory: z.string().optional(),
+        senderId: z.string().optional(),
+        workId: z.string(),
+        moveId: z.string(),
+        revision: z.number().int(),
+        verdict: z.enum(["confirm", "reopen", "consult"]),
+        note: z.string().optional(),
+      }),
+      outputSchema: z.object({ senderId: z.string(), status: z.string(), station: z.string().nullable() }),
+      annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ currentDirectory, senderId, workId, moveId, revision, verdict, note }) => {
+      const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
+      const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const result = await (deps.reviewWorkMove ?? reviewScoutWorkMove)({ workId, moveId, revision, verdict, note, actorId: resolvedSenderId });
+      const structuredContent = { senderId: resolvedSenderId, status: result.status, station: result.station ?? null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "work_lifecycle",
+    {
+      title: "Read Scout Work Lifecycle",
+      description:
+        "Read work lifecycles: their stations, the moves between them, and each station's rules and review criteria. With workId, also returns where that item sits, the stations it can move to, and its recent moves.",
+      inputSchema: z.object({ workId: z.string().optional() }),
+      outputSchema: z.object({
+        lifecycles: z.array(z.object({
+          id: z.string(), name: z.string(), version: z.number(),
+          stations: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), rules: z.array(z.string()), judges: z.array(z.string()) })),
+        })),
+        position: z.object({
+          workId: z.string(), lifecycleId: z.string(), station: z.string(), stationName: z.string(), state: z.string(),
+          reviewPending: z.boolean(), revision: z.number(), next: z.array(z.object({ station: z.string(), name: z.string(), state: z.string() })),
+        }).nullable(),
+        moves: z.array(z.object({
+          id: z.string(), from: z.string(), to: z.string(), moverId: z.string(), verdict: z.string(), review: z.string(),
+          revision: z.number().nullable(), note: z.string().nullable(), at: z.number(),
+        })),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workId }) => {
+      const result = await (deps.readWorkLifecycles ?? readScoutWorkLifecycles)(workId?.trim() || undefined);
+      const structuredContent = {
+        lifecycles: result.lifecycles.map(({ lifecycle }) => ({
+          id: lifecycle.id, name: lifecycle.name, version: lifecycle.version,
+          stations: lifecycle.stations.map((station) => ({
+            id: station.id, name: station.name, state: station.state,
+            rules: (station.rules ?? []).map((rule) => `${rule.effect}: ${rule.message}`),
+            judges: (station.judges ?? []).map((judge) => judge.criterion),
+          })),
+        })),
+        position: result.position
+          ? {
+              workId: result.position.workId, lifecycleId: result.position.lifecycleId, station: result.position.station,
+              stationName: result.position.stationName, state: result.position.state, reviewPending: result.position.reviewPending,
+              revision: result.position.revision, next: result.position.next,
+            }
+          : null,
+        moves: (result.moves ?? []).map((move) => ({
+          id: move.id, from: move.from, to: move.to, moverId: move.moverId, verdict: move.verdict, review: move.review,
+          revision: move.revision ?? null, note: move.note ?? null, at: move.createdAt,
+        })),
+      };
+      return { content: createTextContent(structuredContent), structuredContent };
     },
   );
 

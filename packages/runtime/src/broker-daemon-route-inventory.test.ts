@@ -114,6 +114,8 @@ const expectedRouteInventory = [
   "GET /v1/trust/enroll/status",
   "GET /v1/trust/peers",
   "GET /v1/web/status",
+  "GET /v1/work/lifecycles",
+  "GET /v1/work/moves",
   "OPTIONS /v1/web/restart",
   "OPTIONS /v1/web/start",
   "OPTIONS /v1/web/status",
@@ -227,6 +229,9 @@ const expectedRouteInventory = [
   "POST /v1/trust/revoke",
   "POST /v1/web/restart",
   "POST /v1/web/start",
+  "POST /v1/work/lifecycles",
+  "POST /v1/work/move",
+  "POST /v1/work/review",
 ];
 
 function liveRouteInventory(): string[] {

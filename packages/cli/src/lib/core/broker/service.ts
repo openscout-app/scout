@@ -67,6 +67,14 @@ import {
   stableChannelId,
   systemChannelNaturalKey,
 } from "@openscout/protocol";
+import type {
+  WorkLifecycleSummary,
+  WorkMoveRecord,
+  WorkMoveRequest,
+  WorkMoveResponse,
+  WorkReviewRequest,
+  WorkReviewResponse,
+} from "@openscout/protocol";
 import {
   ensureRelayAgentConfigured,
   findNearestProjectRoot,
@@ -5620,4 +5628,39 @@ export async function cancelScoutFlight(baseUrl: string, flightId: string): Prom
   if (state === "TASK_STATE_COMPLETED") return { ok: true, flightId, state: "completed" };
   if (state === "TASK_STATE_FAILED") return { ok: true, flightId, state: "failed" };
   return { ok: false, flightId, code: "unconfirmed", detail: "Cancellation was not confirmed. Read flight get before retrying; do not dispatch a duplicate." };
+}
+
+// ── Work lifecycles ──
+
+export type ScoutWorkPosition = {
+  workId: string;
+  lifecycleId: string;
+  lifecycleVersion: number;
+  station: string;
+  stationName: string;
+  state: string;
+  reviewPending: boolean;
+  revision: number;
+  next: Array<{ station: string; name: string; state: string }>;
+};
+
+export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMoveResponse> {
+  return brokerPostJson<WorkMoveResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workMove, input);
+}
+
+export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {
+  return brokerPostJson<WorkReviewResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workReview, input);
+}
+
+export async function readScoutWorkLifecycles(workId?: string): Promise<{
+  lifecycles: WorkLifecycleSummary[];
+  position?: ScoutWorkPosition;
+  moves?: WorkMoveRecord[];
+}> {
+  const baseUrl = resolveScoutBrokerUrl();
+  const query = workId ? `?workId=${encodeURIComponent(workId)}` : "";
+  const result = await brokerReadJson<{ lifecycles: WorkLifecycleSummary[]; position?: ScoutWorkPosition }>(baseUrl, `${scoutBrokerPaths.v1.workLifecycles}${query}`);
+  if (!workId) return result;
+  const { moves } = await brokerReadJson<{ moves: WorkMoveRecord[] }>(baseUrl, `${scoutBrokerPaths.v1.workMoves}${query}&limit=20`);
+  return { ...result, moves };
 }
