@@ -1,51 +1,35 @@
 /**
- * The one retention clock. Policy: the current calendar week and the previous
- * complete week are always live; at the Monday boundary only week n−2 rotates
- * out. Weeks start Monday 00:00 machine-local, so effective retention is
- * 7–14 days depending on where `now` lands in the week — there is no
- * `now − X` rolling cutoff anywhere.
+ * The one retention clock: a rolling window of whole local days. Records stay
+ * live for today and the previous `daysLive` days, so with the default of 7
+ * a record is kept 7 to 8 days. The cutoff moves at each local midnight, so
+ * rotation and archiving are a small daily piece of work, not a weekly burst.
  */
 
 export type RetentionClock = {
-  /** Calendar weeks start Monday (ISO 8601). */
-  weekStartsOn: 1;
-  /** Live calendar weeks including the current one. Minimum 1. */
-  weeksLive: number;
+  /** Whole local days kept before today. Minimum 1. */
+  daysLive: number;
 };
 
-const WEEK_MS = 7 * 24 * 60 * 60 * 1_000;
+export const DEFAULT_RETENTION_DAYS = 7;
 
-export const DEFAULT_RETENTION_WEEKS = 2;
-export const DEFAULT_ARCHIVE_WEEKS = 4;
-
-/** Local-week arithmetic: Date handles DST transitions that fixed-ms jumps cannot. */
-function addLocalWeeks(timestampMs: number, weeks: number): number {
-  const date = new Date(timestampMs);
-  date.setDate(date.getDate() + weeks * 7);
-  return date.getTime();
-}
-
-/** Monday 00:00 machine-local of the week containing `now`, epoch ms. */
-export function startOfLocalWeek(now: number): number {
+/** 00:00 machine-local of the day containing `now`, epoch ms. */
+export function startOfLocalDay(now: number): number {
   const date = new Date(now);
-  // getDay: 0=Sunday..6=Saturday → days elapsed since Monday.
-  const daysSinceMonday = (date.getDay() + 6) % 7;
-  return new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate() - daysSinceMonday,
-  ).getTime();
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
 /**
- * Oldest timestamp still live: Monday 00:00 of the earliest live week. With
- * weeksLive=2 this is last week's Monday — so today (this week) and all of
- * last week are always retained, whatever day `now` falls on.
+ * Oldest timestamp still live: local midnight `daysLive` days before today.
+ * Date arithmetic keeps DST days whole, which fixed-ms jumps cannot.
  */
-export function retentionCutoff(now: number, weeksLive = DEFAULT_RETENTION_WEEKS): number {
-  const weeks = Number.isFinite(weeksLive) ? Math.max(1, Math.floor(weeksLive)) : 1;
-  return addLocalWeeks(startOfLocalWeek(now), -(weeks - 1));
+export function retentionCutoff(now: number, daysLive = DEFAULT_RETENTION_DAYS): number {
+  const days = Number.isFinite(daysLive) ? Math.max(1, Math.floor(daysLive)) : 1;
+  const date = new Date(startOfLocalDay(now));
+  date.setDate(date.getDate() - days);
+  return date.getTime();
 }
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1_000;
 
 /**
  * ISO 8601 week key (`YYYY-Www`) for archive file names — Monday-start weeks,
@@ -64,31 +48,42 @@ export function isoWeekKey(timestampMs: number): string {
   return `${isoYear}-W${String(week).padStart(2, "0")}`;
 }
 
-function resolveWeekCount(raw: string | undefined, fallback: number): number {
-  if (raw === undefined || raw.trim() === "") return fallback;
+/** Absent, blank or invalid: undefined. "0": 0 (disabled). Otherwise at least 1. */
+function parseCount(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
   const parsed = Number.parseInt(raw, 10);
   if (parsed === 0) return 0;
-  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
   return Math.max(1, parsed);
 }
 
-/**
- * OPENSCOUT_RETENTION_WEEKS: live calendar weeks for the in-memory/journal hot
- * set and the registry sweep. Default 2, minimum 1; "0" disables week-clock
- * retention entirely (returns 0).
- */
-export function resolveRetentionWeeks(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  return resolveWeekCount(env.OPENSCOUT_RETENTION_WEEKS, DEFAULT_RETENTION_WEEKS);
+function daysFrom(env: Record<string, string | undefined>, daysKey: string, weeksKey: string): number | undefined {
+  const days = parseCount(env[daysKey]);
+  if (days !== undefined) return days;
+  // Earlier releases counted calendar weeks; a set value keeps its length.
+  const weeks = parseCount(env[weeksKey]);
+  return weeks === undefined ? undefined : weeks * 7;
 }
 
 /**
- * OPENSCOUT_ARCHIVE_WEEKS: how long SQLite keeps rows before archive-then-
- * prune. Default 4, minimum 1; "0" disables archiving (returns 0).
+ * OPENSCOUT_RETENTION_DAYS: days of working records kept live in memory, the
+ * journal and the registry sweep. Default 7, minimum 1; "0" disables rotation.
+ * OPENSCOUT_RETENTION_WEEKS is still read, as whole weeks, when days is unset.
  */
-export function resolveArchiveWeeks(
+export function resolveRetentionDays(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  return resolveWeekCount(env.OPENSCOUT_ARCHIVE_WEEKS, DEFAULT_ARCHIVE_WEEKS);
+  return daysFrom(env, "OPENSCOUT_RETENTION_DAYS", "OPENSCOUT_RETENTION_WEEKS") ?? DEFAULT_RETENTION_DAYS;
+}
+
+/**
+ * OPENSCOUT_ARCHIVE_DAYS: days SQLite keeps control-flow events before they
+ * move to gzip archive files. Defaults to the retention window, so one clock
+ * governs both unless set; "0" disables archiving. OPENSCOUT_ARCHIVE_WEEKS is
+ * still read, as whole weeks, when days is unset.
+ */
+export function resolveArchiveDays(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return daysFrom(env, "OPENSCOUT_ARCHIVE_DAYS", "OPENSCOUT_ARCHIVE_WEEKS") ?? resolveRetentionDays(env);
 }

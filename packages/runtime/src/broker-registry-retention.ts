@@ -78,7 +78,7 @@ export function registryRetentionPlan(
     nodeId: string;
     now?: number;
     /**
-     * Explicit boundary from the week clock (see retention-clock.ts). When
+     * Explicit boundary from the day clock (see retention-clock.ts). When
      * absent, a rolling `now − retentionMs` cutoff is derived for tests.
      */
     cutoff?: number;

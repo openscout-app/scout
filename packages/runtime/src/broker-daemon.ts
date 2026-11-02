@@ -118,8 +118,8 @@ import {
   registryRetentionPlan,
 } from "./broker-registry-retention.js";
 import {
-  resolveArchiveWeeks,
-  resolveRetentionWeeks,
+  resolveArchiveDays,
+  resolveRetentionDays,
   retentionCutoff,
 } from "./retention-clock.js";
 import { planHistoryRotation, refineVerifiedRotation } from "./history-rotation.js";
@@ -471,13 +471,13 @@ const relayAgentIdleTtlMs = Number.parseInt(
   process.env.OPENSCOUT_RELAY_AGENT_IDLE_TTL_MS ?? String(DEFAULT_RELAY_AGENT_SESSION_IDLE_TTL_MS),
   10,
 );
-// Registry retention reaps rotation-old unreferenced registrations. The week
-// clock (OPENSCOUT_RETENTION_WEEKS, default 2 live calendar weeks) is the one
+// Registry retention reaps rotation-old unreferenced registrations. The day
+// clock (OPENSCOUT_RETENTION_DAYS, default 7 days before today) is the one
 // clock; OPENSCOUT_REGISTRY_RETENTION_MS remains only as an explicit rolling
 // override — 0 disables the sweep entirely, any positive value is clamped to
 // a one-hour floor.
-const retentionWeeks = resolveRetentionWeeks(process.env);
-const archiveWeeks = resolveArchiveWeeks(process.env);
+const retentionDays = resolveRetentionDays(process.env);
+const archiveDays = resolveArchiveDays(process.env);
 const registryRetentionOverrideMs = (() => {
   const raw = process.env.OPENSCOUT_REGISTRY_RETENTION_MS;
   if (raw === undefined || raw.trim() === "") return undefined;
@@ -487,7 +487,7 @@ const registryRetentionOverrideMs = (() => {
   return Math.max(60 * 60_000, parsed);
 })();
 if (registryRetentionOverrideMs !== undefined) {
-  console.log(`[openscout-runtime] OPENSCOUT_REGISTRY_RETENTION_MS=${registryRetentionOverrideMs} overrides the week-based retention clock (OPENSCOUT_RETENTION_WEEKS=${retentionWeeks})`);
+  console.log(`[openscout-runtime] OPENSCOUT_REGISTRY_RETENTION_MS=${registryRetentionOverrideMs} overrides the day-based retention clock (OPENSCOUT_RETENTION_DAYS=${retentionDays})`);
 }
 const runtimeHeartbeatIntervalMs = 30_000;
 const repoWatchServeCacheTtlMs = Number.parseInt(process.env.OPENSCOUT_REPO_WATCH_CACHE_TTL_MS ?? "1200000", 10);
@@ -558,7 +558,7 @@ const memoryMaintenance = memoryMaintenanceFromEnv(process.env);
 const historyCount=(value:string|undefined,fallback:number)=>{const n=Number(value);return Number.isSafeInteger(n)&&n>0?n:fallback;};
 // Experimental until the full packaged memory budget passes.
 const messageHistory=process.env.OPENSCOUT_BROKER_DISK_HISTORY !== "1" ? undefined : await BrokerMessageHistory.create(journalPath,{snapshotReaders:historyCount(process.env.OPENSCOUT_BROKER_HISTORY_SNAPSHOT_READERS,2),coldReaders:historyCount(process.env.OPENSCOUT_BROKER_HISTORY_COLD_READERS,4)});
-if (messageHistory && retentionWeeks > 0) {
+if (messageHistory && retentionDays > 0) {
   console.warn("[openscout-runtime] history rotation: message eviction is not implemented under OPENSCOUT_BROKER_DISK_HISTORY; messages are retained until that lands");
 }
 const journal = new FileBackedBrokerJournal(journalPath, {
@@ -1618,12 +1618,12 @@ async function sweepIdleCardlessSessions(): Promise<void> {
  */
 async function sweepRegistryRetention(): Promise<void> {
   if (registryRetentionOverrideMs === 0) return;
-  if (registryRetentionOverrideMs === undefined && retentionWeeks <= 0) return;
+  if (registryRetentionOverrideMs === undefined && retentionDays <= 0) return;
   // The boundary is recomputed per sweep: the week clock means a new cutoff
   // only when the calendar week rolls over; the ms override stays rolling.
   const cutoff = registryRetentionOverrideMs !== undefined
     ? Date.now() - registryRetentionOverrideMs
-    : retentionCutoff(Date.now(), retentionWeeks);
+    : retentionCutoff(Date.now(), retentionDays);
   // SQLite's actors.created_at is authoritative age evidence for rows
   // journaled before actor upserts carried createdAt.
   let actorCreatedAtById: Map<string, number> | undefined;
@@ -1715,10 +1715,10 @@ async function sweepRegistryRetention(): Promise<void> {
 let historyRotationCursor: string | null = null;
 let historyRotationPressure: unknown = null;
 async function rotateHistory(): Promise<number> {
-  if (shuttingDown || retentionWeeks <= 0 || sqliteDisabled) {
+  if (shuttingDown || retentionDays <= 0 || sqliteDisabled) {
     return 0;
   }
-  const cutoff = retentionCutoff(Date.now(), retentionWeeks);
+  const cutoff = retentionCutoff(Date.now(), retentionDays);
   const countsOf = (plan: {
     messageIds: ReadonlySet<string>;
     invocationIds: ReadonlySet<string>;
@@ -1853,8 +1853,8 @@ async function rotateHistory(): Promise<number> {
 }
 
 async function archiveDispatchJobs(): Promise<number> {
-  if (shuttingDown || retentionWeeks <= 0 || sqliteDisabled) return 0;
-  const cutoff = retentionCutoff(Date.now(), retentionWeeks);
+  if (shuttingDown || retentionDays <= 0 || sqliteDisabled) return 0;
+  const cutoff = retentionCutoff(Date.now(), retentionDays);
   const jobs = journal.captureArchivableInvocationDispatchJobs({ cutoff });
   if (!jobs.length) return 0;
   const records = journal.dispatchJobHistoricalRecords(jobs);
@@ -1882,13 +1882,13 @@ async function archiveDispatchJobs(): Promise<number> {
 // Export one bounded page per maintenance turn on the projection worker.
 // Free SQLite pages are reused; a whole-file VACUUM belongs to offline upkeep.
 async function archiveControlPlane(): Promise<number> {
-  if (shuttingDown || archiveWeeks <= 0 || !sharedControlPlaneStore) return 0;
+  if (shuttingDown || archiveDays <= 0 || !sharedControlPlaneStore) return 0;
   const boundary = await durableStore.awaitProjectionBoundary();
   if (!boundary.ok) {
     throw new Error(`Control-plane archive deferred: ${boundary.reason}`);
   }
   if (shuttingDown) return 0;
-  const cutoff = retentionCutoff(Date.now(), archiveWeeks);
+  const cutoff = retentionCutoff(Date.now(), archiveDays);
   const archived = await projection.archiveEvents({
     cutoff,
     archiveDir: controlPlaneArchiveDirectory(), pageSize: 1000, maxPages: 1,

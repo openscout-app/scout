@@ -2,67 +2,51 @@ import { describe, expect, test } from "bun:test";
 
 import {
   isoWeekKey,
-  resolveArchiveWeeks,
-  resolveRetentionWeeks,
+  resolveArchiveDays,
+  resolveRetentionDays,
   retentionCutoff,
-  startOfLocalWeek,
+  startOfLocalDay,
 } from "./retention-clock.ts";
 
-// Local-time helpers: these tests assert machine-local Monday boundaries, so
+// Local-time helpers: these tests assert machine-local midnight boundaries, so
 // expected values are built with the same Date constructor semantics instead
 // of fixed epoch constants.
 function localDate(year: number, month: number, day: number, hour = 0, minute = 0): number {
   return new Date(year, month, day, hour, minute).getTime();
 }
 
-describe("startOfLocalWeek", () => {
-  test("returns Monday 00:00 of the containing week", () => {
-    // 2026-09-21 is a Monday; the Sunday before it is 2026-09-20.
-    const monday = localDate(2026, 8, 21, 12, 30);
-    expect(startOfLocalWeek(monday)).toBe(localDate(2026, 8, 21));
-    // Monday 00:00 itself is the boundary — it belongs to the new week.
-    expect(startOfLocalWeek(localDate(2026, 8, 21))).toBe(localDate(2026, 8, 21));
-    // Sunday night still belongs to the week that started the prior Monday.
-    expect(startOfLocalWeek(localDate(2026, 8, 27, 23, 59))).toBe(localDate(2026, 8, 21));
-    // Saturday mid-week.
-    expect(startOfLocalWeek(localDate(2026, 8, 26, 8, 15))).toBe(localDate(2026, 8, 21));
+describe("startOfLocalDay", () => {
+  test("returns local midnight of the same day", () => {
+    expect(startOfLocalDay(localDate(2026, 10, 2, 15, 30))).toBe(localDate(2026, 10, 2));
+    expect(startOfLocalDay(localDate(2026, 10, 2))).toBe(localDate(2026, 10, 2));
+    expect(startOfLocalDay(localDate(2026, 10, 2, 23, 59))).toBe(localDate(2026, 10, 2));
   });
 });
 
 describe("retentionCutoff", () => {
-  test("Monday 00:00: the cutoff is last week's Monday — week n−2 just rotated out", () => {
-    const cutoff = retentionCutoff(localDate(2026, 8, 21), 2);
-    expect(cutoff).toBe(localDate(2026, 8, 14));
+  test("keeps today and the previous seven whole days by default", () => {
+    expect(retentionCutoff(localDate(2026, 10, 2, 15))).toBe(localDate(2026, 9, 26));
+    expect(retentionCutoff(localDate(2026, 10, 2, 0, 0))).toBe(localDate(2026, 9, 26));
   });
 
-  test("Sunday 23:59: the cutoff is the same Monday — a full 14-day window", () => {
-    const cutoff = retentionCutoff(localDate(2026, 8, 27, 23, 59), 2);
-    expect(cutoff).toBe(localDate(2026, 8, 14));
+  test("moves one day at each local midnight, never in weekly jumps", () => {
+    const monday = retentionCutoff(localDate(2026, 10, 2, 23, 59), 7);
+    const tuesday = retentionCutoff(localDate(2026, 10, 3, 0, 1), 7);
+    expect(tuesday).toBe(localDate(2026, 9, 27));
+    expect(tuesday - monday).toBe(24 * 60 * 60 * 1_000);
   });
 
-  test("mid-week: 7–14 days of retention depending on the day", () => {
-    // Wednesday → this-week Monday minus one week = last Monday.
-    expect(retentionCutoff(localDate(2026, 8, 23, 15), 2)).toBe(localDate(2026, 8, 14));
+  test("crosses a month boundary and clamps the day count", () => {
+    expect(retentionCutoff(localDate(2026, 10, 2), 3)).toBe(localDate(2026, 9, 30));
+    expect(retentionCutoff(localDate(2026, 10, 2), 0)).toBe(localDate(2026, 10, 1));
+    expect(retentionCutoff(localDate(2026, 10, 2), Number.NaN)).toBe(localDate(2026, 10, 1));
   });
 
-  test("weeksLive=1 keeps only the current calendar week", () => {
-    expect(retentionCutoff(localDate(2026, 8, 23, 15), 1)).toBe(localDate(2026, 8, 21));
-    expect(retentionCutoff(localDate(2026, 8, 21), 1)).toBe(localDate(2026, 8, 21));
-  });
-
-  test("a week crossing a DST change still lands on Monday 00:00 local", () => {
-    // America/Los_Angeles falls back on 2026-11-01; the week of 2026-11-02
-    // contains the transition. Local-date arithmetic must land on midnight,
-    // not a 23h/25h offset of it.
-    const afterTransition = localDate(2026, 10, 4, 10); // Wed 2026-11-04
-    const cutoff = retentionCutoff(afterTransition, 2);
-    const cutoffDate = new Date(cutoff);
-    expect(cutoffDate.getDay()).toBe(1);
-    expect(cutoffDate.getHours()).toBe(0);
-    expect(cutoffDate.getMinutes()).toBe(0);
-    expect(cutoff).toBe(localDate(2026, 9, 26)); // Mon 2026-10-26
-    // And stepping a local week back across the boundary lands on 00:00 too.
-    expect(retentionCutoff(localDate(2026, 10, 2), 3)).toBe(localDate(2026, 9, 19));
+  test("a DST day stays whole", () => {
+    // US DST ends 2026-11-01; the cutoff is still a local midnight.
+    const cutoff = retentionCutoff(localDate(2026, 10, 3, 12), 2);
+    expect(cutoff).toBe(localDate(2026, 10, 1));
+    expect(new Date(cutoff).getHours()).toBe(0);
   });
 });
 
@@ -86,19 +70,26 @@ describe("isoWeekKey", () => {
   });
 });
 
-describe("resolveRetentionWeeks / resolveArchiveWeeks", () => {
-  test("defaults and minimums", () => {
-    expect(resolveRetentionWeeks({})).toBe(2);
-    expect(resolveArchiveWeeks({})).toBe(4);
-    expect(resolveRetentionWeeks({ OPENSCOUT_RETENTION_WEEKS: "1" })).toBe(1);
-    expect(resolveRetentionWeeks({ OPENSCOUT_RETENTION_WEEKS: "6" })).toBe(6);
+describe("resolveRetentionDays / resolveArchiveDays", () => {
+  test("default to seven days, with archiving on the same clock", () => {
+    expect(resolveRetentionDays({})).toBe(7);
+    expect(resolveArchiveDays({})).toBe(7);
+    expect(resolveArchiveDays({ OPENSCOUT_RETENTION_DAYS: "3" })).toBe(3);
+    expect(resolveArchiveDays({ OPENSCOUT_RETENTION_DAYS: "3", OPENSCOUT_ARCHIVE_DAYS: "10" })).toBe(10);
   });
 
-  test("0 disables, invalid input falls back to the default", () => {
-    expect(resolveRetentionWeeks({ OPENSCOUT_RETENTION_WEEKS: "0" })).toBe(0);
-    expect(resolveArchiveWeeks({ OPENSCOUT_ARCHIVE_WEEKS: "0" })).toBe(0);
-    expect(resolveRetentionWeeks({ OPENSCOUT_RETENTION_WEEKS: "-3" })).toBe(2);
-    expect(resolveRetentionWeeks({ OPENSCOUT_RETENTION_WEEKS: "bogus" })).toBe(2);
-    expect(resolveRetentionWeeks({ OPENSCOUT_RETENTION_WEEKS: "  " })).toBe(2);
+  test("read the earlier week settings as whole weeks when days are unset", () => {
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_WEEKS: "2" })).toBe(14);
+    expect(resolveArchiveDays({ OPENSCOUT_ARCHIVE_WEEKS: "4" })).toBe(28);
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_DAYS: "5", OPENSCOUT_RETENTION_WEEKS: "2" })).toBe(5);
+  });
+
+  test("zero disables, invalid values fall back", () => {
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_DAYS: "0" })).toBe(0);
+    expect(resolveArchiveDays({ OPENSCOUT_ARCHIVE_DAYS: "0" })).toBe(0);
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_WEEKS: "0" })).toBe(0);
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_DAYS: "-3" })).toBe(7);
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_DAYS: "bogus" })).toBe(7);
+    expect(resolveRetentionDays({ OPENSCOUT_RETENTION_DAYS: "  " })).toBe(7);
   });
 });

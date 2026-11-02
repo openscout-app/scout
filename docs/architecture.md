@@ -377,9 +377,13 @@ SQLite records do not.
 
 ### Working data and historical data
 
-The default working window is two weeks (`OPENSCOUT_RETENTION_WEEKS`); control
-flow events use four weeks (`OPENSCOUT_ARCHIVE_WEEKS`). Zero disables the
-corresponding rotation. These policies move records between storage tiers;
+The working window is a rolling count of whole local days: today and the
+previous seven by default (`OPENSCOUT_RETENTION_DAYS`). Control flow events
+move to gzip archive files on the same clock unless `OPENSCOUT_ARCHIVE_DAYS`
+sets their own. The cutoff advances at each local midnight. Zero disables the
+corresponding rotation. The earlier `OPENSCOUT_RETENTION_WEEKS` and
+`OPENSCOUT_ARCHIVE_WEEKS` are still read, as whole weeks, when the day
+settings are unset. These policies move records between storage tiers;
 they do not delete historical context. Active flights, pending result replies,
 nonterminal deliveries and dispatch jobs, and their required records stay live.
 
