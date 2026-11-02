@@ -15,6 +15,8 @@ export function bundleRuntimeEntrypoints(repoRoot, outputDirectory) {
     // WorkerSQLiteProjection resolves this exact sibling name from the broker
     // bundle. Source .ts loading and tsc output do not cover the npm dist tree.
     ["sqlite projection worker", "sqlite-projection-worker-entry.ts", "sqlite-projection-worker-entry.js"],
+    // BrokerHealthResponder resolves this sibling name the same way.
+    ["health responder worker", "broker-health-responder-worker-entry.ts", "broker-health-responder-worker-entry.js"],
   ];
   for (const [label, source, output] of entries) {
     const entryFile = resolve(repoRoot, "packages", "runtime", "src", source);

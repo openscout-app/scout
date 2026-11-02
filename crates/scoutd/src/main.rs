@@ -1702,7 +1702,28 @@ fn fetch_health(config: &Config) -> HealthStatus {
     health
 }
 
+/// The runtime answers health from a cache on its own thread, on a socket beside
+/// `broker.sock`. Runtime work cannot delay that answer.
+fn broker_health_socket_path(config: &Config) -> PathBuf {
+    if let Some(path) = env_nonempty("OPENSCOUT_BROKER_HEALTH_SOCKET_PATH") {
+        return PathBuf::from(path);
+    }
+    let socket = &config.broker_socket_path;
+    let name = socket
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "broker.sock".to_string());
+    let stem = name.strip_suffix(".sock").unwrap_or(&name);
+    socket.with_file_name(format!("{stem}-health.sock"))
+}
+
 fn fetch_health_observation(config: &Config) -> HealthStatus {
+    // A runtime without the health responder has no such socket; connecting
+    // fails at once and the runtime sockets answer as before.
+    if let Ok(mut health) = fetch_unix_health(&broker_health_socket_path(config)) {
+        health.transport = Some("health_socket".to_string());
+        return health;
+    }
     match fetch_unix_health(&config.broker_socket_path) {
         Ok(mut health) => {
             health.transport = Some("unix_socket".to_string());
@@ -4263,6 +4284,15 @@ mod tests {
             probes_socket_path: PathBuf::from("/Users/test/.openscout/run/scoutd-probes.sock"),
             repo_watch_interval: None,
         }
+    }
+
+    #[test]
+    fn health_socket_sits_beside_the_runtime_socket() {
+        let config = test_config("/tmp/runtime", "/tmp/scoutd", "app.openscout");
+        assert_eq!(
+            super::broker_health_socket_path(&config),
+            PathBuf::from("/Users/test/Library/Application Support/OpenScout/runtime/broker-health.sock"),
+        );
     }
 
     fn owner_plist(runtime_package_dir: Option<&str>, daemon_executable: &str) -> String {

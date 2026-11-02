@@ -39,6 +39,7 @@ import { memoryMaintenanceFromEnv } from "./broker-memory-maintenance.js";
 import { scoutbotIsolationMetadata } from "./scoutbot-isolation.js";
 import { randomUUID } from "node:crypto";
 import { BrokerCommandAdmission, BrokerStorageMonitor } from "./broker-storage-pressure.js";
+import { BrokerHealthResponder, brokerHealthSocketPath } from "./broker-health-responder.js";
 import { BrokerStorageMaintenance } from "./broker-storage-maintenance.js";
 import { ControlPlaneHistoryReader, historicalRecordKey } from "./control-plane-history-store.js";
 import { constrainHistoryRotationBatch, selectHistoryRotationBatch } from "./history-rotation-batch.js";
@@ -414,6 +415,11 @@ const nodeName = process.env.OPENSCOUT_NODE_NAME ?? hostname();
 const tailnetName = process.env.TAILSCALE_TAILNET ?? undefined;
 const brokerSocketPath = process.env.OPENSCOUT_BROKER_SOCKET_PATH
   ?? resolveBrokerServiceConfig().brokerSocketPath;
+// Health is a cache read on its own thread: runtime work never delays it.
+const healthResponder = new BrokerHealthResponder({
+  socketPath: brokerHealthSocketPath(brokerSocketPath),
+  log: (message) => console.warn(`[openscout-runtime] ${message}`),
+});
 let nodeId = process.env.OPENSCOUT_NODE_ID?.trim() ?? "";
 const tailnetWebHosts = readTailscaleSelfWebHostsSync();
 // The named web doorway this node answers for — same resolution the local edge
@@ -3574,6 +3580,12 @@ try {
   // bind controller (never a 0.0.0.0 plaintext default).
   await listenTcp(server, { host: isLoopbackHost(host) || host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host, port });
   await listenUnixSocket(socketServer, brokerSocketPath);
+  // Started only after the TCP bind proved this process owns the instance, so
+  // a second runtime can never replace the live one's health socket.
+  await healthResponder.start().then(
+    () => healthResponder.markReady({ nodeId, brokerUrl }),
+    (error) => console.warn("[openscout-runtime] health responder did not start; /health stays on the runtime sockets:", error),
+  );
   tailscaleListenerGuard.start();
   startupTrafficGate.markListening();
 
@@ -3765,8 +3777,32 @@ try {
   throw error;
 }
 
-void storageMonitor.refresh();
-setInterval(() => { void storageMonitor.refresh(); }, 30_000).unref();
+const MB = 1024 * 1024;
+const storageFileLabels: Record<string, string> = {
+  journal: "journal", database: "database", databaseWal: "database log", historicalIndex: "history index",
+  quarantine: "quarantine", quarantineWal: "quarantine log",
+};
+/** Raise or clear the flags of work that can fall behind. Health stays up. */
+function reportStorageHealthFlags(): void {
+  const storage = storageMonitor.status();
+  const over = Object.entries(storage.files).filter(([, file]) => file.aboveWarning)
+    .map(([name, file]) => `${storageFileLabels[name] ?? name} ${Math.round(file.bytes / MB)} MB over its ${Math.round(file.warningBytes / MB)} MB limit`);
+  if (storage.state === "critical" && storage.freeDiskBytes !== null) {
+    over.unshift(`free disk ${Math.round(storage.freeDiskBytes / MB)} MB, below the ${Math.round(storage.minimumFreeDiskBytes / MB)} MB reserve for durable writes`);
+  }
+  healthResponder.report("storage", over.length ? over.join("; ") : null);
+  const compaction = journal.liveCompactionStatus();
+  healthResponder.report("journal_compaction", compaction?.state === "budget"
+    ? `stopped at its scan budget after ${compaction.durationMs} ms; ${Math.round(compaction.sourceBytes / MB)} MB journal not compacted`
+    : null);
+  const maintenance = storageMaintenance.status();
+  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? maintenance.lastError ?? "failed" : null);
+}
+const refreshStorageStatus = () => storageMonitor.refresh().then(reportStorageHealthFlags, (error) => {
+  console.warn("[openscout-runtime] storage status refresh failed:", error);
+});
+void refreshStorageStatus();
+setInterval(() => { void refreshStorageStatus(); }, 30_000).unref();
 
 const otlpReceiver = localAdminKey ? undefined : await startBrokerOtlpReceiver(controlHome);
 
@@ -3952,6 +3988,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
     console.warn("[openscout-runtime] jetstream shutdown failed:", error);
   });
   peerDelivery.stop();
+  await healthResponder.stop();
   meshRendezvousPublisher?.stop();
   await meshBindController?.stop().catch(() => undefined);
   irohBridgeService?.stop();
