@@ -648,9 +648,12 @@ export class FileBackedBrokerJournal {
     const legacyRotations = [...this.appliedRotations];
     try {
       try {
-        await this.visitEntries(async (entry, index, bytes, physicalEndByte) => {
+        await this.visitEntries(async (entry, index, bytes, physicalEndByte, frameStart) => {
           options.signal?.throwIfAborted();
-          if (index >= maximumEntries || Date.now() > scanDeadline) throw scanStop;
+          // Stop only between physical frames: every entry of a frame reports
+          // the frame's end byte, so a partial frame would fold its unread
+          // entries away. A frame holds at most a few thousand entries.
+          if (frameStart && (index >= maximumEntries || Date.now() > scanDeadline)) throw scanStop;
           if (index % 128 === 0) await yieldReadTurn();
           const key = dedupeKey(entry);
           let rotation: AppliedHistoryRotation | undefined, rotationIds = 0;
@@ -661,7 +664,7 @@ export class FileBackedBrokerJournal {
             for (const [field, value] of Object.entries(rotation)) if (field !== "cutoff" && value instanceof Set) rotationIds += value.size;
           }
           const newKeys = key !== null && !latest.has(key) ? 1 : 0;
-          if (latest.size + newKeys + trackedRotationIds + rotationIds > maximumKeys) throw scanStop;
+          if (frameStart && latest.size + newKeys + trackedRotationIds + rotationIds > maximumKeys) throw scanStop;
           if (cleanupBoundary?.fileIdentity && cleanupBoundary.fileIdentity === boundary.fileIdentity && physicalEndByte <= cleanupBoundary.endByteExclusive) cleanupThroughIndex = index;
           if (key) {
             estimatedReclaimBytes += encodedBytes.get(key) ?? 0;
@@ -1678,6 +1681,7 @@ export class FileBackedBrokerJournal {
       index: number,
       encodedLineBytes: number,
       physicalEndByte: number,
+      frameStart: boolean,
     ) => void | Promise<void>,
     options: { endByteExclusive?: number; startByteInclusive?: number; fileIdentity?: string } = {},
   ): Promise<JournalVisitReport> {
@@ -1781,7 +1785,7 @@ export class FileBackedBrokerJournal {
         // overhead for compaction estimates without charging its bytes N times.
         const perEntryBytes = Math.floor(encodedLineBytes / entries.length);
         for (let ordinal = 0; ordinal < entries.length; ordinal++) {
-          await visitor(hydrator!.decode(entries[ordinal]!), index, perEntryBytes + (ordinal === 0 ? encodedLineBytes % entries.length : 0), physicalEndByte);
+          await visitor(hydrator!.decode(entries[ordinal]!), index, perEntryBytes + (ordinal === 0 ? encodedLineBytes % entries.length : 0), physicalEndByte, ordinal === 0);
           index += 1;
           report.validEntries += 1;
         }
@@ -1935,6 +1939,9 @@ export class FileBackedBrokerJournal {
         await writeCompactionOutput("rename", () => rename(temporaryPath, this.filePath));
         await this.syncDirectory();
         this.appendPrefix = "";
+        // The rewrite may drop record lines the writer remembers. Reference
+        // only records written after it.
+        this.eventThinner.reset();
       };
       if (prefixBytes === undefined) await publish();
       else {

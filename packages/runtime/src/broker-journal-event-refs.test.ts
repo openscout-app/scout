@@ -110,3 +110,25 @@ test("ambiguous payloads keep their copies and a lost reference is reported, not
   expect(hydrator.decode(thin)).toEqual(event("e-2", { flight: { id: "f-1" } as never, recordUnavailable: true }));
   expect(hydrator.unresolved).toBe(1);
 });
+
+test("a batch with more records than readers keep writes its early events complete", async () => {
+  const { journal } = await journalAt();
+  const flights = Array.from({ length: 300 }, (_, index) => flight({ id: `f${index}`, invocationId: `i${index}`, metadata: undefined }));
+  await journal.appendEntries([...flights.map(record), event("e-first", { flight: flights[0] }), event("e-last", { flight: flights[299] })]);
+  const replayed = events(await journal.readEntries());
+  expect(journal.unresolvedEventRecordCount()).toBe(0);
+  expect((replayed[0] as { event: { payload: { flight: FlightRecord } } }).event.payload.flight).toEqual(flights[0]!);
+  expect((replayed[1] as { event: { payload: { flight: FlightRecord } } }).event.payload.flight).toEqual(flights[299]!);
+});
+
+test("an event after a history rotation never references a record written before it", () => {
+  const thinner = new ControlEventThinner();
+  const value = flight();
+  const rotate = { kind: "history.rotate", cutoff: 5, rotatedAt: 5, evicted: { messageIds: [], invocationIds: [], flightIds: [value.id], deliveryIds: [], deliveryAttemptIds: [], collaborationEventIds: [] } } as BrokerJournalEntry;
+  const { entries } = thinner.encode([record(value), rotate, event("e-1", { flight: value })]);
+  expect((entries[2] as { payloadRecord?: unknown }).payloadRecord).toBeUndefined();
+  thinner.encodeOne(record(value));
+  expect((thinner.encodeOne(event("e-2", { flight: value })) as { payloadRecord?: unknown }).payloadRecord).toBeDefined();
+  thinner.reset();
+  expect((thinner.encodeOne(event("e-3", { flight: value })) as { payloadRecord?: unknown }).payloadRecord).toBeUndefined();
+});

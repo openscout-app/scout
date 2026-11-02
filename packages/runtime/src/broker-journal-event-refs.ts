@@ -67,21 +67,32 @@ function eventRecordField(payload: Record<string, unknown>): { field: ControlEve
   return found;
 }
 
-/** Writer side. Apply in journal order to the exact entries being encoded. */
+/**
+ * Writer side. Apply in journal order to the exact entries being encoded.
+ * The writer references a record only while every reader still holds it, so
+ * it stages on a copy of the reader's own bounded cache, with the same
+ * eviction, entry by entry. A batch larger than the cache writes its early
+ * events complete.
+ */
 export class ControlEventThinner {
-  private readonly recent = new RecentRecords();
+  private recent = new RecentRecords();
 
   /** The returned commit runs only after the encoded bytes are durable. */
   encode(entries: readonly BrokerJournalEntry[]): { entries: BrokerJournalEntry[]; commit: () => void } {
-    const staged = new Map<string, object>();
-    const lookup = (key: string) => staged.has(key) ? staged.get(key) : this.recent.get(key);
+    let staged = this.recent.clone();
     const encoded = entries.map((entry) => {
+      // A rotation marker evicts records written before it. Never reference
+      // across one; readers keep their copies, so this only costs bytes.
+      if (entry.kind === "history.rotate") { staged = new RecentRecords(); return entry; }
       const written = journaledRecord(entry);
-      if (written) { staged.delete(written.key); staged.set(written.key, written.record); return entry; }
-      return entry.kind === "control.event.record" ? thinEvent(entry, lookup) ?? entry : entry;
+      if (written) { staged.set(written.key, written.record); return entry; }
+      return entry.kind === "control.event.record" ? thinEvent(entry, key => staged.get(key)) ?? entry : entry;
     });
-    return { entries: encoded, commit: () => { for (const [key, record] of staged) this.recent.set(key, record); } };
+    return { entries: encoded, commit: () => { this.recent = staged; } };
   }
+
+  /** Forget every record: the file under the writer was rewritten. */
+  reset(): void { this.recent = new RecentRecords(); }
 
   encodeOne(entry: BrokerJournalEntry): BrokerJournalEntry {
     const result = this.encode([entry]);

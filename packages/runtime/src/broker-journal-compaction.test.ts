@@ -68,7 +68,8 @@ test("live compaction drops only records named by committed rotation markers", a
 test("compaction scan budget preserves original bytes and leaves no partial file", async () => {
   const { journal, root, path } = await setup();
   const before = await readFile(path);
-  expect((await journal.compactIfNeeded({ ...compact, maxEntries: 1 })).state).toBe("budget");
+  // A scan stops only between frames; one that cannot finish the first frame changes nothing.
+  expect((await journal.compactIfNeeded({ ...compact, maxEntries: 0 })).state).toBe("budget");
   expect(await readFile(path)).toEqual(before);
   expect((await readdir(root)).filter(name => name.endsWith(".tmp"))).toEqual([]);
   expect((await journal.compactIfNeeded({ ...compact, maxTrackedKeys: 0 })).state).toBe("budget");
@@ -203,4 +204,20 @@ test("receipt cleanup byte proof includes blank lines and never authorizes a new
   await journal.appendEntries({ kind: "history.rotate", cutoff: 3, rotatedAt: 3, evicted });
   await journal.compactIfNeeded({ ...compact, historicalCleanupApplied: true, historicalCleanupBoundary });
   expect((await journal.readEntries()).filter(entry => entry.kind === "history.rotate").map(entry => entry.cutoff)).toEqual([2, 3]);
+});
+
+test("a scan budget that lands inside a batch keeps every entry of that batch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scout-live-compact-")); cleanup.push(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "journal.jsonl");
+  const journal = new FileBackedBrokerJournal(path, { compactionPolicy: { minimumReclaimBytes: 1 } });
+  await journal.load();
+  const upsert = (id: string, name: string): BrokerJournalEntry => ({ kind: "actor.upsert", actor: { id, kind: "agent", displayName: name } });
+  await journal.appendEntries(upsert("a", "1"));
+  await journal.appendEntries(upsert("a", "2"));
+  await journal.appendEntries([upsert("b", "1"), upsert("c", "1"), upsert("d", "1")]);
+  const result = await journal.compactIfNeeded({ ...compact, maxEntries: 3 });
+  expect(result.state).toBe("compacted");
+  const restored = new FileBackedBrokerJournal(path); await restored.load();
+  expect(Object.keys(restored.snapshot().actors).sort()).toEqual(["a", "b", "c", "d"]);
+  expect(restored.snapshot().actors.a?.displayName).toBe("2");
 });
