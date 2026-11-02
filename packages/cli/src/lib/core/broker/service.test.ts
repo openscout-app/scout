@@ -2122,6 +2122,7 @@ describe("askScoutQuestion", () => {
         kind: string;
         title: string;
         ownerId?: string;
+        acceptanceState?: string;
       } | null,
       postedEvent: null as {
         recordId: string;
@@ -2240,6 +2241,7 @@ describe("askScoutQuestion", () => {
     expect(captured.postedRecord?.kind).toBe("work_item");
     expect(captured.postedRecord?.id).toBe(result.workItem?.id);
     expect(captured.postedRecord?.ownerId).toBe("talkie.main.mini");
+    expect(captured.postedRecord?.acceptanceState).toBe("none");
     expect(captured.postedEvent?.recordId).toBe(result.workItem?.id);
     expect(captured.postedEvent?.kind).toBe("created");
   }, 15000);

@@ -206,10 +206,12 @@ describe("BrokerWorkItemStore", () => {
     expect(runtime.collaborationRecord("work-1")).toEqual(existing);
   });
 
-  test("moves requested work to review when its invocation completes", async () => {
+  test("moves work to review when the asker chose review", async () => {
     const { runtime, appended, projected, store, durableStore, promote } = createStore();
     await store.recordDeliveryWorkItemIfNeeded({
-      payload: testPayload(),
+      payload: testPayload({
+        workItem: { ...testPayload().workItem!, acceptanceState: "pending" },
+      }),
       requestId: "deliver-1",
       requesterId: "operator",
       targetAgentId: "agent-1",
@@ -256,6 +258,36 @@ describe("BrokerWorkItemStore", () => {
     }));
     await durableStore.flushProjectedEntries();
     expect(projected[1]).toEqual(appended[1]);
+  });
+
+  test("completes finished work when no review was asked for", async () => {
+    const { runtime, appended, store, promote } = createStore();
+    await store.recordDeliveryWorkItemIfNeeded({
+      payload: testPayload(),
+      requestId: "deliver-1",
+      requesterId: "operator",
+      targetAgentId: "agent-1",
+      conversationId: "conversation-1",
+      createdAt: 100,
+    });
+
+    await promote(
+      testInvocation(),
+      testFlight({ output: "All broker tests stayed green." }),
+      "All broker tests stayed green.",
+    );
+
+    const updated = runtime.collaborationRecord("work-1");
+    expect(updated).toEqual(expect.objectContaining({
+      state: "done",
+      acceptanceState: "none",
+      completedAt: 200,
+    }));
+    expect(updated?.reviewRequestedAt).toBeUndefined();
+    expect(appended[1]?.[1]).toEqual(expect.objectContaining({
+      kind: "collaboration.event.record",
+      event: expect.objectContaining({ kind: "done" }),
+    }));
   });
 
   test("completes self-driven work that does not require acceptance", async () => {

@@ -72,7 +72,7 @@ async function fixture() {
   }
   wire();
   await work!.recordDeliveryWorkItemIfNeeded({
-    payload: { id: "delivery-1", body: "work", intent: "consult", workItem: { id: "work-1", title: "Work" } },
+    payload: { id: "delivery-1", body: "work", intent: "consult", workItem: { id: "work-1", title: "Work", acceptanceState: "pending" } },
     requestId: "delivery-1", requesterId: "operator", targetAgentId: "agent-1", conversationId: "conversation-1", createdAt: at,
   });
   return {

@@ -48,6 +48,7 @@ describe("broker daemon collaboration routes", () => {
       workItem: {
         id: "work-delivery-test-1",
         title: "Review the Hudson plan",
+        acceptanceState: "pending",
         summary: "Track the delegated plan review.",
         priority: "high",
         labels: ["plan"],
@@ -133,6 +134,7 @@ describe("broker daemon collaboration routes", () => {
       workItem: {
         id: "work-delivery-idempotent-1",
         title: "Retry-safe review",
+        acceptanceState: "pending",
         summary: "Track a delivery retry without duplicating work.",
         priority: "normal",
         labels: ["retry"],

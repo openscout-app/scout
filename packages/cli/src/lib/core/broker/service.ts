@@ -2892,7 +2892,8 @@ async function createScoutTrackedWorkItem(input: {
     id: recordId,
     kind: "work_item",
     state: "open",
-    acceptanceState: input.workItem.acceptanceState ?? "pending",
+    // Finished work goes to done unless the asker chose review.
+    acceptanceState: input.workItem.acceptanceState ?? "none",
     title: input.workItem.title.trim(),
     summary: input.workItem.summary?.trim() || undefined,
     createdById: input.senderId,
