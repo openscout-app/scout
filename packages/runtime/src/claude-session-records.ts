@@ -40,6 +40,8 @@ export type ClaudeSessionRecord = {
   statusUpdatedAt?: number | null;
   updatedAt?: number | null;
   waitingFor?: string | null;
+  /** A background session's job id (`kind: "bg"`): `claude attach <jobId>` opens it in a terminal. */
+  jobId?: string | null;
   recordPath: string;
 };
 
@@ -123,6 +125,7 @@ export function parseClaudeSessionRecord(raw: string, recordPath: string): Claud
     statusUpdatedAt: numberField(record.statusUpdatedAt),
     updatedAt: numberField(record.updatedAt),
     waitingFor: typeof record.waitingFor === "string" ? record.waitingFor : null,
+    jobId: typeof record.jobId === "string" && /^[A-Za-z0-9_-]{1,64}$/u.test(record.jobId) ? record.jobId : null,
     recordPath,
   };
 }

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   __testing,
   joinClaudeRegistryStatus,
+  withPendingToolCalls,
   INTERNAL_TAIL_SESSION_OFFLINE_SUMMARY,
   INTERNAL_TAIL_SESSION_STALLED_SUMMARY,
   readRecentLiveEvents,
@@ -937,4 +938,27 @@ test("discovery joins the newest registry status by native id, and clears missin
   });
   expect(joinClaudeRegistryStatus([{ ...transcript, source: "codex" }], [record(1, 200, "busy")])[0]?.status).toBeUndefined();
   expect(joinClaudeRegistryStatus([{ ...transcript, sessionId: "child", parentSessionId: "native" }], [record(1, 200, "busy")])[0]?.status).toBeNull();
+});
+
+test("a waiting Claude session carries the call it asks about, read once per transcript change", async () => {
+  const waiting: DiscoveredTranscript = {
+    source: "claude", sessionId: "native", transcriptPath: "/native.jsonl",
+    cwd: "/repo", project: "repo", harness: "unattributed", mtimeMs: 1, size: 1,
+    attention: { kind: "ask", source: "registry", reason: "permission prompt", since: 1 },
+  };
+  const idle: DiscoveredTranscript = { ...waiting, sessionId: "idle", transcriptPath: "/idle.jsonl", attention: null };
+  const line = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "rm -rf build", description: "Clean the build" } }] } });
+  let reads = 0;
+  const readTail = async () => { reads++; return line + "\n"; };
+  let size = 10;
+  const statFile = async () => ({ size, mtimeMs: 5 });
+
+  const [joined, untouched] = await withPendingToolCalls([waiting, idle], readTail, statFile);
+  expect(joined?.attention?.pending).toMatchObject({ tool: "Bash", title: "Bash command", subject: "rm -rf build", detail: "Clean the build" });
+  expect(untouched).toBe(idle);
+  await withPendingToolCalls([waiting], readTail, statFile);
+  expect(reads).toBe(1);
+  size = 11;
+  await withPendingToolCalls([waiting], readTail, statFile);
+  expect(reads).toBe(2);
 });

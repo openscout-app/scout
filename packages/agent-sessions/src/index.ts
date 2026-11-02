@@ -81,6 +81,13 @@ export {
 export type {
   ClaudeSubagentTopologyOptions,
 } from "./adapters/claude-code/subagent-topology.js";
+export {
+  describeClaudeToolCall,
+  findClaudePendingToolCall,
+} from "./adapters/claude-code/pending-tool-call.js";
+export type {
+  ClaudePendingToolCall,
+} from "./adapters/claude-code/pending-tool-call.js";
 export { createAdapter as createCodexAdapter } from "./adapters/codex/index.js";
 export { createAdapter as createCursorAcpAdapter } from "./adapters/cursor-acp/index.js";
 export { createAdapter as createDevinAcpAdapter } from "./adapters/devin-acp/index.js";
