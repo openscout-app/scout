@@ -132,3 +132,19 @@ test("an event after a history rotation never references a record written before
   thinner.reset();
   expect((thinner.encodeOne(event("e-3", { flight: value })) as { payloadRecord?: unknown }).payloadRecord).toBeUndefined();
 });
+
+test("an event after a rotation survives a prefix compaction that drops the rotated record", async () => {
+  const { path, journal } = await journalAt();
+  const value = flight();
+  await journal.appendEntries(record(value));
+  await journal.appendEntries({ kind: "history.rotate", cutoff: 1_800_000_000_000, rotatedAt: 1_800_000_000_000,
+    evicted: { messageIds: [], invocationIds: [], flightIds: [value.id], deliveryIds: [], deliveryAttemptIds: [], collaborationEventIds: [] } } as BrokerJournalEntry);
+  await journal.appendEntries(event("e-1", { flight: value }));
+  expect((await journal.compactIfNeeded({ minimumBytes: 0, minimumIntervalMs: 0, maxEntries: 2 })).state).toBe("compacted");
+  expect((await lines(path)).some(line => line.kind === "flight.record")).toBe(false);
+  const restored = new FileBackedBrokerJournal(path); await restored.load();
+  const replayed = events(await restored.readEntries())[0] as { event: { payload: Record<string, unknown> } };
+  expect(replayed.event.payload.recordUnavailable).toBeUndefined();
+  expect(replayed.event.payload.flight).toEqual(value);
+  expect(restored.unresolvedEventRecordCount()).toBe(0);
+});
