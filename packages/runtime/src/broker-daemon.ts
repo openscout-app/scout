@@ -15,6 +15,7 @@ import { tailscaleStatusProbe } from "./system-probes/tailscale-status.js";
 import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
+import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace } from "./in-place/deliver.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
@@ -978,6 +979,7 @@ const workLifecycles = new BrokerWorkLifecycleService({
   runtime,
   listEvents: options => journal.listCollaborationEvents(options),
   childrenOf: recordId => Object.values(runtime.peek().collaborationRecords).filter(record => record.parentId === recordId),
+  listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
   createId: createRuntimeId,
   operatorActorId,
 });

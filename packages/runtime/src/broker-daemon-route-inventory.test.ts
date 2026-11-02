@@ -114,6 +114,7 @@ const expectedRouteInventory = [
   "GET /v1/trust/enroll/status",
   "GET /v1/trust/peers",
   "GET /v1/web/status",
+  "GET /v1/work/board",
   "GET /v1/work/lifecycles",
   "GET /v1/work/moves",
   "OPTIONS /v1/web/restart",

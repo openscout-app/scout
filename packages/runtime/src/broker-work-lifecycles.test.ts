@@ -35,6 +35,7 @@ async function setup(records: CollaborationRecord[] = [workItem()], directory?: 
   const service = new BrokerWorkLifecycleService({
     registry, durableStore, runtime,
     listEvents: ({ recordId }) => events.filter((e) => !recordId || e.recordId === recordId).sort((a, b) => b.at - a.at),
+    listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((r): r is WorkItemRecord => r.kind === "work_item"),
     childrenOf: (recordId) => Object.values(runtime.peek().collaborationRecords).filter((r) => r.parentId === recordId),
     createId: (prefix) => `${prefix}-${++id}`,
     operatorActorId: "operator",
@@ -114,6 +115,14 @@ describe("work lifecycle service", () => {
     await service.move({ workId: "work-1", to: "doing", actorId: "agent-1" });
     const stale = await service.review({ workId: "work-1", moveId: done.move!.id, verdict: "confirm", revision: done.move!.revision! });
     expect(stale.status).toBe("stale");
+  });
+
+  test("the board places every item on the lifecycle", async () => {
+    const { service } = await setup([workItem(), workItem({ id: "work-2", state: "working" }), workItem({ id: "work-3", state: "done", ownerId: undefined, createdAt: 1, updatedAt: 1 })]);
+    await service.move({ workId: "work-1", to: "backlog", actorId: "agent-1" });
+    const board = service.board({ closedSince: 500 });
+    expect(board.lifecycle.lifecycle.id).toBe("scout.default");
+    expect(Object.fromEntries(board.items.map((i) => [i.workId, i.station]))).toEqual({ "work-1": "backlog", "work-2": "doing" });
   });
 
   test("runtime changes get a placement and a ledger move", () => {

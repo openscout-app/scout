@@ -57,6 +57,11 @@ export interface WorkItemPosition {
   next: Array<{ station: WorkStationId; name: string; state: WorkItemState }>;
 }
 
+export interface WorkBoard {
+  lifecycle: WorkLifecycleSummary;
+  items: Array<{ workId: string; station: WorkStationId; reviewPending: boolean; revision: number; next: WorkStationId[] }>;
+}
+
 export class WorkLifecycleError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
@@ -386,6 +391,7 @@ export interface BrokerWorkLifecycleServiceOptions {
   };
   listEvents(options: { recordId?: string; limit?: number }): CollaborationEvent[];
   childrenOf(recordId: string): CollaborationRecord[];
+  listWorkItems(): WorkItemRecord[];
   createId(prefix: string): string;
   operatorActorId: string;
   now?: () => number;
@@ -416,6 +422,25 @@ export class BrokerWorkLifecycleService {
   }
 
   readonly lifecycles = (): WorkLifecycleSummary[] => this.options.registry.list();
+
+  /** Every item on one lifecycle, placed: open work plus work closed since `closedSince`. */
+  readonly board = (query: { lifecycleId?: string; closedSince?: number; limit?: number }): WorkBoard => {
+    const lifecycleId = query.lifecycleId?.trim() || this.options.registry.defaultId;
+    const summary = this.options.registry.list().find((entry) => entry.lifecycle.id === lifecycleId);
+    if (!summary) throw new WorkLifecycleError(404, `No lifecycle ${lifecycleId}.`);
+    const closedSince = query.closedSince ?? this.now() - 7 * 24 * 60 * 60 * 1000;
+    const limit = Math.min(Math.max(query.limit ?? 500, 1), 2000);
+    const items = this.options.listWorkItems()
+      .filter((record) => this.options.registry.forRecord(record).id === lifecycleId)
+      .filter((record) => !isWorkItemTerminalState(record.state) || record.updatedAt >= closedSince)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, limit)
+      .map((record) => {
+        const position = this.position(record.id);
+        return { workId: record.id, station: position.station, reviewPending: position.reviewPending, revision: position.revision, next: position.next.map((n) => n.station) };
+      });
+    return { lifecycle: summary, items };
+  };
 
   /** Where an item sits and the moves open to it, for agents deciding their next move. */
   readonly position = (workId: string): WorkItemPosition => {

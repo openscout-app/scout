@@ -42,6 +42,7 @@ export const scoutBrokerPaths = {
     activity: "/v1/activity",
     collaborationRecords: "/v1/collaboration/records",
     collaborationEvents: "/v1/collaboration/events",
+    workBoard: "/v1/work/board",
     workLifecycles: "/v1/work/lifecycles",
     workMoves: "/v1/work/moves",
     workMove: "/v1/work/move",

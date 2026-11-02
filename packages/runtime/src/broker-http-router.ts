@@ -1749,6 +1749,15 @@ export function createBrokerHttpRouter(
         json(response, 200, work.saveLifecycle(await readRequestBody<WorkLifecycle>(request, { maxBytes: 256 * 1024 })));
         return;
       }
+      if (method === "GET" && url.pathname === "/v1/work/board") {
+        const closedSince = Number(url.searchParams.get("closedSince"));
+        json(response, 200, work.board({
+          lifecycleId: url.searchParams.get("lifecycleId") ?? undefined,
+          closedSince: Number.isFinite(closedSince) && closedSince > 0 ? closedSince : undefined,
+          limit: parseLimit(url),
+        }));
+        return;
+      }
       if (method === "GET" && url.pathname === "/v1/work/moves") {
         json(response, 200, { moves: work.moves({ workId: url.searchParams.get("workId") ?? undefined, limit: parseLimit(url) }) });
         return;

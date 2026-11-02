@@ -122,6 +122,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/runtime-catalog": "local",
   "GET /v1/collaboration/events": "local",
   "GET /v1/collaboration/records": "local",
+  "GET /v1/work/board": "local",
   "GET /v1/work/lifecycles": "local",
   "GET /v1/work/moves": "local",
   "GET /v1/conversation-projection": "local",
