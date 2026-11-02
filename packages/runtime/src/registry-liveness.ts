@@ -4,7 +4,8 @@ export type RegistryRecordKind = "node" | "actor" | "agent" | "endpoint";
 
 /** Explicit liveness allowlist, NOT a recursive timestamp scrubber. In particular
  * registeredAt, createdAt, updatedAt, keys, state and observation evidence matter.
- * Durable journal/projection upserts still retain the complete, current record. */
+ * A node update that is liveness only stays in memory; the journal is
+ * rewritten only as its signed card nears expiry (isNodeLivenessOnlyUpdate). */
 function substantiveRecord(kind: RegistryRecordKind, record: object, renewal: boolean, repeatedFailure: boolean): unknown {
   const value = { ...record } as Record<string, unknown>;
   if (kind === "node") {
