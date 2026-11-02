@@ -857,6 +857,7 @@ const operatorActorId = "operator";
 let attachmentService: BrokerAttachmentService | undefined;
 let attachmentBlobStore: AttachmentBlobStore | undefined;
 const durableRecords = new BrokerDurableRecordStore({
+  journaledNode: (nodeId) => journal.journaledNode(nodeId),
   assertMessageAdmission: message => {
     if (!message.attachments?.some(a => a.blob !== undefined)) return;
     if (!attachmentService) throw new AttachmentError("attachments_unavailable");

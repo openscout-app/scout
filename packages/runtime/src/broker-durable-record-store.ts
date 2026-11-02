@@ -84,6 +84,8 @@ export type BrokerDurableRecordStoreOptions = {
   durableStore: DurableStore;
   knownInvocations: Map<string, InvocationRequest>;
   invocationDispatchJobFor?: (jobId: string) => BrokerInvocationDispatchJob | null;
+  /** The node record the journal last accepted. Without it every node update is journaled. */
+  journaledNode?: (nodeId: string) => NodeDefinition | undefined;
   /**
    * Authoritative membership lookup (SQLite conversation_members), queried
    * before an agent/actor delete so the journaled entry carries the delete
@@ -253,10 +255,6 @@ function isCurrentAgentRecord(
 }
 
 export class BrokerDurableRecordStore {
-  /** The node record the journal last accepted, per id, once a liveness-only
-   * update has made the in-memory copy newer than the journaled one. */
-  private readonly journaledNodes = new Map<string, NodeDefinition>();
-
   constructor(private readonly options: BrokerDurableRecordStoreOptions) {}
 
   readonly upsertNode = async (
@@ -264,11 +262,12 @@ export class BrokerDurableRecordStore {
     options: DurableCommitOptions = {},
   ): Promise<void> => {
     await this.options.durableStore.runWrite(async () => {
-      const journaled = this.journaledNodes.get(node.id) ?? this.options.runtime.peek().nodes[node.id];
+      // Compare with what the journal accepted, never with memory: the
+      // runtime can hold a node (its own, at startup) the journal has not seen.
+      const journaled = this.options.journaledNode?.(node.id);
       if (journaled && isNodeLivenessOnlyUpdate(journaled, node)) {
         // Discovery re-signs every peer's card on each probe. That is
         // liveness, not new data: keep it in memory and leave the journal alone.
-        this.journaledNodes.set(node.id, journaled);
         await this.options.runtime.upsertNode(node);
         return;
       }
@@ -279,7 +278,6 @@ export class BrokerDurableRecordStore {
         },
         options,
       );
-      this.journaledNodes.delete(node.id);
     });
   };
 

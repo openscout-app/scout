@@ -1164,6 +1164,11 @@ export class FileBackedBrokerJournal {
     return cloneSnapshot(this.state.snapshot);
   }
 
+  /** The node record this journal last accepted, without copying the snapshot. Read only. */
+  journaledNode(nodeId: string): Readonly<NodeDefinition> | undefined {
+    return this.state.snapshot.nodes[nodeId];
+  }
+
   verificationRecords(plan: HistoryRotationPlan): BrokerJournalVerificationRecords {
     const snapshot = this.state.snapshot;
     const flights = [...plan.flightIds].flatMap(id => snapshot.flights[id] ? [snapshot.flights[id]!] : []);

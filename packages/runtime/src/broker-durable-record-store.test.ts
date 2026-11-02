@@ -1218,7 +1218,8 @@ describe("registry liveness is durable state, not event history", () => {
     const journal = new FileBackedBrokerJournal(journalPath); await journal.load();
     const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
     const durableStore = new BrokerDurableStore({ journal, projection: { async applyEntries() { return []; } }, threadEvents: { publish() {} } });
-    const records = new BrokerDurableRecordStore({ runtime, durableStore, knownInvocations: new Map() });
+    const records = new BrokerDurableRecordStore({ runtime, durableStore, knownInvocations: new Map(),
+      journaledNode: (id) => journal.journaledNode(id) });
     const ttl = 86_400_000;
     const card = (issuedAt: number, n: number) => ({ nodeId: "peer", label: "peer", publicKey: "key", keyId: "key-id", fingerprint: "fp",
       version: "test", capabilities: [], endpoints: [], issuedAt, expiresAt: issuedAt + ttl, nonce: `n${n}`, signature: `s${n}` });
@@ -1226,6 +1227,9 @@ describe("registry liveness is durable state, not event history", () => {
       advertiseScope: "local" as const, registeredAt: 1, brokerUrl, lastSeenAt: seenAt, card: card(seenAt, n) });
     const lines = async () => (await Bun.file(journalPath).text()).split("\n").filter(line => line.includes("\"node.upsert\"")).length;
 
+    // The runtime can hold a node the journal has never seen (its own, at
+    // startup). The first durable write must reach the journal regardless.
+    await runtime.upsertNode(node(500, 0));
     await records.upsertNode(node(1_000, 1));
     expect(await lines()).toBe(1);
     // A probe every minute for an hour re-signs the card each time.
