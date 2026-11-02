@@ -1619,8 +1619,8 @@ async function sweepIdleCardlessSessions(): Promise<void> {
 async function sweepRegistryRetention(): Promise<void> {
   if (registryRetentionOverrideMs === 0) return;
   if (registryRetentionOverrideMs === undefined && retentionDays <= 0) return;
-  // The boundary is recomputed per sweep: the week clock means a new cutoff
-  // only when the calendar week rolls over; the ms override stays rolling.
+  // The boundary is recomputed per sweep: retention is a rolling window, so
+  // each sweep moves the cutoff forward by the time elapsed since the last.
   const cutoff = registryRetentionOverrideMs !== undefined
     ? Date.now() - registryRetentionOverrideMs
     : retentionCutoff(Date.now(), retentionDays);
