@@ -75,6 +75,31 @@ test("compaction scan budget preserves original bytes and leaves no partial file
   expect(await readFile(path)).toEqual(before);
 });
 
+test("a scan that reaches its key cap folds the prefix it read and the next passes finish the rest", async () => {
+  const { journal, path } = await setup();
+  const evicted = (id: string) => ({ messageIds: [id], invocationIds: [], flightIds: [], deliveryIds: [], deliveryAttemptIds: [], collaborationEventIds: [] });
+  for (let index = 0; index < 8; index++) {
+    await journal.appendEntries(message(`m${index}`));
+    await journal.appendEntries({ kind: "history.rotate", cutoff: 1_800_000_000_000 + index, rotatedAt: 1_800_000_000_000 + index, evicted: evicted(`m${index}`) });
+  }
+  await journal.appendEntries(message("tail"));
+  const before = Object.keys(journal.snapshot().messages).sort();
+  const sizeBefore = (await readFile(path)).byteLength;
+  const first = await journal.compactIfNeeded({ ...compact, maxTrackedKeys: 4 });
+  expect(first.state).toBe("compacted");
+  expect(first.reason.endsWith("_prefix")).toBe(true);
+  expect((await readFile(path)).byteLength).toBeLessThan(sizeBefore);
+  let passes = 1;
+  while (passes < 20 && (await journal.compactIfNeeded({ ...compact, maxTrackedKeys: 4 })).state === "compacted") passes++;
+  expect(passes).toBeGreaterThan(1);
+  const entries = await journal.readEntries();
+  expect(entries.filter(entry => entry.kind === "history.rotate").length).toBeLessThanOrEqual(3);
+  expect(entries.filter(entry => entry.kind === "message.record").map(entry => (entry as { message: { id: string } }).message.id))
+    .not.toContain("m0");
+  const restored = new FileBackedBrokerJournal(path); await restored.load();
+  expect(Object.keys(restored.snapshot().messages).sort()).toEqual(before);
+});
+
 test("only explicitly archived control events can leave the canonical journal", async () => {
   const { journal } = await setup();
   const events = ["archived", "protected"].map(id => ({ kind: "control.event.record", event: { id, kind: "message.created", actorId: "actor", nodeId: "node", ts: 1, payload: { context: [id] } } }) as BrokerJournalEntry);

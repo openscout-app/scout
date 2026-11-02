@@ -629,33 +629,48 @@ export class FileBackedBrokerJournal {
     const maximumMs = finite(options.maxDurationMs, 30_000);
     const budgetError = new Error("journal_compaction_budget");
     const checkBudget = () => { options.signal?.throwIfAborted(); if (Date.now() - start > maximumMs) throw budgetError; };
+    // The scan stops at its share of the budget and compacts the prefix it
+    // read. A prefix is exactly the journal as it stood when it ended there,
+    // so the rewrite keeps every later byte verbatim; markers only ever drop
+    // entries before them. The next turn continues from the folded prefix.
+    const scanDeadline = start + maximumMs / 3;
+    const scanStop = new Error("journal_compaction_scan_stop");
     const latest = new Map<string, number>(), encodedBytes = new Map<string, number>();
     const rotations: AppliedHistoryRotation[] = [];
-    let estimatedReclaimBytes = 0, trackedRotationIds = 0;
+    let estimatedReclaimBytes = 0, trackedRotationIds = 0, scannedEndByte = 0, stoppedEarly = false;
     let cleanupThroughIndex = -1;
     const cleanupBoundary = options.historicalCleanupApplied ? options.historicalCleanupBoundary : undefined;
     const legacyRotations = [...this.appliedRotations];
     try {
-      await this.visitEntries(async (entry, index, bytes, physicalEndByte) => {
-        if (cleanupBoundary?.fileIdentity && cleanupBoundary.fileIdentity === boundary.fileIdentity && physicalEndByte <= cleanupBoundary.endByteExclusive) cleanupThroughIndex = index;
-        checkBudget();
-        if (index >= maximumEntries) throw budgetError;
-        if (index % 128 === 0) await yieldReadTurn();
-        const key = dedupeKey(entry);
-        if (key) {
-          estimatedReclaimBytes += encodedBytes.get(key) ?? 0;
-          latest.set(key, index); encodedBytes.set(key, bytes);
-          if (latest.size + trackedRotationIds > maximumKeys) throw budgetError;
-        }
-        if (entry.kind === "history.rotate") {
-          const rotation = entry.evicted ? { cutoff: entry.cutoff, ...historyRotationPlanFromMarker(entry.evicted) }
-            : legacyRotations.find(value => value.cutoff === entry.cutoff);
-          if (!rotation) throw new Error("journal_compaction_rotation_coverage_unavailable");
-          rotations.push(rotation);
-          for (const [key, value] of Object.entries(rotation)) if (key !== "cutoff" && value instanceof Set) trackedRotationIds += value.size;
-          if (latest.size + trackedRotationIds > maximumKeys) throw budgetError;
-        }
-      }, boundary);
+      try {
+        await this.visitEntries(async (entry, index, bytes, physicalEndByte) => {
+          options.signal?.throwIfAborted();
+          if (index >= maximumEntries || Date.now() > scanDeadline) throw scanStop;
+          if (index % 128 === 0) await yieldReadTurn();
+          const key = dedupeKey(entry);
+          let rotation: AppliedHistoryRotation | undefined, rotationIds = 0;
+          if (entry.kind === "history.rotate") {
+            rotation = entry.evicted ? { cutoff: entry.cutoff, ...historyRotationPlanFromMarker(entry.evicted) }
+              : legacyRotations.find(value => value.cutoff === entry.cutoff);
+            if (!rotation) throw new Error("journal_compaction_rotation_coverage_unavailable");
+            for (const [field, value] of Object.entries(rotation)) if (field !== "cutoff" && value instanceof Set) rotationIds += value.size;
+          }
+          const newKeys = key !== null && !latest.has(key) ? 1 : 0;
+          if (latest.size + newKeys + trackedRotationIds + rotationIds > maximumKeys) throw scanStop;
+          if (cleanupBoundary?.fileIdentity && cleanupBoundary.fileIdentity === boundary.fileIdentity && physicalEndByte <= cleanupBoundary.endByteExclusive) cleanupThroughIndex = index;
+          if (key) {
+            estimatedReclaimBytes += encodedBytes.get(key) ?? 0;
+            latest.set(key, index); encodedBytes.set(key, bytes);
+          }
+          if (rotation) { rotations.push(rotation); trackedRotationIds += rotationIds; }
+          scannedEndByte = physicalEndByte;
+        }, boundary);
+      } catch (error) {
+        if (error !== scanStop) throw error;
+        stoppedEarly = true;
+      }
+      if (stoppedEarly && scannedEndByte === 0) return report("budget", "scan_budget", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
+      const scanned: BrokerJournalReplayBoundary = stoppedEarly ? { ...boundary, endByteExclusive: scannedEndByte } : boundary;
       const lastRotation = latest.get("history.rotate");
       if (lastRotation !== undefined) {
         const remaining = [...rotations];
@@ -664,15 +679,21 @@ export class FileBackedBrokerJournal {
           if (index >= lastRotation) return;
           if (entry.kind === "history.rotate") { remaining.shift(); return; }
           if (historyRotationDropsEntry(remaining, entry) === "all") estimatedReclaimBytes += bytes;
-        }, boundary);
+        }, scanned);
       }
       const reason = journalCompactionReason(boundary.endByteExclusive, estimatedReclaimBytes, this.compactionPolicy);
-      if (!reason) return report("skipped", "insufficient_reclaim", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
-      await this.rewriteCompactedEntries(latest, boundary.endByteExclusive, { boundary, rotations, dedupeFlights: false, checkBudget, cleanupThroughIndex });
+      if (!reason) {
+        // A stopped scan that found nothing to fold cannot make progress: say so.
+        if (stoppedEarly) return report("budget", "scan_budget", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
+        return report("skipped", "insufficient_reclaim", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
+      }
+      await this.rewriteCompactedEntries(latest, scanned.endByteExclusive, { boundary: scanned, rotations, dedupeFlights: false, checkBudget, cleanupThroughIndex });
       // Generation refresh notices the inode change. Existing captures keep
       // their prior generation alive until their readers release it.
       await this.messageHistory?.refresh();
-      return report("compacted", reason, boundary.endByteExclusive, (await stat(this.filePath)).size, estimatedReclaimBytes);
+      // A folded prefix continues on the next maintenance turn, not after the interval.
+      if (stoppedEarly) this.lastLiveCompactionAt = 0;
+      return report("compacted", stoppedEarly ? `${reason}_prefix` : reason, boundary.endByteExclusive, (await stat(this.filePath)).size, estimatedReclaimBytes);
     } catch (error) {
       if (error === budgetError) return report("budget", "scan_budget", boundary.endByteExclusive, boundary.endByteExclusive, estimatedReclaimBytes);
       throw error;
