@@ -1,8 +1,10 @@
+import { completionReply, flightCompletion, flightSessionTrace } from "@openscout/protocol";
+import { taskTerminal, finishedTaskError, taskCompletionMessage } from "./broker-tasks.js";
 import { assertExplicitReplyAdmission, prepareCompletionAdmission } from "./broker-explicit-completion.js";
 import { messageWithAcceptedFlight } from "./broker-delivery-receipt-recovery.js";
 import { ChatQuestionError, transitionChatQuestion } from "./chat-question-transition.js";
 import { clearOperatorTitle, markOperatorTitled } from "./conversation-title.js";
-import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
+import { isIdempotentMessageRetry, MessageIdConflictError } from "./broker-message-idempotency.js";
 import { isIdempotentInvocationRetry } from "./broker-invocation-idempotency.js";
 import { existingDeliveryWorkItemMatches, type DeliveryWorkItemResolution } from "./broker-work-item-store.js";
 import { readMessageRecord } from "./broker-message-records.js";
@@ -75,10 +77,12 @@ type RuntimeRecordStore = {
 
 export type BrokerDurableRecordStoreOptions = {
   localNodeId?: string;
+  operatorActorId?: string;
   assertMessageAdmission?: (message: MessageRecord) => void;
   completionCurrentFlight?: (invocationId: string) => FlightRecord | undefined;
   completionFlight?: (id: string) => FlightRecord | undefined;
   completionInvocation?: (id: string) => InvocationRequest | undefined;
+  authorizeReplyCompletion?: (invocation: InvocationRequest, reply: MessageRecord) => boolean;
   runtime: RuntimeRecordStore;
   durableStore: DurableStore;
   knownInvocations: Map<string, InvocationRequest>;
@@ -645,15 +649,28 @@ export class BrokerDurableRecordStore {
       enqueueProjection?: boolean;
     } = {},
   ): Promise<{ deliveries: DeliveryIntent[]; entries: BrokerJournalEntry[]; duplicate?: MessageRecord }> => {
-    return this.options.durableStore.runWrite(async () => {
+    return this.options.durableStore.runWrite(() => this.recordMessageUnderWriter(message, options));
+  };
+
+  /** Internal composition seam: caller already holds the canonical durable writer. */
+  readonly recordMessageUnderWriter = async (
+    message: MessageRecord,
+    options: {
+      localOnly?: boolean;
+      dedupeExisting?: boolean;
+      enqueueProjection?: boolean;
+    } = {},
+  ): Promise<{ deliveries: DeliveryIntent[]; entries: BrokerJournalEntry[]; duplicate?: MessageRecord }> => {
       this.assertMessageAdmission(message);
+      message = taskCompletionMessage(message, this.options.runtime.peek().invocations,
+        id => this.options.completionCurrentFlight?.(id) ?? this.options.runtime.flightForInvocation?.(id));
       if (options.dedupeExisting) {
         const messages = this.options.runtime.peek().messages;
         if (!messages) throw new Error("Message history is unavailable for duplicate validation");
         const existing = await readMessageRecord(messages, message.id);
         if (existing) {
           if (!isIdempotentMessageRetry(existing, message)) {
-            throw new Error(`message id ${message.id} is already assigned to a different record`);
+            throw new MessageIdConflictError(message.id);
           }
           return { deliveries: [], entries: [], duplicate: existing };
         }
@@ -666,6 +683,41 @@ export class BrokerDurableRecordStore {
       }
       assertExplicitReplyAdmission(message, durableReplyFlight ? { ...replySnapshot,
         flights: { ...replySnapshot.flights, [durableReplyFlight.id]: durableReplyFlight } } : replySnapshot, this.options.completionFlight);
+      const taskEntries: BrokerJournalEntry[] = [];
+      const followup = message.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean } | undefined;
+      if (followup?.invocationId) {
+        const task = this.options.completionInvocation?.(followup.invocationId) ?? replySnapshot.invocations[followup.invocationId];
+        const flight = this.options.completionCurrentFlight?.(followup.invocationId) ?? this.options.runtime.flightForInvocation?.(followup.invocationId);
+        const participant = task?.conversationId && replySnapshot.conversations[task.conversationId]?.participantIds.includes(message.actorId);
+        if (!task || !flight || (message.actorId !== task.requesterId && message.actorId !== (this.options.operatorActorId ?? "operator") && (!participant || followup.cancel))) throw new Error("task follow-up is not authorized");
+        if ((!followup.cancel && (taskTerminal(flight) || flight.metadata?.taskFinalReplyMessageId)) || (followup.cancel && flight.state !== "cancelled")) throw finishedTaskError(task.id);
+        // Choose delivery under the writer, not from the sender's possibly queued
+        // observation: startup may already have passed the prompt snapshot.
+        if (!followup.cancel) message = { ...message,
+          audience: ["queued", "waking"].includes(flight.state) ? { delivery: "none" }
+            : { notify: [task.targetAgentId], reason: "thread_reply" },
+          metadata: { ...message.metadata,
+            targetSessionId: flightSessionTrace(flight).at(-1)?.sessionId ?? task.execution?.targetSessionId } };
+
+      }
+      const typedReply = completionReply(message);
+      if (typedReply && durableReplyFlight) {
+        const task = this.options.completionInvocation?.(typedReply.invocationId) ?? replySnapshot.invocations[typedReply.invocationId];
+        const late = task?.metadata?.humanOwned === true && durableReplyFlight.metadata?.operatorOutcome === "proceeded_with_default";
+        if (late) message = { ...message, metadata: { ...message.metadata, late: true } };
+        if (typedReply.kind === "final" && task && this.options.authorizeReplyCompletion
+          && !this.options.authorizeReplyCompletion(task, message)) {
+          throw new Error("completion_reply_not_authorized: use reply with the delivery's sessionId/deliveryId, task ref and replyToken when provided");
+        }
+        if (typedReply.kind === "final" && !late && !taskTerminal(durableReplyFlight)) taskEntries.push({ kind: "flight.record", flight: {
+          ...durableReplyFlight, metadata: { ...durableReplyFlight.metadata, taskFinalReplyMessageId: message.id,
+            taskFinalReplyRevision: typedReply.revision } } });
+        if (typedReply.kind === "progress" && task?.collaborationRecordId) {
+          const work = this.options.runtime.collaborationRecord(task.collaborationRecordId);
+          if (work?.kind === "work_item") taskEntries.push({ kind: "collaboration.record", record: { ...work,
+            summary: message.body, updatedAt: message.createdAt, metadata: { ...work.metadata, lastProgressMessageId: message.id } } });
+        }
+      }
       const deliveries = this.options.runtime.planMessage(message, {
         localOnly: options.localOnly,
       });
@@ -673,15 +725,19 @@ export class BrokerDurableRecordStore {
         [
           { kind: "message.record", message },
           { kind: "deliveries.record", deliveries },
+          ...taskEntries,
         ],
         async (committed) => {
           const recorded = committed.find((entry) => entry.kind === "message.record");
           await this.options.runtime.commitMessage(recorded?.kind === "message.record" ? recorded.message : message, deliveries);
+          for (const entry of taskEntries) {
+            if (entry.kind === "flight.record") await this.options.runtime.upsertFlight?.(entry.flight);
+            if (entry.kind === "collaboration.record") await this.options.runtime.upsertCollaboration(entry.record);
+          }
         },
         { enqueueProjection: options.enqueueProjection },
       );
       return { deliveries, entries };
-    });
   };
 
   readonly recordInvocation = async (

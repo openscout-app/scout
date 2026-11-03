@@ -1,5 +1,5 @@
 import { flightSessionTrace } from "@openscout/protocol";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { buildFlightLinks } from "./flight.ts";
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";
@@ -29,104 +29,41 @@ const DEFAULT_ASK_DISPATCH_SETTLE_MS = 4_000;
 
 export function renderAskCommandHelp(): string {
   return [
-    "Usage: scout ask [(--to <existing-target> | --ref <ref> | --project <path> [--on <host>] | --profile <runtime-profile>)] [--runtime <harness/model/effort>] [--harness <runtime>] [--model <model>] [--effort <level>] [--new] [--placement <background|foreground|attached> | --foreground] [--notify | --reply-mode <inline|notify|none>] [--prompt-file <path> | <message>]",
-    "",
-    "Ask one agent to do work or return a concrete answer.",
-    "Async receipts show the routed target, harness evidence, and a scout wait command (including --notify).",
-    "",
-    "On another machine (never ssh in to launch an agent; Scout carries the brief, receipt and replies):",
-    '  scout ask --on archie --project ~/renders/arsenal-x --harness codex --prompt-file ./brief.md',
-    "  --on <host> starts a fresh session in that folder on that machine. The path is the path ON that machine.",
-    "  Machines and their projects: scout hosts (MCP: hosts_list).",
-    "",
-    "First collaboration (replace the project path; keep the returned ref):",
-    '  scout ask --project /path/to/repo --harness claude --notify "Review the changes and report back."',
-    "  scout status RETURNED_REF --json",
-    "  scout wait RETURNED_REF --timeout 30",
-    '  scout ask --ref RETURNED_REF "Continue with this correction."',
-    "Queued or acknowledged is not completed. A wait timeout does not cancel work; observe the same ref again, do not duplicate the ask.",
-    "If acknowledgement is lost, reconcile any returned ids and broker activity before retrying. An unresolved receipt is not proof that nothing ran.",
-    "For exact runtimes, inspect executionResolution: requested/resolved show launch intent; observed/drift show harness evidence. Missing observed values remain unknown.",
-    "",
-    "Operator questions: scout ask --operator --question <text> [--option <choice> ...] [--permission]",
-    "",
-    "Routing:",
-    "  one target + no channel            -> DM",
-    "  --channel <name>                   -> named group thread",
-    "  --to <name>                        -> existing agent/session target routing",
-    "  agent <name> to <request>          -> exact normalized existing handle lookup",
-    "  Fable|Kimi|Grok|Opus <request>     -> broker runtime profile; starts a fresh current-project session",
-    "  --profile <name> [--effort <level>] -> explicit profile route; effort is supported by Fable/Opus",
-    "  --to target:<name> or --to ⌖name    -> saved situated target; continues that worker",
-    "  --to session:<id>                  -> continue one exact existing session",
-    "  --to alias:<name>                  -> explicit broker route alias; use --alias-project/--alias-host for cross-scope routing",
-    "  --project <path>                   -> ask by repo/workspace path; Scout resolves the concrete worker",
-    "  --project <path> --on <host>       -> fresh session in that folder on another mesh machine",
-    "  --project <path> --harness <rt>     -> capability request; broker chooses/creates worker",
-    "  --runtime <harness/model/effort>    -> exact shell-safe runtime; fixed slash positions",
-    "  codex/gpt-5.6-sol/xhigh to ...      -> natural RuntimeSpec form for the current project",
-    "  --model/--effort                    -> exact dimensions; legal with --harness or as profile overrides",
-    "  --harness <runtime> with no target  -> ask a compatible worker for the current project",
-    "  '>> project:<path> ...'             -> composer route form for the same project-path ask",
-    "",
-    "Use ask whenever a reply, judgment, investigation, review, implementation, or owned next step is expected.",
-    "If the meaning is \"do this and get back to me,\" use ask. When in doubt, use ask.",
-    "Do not use send merely to avoid blocking: `--notify` returns after the broker receipt and reports completion later.",
-    "The command creates durable broker work; the target should acknowledge quickly in the same DM or channel.",
-    `Default inline mode returns once the target has acknowledged, completed immediately, or stays unacknowledged for ${DEFAULT_ASK_ACK_TIMEOUT_SECONDS}s.`,
-    "Use the returned ref/flight id/conversation/session handle for follow-up.",
-    "Agent-card targets are fresh-session requests. Use a session id only when you intend to keep exact prior context.",
-    "Exact runtime asks use: explicit flag/literal > profile preset > endpoint > harness config > default.",
-    "Exact runtime on a named agent spawns an isolated session. An exact session id must already have matching observed runtime evidence.",
-    "Bare target priority: profile id, then harness id; model names are never bare agent targets.",
-    "Conflicting overlapping runtime values fail; a redundant same-value flag is accepted.",
-    "Use --project when you know the project path but do not want to look up or pin an agent id first.",
-    "Do not guess generic names like claude.main; let the broker route, then pin/name a good worker later.",
-    "Use --harness without a target when the current project should be handled by that runtime.",
-    "New sessions default to background. Use --foreground when you want a top-level task in the destination harness UI.",
-    "Codex foreground tasks appear in the operator's Codex app; Scout does not open or focus the app.",
-    "",
-    "Input:",
-    "  inline message                    -> primary prompt body",
-    "  --prompt-file <path>              -> read the primary prompt body from a UTF-8 file",
-    "  --body-file <path>                -> alias for --prompt-file",
-    "  --label <label>                   -> attach a durable work label; repeatable",
-    "  --notify                          -> asynchronous ask; return now and surface completion later",
-    "  --reply-mode <mode>                -> inline (default), notify, or none",
-    "  --request-id <id>                  -> reuse a command ID after an uncertain receipt; content must match",
-    "  --completion explicit             -> require an explicit final reply (exact local id:<agent> or session:<id> only)",
-    "  --join-to <parent-flight-id>       -> join this child to the parent; parent final waits for it to settle",
-    "  --continue-for <parent-flight-id>  -> add a continuation obligation; mutually exclusive with --join-to",
-    "Explicit completion requires a broker advertising explicit-completion/1. Progress never completes work.",
-    "Use MCP current_reply_context for the latest revision, then messages_reply with completion and a stable requestId.",
-    "After joined work settles, submit a new final reply. An early final is rejected and is not saved for later.",
-    "  --placement <placement>           -> background (default), foreground, or attached (Codex: use the running Codex app-server daemon)",
-    "  --foreground                      -> alias for --placement foreground",
-    "",
-    "Examples:",
-    '  scout ask --to hudson "review the parser"',
-    '  scout ask agent Composer Review to fix the tests',
-    '  scout ask Fable to review the parser',
-    '  scout ask Opus high to review the parser',
-    '  scout ask --profile kimi "review the parser"',
-    '  scout ask --to target:mw-talkie "continue the editorial pass"',
-    '  scout ask --to alias:review --alias-project ../talkie --alias-host mini "take another pass"',
-    '  scout ask --ref 7f3a9c21 "continue from that result"',
-    '  scout ask --project ../talkie "how did you handle auth?"',
-    '  scout ask --harness codex "review this from a fresh Codex session"',
-    '  scout ask --harness codex --foreground "review this where I can chime in from Codex"',
-    '  scout ask --project ../talkie --harness codex --model gpt-5.6-sol --effort xhigh "review auth"',
-    '  scout ask codex/gpt-5.6-sol/xhigh to review the diff',
-    '  scout ask --project ../talkie --harness claude "review Talkie from Claude"',
-    "  scout ask '>> project:../talkie compare auth against this branch'",
-    "  scout ask --to hudson --prompt-file ./handoff.md",
-    '  scout ask --as premotion.master.mini --to hudson "build the editor"',
-    '  scout ask --to hudson --reply-mode notify "take the next pass and report back"',
-    '  scout ask --to hudson --no-wait "start the longer implementation"',
-    '  scout ask --to hudson --label release:0.2.66 "review the package bump"',
-    '  scout ask --to vox.harness:codex "take another pass on the runtime fix"',
-    '  scout ask --to lattices#codex?5.5 "take task A"',
-    '  scout ask --to lattices#claude?sonnet "take task B"',
+    'Usage: scout ask (--to <agent> | --operator | --channel <name> --fyi | --project <path> | --ref <task> | --continue <task>) [flags] "message"',
+    "", "Ask creates a task and returns on acceptance, not completion. Use scout wait <handle> to wait.",
+    "  --to <agent>          recipient; repeat for one independent task/receipt per target",
+    "  --project <path>      capability route; add --harness, --model, --effort, or --on <host>",
+    "  --ref <task>          follow up on unfinished work without creating another task",
+    "  --ref <task> --cancel explicitly cancel; receipt reports worker interruption",
+    "  --continue <task>     successor to a completed, failed, or cancelled task",
+    "  --fyi                 deliberate no-answer message; no task/work record",
+    "  --operator            human-owned task; notification always requested",
+    "  --option <choice>     operator answer choices; repeatable",
+    "  --default-action <X>  proceed with X at the answer deadline unless answered",
+    "  --window <seconds>    default-action answer window (default 1800 seconds)",
+    "  --permission          blocking permission request; --because explains why",
+    "  --notify              operator push only; FYIs otherwise do not push",
+    "  --image <path>        attach PNG, JPEG, GIF, or WebP evidence",
+    "  --prompt-file <path>  read the message from a UTF-8 file (--body-file also accepted)",
+    "  --label <label>      attach a searchable task label; repeatable",
+    "  --reply-mode <notify|inline|none>  notify means acceptance, NOT operator push",
+    "  --request-id <id>     reuse after an uncertain receipt; do not change content",
+    "  --completion explicit require an explicit final reply on an exact local recipient",
+    "  --join-to <task>      child of an active explicit-completion task",
+    "  --continue-for <task> continuation obligation on an active parent, NOT --continue",
+    "  --placement <background|foreground|attached>  new-session placement",
+    "  --runtime <harness/model/effort> or --profile <name>  runtime selection",
+    "Unknown flags are errors. Routing modes cannot be combined. Message text never cancels work.",
+    "An automatic final turn still answers the task; do not also call reply.",
+    "", "Examples:",
+    '  scout ask --to reviewer "review the parser"',
+    '  scout ask --project ../app --harness codex "run the suite"',
+    '  scout ask --ref inv-123 "scope change: skip the tests"',
+    '  scout ask --continue inv-123 "port the fix"',
+    '  scout ask --operator --option yes --option no "Ship to production?"',
+    '  scout ask --operator --fyi --notify "Production is down" --image ./graph.png',
+    '  scout ask --channel shared --fyi "Deploy done"',
+    '  scout reply --ref inv-123 "Two findings, one blocking"',
   ].join("\n");
 }
 
@@ -145,7 +82,7 @@ export function renderScoutAskReceipt(value: {
     ids.targetAgentId ? `${value.onHost ? "routed" : "Routed"} to ${ids.targetAgentId}` : value.onHost ? "ask queued" : "Ask queued",
     renderScoutAskHarness(value.receipt, value.flight),
     bindingRef,
-    ids.flightId ? `flight ${ids.flightId}` : null,
+    ids.flightId ? `task ${ids.invocationId ?? ids.flightId}` : null,
     ids.conversationId ? renderConversationRoute(ids.conversationId) : null,
     ids.sessionAlias ? `alias ${ids.sessionAlias}` : null,
   ].filter((piece): piece is string => Boolean(piece));
@@ -372,11 +309,6 @@ export async function runAskCommand(
   context: ScoutCommandContext,
   args: string[],
 ): Promise<void> {
-  if (args.includes("--operator")) {
-    const { runOperatorQuestionCommand } = await import("./operator-question.ts");
-    await runOperatorQuestionCommand(context, args.filter(arg => arg !== "--operator"));
-    return;
-  }
   if (args.some((arg) => HELP_FLAGS.has(arg))) {
     context.output.writeText(renderAskCommandHelp());
     return;
@@ -393,6 +325,24 @@ export async function runAskWithOptions(
   context: ScoutCommandContext,
   options: ScoutAskCommandOptions,
 ): Promise<void> {
+  if ((options.targets?.length ?? 0) > 1) {
+    const requestId = options.requestId ?? `ask-${randomUUID()}`;
+    const results: Array<{ target: string; accepted: boolean; receipt?: unknown; error?: string }> = [];
+    for (const target of [...new Set(options.targets)]) {
+      let receipt: unknown;
+      try {
+        await runAskWithOptions({ ...context, output: { ...context.output,
+          writeValue: (value: unknown) => { receipt = value; }, writeText: () => {} } }, {
+          ...options, targets: undefined, targetLabel: target,
+          requestId: `ask-${createHash("sha256").update(JSON.stringify([requestId, target])).digest("hex")}`,
+        });
+        results.push({ target, accepted: true, receipt });
+      } catch (error) { results.push({ target, accepted: false, error: error instanceof Error ? error.message : String(error) }); }
+    }
+    context.output.writeValue({ requestId, results }, value => value.results.map(result => `${result.target}: ${result.accepted ? "task accepted" : result.error}`).join("\n"));
+    if (results.some(result => !result.accepted)) throw new Error("Some targets rejected the ask; inspect per-target receipts. Do not retry accepted targets with a new request ID.");
+    return;
+  }
   const currentDirectory =
     options.currentDirectory ?? defaultScoutContextDirectory(context);
   const senderId = await resolveScoutSenderId(
@@ -401,9 +351,7 @@ export async function runAskWithOptions(
     context.env,
   );
   const body = await resolvePromptBody(options);
-  const to = options.targetRef
-    ? `ref:${options.targetRef}`
-    : options.targetLabel;
+  const to = options.targetLabel;
   const target:
     | { to: string; projectPath?: never; runtimeProfile?: never; existingHandle?: never }
     | { to?: never; projectPath: string; runtimeProfile?: never; existingHandle?: never }
@@ -419,11 +367,13 @@ export async function runAskWithOptions(
       : options.projectPath
       ? { projectPath: options.projectPath }
       : { to: to ?? "" };
-  const replyMode = options.replyMode ?? "inline";
+  const replyMode = options.replyMode ?? "notify";
   const requestId = options.requestId ?? `ask-${randomUUID()}`;
   context.stderr(`request ${requestId} (reuse with --request-id after an uncertain receipt)`);
   const receipt = await scoutAskHandler({
     requestId,
+    task: options.task ?? { version: 1 },
+    ...(options.image ? { image: await (await import("../task-image.ts")).readTaskImage(options.image) } : {}),
     completion: options.completion,
     relation: options.relation,
     senderId,
@@ -458,7 +408,7 @@ export async function runAskWithOptions(
     } : undefined,
   });
 
-  if (!receipt.ok || !receipt.ids.flightId) {
+  if (!receipt.ok) {
     throw new Error(formatScoutAskReceiptError(
       receipt,
       options.targetLabel
@@ -467,6 +417,17 @@ export async function runAskWithOptions(
     ));
   }
 
+  if (options.task?.fyi) {
+    context.output.writeValue({ requestId, senderId, receipt }, value => `FYI recorded: ${value.receipt.ids.messageId}. No task was created.`);
+    return;
+  }
+
+  if (options.task?.ref) {
+    context.output.writeValue({ requestId, senderId, receipt }, value => options.task?.cancel
+      ? `Task cancelled. Worker interrupted: ${value.receipt.workerInterrupted === true ? "yes" : "no"}.`
+      : `Follow-up accepted for task ${value.receipt.ids.invocationId ?? options.task?.ref}.`);
+    return;
+  }
   context.stderr(
     `asking ${receipt.ids.targetAgentId ?? options.targetLabel ?? options.existingTargetHandle ?? options.runtimeProfile ?? (options.onHost && options.projectPath ? `${options.projectPath} on ${options.onHost}` : options.projectPath) ?? "target"} as ${senderId} via ${renderConversationRoute(receipt.ids.conversationId)}... (flight ${receipt.ids.flightId})`,
   );
@@ -496,6 +457,7 @@ export async function runAskWithOptions(
     return;
   }
 
+  if (!receipt.ids.flightId) throw new Error("Accepted task returned no task handle; inspect the receipt before retrying.");
   const brokerUrl = resolveScoutBrokerUrl();
   let completed: ScoutFlightRecord;
   let timedOut = false;

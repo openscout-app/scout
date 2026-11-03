@@ -35,8 +35,9 @@ function fixture(deliveryMode?: "cloud_cli") {
     flights.set(id, { id: `flight-${id}`, invocationId: id, requesterId: invocation.requesterId, targetAgentId: "devin", state: "queued" });
     return { invocation, receipt, endpoint: service.endpointFor(invocation)! };
   }
-  function address() { return JSON.parse(sent[0]!.split("coordination metadata):\n")[1]!.split("\n")[0]!); }
-  return { service, options, setup, sent, endpoints, deliveries, flights, messages, invocations, address, fail: (error: Error) => { failure = error; } };
+  function taskAddress() { return JSON.parse(sent[0]!.split("coordination metadata):\n")[1]!.split("\n")[0]!); }
+  function address() { const { ref, ...legacy } = taskAddress(); return legacy; }
+  return { service, options, setup, sent, endpoints, deliveries, flights, messages, invocations, address, taskAddress, fail: (error: Error) => { failure = error; } };
 }
 describe("external session attachment", () => {
   test("cancellation racing durable delivery preparation fences provider submission", async () => {
@@ -310,4 +311,57 @@ test("mailbox attachment rechecks authority after waiting behind another attachm
   await first;
   expect(await rejected).toBe("grant_inactive");
   expect(f.endpoints.size).toBe(1);
+});
+
+test("external task replies retain correlation and use the canonical typed task writer for progress and failure", async () => {
+  const f = fixture();
+  const { invocation, endpoint } = await f.setup();
+  await f.service.dispatch(invocation, endpoint);
+  const calls: unknown[] = [];
+  const service = new BrokerExternalSessionService({ ...f.options, replyTask: async input => { calls.push(input); return { ok: true }; } });
+  const address = { ...f.taskAddress(), ownerId: "remote-owner", requestId: "progress", body: "testing", progress: true };
+  await expect(service.reply({ ...address, ref: "another-task" })).rejects.toThrow("task_mismatch");
+  await expect(service.reply({ ...address, replyToken: "wrong" })).rejects.toThrow("address_invalid");
+  await service.reply(address);
+  expect(calls).toEqual([expect.objectContaining({ ref: invocation.id, senderId: "devin", progress: true, requestId: "progress" })]);
+  expect([...f.deliveries.values()][0]?.metadata?.taskReplyMessageId).toBeUndefined();
+  await service.reply({ ...address, requestId: "failed", body: "build failed", progress: false, failed: true });
+  expect(calls[1]).toMatchObject({ senderId: "devin", failed: true, progress: false });
+  expect([...f.deliveries.values()][0]?.status).toBe("failed");
+  await expect(service.reply({ ...address, progress: false, requestId: "second-final" })).rejects.toThrow("already has a final");
+});
+
+
+test("external reply authorization fails before reserving its final address", async () => {
+  const f = fixture();
+  const { invocation, endpoint } = await f.setup();
+  await f.service.dispatch(invocation, endpoint);
+  const calls: unknown[] = [];
+  const service = new BrokerExternalSessionService({ ...f.options, replyTask: async input => { calls.push(input); return { ok: true }; } });
+  const input = { ...f.taskAddress(), ownerId: "remote-owner", requestId: "denied", body: "done" };
+  await expect(service.reply({ ...input, authorize: () => { throw new Error("grant_inactive"); } })).rejects.toThrow("grant_inactive");
+  expect([...f.deliveries.values()][0]?.metadata?.taskReplyMessageId).toBeUndefined();
+  expect(calls).toHaveLength(0);
+  await service.reply({ ...input, requestId: "authorized" });
+  expect(calls).toHaveLength(1);
+});
+
+test("a failed task image write releases its external reservation for a corrected new request", async () => {
+  const f = fixture();
+  const { invocation, endpoint } = await f.setup();
+  await f.service.dispatch(invocation, endpoint);
+  const { decodeAttachment, validateAttachmentBytes } = await import("./attachment-contract.js");
+  let written = 0;
+  const service = new BrokerExternalSessionService({ ...f.options, replyTask: async input => {
+    if (input.image) validateAttachmentBytes(decodeAttachment(input.image.data), input.image.mediaType);
+    written++; return { ok: true };
+  } });
+  const input = { ...f.taskAddress(), ownerId: "remote-owner", requestId: "bad-image", body: "done",
+    image: { data: Buffer.from("not an image").toString("base64"), mediaType: "image/png" } };
+  await expect(service.reply(input)).rejects.toThrow("attachment_mime_mismatch");
+  expect([...f.deliveries.values()][0]?.metadata?.taskReplyMessageId).toBeUndefined();
+  expect([...f.deliveries.values()][0]?.metadata?.replyBodyHash).toBeUndefined();
+  await service.reply({ ...input, requestId: "corrected-image", image: { ...input.image, data: Buffer.from([137,80,78,71,13,10,26,10]).toString("base64") } });
+  expect(written).toBe(1);
+  expect([...f.deliveries.values()][0]?.status).toBe("completed");
 });

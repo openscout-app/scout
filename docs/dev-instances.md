@@ -51,3 +51,17 @@ installed ("prod") one. One knob, `OPENSCOUT_INSTANCE`, derives everything;
 - Processes launched by an existing supervisor or broker keep their selected instance; the checkout default only applies to direct development entrypoints.
 
 See [instance contracts](agent/instances.agent.md) for the environment, registry, and service invariants.
+
+## scoutd projection recovery smoke test
+
+Build the checkout binary, then run the foreground recovery test:
+
+```sh
+bun run scoutd:build
+bun scripts/scoutd-health-recovery-smoke.ts
+```
+
+The script creates a named dev instance and a scratch projection-open fault.
+It verifies a supervised restart, mutation readiness, and condition clearance.
+It does not control any launchd service. See the
+[health sweep contract](scoutd-health-sweep.md) for the assertions and safety limits.

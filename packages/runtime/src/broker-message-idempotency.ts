@@ -26,3 +26,8 @@ export function isIdempotentMessageRetry(
     && JSON.stringify(existing.speech ?? null) === JSON.stringify(incoming.speech ?? null)
   );
 }
+
+
+export class MessageIdConflictError extends Error {
+  constructor(messageId: string) { super(`message id ${messageId} is already assigned to a different record`); }
+}

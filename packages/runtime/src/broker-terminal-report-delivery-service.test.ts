@@ -196,3 +196,14 @@ test("report acknowledgement preserves other durable effects when runtime apply 
   await h.reopen();
   expect(h.runtime.flight("f1")?.metadata?.workPromotion).toEqual({ version: 1, status: "applied" });
 });
+
+test("operator defaults have a durable requester notification, distinct from harness final replies", () => {
+  const flight = { ...terminal(), state: "completed" as const, output: "Proceeded with default: staging",
+    error: undefined, metadata: { operatorOutcome: "proceeded_with_default" } };
+  const prepared = prepareTerminalReport(flight, { ...invocation, metadata: { humanOwned: true } }, context);
+  const intent = pendingTerminalReport(prepared);
+  expect(intent?.message).toMatchObject({ class: "status", replyToMessageId: "request",
+    metadata: { outcome: "proceeded_with_default" } });
+  expect(intent?.message.body).toContain("Proceeded with default: staging");
+  expect(pendingTerminalReport({ ...prepared, metadata: { ...prepared.metadata, operatorOutcome: "answered" } })).toBeNull();
+});

@@ -67,12 +67,12 @@ installed and authenticated. Use `--harness claude` for Claude Code or
 `--harness codex` for Codex.
 
 ```bash
-scout ask --project . --harness codex --notify \
+scout ask --project . --harness codex \
   "Read package.json and name the package manager. Do not edit files."
 ```
 
-Scout resolves or starts a worker for this project. With `--notify`, the
-command returns when the runtime accepts the request. The receipt includes a
+Scout resolves or starts a worker for this project. The command returns when
+the runtime accepts the task. The receipt includes a
 `ref:` handle and a `Follow:` command. Keep the handle: a receipt confirms
 acceptance, not completion.
 
@@ -103,19 +103,16 @@ are terminal states. Check the state, the answer, and any error before you
 report success. `status` shows blockers that Scout recorded. It cannot see a
 native permission prompt that the harness has not reported to Scout.
 
-Continue the same worker's context with the returned ref:
+Start a successor to the finished task with its returned ref:
 
 ```bash
-scout ask --ref ref:7f3a9c21 --notify \
+scout ask --continue ref:7f3a9c21 \
   "Which test commands are defined in that file? Do not run them."
 ```
 
-The follow-up is a new tracked request in the same session, with its own
-receipt. A new `--project` ask starts fresh instead.
-
-Without `--notify`, `ask` returns when the target acknowledges, when the work
-completes immediately, or after 30 seconds without acknowledgement. It does not
-wait for the task to finish. Use `status` and `wait` to follow the work.
+A successor creates a new task in a fresh session with the earlier outcome as
+context. For unfinished work, `--ref` adds context without creating another
+task. Asks return on acceptance. Use `status` and `wait` to follow the outcome.
 
 <details>
 <summary><strong>Machine-readable receipts and results</strong></summary>
@@ -161,21 +158,20 @@ retry. If no handle survived, inspect `scout status --all --json` or
 | Continue that exact work | `scout ask --ref <ref> "<follow-up>"` |
 | Continue an exact session | `scout ask --to session:<id> "<request>"` |
 | Start fresh on another mesh host | `scout ask --on <host> --project <path-on-host> --harness <harness> "<request>"` |
-| Send an update; expect no reply | `scout tell --to <target> "<update>"` |
-| Post to a named group | `scout tell --channel <name> "<update>"` |
+| Send an update; expect no reply | `scout ask --fyi --to <target> "<update>"` |
+| Post to a named group | `scout ask --fyi --channel <name> "<update>"` |
 
 Use `ask` when you expect an answer, a judgment, or owned work. When in doubt,
-use `ask`. Use `tell` for an FYI or a status update; it never creates work.
-`scout send` still works for older scripts. New scripts use `ask` or `tell`.
+use `ask`. Use `ask --fyi` for news without work. Answer tasks with `reply --ref`;
+`--progress` keeps the task open. Removed verbs fail with rewritten commands.
 
 One target is a direct message. Group coordination needs an explicit channel.
-`scout broadcast` posts to the shared channel and is opt-in. Put the
+`scout ask --channel shared --fyi` posts to the shared channel and is opt-in. Put the
 destination in command options, so `@mentions` in the message stay ordinary
 text.
 
 Sessions do not share context. Include the goal, checkout, constraints, and
-expected result. For a long brief, `ask` reads `--prompt-file` and `tell` reads
-`--message-file`. A runtime profile starts a fresh session from a preset;
+expected result. For a long brief, `ask` reads `--prompt-file`. Unknown flags are errors. A runtime profile starts a fresh session from a preset;
 Fable, Opus, Kimi, and Grok are profiles, not agent names:
 
 ```bash
@@ -220,10 +216,10 @@ trusted clients. Use MCP `tools/list` to read tool names and input schemas.
 For delegated work, call `ask` with `currentDirectory`, `projectPath`, a task
 `body`, and the `harness`. With `replyMode: "notify"`, keep `ids.flightId` and
 follow it with `invocations_get` or a bounded `invocations_wait`. If
-`notification.status` is `not_scheduled`, follow the flight yourself. Continue
-with `to: "ref:<id>"` and the returned binding ref, or with `targetSessionId`
+`notification.status` is `not_scheduled`, follow the flight yourself. Add context
+with `ref` and the returned task handle, or start a new task with `targetSessionId`
 and an exact session that Scout supplied. Agent-card targets start fresh
-sessions. Use `messages_send` for updates.
+sessions. Use `ask` with `fyi: true` for updates.
 
 See the [MCP API guide](../../docs/mcp-api-posture.md) and the
 [integration guide](https://openscout.app/docs/integrations) for host-specific
@@ -323,7 +319,7 @@ build your own client.
 | --- | --- |
 | Set up and verify | `scout setup`, `scout doctor`, `scout config` |
 | Orient yourself | `scout status`, `scout whoami`, `scout who`, `scout runtimes`, `scout inbox` |
-| Request work or send an update | `scout ask`, `scout tell`, `scout broadcast`, `scout operator` |
+| Request work or send an update | `scout ask`, `scout reply`, `scout ask --operator` |
 | Follow a request | `scout status <handle>`, `scout wait <ref>`, `scout flight` |
 | Follow activity | `scout latest`, `scout check`, `scout watch`, `scout tail`, `scout label` |
 | Search and inspect past work | `scout search`, `scout diff`, `scout session` |

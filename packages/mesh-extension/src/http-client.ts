@@ -1,3 +1,5 @@
+import { TaskClosedError, taskClosedRefusal } from '@openscout/protocol';
+
 /** A bounded HTTP client. No stores, runtime paths, sockets or key discovery. */
 export class RuntimeHttpClient {
   readonly origin: string;
@@ -32,7 +34,15 @@ export class RuntimeHttpClient {
       while (true) { abort.throwIfAborted();const part = await reader.read();abort.throwIfAborted();if (part.done) break;
         bytes += part.value.byteLength;if (bytes > 8 * 1024 * 1024) throw new Error('runtime response exceeds size bound');chunks.push(part.value); }
     } finally { abort.removeEventListener('abort', cancel);void reader.cancel().catch(() => {}); }
-    if (!response.ok) throw new Error(`runtime request refused (${response.status})`);
+    if (!response.ok) {
+      if (response.status === 409) {
+        let refusal;
+        try { refusal = taskClosedRefusal(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { /* Other failures stay redacted. */ }
+        if (refusal) throw new TaskClosedError(refusal, refusal.reason === 'already_answered'
+          ? 'task already has a final reply' : `task is already ${refusal.reason}`);
+      }
+      throw new Error(`runtime request refused (${response.status})`);
+    }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
 }

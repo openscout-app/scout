@@ -8,7 +8,7 @@ export type ScoutSendInteraction = "work" | "message";
 // stays message-only so completion notifications and legacy [ask:...] answers
 // can never recursively launch work on the requester, and channel members are
 // never woken. Execution intent is never inferred from body mentions. Shared
-// by the CLI (scout send) and the MCP surface (messages_send) so both expose
+// by retained transport callers so they preserve
 // one classification.
 export function classifySendInteraction(input: {
   targetLabel?: string;

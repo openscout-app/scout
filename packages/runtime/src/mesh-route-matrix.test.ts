@@ -149,9 +149,9 @@ describe("mesh route matrix", () => {
     }
     expect(counts.get("public")).toBe(4);
     expect(counts.get("observe")).toBe(4); // nodes, node-state, snapshot and invocation-stream
-    expect(counts.get("control")).toBe(13); // 10 mesh POST routes + the /trpc upgrade + approvals stream/decide
+    expect(counts.get("control")).toBe(15); // 12 mesh POST routes + the /trpc upgrade + approvals stream/decide
     expect(counts.get("guest")).toBe(9); // discovery, asks, and five mailbox routes
     expect(counts.get("scoped")).toBe(1);
-    expect(counts.get("local")).toBe(Object.keys(meshRouteMatrixEntries()).length - 31);
+    expect(counts.get("local")).toBe(Object.keys(meshRouteMatrixEntries()).length - 33);
   });
 });

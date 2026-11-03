@@ -1,5 +1,7 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerTaskService } from "./broker-tasks.js";
+import { SCOUT_TASKS_CAPABILITY, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -143,6 +145,7 @@ import {
   isLocalAgentSessionAlive,
   isLocalAgentSessionAliveAsync,
   invokeLocalAgentEndpoint,
+  interruptLocalAgent,
   listRelayAgentTmuxSessionOwners,
   listScoutLaunchedTmuxSessions,
   observeLocalAgentEndpointSession,
@@ -795,6 +798,7 @@ const applyMeshBundleDurably = meshBundleService.applyBundle;
 const activeInvocationTasks = new Map<string, Promise<void>>();
 const knownInvocations = new Map<string, InvocationRequest>(Object.entries(initialSnapshot.invocations));
 const meshHttpService = new BrokerMeshHttpService({
+  recordAuthorityMessage: message => durableRecords.recordMessageUnderWriter(message, { dedupeExisting: true, localOnly: true, enqueueProjection: false }),
   nodeId,
   runtime,
   runDurableWrite,
@@ -854,16 +858,18 @@ const controlStreams = new BrokerControlStreamService({
 const operatorActorId = "operator";
 let attachmentService: BrokerAttachmentService | undefined;
 let attachmentBlobStore: AttachmentBlobStore | undefined;
-const durableRecords = new BrokerDurableRecordStore({
+const durableRecords: BrokerDurableRecordStore = new BrokerDurableRecordStore({
   assertMessageAdmission: message => {
     if (!message.attachments?.some(a => a.blob !== undefined)) return;
     if (!attachmentService) throw new AttachmentError("attachments_unavailable");
     attachmentService.assertMessageAdmission(message);
   },
   localNodeId: nodeId,
+  operatorActorId,
   completionCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
   completionFlight: id => journal.getFlight(id),
   completionInvocation: id => journal.getInvocation(id),
+  authorizeReplyCompletion: (invocation, reply): boolean => externalSessionService.authorizesReplyCompletion(invocation, reply) && t3Service.authorizesReplyCompletion(invocation, reply),
   runtime,
   durableStore,
   knownInvocations,
@@ -1279,7 +1285,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: [SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
+  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
@@ -2021,7 +2027,7 @@ const messageService = new BrokerMessageService({
   }),
   completionCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
   completionFlight: id => journal.getFlight(id),
-  authorizeReplyCompletion: (invocation, reply) => externalSessionService.authorizesReplyCompletion(invocation, reply) && t3Service.authorizesReplyCompletion(invocation, reply),
+  authorizeReplyCompletion: (invocation, reply): boolean => externalSessionService.authorizesReplyCompletion(invocation, reply) && t3Service.authorizesReplyCompletion(invocation, reply),
   activeLocalEndpointForAgent: (agentId) => localEndpointResolver.activeLocalEndpointForAgent(agentId),
 });
 
@@ -2095,6 +2101,7 @@ const replyCompletionRecovery = new BrokerReplyCompletionRecovery({
 
 const externalSessionService = new BrokerExternalSessionService({
   nodeId,
+  replyTask: input => taskService.reply(input),
   connections: () => externalSessionConnections(process.env),
   transport: (connection) => devinSessionTransport(connection),
   endpoints: () => Object.values(runtime.snapshot().endpoints),
@@ -2182,6 +2189,14 @@ const invocationResultDeliveryService = new BrokerInvocationResultDeliveryServic
     await durableStore.commitEntries({ kind: "flight.record", flight }, async () => { await runtime.upsertFlight(flight); });
     return true;
   }),
+  markSuperseded: (invocationId, expected, refusal) => durableStore.runWrite(async () => {
+    const current = runtime.flightForInvocation(invocationId);
+    if (!current || !matchesPendingInvocationResultReply(current, expected)) return false;
+    const flight: FlightRecord = { ...current, metadata: { ...current.metadata,
+      resultReply: { ...expected, status: "superseded", supersededAt: Date.now(), refusal } } };
+    await durableStore.commitEntries({ kind: "flight.record", flight }, async () => { await runtime.upsertFlight(flight); });
+    return true;
+  }),
   warn: (message, error) => console.warn(message, error),
 });
 let resultRecoveryFlights: Iterator<FlightRecord> | undefined;
@@ -2197,6 +2212,7 @@ function recoverInvocationResultReplies(): void {
 }
 
 const localInvocationService = new BrokerLocalInvocationService({
+  pendingTaskFollowups: id => journal.pendingTaskFollowups(id),
   nodeId,
   isLocalAgentEndpointAlive,
   runtime,
@@ -2950,7 +2966,59 @@ const unavailableTargetService = new BrokerUnavailableTargetService({
 });
 
 const requestReceipts = new BrokerRequestReceipts();
-const deliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
+const taskService = new BrokerTaskService({
+  nodeId, operatorActorId, snapshot: () => runtime.peek(),
+  openOperatorTasks: () => journal.openOperatorTasks(),
+  invocation: id => knownInvocations.get(id) ?? journal.getInvocation(id),
+  flight: id => journal.getFlight(id), currentFlight: id => journal.getCurrentFlightForInvocation(id),
+  postMessage: postConversationMessage, recordFlight: persistFlight,
+  withTaskImage: (message, image, commit) => {
+    if (!attachmentService) throw new Error("task images unavailable");
+    return attachmentService.withTaskImage(message, image, commit);
+  },
+  accept: payload => deliveryAcceptanceService.accept(payload, { receiptReserved: true, admissionReserved: true }),
+  interrupt: async (invocation, flight) => {
+    // Never signal a card's newer session when the referenced task used another.
+    const sessionId = flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId;
+    const endpoint = Object.values(runtime.snapshot().endpoints).find(item => item.agentId === invocation.targetAgentId
+      && item.nodeId === nodeId && item.sessionId === sessionId);
+    if (!endpoint || !sessionId || flight.state === "queued" || flight.state === "waking") return false;
+    if (endpoint.transport !== "tmux") return false;
+    return (await interruptLocalAgent(endpoint.agentId, sessionId)).ok;
+  },
+  forward: async (home, kind, payload) => {
+    const node = runtime.snapshot().nodes[home];
+    if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY) || !node.brokerUrl) throw new Error(`task home ${home} requires ${SCOUT_TASKS_CAPABILITY} and a reachable broker`);
+    const wirePayload = kind === "ask" ? { ...(payload as ScoutDeliverRequest), intent: "task_ask" } : payload;
+    const response = await daemonMeshPeerFetch(node.brokerUrl, `/v1/mesh/tasks/${kind}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(wirePayload), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`task home rejected request (${response.status}): ${await response.text()}`);
+    return response.json();
+  },
+});
+const operatorTaskExpiryTimer = setInterval(() => { void taskService.expireOperatorTasks().catch(error => console.warn("operator task expiry failed", error)); }, 1_000);
+operatorTaskExpiryTimer.unref();
+
+const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
+  taskAsk: payload => taskService.ask(payload),
+  recoverTaskFollowup: (actor, requestId) => taskService.recoverFollowup(actor, requestId),
+  withTaskImage: (message, image, commit) => {
+    if (!attachmentService) throw new Error("task images unavailable");
+    return attachmentService.withTaskImage(message, image, commit);
+  },
+  checkTaskPeer: payload => {
+    if (!payload.task) return;
+    const snapshot = runtime.snapshot();
+    const target = payload.target;
+    const host = target?.kind === "project_path" ? target.host : target?.kind === "session_id" ? target.host : undefined;
+    const actorId = target?.kind === "agent_id" ? target.agentId : target?.kind === "agent_label"
+      ? Object.values(snapshot.agents).find(agent => [agent.id, agent.handle, agent.displayName].includes(target.label))?.id : undefined;
+    const endpoint = actorId ? homeEndpointForAgent(snapshot, actorId) : undefined;
+    const peers = host ? Object.values(snapshot.nodes).filter(node => [node.id, node.name, node.hostName].includes(host))
+      : endpoint ? [snapshot.nodes[endpoint.nodeId]].filter((node): node is NodeDefinition => Boolean(node)) : [];
+    for (const peer of peers) if (peer.id !== nodeId && !peer.capabilities?.includes(SCOUT_TASKS_CAPABILITY))
+      throw new Error(`target runtime does not advertise ${SCOUT_TASKS_CAPABILITY}; upgrade it before dispatch`);
+  },
   submitSessionInput: input => deliverInPlace({ ...input, requireExactHarness: true }),
   upsertSessionInputActor: upsertActorDurably,
   commandAdmission,
@@ -3146,6 +3214,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 }
 
 const routeRequest = createBrokerHttpRouter({
+  tasks: taskService,
   attachments: {
     service: attachmentService, nodeId,
     notifyOperator: createOperatorAttachmentNotifier({

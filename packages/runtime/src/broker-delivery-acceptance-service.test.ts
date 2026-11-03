@@ -1651,3 +1651,99 @@ test("pure operator-signal rejection releases its receipt before any delivery ef
     expect(harness.acceptedInvocations).toEqual([]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+describe("two-verb acceptance", () => {
+  test("FYI creates no invocation, flight or work", async () => {
+    const h = createHarness();
+    const result = await h.service.accept({ requestId: "fyi", intent: "consult", body: "Heads up", task: { version: 1, fyi: true },
+      target: { kind: "agent_id", agentId: "agent-1" }, requesterId: "operator" });
+    expect(result).toMatchObject({ accepted: true });
+    expect("flight" in result).toBe(false);
+    expect(h.acceptedInvocations).toHaveLength(0); expect(h.recordedWorkItemPayloads).toHaveLength(0);
+    expect(h.postedMessages).toHaveLength(1);
+  });
+  test("operator asks have a durable human-owned task, default deadline and stored push policy", async () => {
+    const h = createHarness({ isOperatorTarget: () => true, now: 100 });
+    const result = await h.service.accept({ requestId: "operator-ask", intent: "consult", body: "Which deployment?",
+      requesterId: "agent-1", target: { kind: "agent_label", label: "operator" }, task: { version: 1, operator: true, defaultAction: "staging", options: ["staging", "prod"] } });
+    expect(result).toMatchObject({ accepted: true, flight: { targetAgentId: "operator" } });
+    expect(h.acceptedInvocations[0]).toMatchObject({ metadata: { humanOwned: true, operatorAnswerDeadline: 1800100, defaultAction: "staging",
+      notificationPolicy: { requested: true, priority: "normal" } } });
+    expect(h.dispatchedInvocations).toHaveLength(0);
+    expect(h.operatorSignals[0]).toMatchObject({ signal: { notificationPolicy: { requested: true, priority: "normal" } } });
+  });
+  test.each([false, true])("operator FYI notify=%s stores policy and never creates work", async notify => {
+    const h = createHarness({ isOperatorTarget: () => true });
+    await h.service.accept({ requestId: "operator-fyi", intent: "consult", body: "Deploy finished", requesterId: "agent-1",
+      target: { kind: "agent_label", label: "operator" }, task: { version: 1, operator: true, fyi: true, notify } });
+    expect(h.acceptedInvocations).toHaveLength(0); expect(h.recordedWorkItemPayloads).toHaveLength(0);
+    expect(h.postedMessages[0]?.metadata?.notificationPolicy).toEqual({ requested: notify, priority: "interrupting" });
+  });
+  test("validation precedes receipt reservation and every routing effect", async () => {
+    const h = createHarness();
+    await expect(h.service.accept({ requestId: "bad", intent: "consult", body: "Please review",
+      task: { version: 1, notify: true }, target: { kind: "agent_id", agentId: "agent-1" } })).rejects.toThrow("--notify now pushes");
+    expect(h.ensuredActors).toHaveLength(0); expect(h.localAgentSyncReasons).toHaveLength(0);
+    expect(h.acceptedInvocations).toHaveLength(0); expect(h.postedMessages).toHaveLength(0);
+  });
+});
+
+test.each([
+  { target: { kind: "agent_id" as const, agentId: "agent-1" }, task: { version: 1 as const, fyi: true } },
+  { target: { kind: "agent_label" as const, label: "operator" }, task: { version: 1 as const, fyi: true, operator: true } },
+  { target: { kind: "channel" as const, channel: "shared" }, task: { version: 1 as const, fyi: true } },
+])("FYI durable message recovers acceptance without a task or receipt sidecar %#", async route => {
+  let committed: MessageRecord | undefined;
+  const h = createHarness({ isOperatorTarget: () => Boolean(route.task.operator),
+    onPostedMessage: async message => { committed = message; }, readAcceptedMessage: async () => committed });
+  await h.service.accept({ ...route, requestId: "fyi-recovery", requesterId: "agent-1", intent: "consult", body: "news" });
+  expect(committed!.metadata?.taskFyiReceipt).not.toHaveProperty("conversation");
+  expect(committed!.metadata?.taskFyiReceipt).toHaveProperty("conversationId");
+  const recovered = await h.service.recoverReceipt("agent-1", "fyi-recovery");
+  expect(recovered).toMatchObject({ accepted: true, message: { id: committed!.id } });
+  expect(recovered && "flight" in recovered).toBe(false);
+  expect(h.acceptedInvocations).toHaveLength(0);
+});
+
+test("malformed task evidence and conflicting wire routes fail before reservation", async () => {
+  const h = createHarness();
+  const input: ScoutDeliverRequest = { requestId: "invalid", intent: "consult", body: "news", requesterId: "agent-1",
+    target: { kind: "agent_id", agentId: "agent-1" }, task: { version: 1, fyi: true },
+    image: { data: "aGVsbG8=", mediaType: "image/png" } };
+  await expect(h.service.accept(input)).rejects.toThrow("attachment_mime_mismatch");
+  await expect(h.service.accept({ ...input, image: undefined, task: { version: 1, operator: true } })).rejects.toThrow("another recipient");
+  await expect(h.service.accept({ ...input, image: undefined, task: { version: 1, ref: "parent" } })).rejects.toThrow("another recipient");
+  expect(h.localAgentSyncReasons).toHaveLength(0);
+  expect(h.ensuredActors).toHaveLength(0);
+});
+
+
+test.each([
+  { target: { kind: "agent_id" as const, agentId: "agent-1" } },
+  { target: { kind: "agent_label" as const, label: "worker" } },
+  { targetAgentId: "agent-1" },
+  { target: { kind: "agent_label" as const, label: "operator" }, targetAgentId: "agent-1" },
+  {},
+])("operator task requires an operator route before effects %#", async route => {
+  const h = createHarness();
+  await expect(h.service.accept({ ...route, requestId: "wrong-operator", requesterId: "agent-1", body: "Choose", intent: "consult",
+    task: { version: 1, operator: true } })).rejects.toThrow("must target the operator");
+  expect(h.localAgentSyncReasons).toHaveLength(0); expect(h.ensuredActors).toHaveLength(0);
+  expect(h.acceptedInvocations).toHaveLength(0); expect(h.postedMessages).toHaveLength(0);
+});
+
+test("blocking operator questions have no deadline", async () => {
+  const h = createHarness({ isOperatorTarget: () => true, now: 100 });
+  await h.service.accept({ requestId: "blocking", requesterId: "agent-1", body: "Ship?", intent: "consult",
+    target: { kind: "agent_label", label: "operator" }, task: { version: 1, operator: true } });
+  expect(h.acceptedInvocations[0]?.metadata?.humanOwned).toBe(true);
+  expect(h.acceptedInvocations[0]?.metadata?.operatorAnswerDeadline).toBeUndefined();
+});
+
+
+test.each([{ targetAgentId: "worker" }, { targetLabel: "worker" }, { targetSessionId: "session" }])("task refs refuse legacy recipient fields before effects %#", async legacy => {
+  const h = createHarness();
+  await expect(h.service.accept({ ...legacy, requestId: "conflict", intent: "consult", body: "context",
+    task: { version: 1, ref: "parent" } })).rejects.toThrow("another recipient route");
+  expect(h.localAgentSyncReasons).toHaveLength(0); expect(h.ensuredActors).toHaveLength(0);
+});

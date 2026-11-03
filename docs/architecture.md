@@ -90,7 +90,7 @@ Agent sessions connect to a single Scout runtime over HTTP and SSE. The runtime 
 A typical exchange looks like this:
 
 ```
-operator  →  scout send --to codex "review the auth module"
+operator  →  scout ask --to codex "review the auth module"
 scout cli →  broker /v1/deliver (target intent + message body)
 broker    →  resolves codex → endpoint
 broker    →  codex session (deliver message via SSE)
@@ -108,7 +108,7 @@ One concrete example: `scout ask --project ../talkie --harness claude "review th
 | **Broker** | Local message bus and state store | SQLite-backed daemon that owns registration, routing, threading, dispatch, HTTP reads/writes, and SSE updates |
 | **Native read projection** | Low-latency local surface reads | Rust journal consumer in `scoutd` that serves bounded, persisted projections over a Unix socket without entering the runtime or web request queues |
 | **Runtime** | Session and runtime lifecycle management | Starts, resumes, stops, and health-checks sessions across harnesses. Manages tmux sessions, system prompts, and transport adapters |
-| **CLI** | Operator interface | `scout up`, `scout send`, `scout ask`, `scout who` -- passes structured route intent to the runtime and keeps bootstrap/orientation cheap |
+| **CLI** | Operator interface | `scout up`, `scout ask`, `scout reply`, `scout who` -- passes structured route intent to the runtime and keeps bootstrap/orientation cheap |
 | **Surfaces** | Views into runtime state | Terminal and pi here; the Mac, iOS, Android, and web apps are separate clients. They read from the runtime; none of them own agent state |
 
 ### Protocol
@@ -123,7 +123,7 @@ A single local daemon per machine. Agents and surfaces submit commands to it; it
 
 ```bash
 # What the broker handles
-scout send --to hudson "check the deploy"  # → resolve, route, deliver
+scout ask --to hudson "check the deploy"  # → resolve, route, deliver
 scout who                                # → read agent registry
 scout watch                              # → SSE stream of all events
 ```
@@ -759,7 +759,7 @@ silently substitute the local operator's privileges.
 
 ```bash
 scout up hudson          # bind + start
-scout send --to hudson "hi"  # route + deliver
+scout ask --to hudson "hi"  # route + deliver
 scout ask --project ../talkie --harness claude "..."  # capability route + invoke
 scout ask --to hudson "..."  # route to a known agent + invoke (tracks flight)
 scout down hudson        # stop
@@ -787,7 +787,7 @@ Once a peer is found, the runtime fetches its agent registry via `/v1/snapshot` 
 
 ### Forwarding
 
-When you `scout send --to hudson "..."` and hudson lives on another machine, the runtime's delivery planner detects that hudson's `authorityNodeId` differs from the local node. Instead of delivering locally, it bundles the message with its full context — actors, agents, conversation, bindings — and POSTs it to the remote broker's `/v1/mesh/messages` endpoint. The remote broker commits the bundle to its own journal and delivers locally.
+When you `scout ask --to hudson "..."` and hudson lives on another machine, the runtime's delivery planner detects that hudson's `authorityNodeId` differs from the local node. Instead of delivering locally, it bundles the message with its full context — actors, agents, conversation, bindings — and POSTs it to the remote broker's `/v1/mesh/messages` endpoint. The remote broker commits the bundle to its own journal and delivers locally.
 
 Invocations work the same way. Ask-style requests forward to the authority node, which executes them and returns the flight record.
 

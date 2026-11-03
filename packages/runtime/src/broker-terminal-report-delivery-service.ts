@@ -22,7 +22,7 @@ export function prepareTerminalReport(flight: FlightRecord, invocation: Invocati
   conversation: (id: string) => ConversationDefinition | undefined;
   now: () => number;
 }): FlightRecord {
-  if ((flight.state !== "failed" && flight.state !== "cancelled") || !invocation?.conversationId
+  if (!terminalReportOutcome(flight) || (flight.state === "completed" && invocation?.metadata?.humanOwned !== true) || !invocation?.conversationId
     || invocation.requesterNodeId !== context.nodeId) return flight;
   const conversation = context.conversation(invocation.conversationId);
   if (!conversation) return flight;
@@ -36,35 +36,37 @@ export function prepareTerminalReport(flight: FlightRecord, invocation: Invocati
   }) } };
 }
 
-export function terminalReportMessageId(flightId: string, outcome: "failed" | "cancelled"): string {
+export function terminalReportMessageId(flightId: string, outcome: "failed" | "cancelled" | "proceeded_with_default"): string {
   return `flight-report-${createHash("sha256").update(`${flightId}:${outcome}`).digest("hex").slice(0, 32)}`;
 }
 
 export function terminalReportBody(flight: FlightRecord): string {
-  return redactSecrets([flight.summary, flight.error].filter((value) => value?.trim()).join("\n")
+  return redactSecrets([flight.summary, terminalReportOutcome(flight) === "proceeded_with_default" ? flight.output : flight.error].filter((value) => value?.trim()).join("\n")
     || `Flight ${flight.id} ${flight.state}.`);
 }
 
 export function createTerminalReportIntent(flight: FlightRecord, message: MessageRecord): TerminalReportIntent {
-  if (flight.state !== "failed" && flight.state !== "cancelled") throw new Error("terminal_report_outcome_invalid");
-  const id = terminalReportMessageId(flight.id, flight.state);
+  const outcome = terminalReportOutcome(flight);
+  if (!outcome) throw new Error("terminal_report_outcome_invalid");
+  const id = terminalReportMessageId(flight.id, outcome);
   return { version: 1, status: "pending", message: {
     ...message, id, body: terminalReportBody(flight), createdAt: flight.completedAt!,
     metadata: { ...message.metadata, invocationId: flight.invocationId, flightId: flight.id,
-      outcome: flight.state, clientMessageId: id },
+      outcome, clientMessageId: id },
   } };
 }
 
 /** Separate from successful result validation: failure reports cannot complete work. */
 export function pendingTerminalReport(flight: FlightRecord | undefined): TerminalReportIntent | null {
-  if (flight?.state !== "failed" && flight?.state !== "cancelled") return null;
+  const outcome = terminalReportOutcome(flight);
+  if (!flight || !outcome) return null;
   const intent = flight.metadata?.terminalReport as TerminalReportIntent | undefined;
   if (!intent || intent.version !== 1 || intent.status !== "pending") return null;
   const message = intent.message;
-  if (!message || message.id !== terminalReportMessageId(flight.id, flight.state)
+  if (!message || message.id !== terminalReportMessageId(flight.id, outcome)
     || message.metadata?.clientMessageId !== message.id
     || message.metadata?.invocationId !== flight.invocationId
-    || message.metadata?.flightId !== flight.id || message.metadata?.outcome !== flight.state
+    || message.metadata?.flightId !== flight.id || message.metadata?.outcome !== outcome
     || message.body !== terminalReportBody(flight)
     || typeof message.actorId !== "string" || !message.actorId
     || typeof message.conversationId !== "string" || !message.conversationId
@@ -197,11 +199,17 @@ export class BrokerTerminalReportDeliveryService {
 
 function hasPendingTerminalReport(flight: FlightRecord): boolean {
   const intent = flight.metadata?.terminalReport;
-  return (flight.state === "failed" || flight.state === "cancelled") && Boolean(intent && typeof intent === "object"
+  return Boolean(terminalReportOutcome(flight)) && Boolean(intent && typeof intent === "object"
     && !Array.isArray(intent) && (intent as { status?: unknown }).status === "pending");
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 1
     ? Math.floor(value) : fallback;
+}
+
+
+function terminalReportOutcome(flight: FlightRecord | undefined): "failed" | "cancelled" | "proceeded_with_default" | null {
+  if (flight?.state === "failed" || flight?.state === "cancelled") return flight.state;
+  return flight?.state === "completed" && flight.metadata?.operatorOutcome === "proceeded_with_default" ? "proceeded_with_default" : null;
 }

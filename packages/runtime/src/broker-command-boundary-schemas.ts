@@ -172,11 +172,13 @@ export const brokerOperatorSignalSchema: z.ZodType<ScoutOperatorSignal> =
   z.discriminatedUnion("kind", [
     z.object({
       kind: z.literal("notify"),
+      notificationPolicy: z.object({ requested: z.boolean(), priority: z.enum(["normal", "interrupting"]) }).strict().optional(),
       blocking: z.literal(false),
       replyExpectation: z.literal("none"),
     }).strict(),
     z.object({
       kind: z.literal("consult"),
+      notificationPolicy: z.object({ requested: z.boolean(), priority: z.enum(["normal", "interrupting"]) }).strict().optional(),
       blocking: z.literal(false),
       replyExpectation: z.literal("optional"),
       defaultAction: trimmedNonEmptyString,
@@ -186,6 +188,7 @@ export const brokerOperatorSignalSchema: z.ZodType<ScoutOperatorSignal> =
     // attention card that started this could not survive either gate.
     z.object({
       kind: z.literal("need"),
+      notificationPolicy: z.object({ requested: z.boolean(), priority: z.enum(["normal", "interrupting"]) }).strict().optional(),
       blocking: z.literal(true),
       replyExpectation: z.literal("required"),
       question: trimmedNonEmptyString,
@@ -199,7 +202,8 @@ export const brokerDeliverRequestSchema: z.ZodType<ScoutDeliverRequest> = z.obje
   body: trimmedNonEmptyString,
   // A previous broker rejects this new discriminant instead of ignoring the
   // option and silently starting ordinary consult execution.
-  intent: z.enum(["tell", "consult", "session_input", "explicit_consult"]),
+  intent: z.enum(["tell", "consult", "session_input", "explicit_consult", "task_ask"]),
+  task: z.object({ version: z.literal(1), ref: nonEmptyString.optional(), continue: nonEmptyString.optional(), successor: z.object({ host: nonEmptyString.optional(), projectPath: nonEmptyString.optional() }).strict().optional(), cancel: z.boolean().optional(), fyi: z.boolean().optional(), operator: z.boolean().optional(), notify: z.boolean().optional(), defaultAction: nonEmptyString.optional(), window: z.number().positive().optional(), options: z.array(nonEmptyString).optional(), permission: z.boolean().optional(), because: nonEmptyString.optional() }).strict().optional(),
   completion: z.object({ mode: z.literal("explicit") }).strict().optional(),
   relation: z.object({ parentFlightId: nonEmptyString, kind: z.enum(["joined", "continuation"]) }).strict().optional(),
   operatorSignal: brokerOperatorSignalSchema.optional(),
@@ -208,9 +212,9 @@ export const brokerDeliverRequestSchema: z.ZodType<ScoutDeliverRequest> = z.obje
   payload => (payload.intent === "session_input") === (payload.sessionDelivery === "in_place_or_resume"),
   "session input requires its versioned wire intent and delivery option",
 ).refine(
-  payload => (payload.intent === "explicit_consult") === Boolean(payload.completion || payload.relation),
+  payload => payload.intent === "task_ask" || ((payload.intent === "explicit_consult") === Boolean(payload.completion || payload.relation)),
   "completion contracts require explicit_consult wire intent",
-).transform(payload => ({ ...payload, intent: payload.intent === "session_input" || payload.intent === "explicit_consult" ? "consult" as const : payload.intent }));
+).refine(payload => (payload.intent === "task_ask") === Boolean(payload.task), "task asks require task_ask wire intent").transform(payload => ({ ...payload, intent: payload.intent === "session_input" || payload.intent === "explicit_consult" || payload.intent === "task_ask" ? "consult" as const : payload.intent }));
 
 export function brokerInvocationRequestSchemaFor(
   runtimeCatalog?: ScoutOwnedRuntimeCatalog,

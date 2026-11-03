@@ -6,23 +6,10 @@ describe("renderAskCommandHelp", () => {
   test("documents owned-work semantics and DM default routing", () => {
     const help = renderAskCommandHelp();
 
-    expect(help).toContain("Ask one agent to do work or return a concrete answer.");
-    expect(help).toContain("one target + no channel            -> DM");
-    expect(help).toContain("If the meaning is \"do this and get back to me,\" use ask. When in doubt, use ask.");
-    expect(help).toContain("Do not use send merely to avoid blocking");
-    expect(help).toContain("--notify                          -> asynchronous ask");
-    expect(help).toContain("--prompt-file <path>");
-    expect(help).toContain("--reply-mode notify");
-    expect(help).toContain("--label <label>");
-    expect(help).toContain("--completion explicit");
-    expect(help).toContain("--join-to <parent-flight-id>");
-    expect(help).toContain("--continue-for <parent-flight-id>");
-    expect(help).toContain("An early final is rejected and is not saved for later.");
-    expect(help).toContain("--project <path>                   -> ask by repo/workspace path");
-    expect(help).toContain("--harness <runtime> with no target");
-    expect(help).toContain("scout ask --harness codex");
-    expect(help).toContain("Use --project when you know the project path but do not want to look up or pin an agent id first.");
-    expect(help).toContain("scout ask '>> project:../talkie compare auth against this branch'");
+    for (const expected of ["returns on acceptance", "--to <agent>", "--project <path>", "--ref <task>",
+      "--continue <task>", "--fyi", "--operator", "--default-action", "--notify", "--image",
+      "--completion explicit", "--join-to <task>", "--continue-for <task>", "Unknown flags are errors",
+      "scout wait <handle>", "scout reply --ref"]) expect(help).toContain(expected);
   });
 });
 

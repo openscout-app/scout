@@ -1,3 +1,5 @@
+import { renderScoutCommand } from "./removed-verbs.ts";
+import { validateTaskAsk, type ScoutTaskAsk } from "@openscout/protocol";
 import { parseSetupCommandOptions as parseLifecycleSetupOptions } from "../../bin/lifecycle-preflight.mjs";
 import { resolve } from "node:path";
 
@@ -53,6 +55,9 @@ export type ScoutSetupCommandOptions = {
 };
 
 export type ScoutAskCommandOptions = ContextRootOptions & {
+  task?: ScoutTaskAsk;
+  targets?: string[];
+  image?: string;
   agentName: string | null;
   requestId?: string;
   completion?: ScoutCompletionRequest;
@@ -871,6 +876,11 @@ function parseTargetableMessageCommandOptions(
   };
 }
 
+function parseAskFlagValue(args: string[], index: number, flag: string): { value: string; nextIndex: number } {
+  if (args[index] === flag && (!args[index + 1]?.trim() || args[index + 1]!.startsWith("--"))) missingFlagValue(flag);
+  return parseFlagValue(args, index, flag);
+}
+
 export function parseAskCommandOptions(
   args: string[],
   defaultCurrentDirectory: string,
@@ -881,6 +891,9 @@ export function parseAskCommandOptions(
   let completion: ScoutCompletionRequest | undefined;
   let relation: ScoutCompletionRelation | undefined;
   let targetLabel: string | null = null;
+  const targets: string[] = [];
+  const task: ScoutTaskAsk = { version: 1 };
+  let image: string | undefined;
   let existingTargetHandle: string | undefined;
   let runtimeProfile: string | undefined;
   let runtimeLiteral: string | undefined;
@@ -907,11 +920,27 @@ export function parseAskCommandOptions(
   let aliasHost: string | undefined;
   const labels: string[] = [];
   const messageParts: string[] = [];
+  let firstMessageIndex: number | undefined;
 
   for (let index = 0; index < parsed.args.length; index += 1) {
     const current = parsed.args[index] ?? "";
+    if (current === "--") { messageParts.push(...parsed.args.slice(index + 1)); break; }
+    const taskBoolean = ({ "--operator": "operator", "--fyi": "fyi", "--notify": "notify", "--cancel": "cancel", "--permission": "permission" } as const)[current as "--operator"];
+    if (taskBoolean) { task[taskBoolean] = true; continue; }
+    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--image"].find(flag => current === flag || current.startsWith(`${flag}=`));
+    if (taskValue) {
+      const value = parseAskFlagValue(parsed.args, index, taskValue);
+      if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(taskValue);
+      if (taskValue === "--continue") { if (task.continue) throw new ScoutCliError("--continue may appear only once"); task.continue = value.value; }
+      if (taskValue === "--default-action") task.defaultAction = value.value;
+      if (taskValue === "--window") task.window = Number(value.value);
+      if (taskValue === "--option") (task.options ??= []).push(value.value);
+      if (taskValue === "--because") task.because = value.value;
+      if (taskValue === "--image") image = resolveInputFilePath(parsed.currentDirectory, value.value);
+      index = value.nextIndex; continue;
+    }
     if (current === "--completion" || current.startsWith("--completion=")) {
-      const value = parseFlagValue(parsed.args, index, "--completion");
+      const value = parseAskFlagValue(parsed.args, index, "--completion");
       if (value.value !== "explicit") throw new ScoutCliError("--completion must be explicit");
       completion = { mode: "explicit" };
       index = value.nextIndex;
@@ -920,7 +949,7 @@ export function parseAskCommandOptions(
     if (current === "--join-to" || current.startsWith("--join-to=")
       || current === "--continue-for" || current.startsWith("--continue-for=")) {
       const flag = current.startsWith("--join-to") ? "--join-to" : "--continue-for";
-      const value = parseFlagValue(parsed.args, index, flag);
+      const value = parseAskFlagValue(parsed.args, index, flag);
       if (relation) throw new ScoutCliError("--join-to and --continue-for are mutually exclusive and may appear only once");
       if (!value.value.trim()) throw new ScoutCliError(`${flag} requires a parent flight id`);
       relation = { kind: flag === "--join-to" ? "joined" : "continuation", parentFlightId: value.value.trim() };
@@ -928,32 +957,34 @@ export function parseAskCommandOptions(
       continue;
     }
     if (current === "--request-id" || current.startsWith("--request-id=")) {
-      const value = parseFlagValue(parsed.args, index, "--request-id");
+      const value = parseAskFlagValue(parsed.args, index, "--request-id");
       requestId = value.value.trim();
       if (!requestId || requestId.length > 256) throw new ScoutCliError("--request-id must contain 1 to 256 characters");
       index = value.nextIndex;
       continue;
     }
     if (current === "--as" || current.startsWith("--as=")) {
-      const value = parseFlagValue(parsed.args, index, "--as");
+      const value = parseAskFlagValue(parsed.args, index, "--as");
       agentName = value.value;
       index = value.nextIndex;
       continue;
     }
     if (current === "--to" || current.startsWith("--to=")) {
-      const value = parseFlagValue(parsed.args, index, "--to");
-      targetLabel = value.value;
+      const value = parseAskFlagValue(parsed.args, index, "--to");
+      if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue("--to");
+      targetLabel ??= value.value;
+      targets.push(value.value);
       index = value.nextIndex;
       continue;
     }
     if (current === "--profile" || current.startsWith("--profile=")) {
-      const value = parseFlagValue(parsed.args, index, "--profile");
+      const value = parseAskFlagValue(parsed.args, index, "--profile");
       runtimeProfile = parseRuntimeProfileFlag(value.value);
       index = value.nextIndex;
       continue;
     }
     if (current === "--runtime" || current.startsWith("--runtime=")) {
-      const value = parseFlagValue(parsed.args, index, "--runtime");
+      const value = parseAskFlagValue(parsed.args, index, "--runtime");
       const runtime = parseRuntimeLiteralFlag(value.value);
       runtimeLiteral = value.value;
       runtimeLiteralHarness = runtime.harness;
@@ -963,7 +994,7 @@ export function parseAskCommandOptions(
       continue;
     }
     if (current === "--model" || current.startsWith("--model=")) {
-      const value = parseFlagValue(parsed.args, index, "--model");
+      const value = parseAskFlagValue(parsed.args, index, "--model");
       model = value.value.trim();
       explicitModelFlag = true;
       if (!model) missingFlagValue("--model");
@@ -972,21 +1003,22 @@ export function parseAskCommandOptions(
     }
     const effortFlag = flagNameFor(current, ["--effort", "--reasoning-effort"]);
     if (effortFlag) {
-      const value = parseFlagValue(parsed.args, index, effortFlag);
+      const value = parseAskFlagValue(parsed.args, index, effortFlag);
       reasoningEffort = parseRuntimeProfileEffortFlag(value.value);
       explicitEffortFlag = true;
       index = value.nextIndex;
       continue;
     }
     if (current === "--ref" || current.startsWith("--ref=")) {
-      const value = parseFlagValue(parsed.args, index, "--ref");
+      const value = parseAskFlagValue(parsed.args, index, "--ref");
+      if (targetRef) throw new ScoutCliError("--ref may appear only once");
       targetRef = value.value.replace(/^ref:/, "");
-      targetLabel = `ref:${targetRef}`;
+      task.ref = targetRef;
       index = value.nextIndex;
       continue;
     }
     if (current === "--project" || current.startsWith("--project=")) {
-      const value = parseFlagValue(parsed.args, index, "--project");
+      const value = parseAskFlagValue(parsed.args, index, "--project");
       rawProjectPath = value.value;
       projectPath = resolveInputFilePath(parsed.currentDirectory, value.value);
       index = value.nextIndex;
@@ -994,39 +1026,39 @@ export function parseAskCommandOptions(
     }
     if (current === "--on" || current.startsWith("--on=") || current === "--host" || current.startsWith("--host=")) {
       const flag = current.startsWith("--host") ? "--host" : "--on";
-      const value = parseFlagValue(parsed.args, index, flag);
+      const value = parseAskFlagValue(parsed.args, index, flag);
       if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(flag);
       onHost = value.value.trim();
       index = value.nextIndex;
       continue;
     }
     if (current === "--channel" || current.startsWith("--channel=")) {
-      const value = parseFlagValue(parsed.args, index, "--channel");
+      const value = parseAskFlagValue(parsed.args, index, "--channel");
       channel = value.value;
       index = value.nextIndex;
       continue;
     }
     if (current === "--harness" || current.startsWith("--harness=")) {
-      const value = parseFlagValue(parsed.args, index, "--harness");
+      const value = parseAskFlagValue(parsed.args, index, "--harness");
       harness = value.value;
       explicitHarnessFlag = true;
       index = value.nextIndex;
       continue;
     }
     if (current === "--alias-project" || current.startsWith("--alias-project=")) {
-      const value = parseFlagValue(parsed.args, index, "--alias-project");
+      const value = parseAskFlagValue(parsed.args, index, "--alias-project");
       aliasProject = resolveInputFilePath(parsed.currentDirectory, value.value);
       index = value.nextIndex;
       continue;
     }
     if (current === "--alias-host" || current.startsWith("--alias-host=")) {
-      const value = parseFlagValue(parsed.args, index, "--alias-host");
+      const value = parseAskFlagValue(parsed.args, index, "--alias-host");
       aliasHost = value.value;
       index = value.nextIndex;
       continue;
     }
     if (current === "--session" || current.startsWith("--session=")) {
-      const value = parseFlagValue(parsed.args, index, "--session");
+      const value = parseAskFlagValue(parsed.args, index, "--session");
       session = mergeAskSessionPreference(
         session,
         parseAskSessionPreference(value.value),
@@ -1039,7 +1071,7 @@ export function parseAskCommandOptions(
       continue;
     }
     if (current === "--timeout" || current.startsWith("--timeout=")) {
-      const value = parseFlagValue(parsed.args, index, "--timeout");
+      const value = parseAskFlagValue(parsed.args, index, "--timeout");
       const parsedTimeout = Number.parseInt(value.value, 10);
       if (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0) {
         throw new ScoutCliError(`invalid timeout: ${value.value}`);
@@ -1049,7 +1081,7 @@ export function parseAskCommandOptions(
       continue;
     }
     if (current === "--reply-mode" || current.startsWith("--reply-mode=")) {
-      const value = parseFlagValue(parsed.args, index, "--reply-mode");
+      const value = parseAskFlagValue(parsed.args, index, "--reply-mode");
       if (value.value !== "inline" && value.value !== "notify" && value.value !== "none") {
         throw new ScoutCliError(`invalid reply mode: ${value.value}`);
       }
@@ -1061,12 +1093,8 @@ export function parseAskCommandOptions(
       replyMode = "none";
       continue;
     }
-    if (current === "--notify") {
-      replyMode = "notify";
-      continue;
-    }
     if (current === "--placement" || current.startsWith("--placement=")) {
-      const value = parseFlagValue(parsed.args, index, "--placement");
+      const value = parseAskFlagValue(parsed.args, index, "--placement");
       if (value.value !== "background" && value.value !== "foreground" && value.value !== "attached") {
         throw new ScoutCliError(`invalid placement: ${value.value}`);
       }
@@ -1087,7 +1115,7 @@ export function parseAskCommandOptions(
     }
     const labelFlag = flagNameFor(current, ["--label", "--labels"]);
     if (labelFlag) {
-      const value = parseFlagValue(parsed.args, index, labelFlag);
+      const value = parseAskFlagValue(parsed.args, index, labelFlag);
       appendLabelValues(labels, value.value);
       index = value.nextIndex;
       continue;
@@ -1097,47 +1125,17 @@ export function parseAskCommandOptions(
       if (promptFile) {
         throw new ScoutCliError("prompt file was provided more than once");
       }
-      const value = parseFlagValue(parsed.args, index, fileFlag);
+      const value = parseAskFlagValue(parsed.args, index, fileFlag);
       promptFile = resolveInputFilePath(parsed.currentDirectory, value.value);
       index = value.nextIndex;
       continue;
     }
+    if (current.startsWith("-")) throw new ScoutCliError(`unknown flag ${current}; run scout ask --help`);
+    firstMessageIndex ??= index;
     messageParts.push(current);
   }
 
   let message = messageParts.join(" ").trim();
-  if (!targetLabel && !runtimeProfile) {
-    const routed = parseComposerRoutedBody(message, "ask", parsed.currentDirectory);
-    if (routed) {
-      targetLabel = routed.targetLabel ?? null;
-      targetRef = routed.targetRef;
-      projectPath = routed.projectPath;
-      channel = mergeComposerChannel(channel, routed.channel);
-      message = routed.message;
-    }
-  }
-  if (!targetLabel && !runtimeProfile && !runtimeLiteral && message) {
-    const natural = parseNaturalLanguageAskTarget(message, {
-      allowMissingMessage: Boolean(promptFile),
-    });
-    if (natural?.kind === "existing_handle") {
-      existingTargetHandle = natural.handle;
-      message = natural.message;
-    } else if (natural?.kind === "runtime_profile") {
-      runtimeProfile = natural.profile;
-      reasoningEffort = mergeRuntimeProfileReasoningEffort(
-        reasoningEffort,
-        natural.reasoningEffort,
-      );
-      message = natural.message;
-    } else if (natural?.kind === "runtime_spec") {
-      runtimeLiteral = natural.literal;
-      runtimeLiteralHarness = natural.harness;
-      runtimeLiteralModel = natural.model;
-      runtimeLiteralEffort = natural.reasoningEffort;
-      message = natural.message;
-    }
-  }
   harness = mergeRuntimeDimension("harness", harness, runtimeLiteralHarness);
   model = mergeRuntimeDimension("model", model, runtimeLiteralModel);
   reasoningEffort = mergeRuntimeDimension("reasoning effort", reasoningEffort, runtimeLiteralEffort);
@@ -1149,10 +1147,10 @@ export function parseAskCommandOptions(
       throw new ScoutCliError(`--on ${onHost} starts a fresh session from --project; drop --to/--ref/--profile`);
     }
     // The path belongs to the other machine; resolving it here would bake in this machine's home and cwd.
-    projectPath = rawProjectPath.trim();
+    projectPath = rawProjectPath?.trim();
     session ??= "new";
   }
-  if (!runtimeProfile && shouldInferCurrentProjectAskTarget({ targetLabel, projectPath, harness, model, reasoningEffort, session })) {
+  if (!task.operator && !task.ref && !task.continue && !channel && !runtimeProfile && shouldInferCurrentProjectAskTarget({ targetLabel, projectPath, harness, model, reasoningEffort, session })) {
     projectPath = parsed.currentDirectory;
   }
   const parsedExplicitTarget = targetLabel ? parseScoutComposerRouteTarget(targetLabel) : null;
@@ -1163,17 +1161,30 @@ export function parseAskCommandOptions(
   ) {
     session = "new";
   }
-  const targetCount = [targetLabel || existingTargetHandle, projectPath || runtimeProfile]
-    .filter(Boolean).length;
-  if (targetLabel && projectPath) {
-    throw new ScoutCliError("provide either --to/--ref or --project, not both");
+  if (!targetLabel && !task.operator && !task.ref && !task.continue && !projectPath && !runtimeProfile && !channel) {
+    const positional = message.match(/^@([^\s]+)(?:\s|$)/);
+    if (positional && firstMessageIndex !== undefined) {
+      // Context-root parsing removes tokens. Map this body token back to the
+      // original argv so the refusal retains every flag, value and literal.
+      let parsedIndex = 0;
+      const rewritten = [...args];
+      for (let index = 0; index < args.length; index++) {
+        if (args[index] === "--context-root") { index++; continue; }
+        if (args[index]!.startsWith("--context-root=")) continue;
+        if (parsedIndex++ !== firstMessageIndex) continue;
+        const rest = args[index]!.slice(positional[1]!.length + 1).trimStart();
+        rewritten.splice(index, 1, "--to", positional[1]!, ...(rest ? [rest] : []));
+        break;
+      }
+      throw new ScoutCliError(`positional recipients were removed; use ${renderScoutCommand("ask", rewritten)}`);
+    }
   }
-  if (targetCount > 1) {
-    throw new ScoutCliError("provide one existing target, or a project/runtime launch target");
-  }
-  if (targetCount === 0) {
-    throw new ScoutCliError("--to <name>, --project <path>, --profile <name>, or natural target is required");
-  }
+  validateTaskAsk(task, {
+    to: targetLabel ?? undefined, channel,
+    capability: !task.continue && Boolean(projectPath || runtimeProfile),
+    execution: Boolean(harness || model || reasoningEffort || onHost || projectPath || runtimeProfile || runtimeLiteral || session || placement),
+    relation: Boolean(relation),
+  });
   if (runtimeProfile) {
     rejectUnsupportedRuntimeProfileEffort(runtimeProfile, reasoningEffort);
   }
@@ -1194,6 +1205,9 @@ export function parseAskCommandOptions(
     currentDirectory: parsed.currentDirectory,
     args: parsed.args,
     agentName,
+    task,
+    ...(targets.length ? { targets } : {}),
+    ...(image ? { image } : {}),
     ...(targetLabel ? { targetLabel } : {}),
     ...(requestId ? { requestId } : {}),
     ...(completion ? { completion } : {}),
@@ -1229,351 +1243,12 @@ export function parseAskCommandOptions(
   };
 }
 
+/** The shortcut has exactly the same validation and task semantics as ask. */
 export function parseImplicitAskCommandOptions(
   args: string[],
   defaultCurrentDirectory: string,
 ): ScoutImplicitAskCommandOptions {
-  const parsed = parseContextRootPrefix(args, defaultCurrentDirectory);
-  let agentName: string | null = null;
-  let runtimeProfile: string | undefined;
-  let runtimeLiteral: string | undefined;
-  let model: string | undefined;
-  let reasoningEffort: string | undefined;
-  let channel: string | undefined;
-  let harness: string | undefined;
-  let session: ScoutAskCommandOptions["session"];
-  let timeoutSeconds: number | undefined;
-  let replyMode: ScoutAskCommandOptions["replyMode"];
-  let placement: ScoutAskCommandOptions["placement"];
-  let promptFile: string | undefined;
-  const labels: string[] = [];
-  const messageParts: string[] = [];
-
-  for (let index = 0; index < parsed.args.length; index += 1) {
-    const current = parsed.args[index] ?? "";
-    if (current === "--as" || current.startsWith("--as=")) {
-      const value = parseFlagValue(parsed.args, index, "--as");
-      agentName = value.value;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--profile" || current.startsWith("--profile=")) {
-      const value = parseFlagValue(parsed.args, index, "--profile");
-      runtimeProfile = parseRuntimeProfileFlag(value.value);
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--runtime" || current.startsWith("--runtime=")) {
-      const value = parseFlagValue(parsed.args, index, "--runtime");
-      parseRuntimeLiteralFlag(value.value);
-      runtimeLiteral = value.value;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--model" || current.startsWith("--model=")) {
-      const value = parseFlagValue(parsed.args, index, "--model");
-      model = value.value.trim();
-      if (!model) missingFlagValue("--model");
-      index = value.nextIndex;
-      continue;
-    }
-    const effortFlag = flagNameFor(current, ["--effort", "--reasoning-effort"]);
-    if (effortFlag) {
-      const value = parseFlagValue(parsed.args, index, effortFlag);
-      reasoningEffort = parseRuntimeProfileEffortFlag(value.value);
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--channel" || current.startsWith("--channel=")) {
-      const value = parseFlagValue(parsed.args, index, "--channel");
-      channel = value.value;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--harness" || current.startsWith("--harness=")) {
-      const value = parseFlagValue(parsed.args, index, "--harness");
-      harness = value.value;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--session" || current.startsWith("--session=")) {
-      const value = parseFlagValue(parsed.args, index, "--session");
-      session = mergeAskSessionPreference(
-        session,
-        parseAskSessionPreference(value.value),
-      );
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--new") {
-      session = mergeAskSessionPreference(session, "new");
-      continue;
-    }
-    if (current === "--timeout" || current.startsWith("--timeout=")) {
-      const value = parseFlagValue(parsed.args, index, "--timeout");
-      const parsedTimeout = Number.parseInt(value.value, 10);
-      if (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0) {
-        throw new ScoutCliError(`invalid timeout: ${value.value}`);
-      }
-      timeoutSeconds = parsedTimeout;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--reply-mode" || current.startsWith("--reply-mode=")) {
-      const value = parseFlagValue(parsed.args, index, "--reply-mode");
-      if (value.value !== "inline" && value.value !== "notify" && value.value !== "none") {
-        throw new ScoutCliError(`invalid reply mode: ${value.value}`);
-      }
-      replyMode = value.value;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--no-wait") {
-      replyMode = "none";
-      continue;
-    }
-    if (current === "--notify") {
-      replyMode = "notify";
-      continue;
-    }
-    if (current === "--placement" || current.startsWith("--placement=")) {
-      const value = parseFlagValue(parsed.args, index, "--placement");
-      if (value.value !== "background" && value.value !== "foreground" && value.value !== "attached") {
-        throw new ScoutCliError(`invalid placement: ${value.value}`);
-      }
-      if (placement && placement !== value.value) {
-        throw new ScoutCliError(`conflicting placement: ${placement} and ${value.value}`);
-      }
-      placement = value.value;
-      index = value.nextIndex;
-      continue;
-    }
-    if (current === "--foreground" || current === "--background") {
-      const requested = current === "--foreground" ? "foreground" : "background";
-      if (placement && placement !== requested) {
-        throw new ScoutCliError(`conflicting placement: ${placement} and ${requested}`);
-      }
-      placement = requested;
-      continue;
-    }
-    const labelFlag = flagNameFor(current, ["--label", "--labels"]);
-    if (labelFlag) {
-      const value = parseFlagValue(parsed.args, index, labelFlag);
-      appendLabelValues(labels, value.value);
-      index = value.nextIndex;
-      continue;
-    }
-    const fileFlag = flagNameFor(current, ["--prompt-file", "--body-file"]);
-    if (fileFlag) {
-      if (promptFile) {
-        throw new ScoutCliError("prompt file was provided more than once");
-      }
-      const value = parseFlagValue(parsed.args, index, fileFlag);
-      promptFile = resolveInputFilePath(parsed.currentDirectory, value.value);
-      index = value.nextIndex;
-      continue;
-    }
-    messageParts.push(current);
-  }
-
-  const input = messageParts.join(" ").trim();
-  if (!input && !promptFile) {
-    throw new ScoutCliError("no question provided");
-  }
-
-  const routed = runtimeProfile || runtimeLiteral
-    ? null
-    : parseComposerRoutedBody(input, "ask", parsed.currentDirectory);
-  if (routed) {
-    const message = routed.message;
-    if (message && promptFile) {
-      rejectMixedBodySources("question");
-    }
-    if (!message && !promptFile) {
-      throw new ScoutCliError("no question provided");
-    }
-
-    return {
-      currentDirectory: parsed.currentDirectory,
-      args: parsed.args,
-      agentName,
-      ...(routed.targetLabel ? { targetLabel: routed.targetLabel } : {}),
-      targetRef: routed.targetRef,
-      projectPath: routed.projectPath,
-      channel: mergeComposerChannel(channel, routed.channel),
-      harness,
-      model,
-      reasoningEffort,
-      session,
-      timeoutSeconds,
-      replyMode,
-      placement,
-      ...(labels.length ? { labels } : {}),
-      message,
-      promptFile,
-    };
-  }
-
-  const natural = !runtimeProfile && !runtimeLiteral && input
-    ? parseNaturalLanguageAskTarget(input, {
-        allowMissingMessage: Boolean(promptFile),
-      })
-    : null;
-  if (natural || runtimeProfile || runtimeLiteral) {
-    const selectedProfile = natural?.kind === "runtime_profile"
-      ? natural.profile
-      : runtimeProfile;
-    if (natural?.kind === "existing_handle") {
-      if (runtimeProfile || runtimeLiteral) {
-        throw new ScoutCliError("runtime_conflict: existing agent targets cannot also be runtime-profile or RuntimeSpec targets");
-      }
-      if (natural.message && promptFile) {
-        rejectMixedBodySources("question");
-      }
-      return {
-        currentDirectory: parsed.currentDirectory,
-        args: parsed.args,
-        agentName,
-        existingTargetHandle: natural.handle,
-        channel,
-        harness,
-        model,
-        reasoningEffort,
-        session: session ?? (harness || model || reasoningEffort ? "new" : undefined),
-        timeoutSeconds,
-        replyMode,
-        placement,
-        ...(labels.length ? { labels } : {}),
-        message: natural.message,
-        promptFile,
-      };
-    }
-    if (natural?.kind === "runtime_spec" || runtimeLiteral) {
-      const literal = natural?.kind === "runtime_spec" ? natural.literal : runtimeLiteral!;
-      const literalRuntime = natural?.kind === "runtime_spec"
-        ? natural
-        : parseRuntimeLiteralFlag(literal);
-      const selectedHarness = mergeRuntimeDimension("harness", harness, literalRuntime.harness);
-      const selectedModel = mergeRuntimeDimension("model", model, literalRuntime.model);
-      const selectedReasoningEffort = mergeRuntimeDimension(
-        "reasoning effort",
-        reasoningEffort,
-        literalRuntime.reasoningEffort,
-      );
-      const message = natural?.kind === "runtime_spec" ? natural.message : input;
-      if (message && promptFile) rejectMixedBodySources("question");
-      if (!message && !promptFile) throw new ScoutCliError("no question provided");
-      return {
-        currentDirectory: parsed.currentDirectory,
-        args: parsed.args,
-        agentName,
-        projectPath: parsed.currentDirectory,
-        runtimeLiteral: literal,
-        harness: selectedHarness,
-        model: selectedModel,
-        reasoningEffort: selectedReasoningEffort,
-        session: session ?? "new",
-        channel,
-        timeoutSeconds,
-        replyMode,
-        placement,
-        ...(labels.length ? { labels } : {}),
-        message,
-        promptFile,
-      };
-    }
-    if (!selectedProfile) {
-      throw new ScoutCliError("runtime profile target is required");
-    }
-    const selectedReasoningEffort = mergeRuntimeProfileReasoningEffort(
-      reasoningEffort,
-      natural?.kind === "runtime_profile" ? natural.reasoningEffort : undefined,
-    );
-    rejectUnsupportedRuntimeProfileEffort(selectedProfile, selectedReasoningEffort);
-    const message = natural?.kind === "runtime_profile" ? natural.message : input;
-    if (message && promptFile) {
-      rejectMixedBodySources("question");
-    }
-    if (!message && !promptFile) {
-      throw new ScoutCliError("no question provided");
-    }
-    return {
-      currentDirectory: parsed.currentDirectory,
-      args: parsed.args,
-      agentName,
-      runtimeProfile: selectedProfile,
-      ...(harness ? { harness } : {}),
-      ...(model ? { model } : {}),
-      reasoningEffort: selectedReasoningEffort,
-      session,
-      channel,
-      timeoutSeconds,
-      replyMode,
-      placement,
-      ...(labels.length ? { labels } : {}),
-      message,
-      promptFile,
-    };
-  }
-
-  if ((model || reasoningEffort) && !harness) {
-    throw new ScoutCliError("runtime_target_required: --model/--effort requires --harness, --runtime, or --profile");
-  }
-
-  const mentions = extractMentionTargets(input);
-  if (mentions.length === 0) {
-    if (shouldInferCurrentProjectAskTarget({ harness, model, reasoningEffort, session })) {
-      const inferredSession = (harness || model || reasoningEffort) && !session ? "new" : session;
-      return {
-        currentDirectory: parsed.currentDirectory,
-        args: parsed.args,
-        agentName,
-        projectPath: parsed.currentDirectory,
-        channel,
-        harness,
-        model,
-        reasoningEffort,
-        session: inferredSession,
-        timeoutSeconds,
-        replyMode,
-        placement,
-        ...(labels.length ? { labels } : {}),
-        message: input,
-        promptFile,
-      };
-    }
-    throw new ScoutCliError("implicit ask requires >> target or an @agent mention");
-  }
-  if (mentions.length > 1) {
-    throw new ScoutCliError("implicit ask supports exactly one @agent mention");
-  }
-
-  const [target] = mentions;
-  const message = stripMention(input, target);
-  if (message && promptFile) {
-    rejectMixedBodySources("question");
-  }
-  if (!message && !promptFile) {
-    throw new ScoutCliError("no question provided");
-  }
-
-  return {
-    currentDirectory: parsed.currentDirectory,
-    args: parsed.args,
-    agentName,
-    targetLabel: target.label,
-    channel,
-    harness,
-    model,
-    reasoningEffort,
-    session: session ?? (harness || model || reasoningEffort ? "new" : undefined),
-    timeoutSeconds,
-    replyMode,
-    placement,
-    ...(labels.length ? { labels } : {}),
-    message,
-    promptFile,
-  };
+  return parseAskCommandOptions(args, defaultCurrentDirectory);
 }
 
 export function parseWatchCommandOptions(

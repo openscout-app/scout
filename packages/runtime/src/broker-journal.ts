@@ -4,7 +4,7 @@ import { journalEntryProblem, readableCanonicalMessage, readableJournalKinds } f
 import { isUtf8 } from "node:buffer";
 import { BrokerQuarantine, type QuarantineListOptions } from "./broker-quarantine.js";
 import { shareLoadedRecordStrings } from "./broker-record-strings.js";
-import { captureMessageRecords, asyncMessageRecordView } from "./broker-message-records.js";
+import { captureMessageRecords, asyncMessageRecordView, readMessageRecord } from "./broker-message-records.js";
 import type { BrokerMemoryMaintenance } from "./broker-memory-maintenance.js";
 import { applyHistoryRotationEviction, emptyHistoryRotationPlan, planHistoryRotation, type HistoryRotationContext, type HistoryRotationPlan } from "./history-rotation.js";
 import { setImmediate as yieldReadTurn } from "node:timers/promises";
@@ -550,6 +550,9 @@ export class FileBackedBrokerJournal {
    * drops a record line when ANY rotation after the line doomed it — later
    * markers alone cannot describe what earlier ones evicted. */
   private appliedRotations: AppliedHistoryRotation[] = [];
+  private readonly openOperatorTaskIndex = new Map<string, InvocationRequest>();
+  private readonly queuedTaskFollowupIds = new Map<string, Set<string>>();
+  private readonly followupTaskByMessage = new Map<string, string>();
   private readonly pendingResultFlights = new Map<string, FlightRecord>();
   private readonly currentFlightIds = new Map<string, string>();
   private readonly pendingTerminalReportFlights = new Map<string, FlightRecord>();
@@ -1404,6 +1407,52 @@ export class FileBackedBrokerJournal {
     return historical ? this.dispatchJobHistory!.readLocation<BrokerInvocationDispatchJob>(historical) : null;
   }
 
+  /** Rebuilt during replay and maintained only by canonical journal entries. */
+  openOperatorTasks(): IterableIterator<InvocationRequest> {
+    return this.openOperatorTaskIndex.values();
+  }
+
+  async pendingTaskFollowups(invocationId: string): Promise<MessageRecord[]> {
+    const messages: MessageRecord[] = [];
+    for (const id of this.queuedTaskFollowupIds.get(invocationId) ?? []) {
+      const message = await readMessageRecord(this.state.snapshot.messages, id);
+      if (message) messages.push(message);
+    }
+    return messages;
+  }
+
+  private updateOpenOperatorTask(invocationId: string): void {
+    const invocation = this.getInvocation(invocationId);
+    const flight = this.getCurrentFlightForInvocation(invocationId);
+    const terminal = flight && ["completed", "failed", "cancelled"].includes(flight.state);
+    if (invocation?.metadata?.humanOwned === true && typeof invocation.metadata.defaultAction === "string"
+      && typeof invocation.metadata.operatorAnswerDeadline === "number" && flight && !terminal) {
+      this.openOperatorTaskIndex.set(invocationId, invocation);
+    } else this.openOperatorTaskIndex.delete(invocationId);
+    if (terminal) {
+      for (const id of this.queuedTaskFollowupIds.get(invocationId) ?? []) this.followupTaskByMessage.delete(id);
+      this.queuedTaskFollowupIds.delete(invocationId);
+    }
+  }
+
+  private indexTaskFollowup(message: MessageRecord): void {
+    const previous = this.followupTaskByMessage.get(message.id);
+    if (previous) {
+      const ids = this.queuedTaskFollowupIds.get(previous);
+      ids?.delete(message.id);
+      if (!ids?.size) this.queuedTaskFollowupIds.delete(previous);
+      this.followupTaskByMessage.delete(message.id);
+    }
+    const followup = message.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean } | undefined;
+    if (!followup?.invocationId || followup.cancel || message.audience?.delivery !== "none") return;
+    const flight = this.getCurrentFlightForInvocation(followup.invocationId);
+    if (flight && ["completed", "failed", "cancelled"].includes(flight.state)) return;
+    const ids = this.queuedTaskFollowupIds.get(followup.invocationId) ?? new Set<string>();
+    ids.add(message.id);
+    this.queuedTaskFollowupIds.set(followup.invocationId, ids);
+    this.followupTaskByMessage.set(message.id, followup.invocationId);
+  }
+
   pendingTerminalReports(): IterableIterator<FlightRecord> {
     return this.pendingTerminalReportFlights.values();
   }
@@ -2101,6 +2150,7 @@ export class FileBackedBrokerJournal {
         this.state.snapshot.bindings[entry.binding.id] = entry.binding;
         return;
       case "message.record":
+        this.indexTaskFollowup(entry.message);
         if(!this.messageHistory)this.state.snapshot.messages[entry.message.id] = entry.message;
         return;
       case "conversation.read_cursor.upsert":
@@ -2108,6 +2158,7 @@ export class FileBackedBrokerJournal {
         return;
       case "invocation.record":
         this.state.snapshot.invocations[entry.invocation.id] = entry.invocation;
+        this.updateOpenOperatorTask(entry.invocation.id);
         return;
       case "invocation.dispatch_job.record":
         this.indexDispatchJob(entry.job);
@@ -2115,6 +2166,7 @@ export class FileBackedBrokerJournal {
       case "flight.record":
         this.state.snapshot.flights[entry.flight.id] = entry.flight;
         if (!entry.preserveCurrent) this.currentFlightIds.set(entry.flight.invocationId, entry.flight.id);
+        this.updateOpenOperatorTask(entry.flight.invocationId);
         this.updateDispatchJobsForFlight(entry.flight.id);
         this.updatePeerMirrorsForFlight(entry.flight.id);
         if ((entry.flight.metadata?.terminalReport as { status?: unknown } | undefined)?.status === "pending") {
@@ -2224,6 +2276,7 @@ export class FileBackedBrokerJournal {
    */
   historyRotationContext(): HistoryRotationContext {
     return {
+      queuedFollowupMessageIds: this.followupTaskByMessage.keys(),
       deliveries: this.state.deliveries.values(),
       dispatchJobs: this.state.invocationDispatchJobs.values(),
       collaborationEvents: this.state.collaborationEvents,
@@ -2258,7 +2311,20 @@ export class FileBackedBrokerJournal {
       this.updateDispatchJobsForFlight(flightId);
       this.pendingWorkPromotionFlights.delete(flightId);
     }
-    for (const invocationId of evicted.invocationIds) this.currentFlightIds.delete(invocationId);
+    for (const invocationId of evicted.invocationIds) {
+      this.currentFlightIds.delete(invocationId);
+      this.openOperatorTaskIndex.delete(invocationId);
+      for (const id of this.queuedTaskFollowupIds.get(invocationId) ?? []) this.followupTaskByMessage.delete(id);
+      this.queuedTaskFollowupIds.delete(invocationId);
+    }
+    for (const id of evicted.messageIds) {
+      const invocationId = this.followupTaskByMessage.get(id);
+      if (!invocationId) continue;
+      const ids = this.queuedTaskFollowupIds.get(invocationId);
+      ids?.delete(id);
+      if (!ids?.size) this.queuedTaskFollowupIds.delete(invocationId);
+      this.followupTaskByMessage.delete(id);
+    }
 
     for (const deliveryId of evicted.deliveryIds) {
       const flightId = this.state.deliveries.get(deliveryId)?.metadata?.peerFlightId;

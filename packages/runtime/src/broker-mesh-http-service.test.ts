@@ -229,6 +229,7 @@ function collaborationEventBundle(input: Partial<MeshCollaborationEventBundle> =
 }
 
 function createHarness(input: {
+  recordAuthorityMessage?: BrokerMeshHttpServiceDeps["recordAuthorityMessage"];
   agents?: Record<string, AgentDefinition>;
   messages?: Record<string, MessageRecord>;
   flights?: Record<string, FlightRecord>;
@@ -254,6 +255,7 @@ function createHarness(input: {
   const messageFor = async (id: string) => messages[id] ?? await input.messageFor?.(id);
 
   const service = new BrokerMeshHttpService({
+    recordAuthorityMessage: input.recordAuthorityMessage,
     nodeId: "node-local",
     runtime: {
       message: (messageId) => messages[messageId],
@@ -747,4 +749,26 @@ test("mesh message and invocation ingress cannot adopt an existing local attachm
   const invocationMessage={...managed,actorId:invocation().requesterId,id:invocation().messageId!,conversationId:invocation().conversationId!};
   await expect(harness.service.receiveInvocationBundle(invocationBundle({message:invocationMessage}))).rejects.toThrow("attachment_inline_write_required");
   expect(harness.applyBundleCalls).toHaveLength(0); expect(harness.committedEntries).toHaveLength(0);
+});
+
+
+test("canonical mesh admission preserves exact legacy retries without client IDs", async () => {
+  const legacy = message({ metadata: {} });
+  const h = createHarness({ messages: { [legacy.id]: legacy },
+    recordAuthorityMessage: async () => { throw new Error("an exact historical duplicate needs no new admission"); } });
+  expect(await h.service.receiveMessageBundle(messageBundle({ message: legacy }))).toMatchObject({ status: 200, body: { duplicate: true } });
+  expect(h.committedEntries).toHaveLength(0);
+});
+
+test("canonical mesh admission cannot overwrite an existing blob message with a conflicting no-blob message", async () => {
+  const existing = message({ attachments: [{ id: "evidence", mediaType: "image/png",
+    blob: { sha256: "a".repeat(64), mediaType: "image/png", byteSize: 8 } }] });
+  const messages = { [existing.id]: existing };
+  const h = createHarness({ messages,
+    recordAuthorityMessage: async () => { throw new Error("blob retries must not enter canonical admission"); } });
+  await expect(h.service.receiveMessageBundle(messageBundle({ message: message({ body: "replacement" }) })))
+    .rejects.toThrow("conflicts with existing record");
+  expect(messages[existing.id]).toEqual(existing);
+  expect(h.committedEntries).toHaveLength(0);
+  expect(h.completedReplies).toHaveLength(0);
 });

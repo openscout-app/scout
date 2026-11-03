@@ -23,28 +23,21 @@ Each surface presents the same decision according to its audience. Displaying
 or dismissing it does not answer it. These are design requirements; current
 coverage below does not yet provide the complete cross-surface lifecycle.
 
-## Agent-Originated Non-Blocking Signals
+## Agent-originated operator tasks
 
-Long-running agents also need a way to communicate without manufacturing a
-block. Scout exposes two MCP tools for that attention-plane traffic:
+Agents use `ask --operator` for human-owned tasks. A question always requests
+a push and remains tracked until answered, expired or cancelled.
+`--default-action "X"` lets work proceed: an unanswered task completes as
+`proceeded with default` at the answer deadline (default 30 minutes;
+`--window` is seconds). A late answer is delivered as a marked follow-up.
 
-- `notify_operator({ message })`: a useful one-way FYI. The agent continues and
-  does not request a response.
-- `consult_operator({ question, defaultAction })`: optional advice. The agent
-  continues with the declared default unless the operator replies soon enough
-  to influence later work.
+News uses `ask --operator --fyi` and creates no task. It requests no push
+unless `--notify` is present. That flag requests interrupting priority;
+default-action tasks request normal priority. APNs enforces the stored policy.
+The apps adopt the notification policy after core lands.
 
-Both are runtime-backed durable messages to the operator. The runtime message id
-is also the signal id, so ordinary threaded replies provide correlation without
-creating a second consultation state machine. Neither tool creates a flight,
-changes a work item, or marks the agent waiting. The tool confirms when that
-message is recorded; mobile or desktop notification delivery remains
-best-effort and unconfirmed at call time.
-
-The boundary is strict: if there is no responsible default, the agent must use
-a real human-input or waiting path. Only `needs_input` may block. A late reply
-to a non-blocking consultation is steering; it does not retroactively change
-the task lifecycle.
+A receipt confirms durable recording separately from an unconfirmed push
+request. Device permissions, settings and transport still determine delivery.
 
 ## Alertable Events
 
@@ -109,11 +102,9 @@ Implemented now:
   live broker communication, declared operator needs, delivery failures,
   operator-owned collaboration waits, and requested completion callbacks.
   It has separate inbound/outbound, attention, scope, and preview controls.
-- Scout MCP exposes `notify_operator` and `consult_operator`; the latter
-  requires a safe default. Both write operator messages without creating a
-  flight, and the runtime can fan out a generic APNs alert without putting agent
-  content in the push payload. The relay preserves opaque conversation/message
-  correlation and keeps these non-blocking alerts quiet.
+- Scout MCP exposes operator questions, default actions and FYIs through `ask`.
+  Tracked operator tasks use `reply` for their answer. FYIs create only a message.
+  APNs uses stored notification policy and does not embed authored content.
 - Web operator attention reads pairing-session approvals and collaboration
   attention. It must not be described as reading durable broker unblock requests
   until that record lifecycle exists.
@@ -234,8 +225,8 @@ Permission scope is not invented:
 | Grok tmux and Claude Ghostty / unowned terminals | `local-agents.ts` checks Grok composer readiness and delivers to attached terminals, but has no permission parser for these surfaces. This bridge does not inject hooks or scrape arbitrary foreign sessions. | Native host input; a future explicit host integration must bind a live prompt before sending keys. |
 | Pi RPC and unowned terminal/client prompts | No permission request ingress in `pi-rpc.ts`; unowned MCP client prompts remain invisible to the server. | Native host UI or an explicit host-owned integration; no hooks injected into foreign sessions. |
 
-`scout operator --question/--permission` now also writes a collaboration question
+`scout ask --operator --permission` now also writes a collaboration question
 linked to its durable message. The existing declared-message Requests projection
 and offered-answer reply path remain; a threaded operator reply closes the
-collaboration record. This manual question is not authority to grant a native
-harness permission and does not manufacture a waiting flight.
+collaboration record. This question is not authority to grant a native harness permission.
+The operator task has a durable lifecycle independently of harness permission.

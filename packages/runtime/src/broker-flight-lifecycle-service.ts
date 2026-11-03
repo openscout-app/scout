@@ -290,6 +290,7 @@ export class BrokerFlightLifecycleService {
       if (eligible && !eligible()) return;
       const previous = this.options.journal.getFlight?.(flightToRecord.id) ?? this.options.runtime.snapshot().flights[flightToRecord.id];
       previousFlight = previous;
+      if (previous?.metadata?.taskFinalReplyMessageId && flightToRecord.metadata?.replyMessageId !== previous.metadata.taskFinalReplyMessageId) return;
       if (previous?.metadata?.completion !== undefined && (!invocation || !hasExplicitCompletion(invocation)
         || previous.invocationId !== flightToRecord.invocationId || previous.targetAgentId !== flightToRecord.targetAgentId
         || previous.requesterId !== flightToRecord.requesterId)) {
@@ -471,6 +472,7 @@ export class BrokerFlightLifecycleService {
     const now = this.now();
 
     for (const flight of Object.values(snapshot.flights)) {
+      if (snapshot.invocations[flight.invocationId]?.metadata?.humanOwned === true) continue;
       const reason = staleWorkingFlightReason(snapshot, flight, {
         isInvocationActive: this.options.isInvocationActive,
         now,

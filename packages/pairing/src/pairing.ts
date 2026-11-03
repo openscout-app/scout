@@ -25,6 +25,7 @@ import {
 } from "@openscout/agent-sessions";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
 import {
+  isScoutPairingFileFromPreviousBoot,
   isScoutPairingProcessRunning as isLivePairingProcess,
   readLiveScoutPairingSupervisorPid,
   readScoutPairingProcessPid as readSupervisedPairingProcessPid,
@@ -472,7 +473,8 @@ async function resolveDefaultScoutPairingWorkspaceRoot(currentDirectory?: string
 
 function readScoutPairingRuntimeSnapshot(): ScoutPairingRuntimeSnapshot | null {
   const { runtimeStatePath } = resolveScoutPairingPaths();
-  if (!existsSync(runtimeStatePath)) {
+  // A snapshot from before this boot names pids that may now belong to any process.
+  if (!existsSync(runtimeStatePath) || isScoutPairingFileFromPreviousBoot(runtimeStatePath)) {
     return null;
   }
 
@@ -494,18 +496,7 @@ function clearScoutPairingRuntimeSnapshot(): void {
 }
 
 function readScoutPairingRuntimePid(): number | null {
-  const { runtimePidPath } = resolveScoutPairingPaths();
-  if (!existsSync(runtimePidPath)) {
-    return null;
-  }
-
-  try {
-    const raw = readFileSync(runtimePidPath, "utf8").trim();
-    const pid = Number(raw);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
+  return readSupervisedPairingProcessPid(resolveScoutPairingPaths().runtimePidPath);
 }
 
 function clearScoutPairingRuntimePid(): void {

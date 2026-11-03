@@ -1,3 +1,4 @@
+import { validateTaskAsk } from "@openscout/protocol";
 import { basename, resolve } from "node:path";
 
 import {
@@ -69,6 +70,8 @@ function compactAskIds(ids: ScoutAskReceipt["ids"]): ScoutAskReceipt["ids"] {
 
 type ScoutAskDeliveryResult = {
   usedBroker: boolean;
+  accepted?: boolean;
+  deliveryMessage?: import("@openscout/protocol").MessageRecord;
   flight?: ScoutFlightRecord;
   conversationId?: string;
   messageId?: string;
@@ -169,8 +172,8 @@ function buildScoutAskReceipt(input: {
 
   const state = input.result.targetDiagnostic?.state === "ambiguous"
     ? "ambiguous"
-    : receiptStateFromFlight(input.result.flight);
-  const ok = state === "queued" || state === "completed";
+    : !input.result.flight && input.result.accepted ? "queued" : receiptStateFromFlight(input.result.flight);
+  const ok = input.result.accepted === true || state === "queued" || state === "completed";
   const next = ok
     ? undefined
     : nextCallForAskFailure({
@@ -187,6 +190,10 @@ function buildScoutAskReceipt(input: {
   return {
     ok,
     state,
+    ...(input.result.accepted ? { recording: "recorded" as const } : {}),
+    ...(typeof input.result.deliveryMessage?.metadata?.workerInterrupted === "boolean" ? { workerInterrupted: input.result.deliveryMessage.metadata.workerInterrupted } : {}),
+    ...(input.result.deliveryMessage?.metadata?.notificationPolicy ? { notificationStatus:
+      (input.result.deliveryMessage.metadata.notificationPolicy as { requested?: boolean }).requested ? "requested_unconfirmed" as const : "not_requested" as const } : {}),
     ...(completion && input.result.flight ? { completion: { ...completion,
       invocationId: input.result.flight.invocationId, flightId: input.result.flight.id } } : {}),
     ...(parentCompletion ? { parentCompletion } : {}),
@@ -343,6 +350,10 @@ export function buildScoutAskRoute(input: {
 
 export const scoutAskHandler: ScoutAskHandler = async (command) => {
   const currentDirectory = command.currentDirectory ?? process.cwd();
+  if (command.task) validateTaskAsk(command.task, { to: command.to, channel: command.channel,
+    capability: !command.task?.continue && Boolean(command.projectPath || command.runtimeProfile || command.existingHandle),
+    execution: Boolean(command.harness || command.model || command.reasoningEffort || command.placement || command.host || command.projectPath || command.runtimeProfile),
+    relation: Boolean(command.relation) });
   if (command.completion || command.relation) {
     const target = command.to?.trim();
     const exactTarget = target && /^(id|session):[^\s]+$/.test(target);
@@ -358,7 +369,7 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
     }
   }
   const host = command.host?.trim() || undefined;
-  if (host && !command.projectPath?.trim()) {
+  if (host && !command.projectPath?.trim() && !command.task?.continue) {
     return {
       ok: false,
       state: "failed",
@@ -383,7 +394,7 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
   // A path on another machine is that machine's to resolve: `~` and relative
   // segments mean nothing here, so it travels exactly as typed.
   const commandProjectPath = host
-    ? command.projectPath!.trim()
+    ? command.projectPath?.trim()
     : resolveAskProjectPath(
       command.projectPath,
       currentDirectory,
@@ -392,7 +403,8 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
   const requestedRuntimeProfile = command.runtimeProfile?.trim() || "";
   const requestedExistingHandle = command.existingHandle?.trim() || "";
   const inferredProjectPath =
-    !requestedTo
+    !command.task?.operator && !command.task?.ref && !command.task?.continue && !command.channel
+    && !requestedTo
     && !requestedRuntimeProfile
     && !requestedExistingHandle
     && !commandProjectPath
@@ -434,7 +446,10 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
       },
     };
   }
-  const target = buildScoutAskRoute({
+  const taskTarget = command.task?.operator ? { kind: "agent_label" as const, label: "operator" }
+    : command.task?.ref || command.task?.continue ? { kind: "binding_ref" as const, ref: command.task.ref ?? command.task.continue! }
+    : command.channel ? { kind: "channel" as const, channel: command.channel } : undefined;
+  const target = taskTarget ?? buildScoutAskRoute({
     to: requestedTo,
     projectPath: targetProjectPath,
     runtimeProfile: requestedRuntimeProfile,
@@ -467,6 +482,10 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
       currentDirectory,
     });
   const result = await deliverScoutAsk({
+    task: command.task?.continue && (host || commandProjectPath)
+      ? { ...command.task, successor: { host, projectPath: commandProjectPath } } : command.task,
+    image: command.image,
+    attachments: command.attachments,
     requestId: command.requestId,
     completion: command.completion,
     relation: command.relation,

@@ -6,6 +6,7 @@ export type ScoutCompletionRequest = { mode: "explicit" };
 export type ScoutCompletionRelation = { parentFlightId: string; kind: "joined" | "continuation" };
 export type ScoutCompletionReply = {
   kind: "progress" | "final";
+  outcome?: "failed";
   invocationId: string;
   flightId: string;
   revision: number;
