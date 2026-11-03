@@ -58,6 +58,8 @@ export type BrokerMeshHttpServiceDeps = {
   messageFor: (messageId: string) => Promise<MessageRecord | undefined>;
   rememberInvocation: (invocation: InvocationRequest) => void;
   completeInvocationsForBrokerReply?: (message: MessageRecord) => Promise<void>;
+  /** A question to the operator, or the operator's answer to one, arrived from another host. */
+  trackOperatorQuestion?: (message: MessageRecord) => Promise<void>;
   /**
    * Cardless session targets carry no agent card, so authority rides on the
    * endpoint instead: a forwarded invocation is accepted when this node owns a
@@ -79,6 +81,15 @@ export type BrokerMeshHttpResult = {
 
 export class BrokerMeshHttpService {
   constructor(private readonly deps: BrokerMeshHttpServiceDeps) {}
+
+  // The message is already committed; a record that fails to follow must not fail the receipt.
+  private async trackOperatorQuestion(message: MessageRecord): Promise<void> {
+    try {
+      await this.deps.trackOperatorQuestion?.(message);
+    } catch (error) {
+      this.deps.warn?.(`[mesh] operator question ${message.id} was not tracked`, error);
+    }
+  }
 
   readonly receiveMessageBundle = async (bundle: MeshMessageBundle): Promise<BrokerMeshHttpResult> => {
     const result = await this.deps.runDurableWrite(async () => {
@@ -151,6 +162,7 @@ export class BrokerMeshHttpService {
     // Mesh-originated replies are canonical here just like local posts. Settle
     // matching work even if the executor's flight callback is unavailable.
     await this.deps.completeInvocationsForBrokerReply?.(result.message);
+    await this.trackOperatorQuestion(result.message);
     return {
       status: 200,
       body: result.kind === "duplicate"

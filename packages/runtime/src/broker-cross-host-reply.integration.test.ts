@@ -175,3 +175,28 @@ test("mesh executor rejects replacement anchors on duplicate invocations but rep
   expect(journal).not.toContain('"kind":"invocation.dispatch_job.record"');
   expect(journal).not.toContain("msg-other");
 }, 20_000);
+
+test("a question to the operator from another host can be dismissed here, and an answer from another host settles it", async () => {
+  const fixture = authorityFixture();
+  const authority = await startAuthorityFixture(fixture);
+  const [operator, asker] = fixture.actors;
+  const question = (id: string, text: string): MessageRecord => ({
+    ...fixture.request, id, actorId: asker!.id, body: text,
+    metadata: { operatorSignal: { kind: "need", blocking: true, replyExpectation: "required", question: text, options: ["Yes", "No"] } },
+  });
+  const records = async () => (await broker.getJson<{ collaborationRecords: Record<string, { state: string; answer?: string }> }>(authority.baseUrl, "/v1/snapshot")).collaborationRecords;
+
+  const dismissed = question("msg-peer-question-dismissed", "Which window can you give me?");
+  const answered = question("msg-peer-question-answered", "Ship it?");
+  await broker.postJson(authority.baseUrl, "/v1/mesh/messages", { ...fixture, bindings: [], message: dismissed });
+  await broker.postJson(authority.baseUrl, "/v1/mesh/messages", { ...fixture, bindings: [], message: answered });
+  expect((await records())[`operator-question:${dismissed.id}`]).toMatchObject({ state: "open" });
+  expect((await records())[`operator-question:${answered.id}`]).toMatchObject({ state: "open" });
+
+  await broker.postJson(authority.baseUrl, "/v1/operator-requests/dismiss", { requestId: `operator-question:${dismissed.id}` });
+  expect((await records())[`operator-question:${dismissed.id}`]?.state).not.toBe("open");
+
+  const reply: MessageRecord = { ...fixture.request, id: "msg-operator-answer", actorId: operator!.id, body: "Yes", replyToMessageId: answered.id, createdAt: answered.createdAt + 1 };
+  await broker.postJson(authority.baseUrl, "/v1/mesh/messages", { ...fixture, bindings: [], message: reply });
+  expect((await records())[`operator-question:${answered.id}`]).toMatchObject({ state: "closed", answer: "Yes" });
+}, 20_000);

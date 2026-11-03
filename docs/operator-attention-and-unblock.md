@@ -231,6 +231,13 @@ request that a session still waits on is refused with `409`: answer it with a
 decision instead. A record that is already settled returns `410` with
 `outcome: "ended"`.
 
+A question that an agent on another host asks the operator gets an
+`operator-question:` record on the host that stores the conversation, when the
+message arrives there. The operator can dismiss it on that host. When the
+operator's answer arrives from another host, it settles the record in the same
+way as an answer posted locally. Each host keeps its own record, so a dismissal
+on one host does not settle the record on another.
+
 Permission scope is not invented:
 
 - Claude folder trust offers **Allow for project** and **Deny**. Claude persists

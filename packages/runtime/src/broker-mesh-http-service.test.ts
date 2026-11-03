@@ -237,6 +237,7 @@ function createHarness(input: {
   localEndpoints?: Record<string, AgentEndpoint>;
   invocationSnapshotFor?: BrokerMeshHttpServiceDeps["invocationSnapshotFor"];
   messageFor?: BrokerMeshHttpServiceDeps["messageFor"];
+  trackOperatorQuestion?: BrokerMeshHttpServiceDeps["trackOperatorQuestion"];
 } = {}) {
   const agents = input.agents ?? {};
   const localEndpoints = input.localEndpoints ?? {};
@@ -250,6 +251,8 @@ function createHarness(input: {
   const rememberedInvocations: InvocationRequest[] = [];
   const runDispatchJobs: Array<{ job: BrokerInvocationDispatchJob; invocation: InvocationRequest }> = [];
   const completedReplies: MessageRecord[] = [];
+  const trackedQuestions: MessageRecord[] = [];
+  const warnings: string[] = [];
   const plannedInvocations: InvocationRequest[] = [];
   const messageFor = async (id: string) => messages[id] ?? await input.messageFor?.(id);
 
@@ -308,6 +311,11 @@ function createHarness(input: {
       expect(await messageFor(reply.id)).toEqual(reply);
       completedReplies.push(reply);
     },
+    async trackOperatorQuestion(next) {
+      trackedQuestions.push(next);
+      await input.trackOperatorQuestion?.(next);
+    },
+    warn: (warning) => { warnings.push(warning); },
     localEndpointForActor: (actorId) => localEndpoints[actorId],
     async runDispatchJob(job, nextInvocation) {
       runDispatchJobs.push({ job, invocation: nextInvocation });
@@ -328,6 +336,8 @@ function createHarness(input: {
     rememberedInvocations,
     runDispatchJobs,
     service,
+    trackedQuestions,
+    warnings,
   };
 }
 
@@ -568,6 +578,30 @@ describe("BrokerMeshHttpService", () => {
     ]);
   });
 
+  test("a stored mesh message is offered to operator question tracking", async () => {
+    const harness = createHarness();
+    const bundle = messageBundle();
+
+    await harness.service.receiveMessageBundle(bundle);
+    await harness.service.receiveMessageBundle(bundle);
+
+    // The duplicate is offered again; tracking is idempotent on the record id.
+    expect(harness.trackedQuestions).toEqual([bundle.message, bundle.message]);
+  });
+
+  test("a failure to track an operator question does not fail the receipt", async () => {
+    const harness = createHarness({
+      trackOperatorQuestion: async () => { throw new Error("record store unavailable"); },
+    });
+    const bundle = messageBundle();
+
+    const result = await harness.service.receiveMessageBundle(bundle);
+
+    expect(result.status).toBe(200);
+    expect(harness.messages["msg-1"]).toBe(bundle.message);
+    expect(harness.warnings).toEqual(["[mesh] operator question msg-1 was not tracked"]);
+  });
+
   test("rejects non-authority mesh messages after projecting retained bundle entries", async () => {
     const harness = createHarness();
     const bundle = messageBundle({
@@ -585,6 +619,7 @@ describe("BrokerMeshHttpService", () => {
     });
     expect(harness.messages["msg-1"]).toBeUndefined();
     expect(harness.completedReplies).toEqual([]);
+    expect(harness.trackedQuestions).toEqual([]);
     expect(harness.committedEntries).toEqual([]);
     expect(harness.projectedEntries[0]?.map((entry) => entry.kind)).toEqual(["node.upsert"]);
   });
