@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { refusesLoopbackHttpProxy } from "./mesh-loopback-proxy.js";
+import { webStartContextFromRequest } from "./broker-web-control-service.js";
 import { createBaseEdgeRefresh } from "./base-edge-refresh.js";
 
 function deferred<T>() {
@@ -279,4 +283,47 @@ test("retired Caddy exit cannot stop an already-started successor", () => {
   old.emit("exit");
   expect(h.state()).toEqual(before);
   expect(next.killed).toBe(false);
+});
+
+test("actual base startup and retry use allowlisted metadata without proxy headers", async () => {
+  const requests: Request[] = [];
+  let retries = 0;
+  const factory = ts.transpileModule(`
+    let webStartInFlight = false, shuttingDown = false;
+    const process = { env: {} };
+    const brokerControlUrl = "http://127.0.0.1:24400";
+    const log = () => {}, warn = () => {};
+    ${declaration("forwardedProtoForEdgeScheme")}
+    ${declaration("startWebWhenBrokerIsReady").replaceAll("import.meta.url", JSON.stringify(import.meta.url))}
+    return startWebWhenBrokerIsReady;
+  `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const start = new Function(
+    "waitForBrokerHealth", "readTailscaleSelfWebHosts", "resolveEdgeConfig",
+    "fetch", "scheduleWebStartRetry", "resolveLegacyWebEntry", "dirname", "fileURLToPath", factory,
+  )(
+    async () => true,
+    async () => ["mesh.example.test"],
+    () => ({ portalHost: "mesh.example.test", scheme: "https" }),
+    async (url: URL, init: RequestInit) => {
+      const request = new Request(url, init);
+      requests.push(request);
+      const headers = Object.fromEntries(request.headers);
+      expect(refusesLoopbackHttpProxy("loopback", headers)).toBe(false);
+      expect(webStartContextFromRequest({ headers }, new Set(["mesh.example.test"]))).toEqual({
+        publicOrigin: "https://mesh.example.test", trustedHost: "mesh.example.test",
+      });
+      return Response.json(requests.length === 1 ? { ok: false, error: "warming up" } : { ok: true, pid: 1234 },
+        { status: requests.length === 1 ? 503 : 200 });
+    },
+    () => { retries++; },
+    () => "/fixture/web.mjs",
+    dirname,
+    fileURLToPath,
+  );
+  await start();
+  expect(retries).toBe(1);
+  await start();
+  expect(requests).toHaveLength(2);
+  expect(requests.every((request) => request.method === "POST" && new URL(request.url).pathname === "/v1/web/start")).toBe(true);
+  expect(retries).toBe(1);
 });

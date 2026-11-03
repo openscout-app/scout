@@ -620,8 +620,8 @@ async function startWebWhenBrokerIsReady(): Promise<void> {
         method: "POST",
         headers: {
           accept: "application/json",
-          "x-forwarded-host": edgeConfig.portalHost,
-          "x-forwarded-proto": scheme,
+          "x-openscout-web-host": edgeConfig.portalHost,
+          "x-openscout-web-proto": scheme,
         },
         signal: AbortSignal.timeout(15_000),
       });

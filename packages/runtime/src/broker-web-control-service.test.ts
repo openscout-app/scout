@@ -61,10 +61,10 @@ describe("BrokerWebControlService", () => {
     }), trustedHosts)).toEqual({});
   });
 
-  test("derives web start context from forwarded headers", () => {
+  test("derives web start context from local startup metadata", () => {
     const context = webStartContextFromRequest(fakeRequest({
-      "x-forwarded-host": "mesh.example.test",
-      "x-forwarded-proto": "https",
+      "x-openscout-web-host": "mesh.example.test",
+      "x-openscout-web-proto": "https",
     }), new Set(["mesh.example.test"]));
 
     expect(context).toEqual({
@@ -72,9 +72,25 @@ describe("BrokerWebControlService", () => {
       trustedHost: "mesh.example.test",
     });
     expect(webStartContextFromRequest(fakeRequest({
-      "x-forwarded-host": "evil.example.test",
-      "x-forwarded-proto": "https",
+      "x-openscout-web-host": "evil.example.test",
+      "x-openscout-web-proto": "https",
     }), new Set(["mesh.example.test"]))).toEqual({});
+  });
+
+  test("startup metadata is optional and never trusts forwarding headers", () => {
+    expect(webStartContextFromRequest(fakeRequest({}))).toEqual({});
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-forwarded-host": "scout.local",
+      "x-forwarded-proto": "https",
+    }))).toEqual({});
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-openscout-web-host": ["scout.local", "evil.example.test"],
+      "x-openscout-web-proto": ["https", "http"],
+    }))).toEqual({ publicOrigin: "https://scout.local", trustedHost: "scout.local" });
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-openscout-web-host": "scout.local",
+      "x-openscout-web-proto": "javascript",
+    }))).toEqual({ publicOrigin: "http://scout.local", trustedHost: "scout.local" });
   });
 
   test("merges trusted host CSV values without duplicate casing", () => {

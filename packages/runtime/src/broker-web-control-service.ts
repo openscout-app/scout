@@ -139,17 +139,19 @@ export function webStartContextFromRequest(
   request: Pick<RuntimeHttpRequestLike, "headers">,
   trustedHosts: Set<string> = new Set(),
 ): WebStartContext {
-  const forwardedHost = Array.isArray(request.headers["x-forwarded-host"])
-    ? request.headers["x-forwarded-host"][0]
-    : request.headers["x-forwarded-host"];
-  const forwardedProto = Array.isArray(request.headers["x-forwarded-proto"])
-    ? request.headers["x-forwarded-proto"][0]
-    : request.headers["x-forwarded-proto"];
-  const trustedHost = normalizeTrustedWebHost(forwardedHost, trustedHosts);
+  // Startup metadata, not proxy identity or authority. Keep the same host
+  // allowlist; forwarding headers are refused by the loopback ingress gate.
+  const webHost = Array.isArray(request.headers["x-openscout-web-host"])
+    ? request.headers["x-openscout-web-host"][0]
+    : request.headers["x-openscout-web-host"];
+  const webProto = Array.isArray(request.headers["x-openscout-web-proto"])
+    ? request.headers["x-openscout-web-proto"][0]
+    : request.headers["x-openscout-web-proto"];
+  const trustedHost = normalizeTrustedWebHost(webHost, trustedHosts);
   if (!trustedHost) {
     return {};
   }
-  const proto = forwardedProto?.trim().toLowerCase() === "https" ? "https" : "http";
+  const proto = webProto?.trim().toLowerCase() === "https" ? "https" : "http";
   return {
     publicOrigin: `${proto}://${trustedHost}`,
     trustedHost,

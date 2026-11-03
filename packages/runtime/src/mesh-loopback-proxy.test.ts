@@ -73,6 +73,22 @@ describe("loopback proxy refusal", () => {
     }
     expect(f.handled()).toBe(0);
   });
+  test("local startup metadata passes the real gate but cannot override proxy refusal", async () => {
+    for (const mode of ["verify-warn", "enforce"] as const) {
+      const f = await runtime(mode);
+      const headers = {
+        "x-openscout-web-host": "scout.local",
+        "x-openscout-web-proto": "https",
+      };
+      expect((await fetch(f.url + "/v1/web/start", { method: "POST", headers })).status).toBe(200);
+      for (const profile of Object.values(profiles)) {
+        const response = await fetch(f.url + "/v1/web/start", { method: "POST", headers: { ...headers, ...profile } });
+        expect(response.status).toBe(403);
+        expect(await response.json()).toMatchObject({ error: "loopback_proxy_refused" });
+      }
+      expect(f.handled()).toBe(1);
+    }
+  });
   test("the web server's fresh broker client headers still reach local HTTP", async () => {
     const f = await runtime();
     // The web broker service uses requestScoutBrokerJson with no inbound

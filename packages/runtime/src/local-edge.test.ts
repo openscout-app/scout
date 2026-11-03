@@ -144,6 +144,31 @@ describe("OpenScout local edge", () => {
     expect(caddyfile).toContain("handle /__openscout/web/status {\n    respond \"Forbidden\" 403");
   });
 
+  test("only loopback control bridges suppress Caddy's automatic forwarding headers", () => {
+    for (const scheme of ["http", "https", "both"] as const) {
+      const caddyfile = renderOpenScoutCaddyfile(resolveOpenScoutLocalEdgeConfig({ scheme }));
+      const controlBlocks = [...caddyfile.matchAll(/handle @openscout_web_(?:start|status)_local \{[\s\S]*?\n  \}/g)];
+      expect(controlBlocks.length).toBeGreaterThan(0);
+      for (const [block] of controlBlocks) {
+        expect(block).toContain("header_up -X-Forwarded-For");
+        expect(block).toContain("header_up -X-Forwarded-Host");
+        expect(block).toContain("header_up -X-Forwarded-Proto");
+        expect(block).toContain("header_up -Via");
+        expect(block).toContain("header_up X-Openscout-Web-Host {host}");
+        expect(block).toContain("header_up X-Openscout-Web-Proto {scheme}");
+      }
+      expect(caddyfile.match(/header_up -X-Forwarded-For/g)).toHaveLength(controlBlocks.length);
+      for (const field of ["For", "Host", "Proto"]) {
+        expect(caddyfile.match(new RegExp(`header !X-Forwarded-${field}`, "g"))).toHaveLength(controlBlocks.length);
+      }
+      expect(caddyfile.match(/header !Via/g)).toHaveLength(controlBlocks.length);
+      expect(caddyfile).not.toContain("header_up -Forwarded");
+      expect(caddyfile).not.toContain("header_up -Tailscale-");
+      expect(caddyfile).toContain('handle /__openscout/web/start {\n    respond "Forbidden" 403');
+      expect(caddyfile).toContain('handle /__openscout/web/status {\n    respond "Forbidden" 403');
+    }
+  });
+
   test("registers additional tailnet hosts as edge routes", () => {
     const config = resolveOpenScoutLocalEdgeConfig({
       nodeHost: "m1.scout.local",

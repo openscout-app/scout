@@ -600,10 +600,25 @@ function renderCaddyDefaultRouteBlock(
     + `  @openscout_web_start_local {\n`
     + `    path /__openscout/web/start\n`
     + `    remote_ip 127.0.0.1 ::1\n`
+    // Never launder inbound proxy evidence while stripping Caddy's own headers.
+    + `    header !X-Forwarded-For\n`
+    + `    header !X-Forwarded-Host\n`
+    + `    header !X-Forwarded-Proto\n`
+    + `    header !Via\n`
     + `  }\n`
     + `  handle @openscout_web_start_local {\n`
     + `    rewrite * /v1/web/start\n`
-    + `    reverse_proxy ${config.brokerUpstream}\n`
+    + `    reverse_proxy ${config.brokerUpstream} {\n`
+    // These loopback-only control routes are a deliberate local bridge, not
+    // runtime ingress for the web proxy. Remove Caddy's automatic forwarding/Via
+    // headers only here; the runtime's proxy refusal policy stays unchanged.
+    + `      header_up -X-Forwarded-For\n`
+    + `      header_up -X-Forwarded-Host\n`
+    + `      header_up -X-Forwarded-Proto\n`
+    + `      header_up -Via\n`
+    + `      header_up X-Openscout-Web-Host {host}\n`
+    + `      header_up X-Openscout-Web-Proto {scheme}\n`
+    + `    }\n`
     + `  }\n`
     + `  handle /__openscout/web/start {\n`
     + `    respond "Forbidden" 403\n`
@@ -611,10 +626,25 @@ function renderCaddyDefaultRouteBlock(
     + `  @openscout_web_status_local {\n`
     + `    path /__openscout/web/status\n`
     + `    remote_ip 127.0.0.1 ::1\n`
+    // Never launder inbound proxy evidence while stripping Caddy's own headers.
+    + `    header !X-Forwarded-For\n`
+    + `    header !X-Forwarded-Host\n`
+    + `    header !X-Forwarded-Proto\n`
+    + `    header !Via\n`
     + `  }\n`
     + `  handle @openscout_web_status_local {\n`
     + `    rewrite * /v1/web/status\n`
-    + `    reverse_proxy ${config.brokerUpstream}\n`
+    + `    reverse_proxy ${config.brokerUpstream} {\n`
+    // These loopback-only control routes are a deliberate local bridge, not
+    // runtime ingress for the web proxy. Remove Caddy's automatic forwarding/Via
+    // headers only here; the runtime's proxy refusal policy stays unchanged.
+    + `      header_up -X-Forwarded-For\n`
+    + `      header_up -X-Forwarded-Host\n`
+    + `      header_up -X-Forwarded-Proto\n`
+    + `      header_up -Via\n`
+    + `      header_up X-Openscout-Web-Host {host}\n`
+    + `      header_up X-Openscout-Web-Proto {scheme}\n`
+    + `    }\n`
     + `  }\n`
     + `  handle /__openscout/web/status {\n`
     + `    respond "Forbidden" 403\n`
