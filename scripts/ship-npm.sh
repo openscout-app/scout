@@ -168,12 +168,22 @@ if [[ -z "$RELEASE_STATE_DIR" ]]; then
 fi
 RELEASE_RECEIPT_PATH="$RELEASE_STATE_DIR/receipt.json"
 RELEASE_LOCK_DIR="${RELEASE_STATE_DIR}.lock"
-# Local token publication is the default. Hosted OIDC remains an explicit,
-# separately verified workflow authority; neither path falls back to the other.
+# Hosted OIDC publication from release-package-npm.yml is the default, so npm
+# records provenance. A local upload needs ship-release.mjs --local-publish;
+# neither path falls back to the other.
+assert_local_upload_allowed() {
+  [[ "${SCOUT_NPM_LOCAL_PUBLISH:-}" == "1" ]] && return 0
+  echo "ERROR: stable releases publish from release-package-npm.yml; a local upload needs bun run ship -- ${release_version} --execute --yes --local-publish" >&2
+  exit 1
+}
 if [[ "$MODE" == "publish" || "$MODE" == "prepare" || "$MODE" == "publish-prepared" || "$MODE" == "publish-candidate" || "$MODE" == "promote-prepared" ]]; then
   if ! node -e 'const v=process.argv[1].split("-")[0].split(".").map(Number); process.exit(v[0]===0 && (v[1]<2 || (v[1]===2 && v[2]<=90)) ? 1 : 0)' "$release_version"; then
     echo "ERROR: v${release_version} is historical and unsupported; publication is disabled" >&2
     exit 1
+  fi
+  # Refuse before building; publish_missing_artifacts checks again before any upload.
+  if [[ "$PUBLICATION_AUTHORITY" == "local-signed" && "$MODE" == "publish" ]]; then
+    assert_local_upload_allowed
   fi
   if [[ "$PUBLICATION_AUTHORITY" == "github-oidc" ]]; then
     expected_workflow_ref="openscout-app/scout/.github/workflows/release-package-npm.yml@refs/heads/main"
@@ -562,7 +572,8 @@ configure_publish_credentials() {
   fi
   if [[ "$NPM_AUTH_MODE" == "npm-login" ]]; then
     # Inherit the operator's existing npm configuration and terminal. Never
-    # read/copy credentials, invoke a secret helper, or fall back to tokens.
+    # read/copy credentials, invoke a secret helper the operator did not name
+    # in SCOUT_NPM_OTP_COMMAND, or fall back to tokens.
     if ! npm whoami --registry "$NPM_REGISTRY_URL" >/dev/null; then
       echo "ERROR: npm-login requires an existing authenticated npm login; run npm login separately" >&2
       exit 1
@@ -583,7 +594,7 @@ configure_publish_credentials() {
   fi
 }
 
-run_npm_mutation() {
+run_npm_with_config() {
   # macOS still ships Bash 3.2, where expanding a declared-but-empty array
   # under `set -u` aborts with "unbound variable". Keep the optional local
   # token argument behind an explicit scalar check so trusted publishing can
@@ -593,6 +604,29 @@ run_npm_mutation() {
   else
     npm "$@"
   fi
+}
+
+run_npm_mutation() {
+  # A one-time code lasts about 30 seconds, and the publisher waits for
+  # registry propagation between writes, so one code cannot cover a release.
+  # Without a terminal for npm to prompt in, the operator can name a command
+  # that prints a fresh code; it runs immediately before each write, and the
+  # code reaches only that write. The code is never printed.
+  if [[ -n "${SCOUT_NPM_OTP_COMMAND:-}" && "${GITHUB_ACTIONS:-}" != "true" ]]; then
+    local otp
+    if ! otp=$(bash -c "$SCOUT_NPM_OTP_COMMAND"); then
+      echo "ERROR: SCOUT_NPM_OTP_COMMAND failed" >&2
+      return 1
+    fi
+    otp="${otp//[[:space:]]/}"
+    if [[ ! "$otp" =~ ^[0-9]{6,8}$ ]]; then
+      echo "ERROR: SCOUT_NPM_OTP_COMMAND did not print a one-time code" >&2
+      return 1
+    fi
+    npm_config_otp="$otp" run_npm_with_config "$@"
+    return
+  fi
+  run_npm_with_config "$@"
 }
 
 build_and_check() {
@@ -746,6 +780,9 @@ wait_for_exact_artifact() {
 
 publish_missing_artifacts() {
   local index name version tarball
+  # Promotion and verification of a pair already on npm never reach this point,
+  # so resuming a local release needs no flag; a new local upload does.
+  [[ "$PUBLICATION_AUTHORITY" == "local-signed" ]] && assert_local_upload_allowed
   for index in "${!PUBLISH_PACKAGES[@]}"; do
     if [[ "${PACKAGE_EXISTS[$index]}" == "1" ]]; then
       echo "  ✓ ${PACKAGE_NAMES[$index]}@${PACKAGE_VERSIONS[$index]} already matches ${release_sha}"
@@ -830,6 +867,11 @@ inspect_registry_state
 assert_registry_preflight
 
 if [[ "$MODE" == "verify-state" ]]; then
+  # A run without --local-publish may only finish a pair already on npm. Refuse
+  # here, before ship-release.mjs creates the tag or a candidate marker.
+  if [[ "${SCOUT_NPM_RESUME_ONLY:-}" == "1" ]] && ! all_artifacts_exist; then
+    assert_local_upload_allowed
+  fi
   if all_artifacts_exist && [[ "$RELEASE_RECEIPT_LOADED" != "1" ]]; then
     load_release_receipt
     inspect_registry_state

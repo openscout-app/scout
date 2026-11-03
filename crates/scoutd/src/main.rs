@@ -1,6 +1,9 @@
 #[cfg(not(unix))]
 compile_error!("scoutd first slice requires a Unix-like platform.");
 
+mod health_observations;
+mod health_sweep;
+mod health_worker;
 mod probes;
 
 use std::collections::HashSet;
@@ -9,6 +12,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -114,6 +118,9 @@ const OPTIONAL_LAUNCH_ENV_KEYS: &[&str] = &[
     "OPENSCOUT_RUNTIME_BUILD_PIN",
     "OPENSCOUT_RUNTIME_BUILD_PIN_REASON",
     "OPENSCOUT_HOME",
+    "OPENSCOUT_APP_BUNDLE_PATH",
+    "OPENSCOUT_PAIRING_PORT",
+    "OPENSCOUT_WEB_SERVER_ENTRY",
     "OPENSCOUT_PROBES_SOCKET",
     // Instance isolation (packages/runtime/src/instance.ts): a non-prod
     // instance's launchd service must keep its root and port block.
@@ -762,6 +769,12 @@ struct SupervisionTestHooks {
     fail_phase: &'static str,
     write_attempts: Vec<(&'static str, u32)>,
     observations: usize,
+    sweep_samples: Vec<(u32, health_sweep::Observation)>,
+    sweep_actions: Vec<(u32, String)>,
+    sweep_states: Vec<(u32, Vec<health_sweep::Condition>)>,
+    sweep_notifications_succeed: bool,
+    sweep_probe_ticks: Vec<(u32, bool)>,
+    health_worker: Option<health_worker::Worker>,
 }
 
 #[cfg(test)]
@@ -867,6 +880,8 @@ fn supervise_service_inner(
         }
     };
 
+    let base_spawned_at_ms = if testing { started_at_ms } else { epoch_ms() };
+
     let mut probe_restart_count = 0_u32;
     let mut probe_restart_delay = RESTART_MIN_DELAY;
     let mut last_probe_exit: Option<ChildExitTelemetry> = None;
@@ -956,6 +971,32 @@ fn supervise_service_inner(
         }};
     }
     let mut next_process_sweep = clock_now!();
+    let sweep_started = clock_now!();
+    let mut next_health_sweep = sweep_started;
+    let mut next_slow_sweep = sweep_started;
+    #[cfg(test)]
+    let injected_worker = test_hooks.as_mut().and_then(|h| h.health_worker.take());
+    #[cfg(not(test))]
+    let injected_worker = None;
+    let mut health_worker = if testing {
+        injected_worker
+    } else {
+        health_worker::Worker::start(config.clone())
+    };
+    let mut health_worker_backoff = health_worker::RestartBackoff::new(clock_now!());
+    if !testing && health_worker.is_none() {
+        let delay = health_worker_backoff.failed(clock_now!());
+        eprintln!(
+            "[scoutd] health worker start failed #{}; retry in {}s",
+            health_worker_backoff.failures,
+            delay.as_secs()
+        );
+    }
+    let mut health_sweep = load_health_sweep(config).unwrap_or_default();
+    health_sweep.base_started(base_spawned_at_ms);
+    if !testing {
+        prepare_health_reserve(config);
+    }
 
     loop {
         #[cfg(test)]
@@ -992,6 +1033,211 @@ fn supervise_service_inner(
                 }
             }
             next_process_sweep = clock_now!() + PROCESS_SWEEP_INTERVAL;
+        }
+
+        if !testing && health_worker.is_none() && health_worker_backoff.due(clock_now!()) {
+            health_worker = health_worker::Worker::start(config.clone());
+            if health_worker.is_some() {
+                health_worker_backoff.started();
+                next_health_sweep = clock_now!();
+            } else {
+                let delay = health_worker_backoff.failed(clock_now!());
+                eprintln!(
+                    "[scoutd] health worker start failed #{}; retry in {}s",
+                    health_worker_backoff.failures,
+                    delay.as_secs()
+                );
+            }
+        }
+        let mut collected = None;
+        let mut worker_disconnected = false;
+        if let Some(worker) = health_worker.as_mut() {
+            while let Some(result) = worker.poll() {
+                match result {
+                    health_worker::Result::Disconnected => worker_disconnected = true,
+                    health_worker::Result::Observed {
+                        observation,
+                        base_pid,
+                    } => {
+                        health_worker_backoff.observed(clock_now!());
+                        if base_pid == child.id() {
+                            collected = Some(observation);
+                        }
+                    }
+                    health_worker::Result::Notified {
+                        id,
+                        since,
+                        level,
+                        delivered,
+                    } => {
+                        // A delayed delivery result must not alter a new incident.
+                        if let Some(condition) = health_sweep
+                            .conditions
+                            .iter_mut()
+                            .find(|c| c.condition == id && c.delivery_matches(since, level))
+                        {
+                            if !delivered {
+                                condition.delivery_failed(epoch_ms());
+                            }
+                            if let Err(error) = publish_health_sweep(config, &health_sweep) {
+                                eprintln!(
+                                    "[scoutd] health delivery checkpoint unavailable: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if worker_disconnected {
+            #[cfg(test)]
+            if let Some(hooks) = test_hooks.as_mut() {
+                hooks
+                    .sweep_actions
+                    .push((hooks.ticks, "worker-disconnected".into()));
+            }
+            let delay = health_worker_backoff.failed(clock_now!());
+            eprintln!("[scoutd] health worker disconnected #{}; restarting in {}s; delivery reservations preserved", health_worker_backoff.failures, delay.as_secs());
+            health_worker = None;
+            // Lost observations must not consume the next slow sweep.
+            next_slow_sweep = clock_now!();
+        }
+        let sweep_due = clock_now!() >= next_health_sweep;
+        if sweep_due || collected.is_some() {
+            let now = if testing {
+                started_at_ms + clock_now!().duration_since(sweep_started).as_millis()
+            } else {
+                epoch_ms()
+            };
+            let slow = sweep_due && clock_now!() >= next_slow_sweep;
+            #[cfg(test)]
+            let injected = test_hooks.as_mut().and_then(|hooks| {
+                hooks.sweep_probe_ticks.push((hooks.ticks, slow));
+                hooks
+                    .sweep_samples
+                    .iter()
+                    .rev()
+                    .find(|(tick, _)| *tick <= hooks.ticks)
+                    .map(|(_, sample)| sample.clone())
+            });
+            #[cfg(not(test))]
+            let injected: Option<health_sweep::Observation> = None;
+            let observation_scheduled = if sweep_due {
+                health_worker
+                    .as_mut()
+                    .map_or(testing, |worker| worker.observe(slow, now, child.id()))
+            } else {
+                false
+            };
+            let observation = injected.or(collected);
+            if let Some(observation) = observation {
+                let restart = health_sweep.observe_all(now, &observation);
+                let runtime_up = observation
+                    .health
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| {
+                        v.pointer("/startup/mutationsAdmitted")
+                            .and_then(|s| s.as_bool())
+                            .or_else(|| v.get("ok").and_then(|s| s.as_bool()))
+                    })
+                    == Some(true);
+                let delivery_busy = health_worker
+                    .as_ref()
+                    .map_or(!testing, |w| w.notification_pending);
+                for id in health_sweep
+                    .due_notifications(now)
+                    .into_iter()
+                    .take(if delivery_busy { 0 } else { 1 })
+                {
+                    if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let index = health_sweep
+                        .conditions
+                        .iter()
+                        .position(|c| c.condition == id)
+                        .unwrap();
+                    // Persist the reservation before invoking any delivery path. A
+                    // crash after display/recording cannot duplicate a notification.
+                    health_sweep.conditions[index].reserve_notice(now);
+                    let reserved =
+                        write_state!("health", publish_health_sweep(config, &health_sweep)).is_ok();
+                    let condition = &health_sweep.conditions[index];
+                    let delivered = if reserved {
+                        #[cfg(test)]
+                        {
+                            if let Some(hooks) = test_hooks.as_mut() {
+                                hooks.sweep_actions.push((
+                                    hooks.ticks,
+                                    format!(
+                                        "notify:{}:{}",
+                                        if runtime_up { "runtime" } else { "local" },
+                                        id
+                                    ),
+                                ));
+                                hooks.sweep_notifications_succeed
+                            } else {
+                                health_worker
+                                    .as_mut()
+                                    .is_some_and(|w| w.notify(condition.clone(), runtime_up))
+                            }
+                        }
+                        #[cfg(not(test))]
+                        {
+                            health_worker
+                                .as_mut()
+                                .is_some_and(|w| w.notify(condition.clone(), runtime_up))
+                        }
+                    } else {
+                        false
+                    };
+                    if !delivered {
+                        // Explicit failures retry after a persisted bounded delay.
+                        health_sweep.conditions[index].delivery_failed(now);
+                    }
+                }
+                let persisted = write_state!("health", publish_health_sweep(config, &health_sweep));
+                if let Err(error) = &persisted {
+                    eprintln!("[scoutd] health sweep state unavailable: {error}");
+                }
+                if restart && persisted.is_err() {
+                    health_sweep.defer_restart(now);
+                }
+                #[cfg(test)]
+                if let Some(hooks) = test_hooks.as_mut() {
+                    hooks
+                        .sweep_states
+                        .push((hooks.ticks, health_sweep.conditions.clone()));
+                }
+                if restart && persisted.is_ok() && !SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    #[cfg(test)]
+                    let intercepted = if let Some(hooks) = test_hooks.as_mut() {
+                        hooks
+                            .sweep_actions
+                            .push((hooks.ticks, "restart-base".into()));
+                        true
+                    } else {
+                        false
+                    };
+                    #[cfg(not(test))]
+                    let intercepted = false;
+                    if !intercepted {
+                        // Only this retained Child carries signalling authority.
+                        if let Err(error) =
+                            terminate_child(&mut child, "degraded Bun base", CHILD_SHUTDOWN_TIMEOUT)
+                        {
+                            eprintln!("[scoutd] health sweep could not stop owned base: {error}");
+                        }
+                    }
+                }
+            }
+            if slow && observation_scheduled {
+                next_slow_sweep = clock_now!() + health_observations::SLOW_INTERVAL;
+            }
+            if sweep_due {
+                next_health_sweep = clock_now!() + Duration::from_secs(30);
+            }
         }
 
         if let Some(probe) = probe_child.as_mut() {
@@ -1086,6 +1332,8 @@ fn supervise_service_inner(
                 restart_delay = doubled_delay(restart_delay);
                 runtime_build = configured_runtime_artifact(config);
                 child = spawn_base_process(config)?;
+                // Crash respawns must not postpone an open projection outage.
+                // Only supervisor startup and sweep recovery grant a boot window.
                 refresh_state!(
                     "base-started",
                     write_state!(
@@ -1308,6 +1556,46 @@ fn spawn_probe_process(config: &Config) -> Result<Child, String> {
         .map_err(|error| format!("failed to start probe server: {error}"))
 }
 
+fn maintain_health_sweep_logs(config: &Config) -> Result<(), String> {
+    let base_logs = config.support_directory.join("logs/base");
+    let mut paths = vec![
+        (config.stdout_log_path.clone(), &config.logs_directory),
+        (config.stderr_log_path.clone(), &config.logs_directory),
+        (
+            config.probe_stdout_log_path.clone(),
+            &config.probe_logs_directory,
+        ),
+        (
+            config.probe_stderr_log_path.clone(),
+            &config.probe_logs_directory,
+        ),
+    ];
+    for role in [
+        "broker",
+        "pairing",
+        "room-listening",
+        "mdns",
+        "edge",
+        "menu",
+        "mesh-bridge",
+    ] {
+        for stream in ["stdout", "stderr"] {
+            paths.push((base_logs.join(format!("{role}.{stream}.log")), &base_logs));
+        }
+    }
+    let mut errors = Vec::new();
+    for (path, directory) in paths {
+        if let Err(error) = rotate_child_log_if_needed(&path, directory) {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 fn prepare_child_logs_for_spawn(config: &Config) -> Result<(), String> {
     rotate_child_log_if_needed(&config.stdout_log_path, &config.logs_directory)?;
     rotate_child_log_if_needed(&config.stderr_log_path, &config.logs_directory)
@@ -1330,6 +1618,37 @@ fn open_child_log(path: &Path) -> Result<fs::File, String> {
 }
 
 fn rotate_child_log_if_needed(path: &Path, logs_directory: &Path) -> Result<(), String> {
+    rotate_child_log_with_guard(path, logs_directory, |file| {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })
+}
+fn rotation_guard_allows(
+    result: io::Result<()>,
+    warned: &AtomicBool,
+    warn_unavailable: impl FnOnce(&io::Error),
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => false,
+        Err(error) => {
+            // Advisory locking is optional; preserve the pre-lock rotation
+            // behavior on filesystems that cannot provide it.
+            if !warned.swap(true, Ordering::Relaxed) {
+                warn_unavailable(&error);
+            }
+            true
+        }
+    }
+}
+fn rotate_child_log_with_guard(
+    path: &Path,
+    logs_directory: &Path,
+    lock: impl FnOnce(&fs::File) -> io::Result<()>,
+) -> Result<(), String> {
     if !scoutd_owned_child_log_path(path, logs_directory) {
         return Ok(());
     }
@@ -1338,43 +1657,138 @@ fn rotate_child_log_if_needed(path: &Path, logs_directory: &Path) -> Result<(), 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(format!("failed to inspect log {}: {error}", path.display())),
     };
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() || metadata.nlink() != 1
+    {
         return Ok(());
     }
     if metadata.len() <= CHILD_LOG_ROTATE_LIMIT {
         return Ok(());
     }
 
-    let mut file = fs::File::open(path)
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
         .map_err(|error| format!("failed to read log {}: {error}", path.display()))?;
+    let opened = file.metadata().map_err(|error| error.to_string())?;
+    if !opened.is_file()
+        || opened.uid() != unsafe { libc::geteuid() }
+        || opened.nlink() != 1
+        || opened.ino() != metadata.ino()
+        || opened.dev() != metadata.dev()
+    {
+        return Ok(());
+    }
+    // Spawn-time rotation and the sweep share this nonblocking inode guard.
+    // Append writers do not take it; only competing rotators are excluded.
+    static UNAVAILABLE_WARNING: AtomicBool = AtomicBool::new(false);
+    if !rotation_guard_allows(lock(&file), &UNAVAILABLE_WARNING, |error| {
+        eprintln!("[scoutd] advisory log locking unavailable; rotating without a lock: {error}");
+    }) {
+        return Ok(());
+    }
+    let current_len = file.metadata().map_err(|error| error.to_string())?.len();
+    if current_len <= CHILD_LOG_ROTATE_LIMIT {
+        return Ok(());
+    }
     file.seek(SeekFrom::Start(
-        metadata.len().saturating_sub(CHILD_LOG_ROTATE_LIMIT),
+        current_len.saturating_sub(CHILD_LOG_ROTATE_LIMIT),
     ))
     .map_err(|error| format!("failed to seek log {}: {error}", path.display()))?;
     let mut retained_tail = Vec::new();
-    file.read_to_end(&mut retained_tail)
+    (&mut file)
+        .take(CHILD_LOG_ROTATE_LIMIT)
+        .read_to_end(&mut retained_tail)
         .map_err(|error| format!("failed to retain log tail {}: {error}", path.display()))?;
 
     let rotated_path = rotated_child_log_path(path);
-    fs::write(&rotated_path, retained_tail).map_err(|error| {
-        format!(
-            "failed to write rotated log {}: {error}",
-            rotated_path.display()
-        )
-    })?;
-    OpenOptions::new()
+    // Never follow a pre-existing rotation symlink into user data.
+    if let Ok(metadata) = fs::symlink_metadata(&rotated_path) {
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+    }
+    let mut rotated = match OpenOptions::new()
         .write(true)
-        .open(path)
-        .and_then(|file| file.set_len(0))
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&rotated_path)
+    {
+        Ok(file) => file,
+        Err(error) if space_error(&error) => {
+            // No inode/block is available for a snapshot. Scout-owned logs are
+            // expendable; reclaim their space rather than latch on ENOSPC.
+            return file.set_len(0).map_err(|error| error.to_string());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let metadata = rotated.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Ok(());
+    }
+    retain_or_reclaim_log(&file, || write_log_tail(&mut rotated, &retained_tail)).map_err(
+        |error| {
+            format!(
+                "failed to write rotated log {}: {error}",
+                rotated_path.display()
+            )
+        },
+    )?;
+    file.set_len(0)
         .map_err(|error| format!("failed to truncate log {}: {error}", path.display()))
 }
 
+fn write_log_tail(rotated: &mut fs::File, tail: &[u8]) -> io::Result<()> {
+    // set_len does not reset the cursor after a partial ENOSPC write.
+    rotated.seek(SeekFrom::Start(0))?;
+    rotated.set_len(0)?;
+    rotated.write_all(tail)
+}
+
+fn space_error(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSPC) | Some(libc::EDQUOT)
+    )
+}
+fn retain_or_reclaim_log(
+    source: &fs::File,
+    mut write_tail: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    match write_tail() {
+        Err(error) if space_error(&error) => {
+            source.set_len(0)?;
+            write_tail()
+        }
+        result => result,
+    }
+}
+
 fn scoutd_owned_child_log_path(path: &Path, logs_directory: &Path) -> bool {
-    path.parent() == Some(logs_directory)
-        && matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("stdout.log" | "stderr.log")
-        )
+    if path.parent() != Some(logs_directory) {
+        return false;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if matches!(name, "stdout.log" | "stderr.log") {
+        return true;
+    }
+    logs_directory.file_name().and_then(|n| n.to_str()) == Some("base")
+        && [
+            "broker",
+            "pairing",
+            "room-listening",
+            "mdns",
+            "edge",
+            "menu",
+            "mesh-bridge",
+        ]
+        .iter()
+        .any(|role| name == format!("{role}.stdout.log") || name == format!("{role}.stderr.log"))
 }
 
 fn rotated_child_log_path(path: &Path) -> PathBuf {
@@ -3966,6 +4380,7 @@ fn status_json(status: &ServiceStatus) -> String {
 \"hostInfoPath\":{},\
 \"scoutdStatePath\":{},\
 \"scoutdState\":{},\
+\"healthSweep\":{},\
 \"runtimeFreshness\":{},\
 \"probes\":{}\
 }}",
@@ -4000,9 +4415,134 @@ fn status_json(status: &ServiceStatus) -> String {
         json_string(&status.config.host_info_path.to_string_lossy()),
         json_string(&status.config.daemon_state_path.to_string_lossy()),
         status.daemon_state.as_deref().unwrap_or("null"),
+        health_sweep_json(&status.config),
         serde_json::to_string(&status.runtime_freshness).unwrap_or_else(|_| "null".to_string()),
         serde_json::to_string(&status.probes).unwrap_or_else(|_| "null".to_string()),
     )
+}
+
+const HEALTH_RESERVE_HEADER: &[u8] = b"SCOUT_HEALTH_RESERVE_V1\n";
+fn prepare_health_reserve(config: &Config) {
+    let path = config.runtime_directory.join("scoutd-health-reserve.tmp");
+    if let Ok(mut file) = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        let mut bytes = vec![0; 65536];
+        bytes[..HEALTH_RESERVE_HEADER.len()].copy_from_slice(HEALTH_RESERVE_HEADER);
+        let _ = file.write_all(&bytes).and_then(|_| file.sync_all());
+    }
+}
+fn release_health_reserve(config: &Config) -> bool {
+    let path = config.runtime_directory.join("scoutd-health-reserve.tmp");
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.len() > 65536
+    {
+        return false;
+    }
+    let mut header = vec![0; HEALTH_RESERVE_HEADER.len()];
+    if file.read_exact(&mut header).is_err() || header != HEALTH_RESERVE_HEADER {
+        return false;
+    }
+    let Ok(current) = fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if current.ino() != metadata.ino() || current.dev() != metadata.dev() {
+        return false;
+    }
+    fs::remove_file(path).is_ok()
+}
+fn publish_health_sweep(config: &Config, sweep: &health_sweep::Sweep) -> Result<(), String> {
+    let result = publish_health_sweep_once(config, sweep);
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|e| matches!(e.raw_os_error(), Some(libc::ENOSPC) | Some(libc::EDQUOT)))
+        && release_health_reserve(config)
+    {
+        return publish_health_sweep_once(config, sweep).map_err(|e| e.to_string());
+    }
+    result.map_err(|e| e.to_string())
+}
+fn health_stage_path(config: &Config) -> PathBuf {
+    static NONCE: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let nonce = NONCE.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    });
+    // A recycled pid after reboot must not latch publication on an old temp.
+    config.runtime_directory.join(format!(
+        "scoutd-health.json.{}.{nonce}.tmp",
+        std::process::id()
+    ))
+}
+fn publish_health_sweep_once(config: &Config, sweep: &health_sweep::Sweep) -> io::Result<()> {
+    let path = config.runtime_directory.join("scoutd-health.json");
+    let temp = health_stage_path(config);
+    let mut value = serde_json::to_value(sweep).map_err(io::Error::other)?;
+    value["checkedAt"] = serde_json::json!(epoch_ms());
+    let bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
+    // Exclusive creation never follows or truncates an existing temp/lock.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    let result = file
+        .write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .and_then(|_| fs::rename(&temp, &path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn load_health_sweep(config: &Config) -> Option<health_sweep::Sweep> {
+    let path = config.runtime_directory.join("scoutd-health.json");
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 65536 {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn health_sweep_json(config: &Config) -> String {
+    let path = config.runtime_directory.join("scoutd-health.json");
+    fs::File::open(path)
+        .ok()
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
+            serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+        })
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".into())
 }
 
 fn health_json(health: &HealthStatus) -> String {
@@ -4331,6 +4871,12 @@ mod tests {
             fail_phase: "periodic",
             write_attempts: Vec::new(),
             observations: 0,
+            sweep_samples: Vec::new(),
+            sweep_actions: Vec::new(),
+            sweep_states: Vec::new(),
+            sweep_notifications_succeed: true,
+            sweep_probe_ticks: Vec::new(),
+            health_worker: None,
         };
         // The production supervisor loop used to propagate the injected error
         // and exit on its first periodic publication. This must reach shutdown.
@@ -4359,6 +4905,474 @@ mod tests {
             );
         }
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn run_sweep_loop(
+        samples: Vec<(u32, super::health_sweep::Observation)>,
+        ticks: u32,
+        prior: Option<super::health_sweep::Sweep>,
+    ) -> super::SupervisionTestHooks {
+        run_sweep_loop_delivery(samples, ticks, prior, true)
+    }
+    fn run_sweep_loop_delivery(
+        samples: Vec<(u32, super::health_sweep::Observation)>,
+        ticks: u32,
+        prior: Option<super::health_sweep::Sweep>,
+        notification_success: bool,
+    ) -> super::SupervisionTestHooks {
+        run_sweep_loop_worker(samples, ticks, prior, notification_success, None)
+    }
+    fn run_sweep_loop_worker(
+        samples: Vec<(u32, super::health_sweep::Observation)>,
+        ticks: u32,
+        prior: Option<super::health_sweep::Sweep>,
+        notification_success: bool,
+        worker: Option<super::health_worker::Worker>,
+    ) -> super::SupervisionTestHooks {
+        use std::process::{Command, Stdio};
+        let owned = || {
+            Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let base = owned();
+        let probe = owned();
+        let expected_pids = (base.id(), probe.id());
+        let _guard = OwnedPipeChildren(vec![base.id(), probe.id()]);
+        let directory = unique_temp_path("sweep-loop");
+        fs::create_dir_all(&directory).unwrap();
+        let mut config = test_config("/nonexistent-runtime", "/nonexistent-scoutd", "scoutd.test");
+        config.runtime_directory = directory.clone();
+        config.daemon_state_path = directory.join("state.json");
+        if let Some(prior) = prior {
+            super::publish_health_sweep(&config, &prior).unwrap();
+        }
+        let mut hooks = super::SupervisionTestHooks {
+            base: Some(base),
+            probe: Some(probe),
+            expected_pids,
+            start: std::time::Instant::now(),
+            ticks: 0,
+            stop_after_ticks: ticks,
+            fail_phase: "",
+            write_attempts: Vec::new(),
+            observations: 0,
+            sweep_samples: samples,
+            sweep_actions: Vec::new(),
+            sweep_states: Vec::new(),
+            sweep_notifications_succeed: notification_success,
+            sweep_probe_ticks: Vec::new(),
+            health_worker: worker,
+        };
+        super::supervise_service_inner(&config, Some(&mut hooks)).unwrap();
+        assert_eq!(hooks.observations, ticks as usize);
+        fs::remove_dir_all(directory).unwrap();
+        hooks
+    }
+
+    #[test]
+    fn supervisor_keeps_polling_owned_children_and_shuts_down_during_held_health_work() {
+        use super::health_worker::{Job, Result, Worker};
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut worker = Worker::start_with(move |job| {
+            wait.recv().unwrap();
+            match job {
+                Job::Observe { base_pid, .. } => Result::Observed {
+                    observation: super::health_sweep::Observation::default(),
+                    base_pid,
+                },
+                Job::Notify { condition, .. } => Result::Notified {
+                    id: condition.condition,
+                    since: condition.since,
+                    level: condition.notice_level,
+                    delivered: false,
+                },
+            }
+        })
+        .unwrap();
+        worker.observe(true, 0, 42);
+        let start = std::time::Instant::now();
+        let hooks = run_sweep_loop_worker(Vec::new(), 100, None, true, Some(worker));
+        assert_eq!(hooks.observations, 100);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        // The worker remains held until after both owned children were reaped.
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn pending_observation_does_not_advance_the_slow_sweep_deadline() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut worker = super::health_worker::Worker::start_with(move |job| {
+            wait.recv().unwrap();
+            match job {
+                super::health_worker::Job::Observe { base_pid, .. } => {
+                    super::health_worker::Result::Observed {
+                        observation: super::health_sweep::Observation::default(),
+                        base_pid,
+                    }
+                }
+                _ => panic!("unexpected notification"),
+            }
+        })
+        .unwrap();
+        assert!(worker.observe(true, 0, 42));
+        let hooks = run_sweep_loop_worker(Vec::new(), 601, None, true, Some(worker));
+        assert_eq!(
+            hooks.sweep_probe_ticks,
+            vec![(0, true), (300, true), (600, true)]
+        );
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn supervisor_reports_a_dead_health_worker_without_losing_child_custody() {
+        let (done, dead) = std::sync::mpsc::channel::<()>();
+        let mut worker = super::health_worker::Worker::start_with(move |_| {
+            drop(done.clone());
+            panic!("injected health worker failure");
+        })
+        .unwrap();
+        worker.observe(true, 0, 42);
+        // Wait for the injected panic to unwind; no Scout service is started.
+        assert!(dead
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_err());
+        let hooks = run_sweep_loop_worker(Vec::new(), 100, None, true, Some(worker));
+        assert_eq!(hooks.observations, 100);
+        assert_eq!(
+            hooks
+                .sweep_actions
+                .iter()
+                .filter(|(_, a)| a == "worker-disconnected")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn sweep_loop_long_disk_latch_recovers_without_an_outage_notice() {
+        use super::health_sweep::Observation;
+        let low = Observation {
+            health: Some(r#"{"startup":{"phase":"degraded","error":"SQLITE_FULL"}}"#.into()),
+            disk: Some((0, 100 << 30)),
+            ..Observation::default()
+        };
+        let freed = Observation {
+            disk: Some((10 << 30, 100 << 30)),
+            ..low.clone()
+        };
+        let booting = Observation {
+            disk: freed.disk,
+            ..Observation::default()
+        };
+        let ready = Observation {
+            health: Some(r#"{"startup":{"mutationsAdmitted":true}}"#.into()),
+            ..booting.clone()
+        };
+        let hooks = run_sweep_loop(
+            vec![(0, low), (6600, freed), (6900, booting), (7200, ready)],
+            7501,
+            None,
+        );
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![
+                (600, "notify:local:disk".into()),
+                (1200, "notify:local:startup-projection".into()),
+                (6600, "restart-base".into())
+            ]
+        );
+        assert!(hooks.sweep_states.last().unwrap().1.is_empty());
+    }
+    #[test]
+    fn sweep_loop_gives_a_new_child_time_to_boot_with_an_old_checkpoint() {
+        use super::health_sweep::{Observation, Sweep};
+        let mut prior = Sweep::default();
+        prior.observe(
+            super::epoch_ms() - 1_200_000,
+            Some(r#"{"startup":{"phase":"degraded","error":"schema failed"}}"#),
+            None,
+        );
+        let hooks = run_sweep_loop(vec![(0, Observation::default())], 6301, Some(prior));
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![(6000, "notify:local:startup-projection".into())]
+        );
+    }
+
+    #[test]
+    fn sweep_loop_reports_an_unready_successor_after_ten_minutes() {
+        use super::health_sweep::Observation;
+        let broken = Observation {
+            health: Some(r#"{"startup":{"phase":"degraded","error":"schema failed"}}"#.into()),
+            ..Observation::default()
+        };
+        let hooks = run_sweep_loop(
+            vec![(0, broken), (1300, Observation::default())],
+            7501,
+            None,
+        );
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![
+                (1200, "restart-base".into()),
+                (7200, "notify:local:startup-projection".into())
+            ]
+        );
+    }
+    #[test]
+    fn sweep_loop_reports_manual_repair_after_its_space_notice_and_failed_restart() {
+        use super::health_sweep::{NoticeLevel, Observation};
+        let broken = Observation {
+            health: Some(r#"{"startup":{"phase":"degraded","error":"SQLITE_FULL"}}"#.into()),
+            disk: Some((0, 100 << 30)),
+            ..Observation::default()
+        };
+        let space = Observation {
+            disk: Some((10 << 30, 100 << 30)),
+            ..broken.clone()
+        };
+        let hooks = run_sweep_loop(vec![(0, broken), (1500, space)], 2101, None);
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![
+                (600, "notify:local:disk".into()),
+                (1200, "notify:local:startup-projection".into()),
+                (1500, "restart-base".into()),
+                (1800, "notify:local:startup-projection".into())
+            ]
+        );
+        let manual = hooks
+            .sweep_states
+            .iter()
+            .find(|(tick, _)| *tick == 1800)
+            .unwrap()
+            .1
+            .iter()
+            .find(|c| c.condition == "startup-projection")
+            .unwrap();
+        assert_eq!(manual.notified_level, Some(NoticeLevel::Manual));
+        assert!(manual.action.contains("Repair"));
+    }
+
+    #[test]
+    fn sweep_loop_reports_relay_after_90_seconds_without_restarting_and_clears() {
+        use super::health_sweep::{Observation, ServiceObservation};
+        let broken = Observation {
+            relay: Some(ServiceObservation {
+                expected: true,
+                running: false,
+                cause: "no listener".into(),
+                action: "restart phone pairing".into(),
+            }),
+            ..Observation::default()
+        };
+        let clear = Observation {
+            relay: Some(ServiceObservation::default()),
+            ..Observation::default()
+        };
+        let hooks = run_sweep_loop(vec![(0, broken), (1200, clear)], 1501, None);
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![(900, "notify:local:relay".into())]
+        );
+        assert!(hooks.sweep_states[0]
+            .1
+            .iter()
+            .any(|c| c.condition == "relay"));
+        assert!(hooks.sweep_states.last().unwrap().1.is_empty());
+    }
+    #[test]
+    fn sweep_loop_headless_web_is_quiet_then_reports_missing_entry_and_clears() {
+        use super::health_sweep::{Observation, ServiceObservation};
+        let headless = Observation {
+            web: Some(ServiceObservation::default()),
+            ..Observation::default()
+        };
+        let broken = Observation {
+            web: Some(ServiceObservation {
+                expected: true,
+                running: false,
+                cause: "no web entry: legacy-app-services.json is missing".into(),
+                action: "open Scout.app once".into(),
+            }),
+            ..Observation::default()
+        };
+        let hooks = run_sweep_loop(
+            vec![(0, headless.clone()), (300, broken), (1500, headless)],
+            1801,
+            None,
+        );
+        assert!(hooks.sweep_states[0].1.is_empty());
+        assert_eq!(hooks.sweep_actions, vec![(1200, "notify:local:web".into())]);
+        assert!(hooks.sweep_states.last().unwrap().1.is_empty());
+    }
+    #[test]
+    fn sweep_loop_disk_gate_owned_restart_notify_once_and_clear() {
+        use super::health_sweep::Observation;
+        let full = r#"{"startup":{"phase":"degraded","error":"SQLITE_FULL"}}"#;
+        let ready = r#"{"startup":{"mutationsAdmitted":true}}"#;
+        let low = Observation {
+            health: Some(full.into()),
+            disk: Some((0, 100 << 30)),
+            top_consumers: vec!["base logs 999 MiB".into()],
+            ..Observation::default()
+        };
+        let space = Observation {
+            health: Some(full.into()),
+            disk: Some((10 << 30, 100 << 30)),
+            ..Observation::default()
+        };
+        let clear = Observation {
+            health: Some(ready.into()),
+            disk: space.disk,
+            ..Observation::default()
+        };
+        let hooks = run_sweep_loop(vec![(0, low), (1500, space), (1800, clear)], 2101, None);
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![
+                (600, "notify:local:disk".into()),
+                (1200, "notify:local:startup-projection".into()),
+                (1500, "restart-base".into())
+            ]
+        );
+        assert!(hooks.sweep_states[0]
+            .1
+            .iter()
+            .any(|c| c.cause.contains("base logs 999 MiB")));
+        assert!(hooks.sweep_states.last().unwrap().1.is_empty());
+    }
+    #[test]
+    fn sweep_loop_slow_findings_report_via_runtime_once_and_clear() {
+        use super::health_sweep::{Finding, Observation};
+        let health = Some(r#"{"startup":{"mutationsAdmitted":true}}"#.into());
+        for id in ["version-skew", "stale-files", "temp-orphans"] {
+            let broken = Observation {
+                health: health.clone(),
+                slow: Some(vec![Finding {
+                    id: id.into(),
+                    cause: "diagnosed cause".into(),
+                    action: "one action".into(),
+                }]),
+                ..Observation::default()
+            };
+            let clear = Observation {
+                health: health.clone(),
+                slow: Some(Vec::new()),
+                ..Observation::default()
+            };
+            let hooks = run_sweep_loop(vec![(0, broken), (600, clear)], 901, None);
+            assert_eq!(
+                hooks.sweep_actions,
+                vec![(0, format!("notify:runtime:{id}"))]
+            );
+            assert!(hooks.sweep_states.last().unwrap().1.is_empty());
+        }
+    }
+    #[test]
+    fn sweep_loop_bounds_non_disk_restarts_and_clears_only_on_confirmed_readiness() {
+        use super::health_sweep::Observation;
+        let broken = Observation {
+            health: Some(r#"{"startup":{"phase":"degraded","error":"schema failed"}}"#.into()),
+            disk: Some((10 << 30, 100 << 30)),
+            ..Observation::default()
+        };
+        let clear = Observation {
+            health: Some(r#"{"startup":{"mutationsAdmitted":true}}"#.into()),
+            ..Observation::default()
+        };
+        let hooks = run_sweep_loop(
+            vec![
+                (0, broken.clone()),
+                (1800, Observation::default()),
+                (2100, broken),
+                (9000, clear),
+            ],
+            9301,
+            None,
+        );
+        let restarts: Vec<u32> = hooks
+            .sweep_actions
+            .iter()
+            .filter(|(_, a)| a == "restart-base")
+            .map(|(tick, _)| *tick)
+            .collect();
+        assert_eq!(restarts, vec![1200, 2400, 4800]);
+        assert_eq!(
+            hooks
+                .sweep_probe_ticks
+                .iter()
+                .filter(|(_, slow)| *slow)
+                .map(|(tick, _)| *tick)
+                .collect::<Vec<_>>(),
+            vec![0, 6000]
+        );
+        assert_eq!(
+            hooks
+                .sweep_actions
+                .iter()
+                .filter(|(_, a)| a.starts_with("notify:"))
+                .count(),
+            1
+        );
+        assert!(!hooks
+            .sweep_states
+            .iter()
+            .find(|(t, _)| *t == 1800)
+            .unwrap()
+            .1
+            .is_empty());
+        assert!(hooks.sweep_states.last().unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn sweep_loop_notification_failure_uses_persisted_retry_delay() {
+        use super::health_sweep::{Observation, ServiceObservation};
+        let broken = Observation {
+            relay: Some(ServiceObservation {
+                expected: true,
+                running: false,
+                cause: "no listener".into(),
+                action: "restart pairing".into(),
+            }),
+            ..Observation::default()
+        };
+        let hooks = run_sweep_loop_delivery(vec![(0, broken)], 4201, None, false);
+        assert_eq!(
+            hooks.sweep_actions,
+            vec![
+                (900, "notify:local:relay".into()),
+                (3900, "notify:local:relay".into())
+            ]
+        );
+        assert!(hooks.sweep_states.last().unwrap().1[0]
+            .notified_at
+            .is_none());
+    }
+
+    #[test]
+    fn sweep_loop_restores_notification_deduplication_after_supervisor_restart() {
+        use super::health_sweep::{Observation, ServiceObservation, Sweep};
+        let sample = Observation {
+            relay: Some(ServiceObservation {
+                expected: true,
+                running: false,
+                cause: "no listener".into(),
+                action: "restart pairing".into(),
+            }),
+            ..Observation::default()
+        };
+        let mut prior = Sweep::default();
+        prior.observe_all(super::epoch_ms() - 300_000, &sample);
+        prior.conditions[0].notified_at = Some(super::epoch_ms() - 120_000);
+        let hooks = run_sweep_loop(vec![(0, sample)], 1201, Some(prior));
+        assert!(hooks.sweep_actions.is_empty());
+        assert!(hooks.sweep_states.last().unwrap().1[0]
+            .notified_at
+            .is_some());
     }
 
     #[test]
@@ -4806,7 +5820,7 @@ mod tests {
         let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
         let writer = std::thread::spawn(move || {
             let mut request = [0; 1024];
-            server.read(&mut request).unwrap();
+            assert!(server.read(&mut request).unwrap() > 0);
             for _ in 0..20 {
                 if server.write_all(b"x").is_err() {
                     break;
@@ -4829,7 +5843,7 @@ mod tests {
         let (mut client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
         let writer = std::thread::spawn(move || {
             let mut request = [0; 1024];
-            server.read(&mut request).unwrap();
+            assert!(server.read(&mut request).unwrap() > 0);
             server
                 .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"ok\":true}")
                 .unwrap();
@@ -5524,6 +6538,257 @@ mod tests {
         assert!(rotated.len() <= CHILD_LOG_ROTATE_LIMIT as usize);
         assert!(rotated.ends_with(marker));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsupported_rotation_locks_warn_once_and_allow_the_existing_rotation_path() {
+        let warned = std::sync::atomic::AtomicBool::new(false);
+        let count = std::cell::Cell::new(0);
+        for code in [libc::ENOTSUP, libc::EOPNOTSUPP, libc::ENOSYS, libc::EINVAL] {
+            assert!(super::rotation_guard_allows(
+                Err(std::io::Error::from_raw_os_error(code)),
+                &warned,
+                |_| count.set(count.get() + 1)
+            ));
+        }
+        assert_eq!(count.get(), 1);
+        assert!(!super::rotation_guard_allows(
+            Err(std::io::Error::from_raw_os_error(libc::EWOULDBLOCK)),
+            &warned,
+            |_| panic!("contention is not an unsupported lock")
+        ));
+        let root = unique_temp_path("health-unsupported-lock");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stdout.log");
+        fs::write(&path, vec![b'x'; (CHILD_LOG_ROTATE_LIMIT * 2) as usize]).unwrap();
+        super::rotate_child_log_with_guard(&path, &root, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
+        })
+        .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(
+            fs::read(rotated_child_log_path(&path)).unwrap(),
+            vec![b'x'; CHILD_LOG_ROTATE_LIMIT as usize]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn rotate_child_log_eventually(path: &std::path::Path, directory: &std::path::Path) {
+        // A concurrent spawn can retain a locked file description until exec,
+        // even after this thread drops the handle from an earlier rotation.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            rotate_child_log_if_needed(path, directory).unwrap();
+            if fs::metadata(path).unwrap().len() == 0 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "log rotation remained contended after dropping the lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn competing_log_rotation_skips_without_blocking_or_overwriting_the_tail() {
+        use std::os::fd::AsRawFd;
+        let root = unique_temp_path("health-rotation-guard");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stdout.log");
+        fs::write(&path, vec![b'x'; (CHILD_LOG_ROTATE_LIMIT * 2) as usize]).unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let start = std::time::Instant::now();
+        rotate_child_log_if_needed(&path, &root).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(held.metadata().unwrap().len(), CHILD_LOG_ROTATE_LIMIT * 2);
+        assert!(!rotated_child_log_path(&path).exists());
+        drop(held);
+        rotate_child_log_eventually(&path, &root);
+        rotate_child_log_if_needed(&path, &root).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(
+            fs::read(rotated_child_log_path(&path)).unwrap(),
+            vec![b'x'; CHILD_LOG_ROTATE_LIMIT as usize]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn health_sweep_rotates_only_base_allowlist_and_preserves_rotation_symlink() {
+        let root = unique_temp_path("health-logs");
+        let dir = root.join("base");
+        fs::create_dir_all(&dir).unwrap();
+        let contents = vec![b'x'; CHILD_LOG_ROTATE_LIMIT as usize + 32];
+        let path = dir.join("broker.stderr.log");
+        fs::write(&path, &contents).unwrap();
+        let user_data = root.join("keep.txt");
+        fs::write(&user_data, "keep").unwrap();
+        std::os::unix::fs::symlink(&user_data, rotated_child_log_path(&path)).unwrap();
+        rotate_child_log_if_needed(&path, &dir).unwrap();
+        assert_eq!(fs::read_to_string(&user_data).unwrap(), "keep");
+        assert_eq!(fs::metadata(&path).unwrap().len(), contents.len() as u64);
+        fs::remove_file(rotated_child_log_path(&path)).unwrap();
+        rotate_child_log_eventually(&path, &dir);
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert!(!scoutd_owned_child_log_path(&dir.join("user.log"), &dir));
+        assert!(!scoutd_owned_child_log_path(
+            &root.join("broker.stderr.log"),
+            &root
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn notification_command_uses_owned_instance_and_runtime_context_not_a_project() {
+        let root = unique_temp_path("notify-command");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/scout.mjs"), "").unwrap();
+        let mut config = test_config("/nonexistent-runtime", "/nonexistent-scoutd", "scoutd.test");
+        config.runtime_package_dir = root.clone();
+        config.runtime_directory = root.join("run");
+        let command =
+            super::health_observations::operator_notify_command(&config, "cause and action")
+                .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert!(args
+            .windows(3)
+            .any(|a| a == ["notify", "--as", "scoutd-health"]));
+        assert!(args
+            .windows(2)
+            .any(|a| a == ["--cwd", config.runtime_directory.to_str().unwrap()]));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(config.runtime_directory.as_path())
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "OPENSCOUT_CLIENT_INSTANCE" && value.is_none()));
+        assert!(!args.iter().any(|a| a == "install" || a == "restart"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_disk_log_rotation_reclaims_owned_space_but_other_errors_do_not() {
+        let path = unique_temp_path("emergency-log");
+        fs::write(&path, "owned log").unwrap();
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut attempts = 0;
+        super::retain_or_reclaim_log(&file, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        fs::write(&path, "keep").unwrap();
+        assert!(
+            super::retain_or_reclaim_log(&file, || Err(std::io::Error::from_raw_os_error(
+                libc::EACCES
+            )))
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn log_tail_retry_rewinds_after_partial_enospc_write() {
+        let root = unique_temp_path("health-partial-tail");
+        fs::create_dir_all(&root).unwrap();
+        let source = fs::File::create(root.join("active")).unwrap();
+        let mut rotated = fs::File::create(root.join("rotated")).unwrap();
+        let mut first = true;
+        super::retain_or_reclaim_log(&source, || {
+            if first {
+                first = false;
+                use std::io::Write;
+                rotated.write_all(b"partial").unwrap();
+                Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+            } else {
+                super::write_log_tail(&mut rotated, b"retained tail")
+            }
+        })
+        .unwrap();
+        assert_eq!(fs::read(root.join("rotated")).unwrap(), b"retained tail");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn emergency_health_reserve_is_scout_owned_and_never_follows_links() {
+        let root = unique_temp_path("health-reserve");
+        fs::create_dir_all(&root).unwrap();
+        let mut config = test_config("/nonexistent-runtime", "/nonexistent-scoutd", "scoutd.test");
+        config.runtime_directory = root.clone();
+        super::prepare_health_reserve(&config);
+        let path = root.join("scoutd-health-reserve.tmp");
+        assert_eq!(fs::metadata(&path).unwrap().len(), 65536);
+        assert!(super::release_health_reserve(&config));
+        assert!(!path.exists());
+        let user = root.join("keep.txt");
+        fs::write(&user, "keep").unwrap();
+        std::os::unix::fs::symlink(&user, &path).unwrap();
+        super::prepare_health_reserve(&config);
+        assert!(!super::release_health_reserve(&config));
+        assert_eq!(fs::read_to_string(user).unwrap(), "keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn health_sweep_publication_is_atomic_and_does_not_follow_existing_temp_files() {
+        let root = unique_temp_path("health-publication");
+        fs::create_dir_all(&root).unwrap();
+        let mut config = test_config("/nonexistent-runtime", "/nonexistent-scoutd", "scoutd.test");
+        config.runtime_directory = root.clone();
+        let sweep = super::health_sweep::Sweep::default();
+        super::publish_health_sweep(&config, &sweep).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&super::health_sweep_json(&config)).unwrap();
+        assert!(value["conditions"].as_array().unwrap().is_empty());
+        let user = root.join("keep.txt");
+        fs::write(&user, "keep").unwrap();
+        let temp = super::health_stage_path(&config);
+        std::os::unix::fs::symlink(&user, temp).unwrap();
+        assert!(super::publish_health_sweep(&config, &sweep).is_err());
+        assert_eq!(fs::read_to_string(user).unwrap(), "keep");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rotation_does_not_truncate_active_symlinks_or_hardlinks() {
+        let root = unique_temp_path("health-log-links");
+        fs::create_dir_all(&root).unwrap();
+        let user = root.join("keep.txt");
+        let contents = vec![b'x'; CHILD_LOG_ROTATE_LIMIT as usize + 32];
+        fs::write(&user, &contents).unwrap();
+        let log = root.join("stderr.log");
+        std::os::unix::fs::symlink(&user, &log).unwrap();
+        rotate_child_log_if_needed(&log, &root).unwrap();
+        assert_eq!(fs::read(&user).unwrap(), contents);
+        fs::remove_file(&log).unwrap();
+        fs::hard_link(&user, &log).unwrap();
+        rotate_child_log_if_needed(&log, &root).unwrap();
+        assert_eq!(fs::read(&user).unwrap(), contents);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

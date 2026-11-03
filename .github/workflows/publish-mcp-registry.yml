@@ -1,0 +1,188 @@
+name: Publish MCP Registry
+
+# Lists each stable Scout release in the official MCP Registry. A registry
+# version names one exact npm version, so every stable release gets its own
+# entry. Dev builds and prereleases stay off the registry.
+#
+# `released` fires for a stable release and for a prerelease promoted to
+# stable; `published` misses the promotion. A release created with
+# github.token starts no workflow, so release-scout-tui.yml dispatches this
+# one for the releases it creates.
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Released stable tag: vX.Y.Z"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-mcp-registry
+  cancel-in-progress: false
+
+env:
+  MCP_PUBLISHER_VERSION: "1.8.5"
+  MCP_PUBLISHER_SHA256: "2d151ac57275c9a6684d9d22b1cba81058bab195ea0a162e8fce3c6a5ec32812"
+  REGISTRY_URL: "https://registry.modelcontextprotocol.io"
+
+jobs:
+  publish:
+    if: github.repository == 'openscout-app/scout' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Resolve release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Skipping $TAG: the registry lists stable vX.Y.Z releases only."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A manual run must not list a candidate that is still a prerelease.
+          # Only a missing release skips. Any other gh error fails the run, so a
+          # stable version is never left unlisted behind a green run.
+          err=$(mktemp)
+          if ! state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
+            --jq 'if .isDraft then "a draft" elif .isPrerelease then "a prerelease" else "released" end' 2>"$err"); then
+            if grep -q 'release not found' "$err"; then
+              state="missing"
+            else
+              cat "$err" >&2
+              echo "Could not read the GitHub release for $TAG." >&2
+              exit 1
+            fi
+          fi
+          if [[ "$state" != "released" ]]; then
+            echo "Skipping $TAG: its GitHub release is $state."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "publish=true"
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: steps.release.outputs.publish == 'true'
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Check server.json against the release
+        id: server
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const version = process.env.VERSION;
+            const server = JSON.parse(readFileSync("packages/cli/server.json", "utf8"));
+            const pkg = JSON.parse(readFileSync("packages/cli/package.json", "utf8"));
+            const entry = server.packages?.find((p) => p.identifier === pkg.name);
+            const problems = [];
+            if (server.name !== pkg.mcpName) problems.push(`server.json name ${server.name} differs from mcpName ${pkg.mcpName}`);
+            if (server.version !== version) problems.push(`server.json version is ${server.version}`);
+            if (entry?.version !== version) problems.push(`server.json ${pkg.name} version is ${entry?.version}`);
+            if (pkg.version !== version) problems.push(`${pkg.name} version is ${pkg.version}`);
+            if (problems.length) {
+              console.error(`Release ${version} does not match packages/cli: ${problems.join("; ")}`);
+              process.exit(1);
+            }
+          '
+          echo "name=$(node -p 'require("./packages/cli/server.json").name')" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the npm package
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SERVER_NAME: ${{ steps.server.outputs.name }}
+        run: |
+          set -euo pipefail
+          # The registry reads mcpName from the exact npm version it lists.
+          for attempt in $(seq 1 60); do
+            found=$(curl -fsS "https://registry.npmjs.org/@openscout%2fscout/$VERSION" 2>/dev/null | jq -r '.mcpName // empty' || true)
+            if [[ "$found" == "$SERVER_NAME" ]]; then
+              echo "@openscout/scout@$VERSION declares $found"
+              exit 0
+            fi
+            [[ -z "$found" ]] || { echo "@openscout/scout@$VERSION declares $found, expected $SERVER_NAME" >&2; exit 1; }
+            echo "waiting for @openscout/scout@$VERSION on npm ($attempt/60)…"
+            sleep 15
+          done
+          echo "@openscout/scout@$VERSION is not on npm; publish npm first, then rerun this workflow" >&2
+          exit 1
+
+      - name: Check whether the registry already lists this version
+        id: listed
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SERVER_NAME: ${{ steps.server.outputs.name }}
+        run: |
+          set -euo pipefail
+          encoded=$(jq -rn --arg name "$SERVER_NAME" '$name | @uri')
+          status=$(curl -sS -o versions.json -w '%{http_code}' "$REGISTRY_URL/v0/servers/$encoded/versions")
+          listed=false
+          if [[ "$status" == "200" ]] && jq -e --arg v "$VERSION" '[.servers[].server.version] | index($v)' versions.json >/dev/null; then
+            listed=true
+            echo "$SERVER_NAME $VERSION is already in the registry."
+          fi
+          echo "listed=$listed" >> "$GITHUB_OUTPUT"
+
+      - name: Install mcp-publisher
+        if: steps.release.outputs.publish == 'true' && steps.listed.outputs.listed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/mcp-publisher.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  $archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/bin" mcp-publisher
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Publish to the MCP Registry
+        if: steps.release.outputs.publish == 'true' && steps.listed.outputs.listed != 'true'
+        shell: bash
+        working-directory: packages/cli
+        run: |
+          set -euo pipefail
+          # GitHub OIDC proves the run belongs to openscout-app, which owns the
+          # io.github.openscout-app namespace. No stored credential is used.
+          mcp-publisher login github-oidc
+          mcp-publisher publish
+
+      - name: Verify the registry entry
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SERVER_NAME: ${{ steps.server.outputs.name }}
+        run: |
+          set -euo pipefail
+          encoded=$(jq -rn --arg name "$SERVER_NAME" '$name | @uri')
+          curl -fsS "$REGISTRY_URL/v0/servers/$encoded/versions" \
+            | jq -e --arg v "$VERSION" '
+                [.servers[] | select(.server.version == $v)
+                  | ._meta["io.modelcontextprotocol.registry/official"].status] | index("active")' >/dev/null \
+            || { echo "$SERVER_NAME $VERSION is not active in the registry" >&2; exit 1; }
+          echo "$SERVER_NAME $VERSION is active in the MCP Registry."

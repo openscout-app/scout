@@ -10,7 +10,7 @@ import { MeshFeedback, MeshFeedbackError } from "./mesh-feedback.js";
 import { MeshBridgeManagement, MeshBridgeManagementError } from "./mesh-bridge-management.js";
 import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
-import { completionReply } from "@openscout/protocol";
+import { TaskClosedError, completionReply } from "@openscout/protocol";
 import { PermissionDeliveryUnconfirmedError, type BrokerPermissionService } from "./broker-permission-service.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
@@ -163,7 +163,8 @@ import {
 import { normalizeConversationTitle } from "./conversation-title.js";
 
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
-  if (error instanceof BrokerBusyError) json(response, 503, { error: error.code, retryable: true, detail: error.message });
+  if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
+  else if (error instanceof BrokerBusyError) json(response, 503, { error: error.code, retryable: true, detail: error.message });
   else writeBadRequest(response, error);
 }
 
@@ -207,6 +208,7 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 ]);
 
 export type BrokerHttpRouterDeps = {
+  tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
   attachments?: AttachmentHttpDeps;
@@ -782,7 +784,10 @@ export function createBrokerHttpRouter(
       const result = url.pathname.endsWith("/attach")
         ? await service.attach({ ownerId: input.ownerId, connectionId: typeof input.connectionId === "string" ? input.connectionId : undefined, nativeSessionId: string("nativeSessionId") })
         : url.pathname.endsWith("/reply")
-        ? await service.reply({ ownerId: input.ownerId, sessionId: string("sessionId"), deliveryId: string("deliveryId"), replyToken: typeof input.replyToken === "string" ? input.replyToken : undefined, body: string("body") })
+        ? await service.reply({ ownerId: input.ownerId, sessionId: string("sessionId"), deliveryId: string("deliveryId"), replyToken: typeof input.replyToken === "string" ? input.replyToken : undefined, body: string("body"),
+          ...(typeof input.ref === "string" ? { ref: input.ref, requestId: string("requestId"), progress: input.progress === true,
+            failed: input.failed === true, image: input.image as import("@openscout/protocol").ScoutTaskReply["image"],
+            attachments: input.attachments as import("@openscout/protocol").ScoutTaskReply["attachments"] } : {}) })
         : url.pathname.endsWith("/poll")
         ? await service.poll({ ownerId: input.ownerId, sessionId: string("sessionId"), cursor: typeof input.cursor === "string" ? input.cursor : undefined, limit: typeof input.limit === "number" ? input.limit : undefined })
         : url.pathname.endsWith("/ack")
@@ -2310,6 +2315,22 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  if (method === "POST" && (url.pathname === "/v1/mesh/tasks/ask" || url.pathname === "/v1/mesh/tasks/reply")) {
+    try {
+      if (!deps.tasks) throw new Error("ask-reply/1 is unavailable on this runtime");
+      if (url.pathname.endsWith("/reply")) {
+        const input = await readRequestBody<import("@openscout/protocol").ScoutTaskReply>(request);
+        if (!input.ref) throw new Error("mesh task replies require --ref");
+        json(response, 200, await deps.tasks.reply(input));
+      } else {
+        const input = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+        if (!input.task?.ref && !input.task?.continue) throw new Error("mesh task asks require --ref or --continue");
+        json(response, 202, await deliveryAcceptanceService.accept(input));
+      }
+    } catch (error) { badRequest(response, error); }
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/v1/mesh/invocations") {
     try {
       const bundle = await readRequestBody<MeshInvocationBundle>(request);
@@ -2616,7 +2637,13 @@ export function createBrokerHttpRouter(
 
   if (method === "POST" && (url.pathname === "/v1/messages" || url.pathname === "/v1/messages/reply")) {
     try {
-      let message = await readRequestBody<MessageRecord>(request);
+      const input = await readRequestBody<MessageRecord | import("@openscout/protocol").ScoutTaskReply>(request);
+      if (url.pathname === "/v1/messages/reply" && ("ref" in input || "to" in input)) {
+        if (!deps.tasks) throw new Error("ask-reply/1 is unavailable on this runtime");
+        json(response, 200, await deps.tasks.reply(input as import("@openscout/protocol").ScoutTaskReply));
+        return;
+      }
+      let message = input as MessageRecord;
       if (message.attachments?.some(a => a.blob !== undefined)) throw new Error("attachment_inline_write_required");
       if (url.pathname === "/v1/messages/reply" && (!message.requestId || !completionReply(message))) {
         throw new Error("explicit reply requires requestId and completionReply identity");

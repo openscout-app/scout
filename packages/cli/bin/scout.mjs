@@ -256,8 +256,8 @@ Full CLI commands:
   scout setup
   scout doctor
   scout whoami
-  scout send
   scout ask
+  scout reply
 
 This package can be installed with npm, but the full CLI currently needs Bun
 until the Node headless entrypoint is packaged. Install Bun with:

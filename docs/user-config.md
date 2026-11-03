@@ -124,7 +124,7 @@ Scout collaboration commands share one default sender model:
 scout whoami
 ```
 
-By default, `scout send`, `scout ask`, and `scout broadcast`
+By default, `scout ask`, `scout reply`, and `scout ask --channel shared --fyi`
 resolve the sender in this order:
 
 1. `--as <agent>` for that command
@@ -141,16 +141,16 @@ resolve a sender identity.
 
 ## CLI `--as` Flag
 
-The `--as` flag on `scout send`, `scout ask`, and `scout broadcast` overrides
+The `--as` flag on `scout ask`, `scout reply`, and `scout ask --channel shared --fyi` overrides
 the sender identity for that command only. It does not
 change your stored config.
 
 ```bash
 # Send as the default sender for this directory/context
-scout send --to arc "hello"
+scout ask --to arc "hello"
 
 # Send as a specific agent identity
-scout send --as premotion.master.mini --to arc "deploy complete"
+scout ask --fyi --as reviewer --to arc "deploy complete"
 ```
 
 ## Config File Format

@@ -99,17 +99,16 @@ Pause edits while the reviewer reads the diff. This example requires Claude
 Code on the destination host:
 
 ```bash
-scout ask --project . --harness claude --notify \
+scout ask --project . --harness claude \
   "Review the uncommitted diff for correctness. Return findings with file and line references, or say no findings. Do not edit files or run tests."
 ```
 
-Scout resolves or starts a worker and prints a receipt. `--notify` returns after
-the receipt instead of holding the terminal. A receipt confirms acceptance, not
+Scout resolves or starts a worker and returns a receipt on acceptance, not
 completion. Replace `ref:RETURNED` with the handle from the receipt:
 
 ```bash
 scout wait ref:RETURNED --timeout 600
-scout ask --ref ref:RETURNED \
+scout ask --continue ref:RETURNED \
   "Explain the most important finding and the input that triggers it. Do not edit files."
 ```
 
@@ -123,10 +122,12 @@ work; wait on the same handle again. To use Codex instead, set
 | Intent | Command |
 | --- | --- |
 | Request work and a reply | `scout ask --to <target> "<request>"` |
-| Send an update without requesting work | `scout tell --to <target> "<update>"` |
+| Send an update without requesting work | `scout ask --to <target> --fyi "<update>"` |
 | Start work in a project | `scout ask --project . --harness codex "<request>"` |
+| Answer a task | `scout reply --ref <task> "<answer>"` |
+| Add context to unfinished work | `scout ask --ref <task> "<context>"` |
 | Continue an exact session | `scout ask --to session:<id> "<request>"` |
-| Post to a named group | `scout tell --channel <name> "<update>"` |
+| Post to a named group | `scout ask --channel <name> --fyi "<update>"` |
 
 One target is a direct message. Group coordination requires an explicit channel;
 broadcast is opt-in. Sessions do not share context. Include the goal, checkout,
@@ -184,7 +185,7 @@ that accepts command-based MCP configuration can use the installed CLI:
 
 The client's PATH must include `scout` and Bun. Initialize the runtime before
 using coordination tools. Use MCP `tools/list` to inspect tool names and input
-schemas. Tools include `ask` for work, `messages_send` for updates, and
+schemas. Tools include `ask` for tasks, `ask` with `fyi: true` for news, `reply` for answers, and
 `invocations_get` and `invocations_wait` to follow results. See the
 [MCP API guide](./docs/mcp-api-posture.md) and
 [integration contract](./docs/agent-integration-contract.md).

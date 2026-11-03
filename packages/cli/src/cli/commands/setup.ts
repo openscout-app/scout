@@ -119,7 +119,7 @@ const PERMISSIONS_HELP = `scout setup permissions — print a narrow allow list 
   scout setup permissions [--server <name>]   (default server name: scout)
 
 Prints only; it never edits settings. Paste the entries into permissions.allow in
-the settings file you choose. Tools that send or start work (ask, messages_send)
+the settings file you choose. Tools that send or start work (ask, reply)
 are not on it and keep the harness's normal approval.`;
 
 async function runSetupSubcommand(context: ScoutCommandContext, args: string[]): Promise<boolean> {

@@ -324,3 +324,12 @@ test("permission push carries the exact request only through the existing paired
   expect(JSON.stringify(alert)).not.toContain("/private/project");
   expect(alert.payload).toMatchObject({ itemId: "permission-1", conversationId: "chn-permission" });
 });
+
+test("APNs enforces the durable FYI policy and interrupting override", async () => {
+  const h = createHarness();
+  const input = { signal: { kind: "notify" as const, blocking: false as const, replyExpectation: "none" as const,
+    notificationPolicy: { requested: false, priority: "interrupting" as const } }, messageId: "msg-policy", conversationId: "dm", requesterId: "worker", requesterNodeId: "node-1" };
+  await h.service.sendOperatorSignalAlert(input); expect(h.alerts).toHaveLength(0);
+  await h.service.sendOperatorSignalAlert({ ...input, signal: { ...input.signal, notificationPolicy: { requested: true, priority: "interrupting" } } });
+  expect(h.alerts).toHaveLength(1); expect(h.alerts[0]).toMatchObject({ urgency: "interrupt", sound: "default" });
+});

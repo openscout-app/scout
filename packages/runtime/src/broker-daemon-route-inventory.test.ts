@@ -195,6 +195,8 @@ const expectedRouteInventory = [
   "POST /v1/mesh/ping",
   "POST /v1/mesh/sessions/start",
   "POST /v1/mesh/sessions/wake",
+  "POST /v1/mesh/tasks/ask",
+  "POST /v1/mesh/tasks/reply",
   "POST /v1/mesh/web-request",
   "POST /v1/message-reactions",
   "POST /v1/message-reactions/remove",

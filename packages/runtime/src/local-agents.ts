@@ -627,7 +627,7 @@ function buildLocalAgentTmuxProtocolPrompt(context: LocalAgentSystemPromptTempla
     "  - Capability requests should start with project path + harness/capability; let Scout route or create the worker instead of guessing generic names like claude.main",
     "  - Continue using returned refs/ids/session handles; name or pin a long-lived sibling only after the broker has routed a known-good worker",
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
-    "  - Use send only for tells/status where no reply or work is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
+    "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
     `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
     "  - When replying to an [ask:<id>] request, include the same [ask:<id>] tag in your reply",
@@ -659,7 +659,7 @@ function buildLocalAgentDirectProtocolPrompt(context: LocalAgentSystemPromptTemp
     "  - Capability requests should start with project path + harness/capability; let Scout route or create the worker instead of guessing generic names like claude.main",
     "  - Continue using returned refs/ids/session handles; name or pin a long-lived sibling only after the broker has routed a known-good worker",
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
-    "  - Use send only for tells/status where no reply or work is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
+    "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
     `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
     "  - Do not curl broker HTTP endpoints to read messages",
@@ -1141,9 +1141,8 @@ export const DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS = [
   "mcp__scout__tail_events",
   "mcp__scout__agents_search",
   "mcp__scout__agents_resolve",
-  "mcp__scout__messages_reply",
+  "mcp__scout__reply",
   "mcp__scout__ask",
-  "mcp__scout__messages_send",
   "mcp__scout__invocations_get",
   "mcp__scout__invocations_wait",
   "mcp__scout__work_update",
@@ -3434,6 +3433,7 @@ function isMessageAttachmentContextEntry(value: unknown): value is MessageAttach
     && (
       typeof attachment.url === "string"
       || typeof attachment.blobKey === "string"
+      || Boolean(attachment.blob?.sha256)
     );
 }
 
@@ -3501,6 +3501,12 @@ function buildInvocationAttachmentsPrompt(
 ): string | undefined {
   const attachments = invocationMessageAttachments(invocation)
     .map((attachment, index) => {
+      const context = attachment as MessageAttachment & { conversationId?: string; messageId?: string };
+      if (attachment.blob && context.conversationId && context.messageId) {
+        return `- ${attachment.fileName ?? attachment.id} (${attachment.mediaType}): read with attachments_read(${JSON.stringify({
+          conversationId: context.conversationId, messageId: context.messageId, blobId: attachment.blob.sha256, mode: "image",
+        })})`;
+      }
       const url = resolveAttachmentFetchUrl(attachment, env);
       if (!url) return null;
       const fileName = attachment.fileName?.trim();
@@ -3542,20 +3548,20 @@ function formatInvocationContextValue(value: unknown): string {
 
 function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string[] {
   const replyInstruction = context?.completion ? [
-    "> This ask requires explicit completion. Use `messages_reply` with completion.kind='progress' for updates.",
+    "> This ask requires explicit completion. Use `reply` with ref and progress=true for updates.",
     "> Before your final, call `current_reply_context` for the current flight and revision; wait for all joined work to settle.",
-    "> Submit `messages_reply` with completion.kind='final', the returned invocationId/flightId/revision, and a new stable requestId. Reuse that requestId only for an identical retry.",
+    "> Submit `reply` with the task ref, and a new stable requestId. Reuse that requestId only for an identical retry.",
     "> Your plain final assistant output does not complete this ask. Use `ask` with relation to opt child work into the parent's completion obligations.",
   ] : context?.replyPath === "mcp_reply"
     ? [
         "> First, immediately publish a short broker-visible acknowledgement in the same conversation.",
         "> Use the provided Scout reply tool for progress acknowledgement and the final answer; do not create a new send/ask.",
-        "> Call `messages_reply` or `scout_reply` for the initial acknowledgement, then again for the final reply intended for the requester.",
+        "> Call `reply` with the task ref and progress=true for acknowledgement; omit progress for the final answer.",
       ]
     : [
         "> Do not publish a separate acknowledgement or progress update through Scout for this request.",
         "> Your final assistant message will be delivered back through the Scout broker.",
-        "> Do not call `messages_reply`, `scout_reply`, `scout send`, `messages_send`, or `ask` to answer this request.",
+        "> Do not call `reply` or `ask` to answer this request.",
       ];
   const header = [
     "<!-- SCOUT BROKER REPLY MODE -->",
@@ -3695,7 +3701,7 @@ export function buildLocalAgentNudge(agentName: string, invocation: InvocationRe
 
   parts.push(`Read recent context if needed: ${relayCommand} latest --agent ${agentName} --limit 20.`);
   if (invocation.messageId) {
-    parts.push(`Reply in the existing thread, not by addressing @${invocation.requesterId}. This terminal's final assistant text is not captured automatically. Publish the completed result once with this CLI command (messages_reply is an MCP tool, not a CLI command): ${relayCommand} tell --as ${agentName} --ref ${invocation.messageId} "<your response>"`);
+    parts.push(`Reply in the existing thread, not by addressing @${invocation.requesterId}. This terminal's final assistant text is not captured automatically. Publish the completed result once with this CLI command (reply is available in both CLI and MCP): ${relayCommand} reply --as ${agentName} --ref ${invocation.messageId} "<your response>"`);
   } else {
     parts.push(`Reply in the existing broker-visible thread. Prefer the Scout reply tool when available; do not guess an @operator route.`);
   }
@@ -5532,7 +5538,7 @@ export async function stopLocalAgent(agentId: string): Promise<ScoutLocalAgentSt
   };
 }
 
-export async function interruptLocalAgent(agentId: string): Promise<{ ok: boolean; agentId: string }> {
+export async function interruptLocalAgent(agentId: string, expectedSessionId?: string): Promise<{ ok: boolean; agentId: string }> {
   const registry = await readLocalAgentRegistry();
   const record = registry[agentId];
   if (!record) {
@@ -5541,6 +5547,7 @@ export async function interruptLocalAgent(agentId: string): Promise<{ ok: boolea
 
   const normalizedRecord = normalizeLocalAgentRecord(agentId, record);
   const sessionName = normalizedRecord.tmuxSession;
+  if (expectedSessionId && sessionName !== expectedSessionId) return { ok: false, agentId };
 
   try {
     await execSystemFile("tmux", ["send-keys", "-t", sessionName, "C-c"], { timeoutMs: 2_000 });

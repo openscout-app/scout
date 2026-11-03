@@ -82,6 +82,8 @@ export function isTerminalDeliveryStatus(status: DeliveryStatus): boolean {
  * receives the same context from the daemon so both evict identically.
  */
 export type HistoryRotationContext = {
+  /** Indexed queued follow-ups remain prompt input until the task closes. */
+  queuedFollowupMessageIds?: Iterable<string>;
   /** Non-terminal deliveries protect their message/invocation referents. */
   deliveries?: Iterable<DeliveryIntent>;
   /** Non-terminal dispatch jobs protect their invocation. */
@@ -152,7 +154,7 @@ export function planHistoryRotation(
   cutoff: number,
   context: HistoryRotationContext = {},
 ): HistoryRotationPlan {
-  const protectedMessageIds = new Set<string>();
+  const protectedMessageIds = new Set<string>(context.queuedFollowupMessageIds);
   const protectedInvocationIds = new Set<string>();
   const protectedCompletionFlights = new Set<string>();
 

@@ -28,19 +28,24 @@ An operating agent may deliberately contact the operator whenever a user-defined
 condition is satisfied, independently of turn completion:
 
 ```bash
-scout notify --message "The screen is ready for review." --image ./screen.png
-scout notify --message "The investigation found a reason to change our plan."
-scout ask --operator --question "Which environment should I use?" \
+scout ask --operator --fyi --notify "The screen is ready for review." --image ./screen.png
+scout ask --operator --fyi --notify "The investigation found a reason to change our plan."
+scout ask --operator "Which environment should I use?" \
   --option staging --option production
-scout ask --operator --question "May I deploy this migration to staging?" --permission
+scout ask --operator "May I deploy this migration to staging?" --permission
 ```
 
-The operating agent evaluates the condition. `notify` does not create a monitor,
-flight, or blocked state. `ask --operator` records an answer-required question;
-`--permission` labels the question without granting any native harness or system
-permission. The CLI exits after recording it. An exact threaded operator reply
-resolves the question in `status`, which also exposes the answer. Unrelated
-conversation traffic and replies from other agents do not resolve it.
+The operating agent evaluates the condition. An operator FYI creates no task.
+An operator question creates a human-owned task, tracked until answered,
+expired or cancelled. `--permission` adds metadata, not permission to act.
+`--default-action "X"` lets the asker proceed; if unanswered at the deadline
+(default 1800 seconds; `--window` overrides it), the task completes as
+`proceeded with default`. A late answer is delivered as a marked follow-up.
+
+Operator questions always request a push. Defaults request normal priority.
+FYIs request no push unless `--notify` is present. Notification policy is
+stored on the task or FYI message and enforced by APNs. App attention-center
+adoption follows the core release.
 
 Receipts distinguish durable recording from notification delivery, which remains
 best-effort and unconfirmed. macOS consumes explicit signals while Scout is
@@ -147,73 +152,33 @@ explicit session operation and report what happened. See
 
 ## Interaction Workflows
 
-### Message / Update
+### Deliberate FYIs
 
-Use the message path for status, updates, notes, and channel posts only when no
-reply, judgment, investigation, or owned work is expected. Even when no owned
-work lifecycle is required, clients should expect a durable broker receipt.
+`scout ask --to <agent> --fyi "news"` (MCP `ask({to, fyi: true, body})`)
+records a durable message and delivery handles, with no task or work record.
+Use it only when no work, judgment or answer is expected. Channels are FYI-only:
+`scout ask --channel shared --fyi "news"`. Routing stays outside the body.
 
-Examples:
+### Task follow-ups and answers
 
-```bash
-scout send --to hudson "The branch is ready for review."
-scout tell --to hudson "The branch is ready for review."   # explicit FYI verb, same delivery
-```
+Use `ask --ref <task>` to add context to unfinished work. It creates no new
+task and preserves the recipient. Use `--cancel` with a reason to cancel;
+text never cancels by itself. The receipt reports whether interruption was
+confirmed. Finished, failed and cancelled tasks require
+`ask --continue <task> "successor request"`, which starts fresh work with the
+earlier outcome as context. This is distinct from active-parent `--continue-for`.
 
-MCP equivalent:
-
-```ts
-messages_send({
-  targetLabel: "@hudson",
-  body: "The branch is ready for review."
-})
-```
-
-Expected client behavior:
-
-- send an explicit target field, not only `@hudson` in the body
-- render the returned `conversationId`, `messageId`, and optional `flightId`
-  when useful
-- treat one explicit target as a DM
-- let the runtime decide whether a targeted DM needs a wake/start/attach turn;
-  callers should not need to choose wake mechanics for normal sends
-- require an explicit channel for group coordination
-- do not treat message delivery as fire-and-forget; keep the receipt available
-
-`scout tell` is the explicit spelling of this path: it never creates work and
-rejects `--wake` and `--tracked`. A plain `scout send` keeps the same
-message-only default.
-
-Tracked send is opt-in. `scout send --tracked --to hudson "..."` (MCP:
-`messages_send({ interaction: "work" })`) creates tracked work on the same
-invocation/flight lifecycle as `scout ask --notify`: it returns after the runtime
-receipt with durable handles and reports completion back to the requester.
-`--no-notifs` (MCP `replyMode: "none"`) keeps the work tracked but suppresses the
-completion callback; `--wait [--timeout <s>]` waits for the result within a
-bounded budget. It applies only to one directed target: channels, `--ref`
-replies, broadcasts, multi-target sends, and bodies carrying a legacy
-`[ask:<id>]` completion tag fail closed, so completion replies never recurse into
-new work. `ask` remains the primary work verb and carries the richer options
-(`--project`, `--harness`, runtime, placement).
-
-Quiet delivery should be an optional message/reply modifier, not a separate
-primitive. It should still write the durable conversation record while
-suppressing notify/wake side effects where target policy allows. `ask` should
-not grow a quiet variant because it creates ownership and lifecycle state.
-
-Send is not a non-blocking Ask. If the target needs to act and report back, use
-Ask with notification semantics so the runtime preserves the invocation and
-flight lifecycle.
+The recipient answers with `reply --ref <task> "answer"`. A final closes the
+task. `--progress` updates the work record and leaves it open; `--failed`
+closes it as failed. The first final wins. A cancelled task rejects a later
+answer. The harness final is already an automatic answer: do not answer twice.
+`reply --to <message>` is a conversation reply with no task lifecycle.
 
 ### Ask / Requested Reply
 
-`ask` remains the compatibility name for the explicit invocation API used by
-CLI and agent integrations. Product composers should expose one **Send** action:
-in an idle direct agent Chat, Send creates an invocation; while a scoped Run is
-active it steers that Run. In a shared Chat, an untargeted Send posts a passive
-message. An explicitly targeted Send creates requested work while that agent is
-idle or steers that agent's scoped active Run. The invocation and flight
-records remain separate from the Chat and Message that originated them.
+`ask` creates or updates a task through the runtime. The task owns its
+invocation, flight and work record. Clients supply routing metadata, not
+instructions hidden in the message body.
 
 Use the ask path when the caller expects a reply, judgment, investigation,
 review, implementation, or any owned next step. If the meaning is "do this and
@@ -226,7 +191,7 @@ scout ask --to hudson "Review the auth module and report risks."
 scout ask --project ../talkie "Review the auth module and report risks."
 scout ask --project ../talkie --harness claude "Review the auth module and report risks."
 scout ask --project ../talkie --runtime codex/gpt-5.6-sol/xhigh "Review the auth module and report risks."
-scout ask --to hudson --notify "Review the auth module and report risks."
+scout ask --to hudson "Review the auth module and report risks."
 ```
 
 MCP equivalent:
@@ -252,10 +217,9 @@ ask({
 })
 ```
 
-`--notify` / `replyMode: "notify"` is the asynchronous Ask path. It returns
-after the durable broker receipt and asks Scout to surface completion later.
-Callers should use it instead of downgrading work to Send merely to avoid
-blocking.
+Asks return on acceptance by default. MCP `replyMode: "notify"` retains that
+legacy spelling; it is unrelated to operator push `--notify`. Use `wait` to
+follow the outcome rather than changing a task into an FYI.
 
 ### Reply Mode And Session Placement
 
@@ -263,7 +227,7 @@ Reply mode and session placement solve different problems:
 
 | Choice | Controls | Default |
 | --- | --- | --- |
-| Reply mode | whether the caller waits inline, returns for a later notification, or does not wait | `inline` |
+| Reply mode | whether the caller waits inline, returns for a later notification, or does not wait | `notify` (acceptance) |
 | Session placement | where a newly created harness session lives and whether its native UI can list/open it | `background` |
 
 Ordinary Scout-routed work should use background placement. Foreground is an
@@ -381,19 +345,14 @@ interface ScoutReplyContext {
 
 Rules:
 
-- first publish a short broker-visible acknowledgement in the same conversation
-  when starting work
-- if `replyPath` is `final_response`, the harness final assistant message is
-  the broker-visible reply
-- if `replyPath` is `mcp_reply`, use the provided reply tool for the initial
-  acknowledgement and the final answer
-- do not use `messages_send` or `ask` for the final answer to the original
-  request
-- `messages_reply` is a normal threaded message in the existing reply context;
-  it should not create a fresh ask or owned work lifecycle
-- quiet delivery is an optional message modifier/policy, not a distinct reply
-  mode
-- use Scout tools only to ask or delegate while solving the request
+- For `final_response`, the final assistant message is the answer. Do not also
+  call a reply tool.
+- For `mcp_reply`, use `reply({ref, progress: true, body})` for acknowledgement
+  and progress, then `reply({ref, body})` once for the final.
+- Explicit-completion tasks require `reply` for the final, after joined work
+  settles. Refresh `current_reply_context` before submitting it.
+- Do not create a new ask to answer the original task.
+- Reuse request IDs after uncertain receipts.
 
 ### Durable Work
 
@@ -454,16 +413,20 @@ Do not rely on body mentions for routing:
 
 ```ts
 // Avoid: target is only text payload.
-messages_send({ body: "@hudson can you check this?" })
+ask({ body: "@hudson can you check this?" })
 
 // Prefer: target is explicit, body stays payload.
-messages_send({
-  targetLabel: "@hudson",
+ask({
+  to: "hudson",
   body: "Can you check this?"
 })
 ```
 
 ## Composer Route Operator
+
+Composers translate routes to explicit CLI flags or MCP fields. The explicit
+`scout ask` parser has no positional recipient and rejects unknown flags.
+
 
 Human-facing composers can use `>>` as a route operator when `@` would collide
 with host autocomplete or mention systems. The operator is input sugar for

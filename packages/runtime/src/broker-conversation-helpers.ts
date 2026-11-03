@@ -361,14 +361,15 @@ export function completedFlightFromBrokerReply(
   const replySource = metadataStringValue(reply.metadata, "source");
   return {
     ...flight,
-    state: "completed",
+    state: completionReply(reply)?.outcome === "failed" ? "failed" : "completed",
     summary: `${targetDisplayName ?? invocation.targetAgentId} replied.`,
     output: reply.body,
-    error: undefined,
+    error: completionReply(reply)?.outcome === "failed" ? reply.body : undefined,
     completedAt: reply.createdAt,
     metadata: {
       ...(flight.metadata ?? {}),
       completedByBrokerReply: true,
+      ...(invocation.metadata?.humanOwned === true ? { operatorOutcome: "answered" } : {}),
       replyMessageId: reply.id,
       ...(replySource ? { replySource } : {}),
     },

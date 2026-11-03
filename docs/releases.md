@@ -56,12 +56,21 @@ This public repository owns `@openscout/protocol` and `@openscout/scout`.
 Other workspaces share the source version but are not separately supported npm
 releases. Native macOS/iOS apps remain in the private product repository.
 
-Local execution is the default for reviewed, explicitly authorized releases.
-Hosted CI and npm publication remain opt-in. Do not dispatch Actions as a
-fallback for missing local credentials or local validation failures. Record
-proportional local checks against the exact reviewed head and current main base;
-observe required GitHub rules and feedback before merging. Hosted runs can
-provide additional evidence when explicitly requested.
+Stable releases publish from the hosted `release-package-npm.yml` workflow, so
+npm records provenance for each version it publishes. See
+[Hosted publication](#hosted-publication). `bun run ship -- <version> --execute --yes`
+refuses a new upload and prints the tag and dispatch commands. Add
+`--local-publish` only when the hosted workflow cannot run. A local publish has
+no npm provenance, and because npm versions are immutable, that version never
+gains it. Recover a failed hosted run with
+`recovery_run_id`, not with a local publish. Record proportional local checks
+against the exact reviewed head and current main base; observe required GitHub
+rules and feedback before merging.
+
+These versions have no npm provenance: 0.2.104 through 0.2.110, 0.3.2 through
+0.3.5, and 0.3.6 through 0.4.2. npm versions are immutable, so they keep that
+state. Before hosted publication became the default, the last version with
+provenance was 0.3.6-dev.4.
 
 ## Package publication versus the latest downloadable installer
 
@@ -70,8 +79,9 @@ version does not make them one publication: package publication and the
 downloadable installer have separate owners and separate release steps.
 
 - **Package publication** (this repository): `@openscout/protocol` and
-  `@openscout/scout` on npm, plus a GitHub release on `openscout-app/scout` whose only
-  asset is the npm integrity `receipt.json`.
+  `@openscout/scout` on npm, plus a GitHub release on `openscout-app/scout` that
+  carries the npm integrity `receipt.json` and, once `release-scout-tui.yml` has
+  run, the `scout tui` archives.
 - **Latest downloadable installer** (private product): the signed macOS DMG,
   built and verified as a local operator task rather than in CI. GitHub's
   **Latest** release, and therefore `/releases/latest` download links, belongs
@@ -415,12 +425,13 @@ server bundle, regardless of total size. Every final candidate must pass the
 exact tarball audit; this scope change does not waive signing, artifact checks,
 or authorize incidental limit increases.
 
-After the chosen version and source are reviewed and merged, run from a clean
-public `main` checkout:
+Use local publication only when the hosted workflow cannot run. After the
+chosen version and source are reviewed and merged, run from a clean public
+`main` checkout:
 
 ```bash
-bun run ship -- <version>                 # read-only plan; does not build
-bun run ship -- <version> --execute --yes # authorized local release
+bun run ship -- <version>                                 # read-only plan; does not build
+bun run ship -- <version> --execute --yes --local-publish # authorized local release
 ```
 
 Execution never selects a version, bumps manifests, commits source, or starts
@@ -451,15 +462,30 @@ select the operator's existing npm login instead:
 
 ```bash
 npm login --registry https://registry.npmjs.org # establish a login separately
-bun run ship -- <version> --execute --yes --auth npm-login
+bun run ship -- <version> --execute --yes --local-publish --auth npm-login
 ```
 
 Run this mode in an interactive terminal so npm can present browser or OTP
 challenges. It verifies the existing login with `npm whoami` and inherits npm
 configuration and terminal input/output. It does not read, copy, or write
-credentials, call secret-store helpers, or fall back to another authentication
-mode. `NPM_TOKEN` and `NODE_AUTH_TOKEN` must be unset; hosted execution rejects
-this mode. The lower-level publisher accepts `SCOUT_NPM_AUTH_MODE=npm-login`.
+credentials, or fall back to another authentication mode. `NPM_TOKEN` and
+`NODE_AUTH_TOKEN` must be unset; hosted execution rejects this mode.
+
+Without a terminal for npm to prompt in, name a command that prints a fresh
+one-time code in `SCOUT_NPM_OTP_COMMAND`. The publisher runs it immediately
+before each npm write and passes the code to that write only, as
+`npm_config_otp`. It never prints the code. One code cannot cover a whole
+release: a code lasts about 30 seconds, and the publisher waits for registry
+propagation between writes.
+
+```bash
+SCOUT_NPM_OTP_COMMAND='<command that prints a code>' \
+  bun run ship -- <version> --execute --yes --local-publish --auth npm-login
+```
+
+The publisher calls no secret-store helper unless you name one this way.
+
+The lower-level publisher accepts `SCOUT_NPM_AUTH_MODE=npm-login`.
 Default and `@openscout` scoped registries are pinned to npmjs for every package
 read and mutation, including when the inherited login has a different scope registry.
 Token authentication remains the default, and both local modes retain the same
@@ -470,7 +496,10 @@ tag, verifies both against retained candidates, and only then promotes the pair
 to `latest`. A fresh release must advance the current versions and begin with
 both package versions unused. A matching completed release is idempotent. A
 complete immutable pair may resume missing dist-tag promotion only with its
-exact retained receipt. The ordinary publisher still rejects a partial local pair. A protocol-first
+exact retained receipt. A retained bundle for the current HEAD marks a local
+release already in progress: finishing a pair that is already on npm does not
+need `--local-publish`, but uploading either package still does.
+The ordinary publisher still rejects a partial local pair. A protocol-first
 local interruption may use the explicit retained recovery command below. Changed
 artifacts, wrong source, missing receipt, foreign authority, and historical
 candidates remain forbidden.
@@ -480,21 +509,51 @@ public GitHub release, without marking it Latest, and attaches `receipt.json`. E
 clobbered: their size and anonymously downloaded SHA-256 must match the retained
 receipt. An upload command succeeding alone is not a verified release.
 
+## List the release in the MCP Registry
+
+The official MCP Registry lists `io.github.openscout-app/scout`. Each registry
+version names one exact `@openscout/scout` npm version, so each stable release
+gets its own registry version.
+
+- `bump-version.mjs` writes the release version into `packages/cli/server.json`,
+  both as the server version and in its npm package entry. The ship command
+  and the hosted npm workflow refuse a `server.json` that does not match.
+- A stable GitHub release starts `publish-mcp-registry.yml` when it is
+  published or when a candidate prerelease is promoted to stable. The workflow
+  waits until npm lists the exact version with its `mcpName`, signs in to the
+  registry with GitHub OIDC, and publishes `server.json`. It uses no stored
+  credential.
+- The hosted npm path creates its GitHub release in `release-scout-tui.yml`
+  with the workflow token. That token starts no release-event workflow, so the
+  same job dispatches `publish-mcp-registry.yml` for each stable version.
+- Prereleases, drafts and dev versions are skipped, including on a manual run.
+  A version that the registry already lists is left unchanged, so a rerun is
+  safe.
+
+To publish or retry one release by hand:
+
+```bash
+gh workflow run publish-mcp-registry.yml -R openscout-app/scout -f tag=v<version>
+```
+
 ## Validate a candidate before promotion
 
-The full stable command above remains the default. For releases that require a
-real installation pass before changing npm `latest`, explicitly split candidate
-publication from promotion:
+A local release normally uploads and promotes in one command. For releases that
+require a real installation pass before changing npm `latest`, explicitly split
+candidate publication from promotion:
 
 ```bash
 # From clean reviewed public main already versioned at the exact unused version.
 # Run in an interactive terminal using the operator's existing npm login.
-bun run ship -- <version> --phase candidate --execute --yes --auth npm-login
+bun run ship -- <version> --phase candidate --execute --yes --local-publish --auth npm-login
 
 # Install the exact published version and validate the retained candidate.
 # After operator approval of that result, promote the same source and bytes.
 bun run ship -- <version> --phase promote --execute --yes --auth npm-login
 ```
+
+Promotion and retained-candidate finalization finish an upload that already
+happened, so they do not need `--local-publish`.
 
 Candidate mode establishes the ordinary `v<version>` tag at the reviewed public
 source, prepares the exact signed pair once, and publishes both under the existing
@@ -688,11 +747,27 @@ and skipped. Versions through `0.2.90` remain frozen. Staging tags are left as
 harmless recovery evidence. GitHub release creation and attaching/verifying the
 original receipt remain separate steps after the pair succeeds.
 
-## Explicit hosted publication
+## Hosted publication
 
-When the operator deliberately chooses hosted publication, dispatch the public
-`release-package-npm.yml` workflow directly. It verifies its canonical workflow
-identity and refuses token authentication. There is no automatic transition
+Stable releases publish this way. After the reviewed release merges to public
+`main`, tag the tip of `main` and dispatch the public `release-package-npm.yml`
+workflow before anything else merges. The workflow requires the tag to resolve
+to the commit that `main` points at when you dispatch:
+
+```bash
+git fetch <public remote> main
+git tag -a v<version> FETCH_HEAD -m "Scout <version>"
+git push <public remote> refs/tags/v<version>
+gh workflow run release-package-npm.yml --repo openscout-app/scout --ref main \
+  -f tag=v<version> -f npm_tag=latest
+```
+
+The hosted path has no candidate hold: it publishes straight to npm `latest`.
+A release that must be validated before `latest` uses the local candidate
+sequence above, with `--local-publish`, and has no npm provenance.
+
+The workflow verifies its canonical workflow identity and refuses token
+authentication. There is no automatic transition
 between local and hosted authority; retained receipts cannot cross authorities.
 The hosted path uses npm trusted publishing/OIDC and these signing secrets:
 
@@ -736,7 +811,9 @@ After both packages match the retained candidates and reach `latest`, the
 workflow performs a separate registry-verification pass and uploads the final
 integrity receipt. Attach that receipt to the GitHub release only after the
 package set succeeds. Do not weaken the signing gate or publish a GitHub release
-before that verification completes.
+before that verification completes. When the run succeeds,
+`release-scout-tui.yml` attaches the terminal UI archives and creates the GitHub
+release if it does not exist, without marking it Latest.
 
 ## Verify
 

@@ -1,3 +1,4 @@
+import { SCOUT_TASKS_CAPABILITY, type ScoutTaskReply, type AttachmentUpload } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -456,6 +457,8 @@ export type ScoutWaitResolution =
     };
 
 export type ScoutAskResult = {
+  accepted?: boolean;
+  deliveryMessage?: MessageRecord;
   usedBroker: boolean;
   flight?: ScoutFlightRecord;
   conversationId?: string;
@@ -2627,7 +2630,7 @@ function conversationDefinition(
   targetParticipantIds: string[] = [],
 ): ScoutBrokerConversationRecord {
   const requestedChannel = channel?.trim();
-  if (!requestedChannel) throw new Error("Delivery requires an explicit target or channel; use scout broadcast to tell everyone.");
+  if (!requestedChannel) throw new Error("Delivery requires an explicit target or channel; use scout ask --channel shared --fyi for shared news.");
   const normalizedChannel = scoutChannelName(requestedChannel);
   const naturalKey = scoutChannelNaturalKey(normalizedChannel);
   const broadcastParticipants = normalizedChannel === "broadcast" ? [
@@ -4253,6 +4256,9 @@ function defaultAskExecutionSession(
 }
 
 export async function deliverScoutAsk(input: {
+  task?: import("@openscout/protocol").ScoutTaskAsk;
+  image?: AttachmentUpload;
+  attachments?: OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;
   relation?: ScoutCompletionRelation;
@@ -4283,6 +4289,10 @@ export async function deliverScoutAsk(input: {
 }): Promise<ScoutAskResult> {
   const renderedTarget = input.targetLabel?.trim() || renderedScoutAskTarget(input.target);
   const brokerBaseUrl = resolveScoutBrokerUrl();
+  if (input.task) {
+    const node = await brokerReadJson<ScoutBrokerNodeRecord>(brokerBaseUrl, scoutBrokerPaths.v1.node);
+    if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before asking`);
+  }
   if (input.completion || input.relation) {
     if ((!directAgentIdForAskTarget(input.target) && !directSessionIdForAskTarget(input.target) && !input.targetSessionId)
       || input.projectAgent || input.executionHarness || input.executionModel || input.executionReasoningEffort
@@ -4359,7 +4369,10 @@ export async function deliverScoutAsk(input: {
     targetLabel: renderedTarget,
     ...(replyToSessionId ? { replyToSessionId } : {}),
     body: input.body.trim(),
-    intent: input.completion || input.relation ? "explicit_consult" : "consult",
+    intent: input.task ? "task_ask" : input.completion || input.relation ? "explicit_consult" : "consult",
+    ...(input.task ? { task: input.task } : {}),
+    ...(input.image ? { image: input.image } : {}),
+    ...(input.attachments?.length ? { attachments: normalizeOutgoingAttachments(input.attachments, input.requestId) } : {}),
     ...(input.completion ? { completion: input.completion } : {}),
     ...(input.relation ? { relation: input.relation } : {}),
     channel: input.channel,
@@ -4369,7 +4382,7 @@ export async function deliverScoutAsk(input: {
         : stripScoutAgentSelectorLabels(input.body.trim())
       : undefined,
     ...(deliveryWorkItem ? { collaborationRecordId: workRecordId, workItem: deliveryWorkItem } : {}),
-    execution: {
+    ...(!input.task?.fyi && !input.task?.ref ? { execution: {
       ...(input.executionHarness ? { harness: input.executionHarness } : {}),
       ...(input.executionModel?.trim() ? { model: input.executionModel.trim() } : {}),
       ...(input.executionReasoningEffort?.trim()
@@ -4379,6 +4392,7 @@ export async function deliverScoutAsk(input: {
       ...(targetSessionId ? { targetSessionId } : {}),
       session: input.executionSession ?? defaultAskExecutionSession(input.target),
     },
+    } : {}),
     ...(input.executionSource ? { executionSource: input.executionSource } : {}),
     ...(input.projectAgent ? { projectAgent: input.projectAgent } : {}),
     ensureAwake: true,
@@ -4410,6 +4424,8 @@ export async function deliverScoutAsk(input: {
 
   return {
     usedBroker: true,
+    accepted: true,
+    deliveryMessage: delivery.message,
     flight: delivery.flight,
     conversationId: delivery.conversation.id,
     messageId: delivery.message.id,
@@ -5620,4 +5636,12 @@ export async function cancelScoutFlight(baseUrl: string, flightId: string): Prom
   if (state === "TASK_STATE_COMPLETED") return { ok: true, flightId, state: "completed" };
   if (state === "TASK_STATE_FAILED") return { ok: true, flightId, state: "failed" };
   return { ok: false, flightId, code: "unconfirmed", detail: "Cancellation was not confirmed. Read flight get before retrying; do not dispatch a duplicate." };
+}
+
+/** Resolve task handles on the runtime, then use its existing typed completion writer. */
+export async function replyToScoutTask(input: ScoutTaskReply): Promise<unknown> {
+  const baseUrl = resolveScoutBrokerUrl();
+  const node = await brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node);
+  if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before replying`);
+  return brokerPostJson(baseUrl, "/v1/messages/reply", input);
 }

@@ -1,188 +1,72 @@
-# Scout MCP API Posture
+# Scout MCP API posture
 
-Status: current v0 product guidance. This is not a frozen public API contract.
+Scout uses two verbs for task communication: `ask` and `reply`. The user-facing
+noun is **task**. Internal records remain invocations, flights and work items.
 
-Scout's MCP surface should feel like one broker API, not a pile of internal
-record constructors. Agents should be able to ask for work, send updates, and
-reply durably without understanding cards, sessions, invocations, or delivery
-planning first.
+## First collaboration
 
-## First successful collaboration
+1. Call `ask({projectPath, harness, body})` for fresh work. Use `to` for a known
+   recipient, or `on` with the path on another mesh host. Do not invent agent names.
+2. Keep the receipt's task, message and delivery handles. Acceptance is not
+   completion. Reuse `requestId` after an uncertain result.
+3. Follow the task with `invocations_get` or `invocations_wait`. A wait timeout
+   ends only the caller's wait; it does not cancel the task.
+4. Add context with `ask({ref, body})` while the task is unfinished. Cancel
+   explicitly with `cancel: true`; text never cancels.
+5. After completion, failure or cancellation, `ask({continue: ref, body})`
+   starts a successor with the previous outcome as context.
 
-A connected agent should be able to complete this loop without learning Scout's
-storage model or creating a card:
+Use exactly one route: `to`, `operator`, `channel`, capability
+(`projectPath`/runtime), `ref` or `continue`. Channels require `fyi: true`.
+A deliberate FYI creates only a durable message, with no invocation, flight or
+work item. Unknown fields are errors.
 
-1. For authorized new work, call `ask` with the absolute `projectPath`, task
-   `body`, and optional requested `harness` or `profile`. Pass the caller's
-   `currentDirectory` when known. Use `replyMode: "notify"` for background work.
-2. Keep `ids.flightId` from the receipt. `queued` confirms acceptance, not a
-   worker result. Check `notification.status`: `not_scheduled` requires an
-   explicit follow-up read or bounded wait; it does not promise a notification.
-3. Call `invocations_get({ flightId })` or
-   `invocations_wait({ flightId, timeoutSeconds: 30 })`. A timeout ends this
-   caller's wait, not the worker's task. Keep observing the same flight rather
-   than dispatching it again.
-4. If lifecycle state is unclear, read `broker_feed` for the returned target
-   agent and `tail_events` for observed activity. Report conflicts explicitly:
-   a running flight with an offline endpoint is not proof of worker progress.
-5. For a correction or follow-up to the exact worker, use `ask` with its exact
-   `targetSessionId`. An agent/card target can create a fresh session. If the
-   exact session is absent or ambiguous, resolve that uncertainty before sending.
+## Answering
 
-The MCP lookup tools accept `flightId`; they do not accept the CLI's short `ref`.
-MCP `ask` does not have a generic `ref` field. Tool prefixes are host-specific;
-read the connected schemas rather than copying a prefix from another host.
-Use `whoami` only when caller/broker identity is unclear, and routing search or
-resolution when selecting a target or resolving a reported ambiguity.
+`reply({ref, body})` sends the final answer and completes the task.
+`progress: true` writes its work record without closing it; `failed: true`
+closes it as failed. Only the current recipient may answer. The first final
+wins, including races with an automatic harness final or cancellation.
 
-A setup check is complete only when a fresh host session discovers the tools,
-requests real authorized work, observes the result, and successfully continues
-that same worker context. Installing a config entry alone does not establish
-this behavior. Test host notification handling separately from polling support.
+A captured harness final is already an answer; do not call reply as well.
+For explicit-completion tasks, wait for joined work and refresh
+`current_reply_context` before the final. `reply({to: messageId, body})`
+is a plain conversation reply without a task lifecycle.
 
-## Core Agent API
+External mailbox deliveries include a task ref and a correlated return address.
+Copy that address into `reply`; it retains session ownership and token checks.
+The runtime's existing external-session HTTP transport remains available.
 
-These are the tools normal agents should learn first:
+## Operator tasks
 
-| Tool | Purpose |
-| --- | --- |
-| `whoami` | Identify the current broker actor and working-directory context. |
-| `ask` | Request work, investigation, review, or a reply. This is the only work-creation front door. |
-| `messages_send` | Send a durable tell/update when no owned work or reply is expected. |
-| `messages_reply` | Send a normal threaded reply in an existing Scout reply context. |
-| `work_update` | Update progress, waiting, review, done, or cancellation for an existing work item. |
-| `notify_operator` | Give the human operator a useful FYI without pausing or creating lifecycle. |
-| `consult_operator` | Ask for optional advice, declare the safe default, and keep working. |
+- `ask({operator: true, body})` creates a human-owned task and requests a push.
+- `options` offers choices. `permission` and `because` carry permission metadata.
+- `defaultAction` lets work proceed. At the answer deadline (default 1800
+  seconds; `window` overrides it), an unanswered task completes as
+  `proceeded with default`. A late answer is marked late, not substituted
+  for that outcome.
+- `fyi: true` is news with no task. Add `notify: true` only for news worth
+  interrupting. Default-action tasks request normal priority.
+- Recording and notification status are separate. A requested push remains
+  unconfirmed and depends on device permission, settings and transport.
 
-`ask` may create message, invocation, flight, delivery, card, session, and work
-records as side effects. Those records are runtime-owned implementation details
-unless the caller is explicitly observing or managing them.
+## Waiting and other tools
 
-Timeout-style fields on MCP tools are caller wait budgets only. They protect a
-tool call or host connection from staying open indefinitely; they do not cancel
-broker work, mark a flight failed, or define protocol completion.
+Both CLI and MCP asks default to returning on acceptance. MCP retains an
+explicit `replyMode: "inline"` wait. The legacy value `"notify"` means
+acceptance and is unrelated to operator `notify`.
 
-## Non-Blocking Operator Signals
+Use `whoami` when identity is unclear, `agents_search` and `agents_resolve`
+for discovery, `broker_feed` for broker records, and `tail_events` for observed
+harness activity. Transcripts are not Scout messages.
+`work_update` remains for work not tied to a task.
 
-`notify_operator` and `consult_operator` are agent-to-operator communication,
-not task state.
+The protocol catalog in `packages/protocol/src/mcp-core-tools.ts` defines the
+default core tool set. Removed sending tools have no deprecated definitions.
+Old CLI sending verbs are reserved tombstones that print replacement commands
+and never deliver. Runtime and web transport routes remain unchanged; uncertain
+old dispatches reconcile under their original operation. Upgraded callers
+require the target runtime's `ask-reply/1` capability before dispatch.
 
-- `notify_operator` is a one-way FYI. No reply is requested.
-- `consult_operator` requests optional advice and requires `defaultAction`.
-  The agent continues with that default unless a reply arrives in time to steer
-  later work.
-- Neither tool creates an invocation, flight, question, waiting state, or work
-  transition.
-- The runtime writes a durable operator message and uses its `messageId` as the
-  signal correlation id. A reply stays in that conversation and points back to
-  the signal message.
-- The wire contract is discriminated: notify declares no reply expectation;
-  consult declares an optional reply expectation and a nonblank default action.
-- `status: "recorded"` confirms only the durable broker write. Push or other
-  notification delivery is best-effort and reported as unconfirmed.
-- A late reply is steering input. It does not retroactively rewrite work state.
-
-If an agent cannot responsibly continue, these tools are the wrong mechanism.
-That dependency belongs in the existing blocking human-input, approval,
-question, or `work_item.waiting` path. Only a real `needs_input` condition may
-hand the next move to the operator.
-
-The tool names are deliberately namespaced. Bare `notify` already describes
-delivery and MCP reply modes inside Scout, while bare `consult` already names
-the tracked `ask` delivery intent.
-
-When the caller knows the project but not the concrete agent, use
-`ask({ projectPath })`; add `harness` when the desired capability matters. The
-broker resolves or creates the concrete worker for that project. Do not make
-the caller run discovery just to invent a target, and do not train agents to
-guess generic names such as `claude.main`.
-
-MCP receipts should make follow-up cheap: return durable ids such as
-`flightId`, `conversationId`, `messageId`, `workId`, `targetSessionId`/`sessionId`,
-and any short `ref` or broker-suggested situated target handle the server can
-provide. Humans type saved targets as `target:<name>`; agents and compact UI may
-render the same handle as `⌖name`. Follow-up uses those handles; naming/pinning
-is an explicit later promotion.
-
-`messages_reply` is the threaded-message form of `messages_send`. It should
-preserve the ask conversation instead of creating a fresh ask. Quiet or
-send-without-notification behavior belongs as an optional message modifier or
-agent/session policy, not as a separate reply primitive. Use `ask` only when
-there is a new request or ownership lifecycle.
-
-Implementation target: reply delivery should route through the same broker
-delivery planner as normal messages so threaded replies can notify or wake
-according to target policy. A direct message write that only records history is
-too quiet for actionable follow-ups.
-
-## Quiet Delivery
-
-Message and reply quieting should be a shared optional delivery modifier, not a
-separate message kind and not a different reply primitive. Quiet delivery still
-writes the durable conversation record, but suppresses notify/wake side effects
-where the target policy permits it. `ask` should not have a quiet variant:
-asking creates a lifecycle.
-
-## Observation Handlers
-
-These tools observe records created by `ask`; they do not create work:
-
-| Tool | Purpose |
-| --- | --- |
-| `invocations_get` | Fetch the current state for a known ask flight. |
-| `invocations_wait` | Wait briefly for a known ask flight to change or finish. |
-| `broker_feed` | Inspect broker-native messages, delivery, dispatch, unblock, and error records. |
-| `tail_events` | Inspect recent observed harness activity without making transcripts Scout-owned messages. |
-
-`invocations_ask` is not an agent-facing front door. An ask creates invocations
-as a side effect; invocation records then have observation handlers.
-
-## Routing Helpers
-
-Routing helpers are optional. They are useful when the runtime reports ambiguity
-or when a user is inspecting available agents, but they are not mandatory
-preflight steps:
-
-| Tool | Purpose |
-| --- | --- |
-| `agents_search` | Search likely targets for a human or advanced integration. |
-| `agents_resolve` | Resolve one ambiguous label into one concrete target. |
-
-Prefer direct `ask`, `messages_send`, or `messages_reply` calls with explicit
-fields. Message body text remains payload, not routing metadata.
-
-## Pro Integration API
-
-Some agents and host integrations know Scout deeply enough to manage identity
-and runtime infrastructure directly. These tools belong to that pro integration
-layer:
-
-| Tool | Purpose |
-| --- | --- |
-| `card_create` | Create a reply-ready identity/return-address record. |
-| `agents_start` | Start or create a concrete local agent session. |
-| `session_attach_current` | Attach the current host session to Scout. |
-| `aliases_set` / `aliases_repoint` / `aliases_unset` | Manage one scoped mutable route pointer without creating or mutating a card. |
-| `aliases_list` / `aliases_resolve` | Inspect alias binding/revision and target availability without dispatch. |
-
-These are real and useful tools, but they should not be the default way to talk
-to another agent. Core agents should use `ask({ projectPath, harness })` for
-capability requests and let the runtime create or bind cards and sessions when
-needed. Pro tools are for deliberate promotion, pinning, or lifecycle
-management after the routed worker is known good.
-
-`ask` and `messages_send` accept `alias:<name>` or a structured `route_alias`
-target directly; callers do not preflight every dispatch with
-`aliases_resolve`. The runtime dereferences once and returns the pinned binding
-revision/canonical target proof.
-
-## Identity Model
-
-The base agent identity is the vanilla project/workspace identity. Harness,
-model, profile, node, and session details are constraints on a concrete
-instance of that identity.
-
-Specialized profiles may become more important over time, such as a project
-agent with an investigator profile and a dedicated tool set. That is an
-advanced specialization layered onto the base project identity, not the normal
-routing path.
+See [agent communication rules](agent/scout-comms.agent.md) and
+[the accepted contract](plans/ask-and-reply.md).

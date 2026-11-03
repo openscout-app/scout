@@ -79,249 +79,6 @@ async function connectTestServer(
 }
 
 describe("createScoutMcpServer", () => {
-  test("registers the core Scout MCP tools", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => ({
-        usedBroker: true,
-        invokedTargets: [],
-        unresolvedTargets: [],
-      }),
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => ({ usedBroker: true }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      readLabelBrief: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    }, {
-      OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK: "",
-    });
-
-    const result = await client.listTools();
-    expect(result.tools.map((tool) => tool.name)).toEqual([
-      "where",
-      "check",
-      "route_context",
-      "sessions_inventory",
-      "sessions_search",
-      "herdr_workspaces",
-      "session_send",
-      "flight_cancel",
-      "attachments_read",
-      "integrations_setup",
-      "integrations_get",
-      "integrations_verify",
-      "integrations_manifest",
-      "integrations_start",
-      "integrations_pause",
-      "integrations_disconnect",
-      "integrations_resume",
-      "chat_status",
-      "chat_catch_up",
-      "chat_ack",
-      "sessions_attach",
-      "sessions_get",
-      "sessions_poll",
-      "sessions_ack",
-      "sessions_reply",
-      "aliases_set",
-      "aliases_list",
-      "aliases_resolve",
-      "aliases_repoint",
-      "aliases_unset",
-      "whoami",
-      "hosts_list",
-      "feedback_send",
-      "messages_inbox",
-      "messages_channel",
-      "broker_feed",
-      "tail_events",
-      "current_reply_context",
-      "messages_reply",
-      "session_attach_current",
-      "card_create",
-      "agents_start",
-      "agents_search",
-      "agents_resolve",
-      "ask",
-      "notify_operator",
-      "consult_operator",
-      "messages_send",
-      "invocations_get",
-      "invocations_wait",
-      "labels_brief",
-      "labels_feed",
-      "work_update",
-    ]);
-    expect(result.tools.find((tool) => tool.name === "aliases_set")?.description)
-      .toContain("never creates or mutates an agent card");
-    expect(result.tools.find((tool) => tool.name === "whoami")?.description)
-      .toContain("Use this when host or workspace context is unclear");
-    expect(result.tools.find((tool) => tool.name === "messages_send")?.description)
-      .toContain("For new agent-to-agent work, use ask instead.");
-    expect(result.tools.find((tool) => tool.name === "notify_operator")?.description)
-      .toContain("non-blocking FYI");
-    expect(result.tools.find((tool) => tool.name === "consult_operator")?.description)
-      .toContain("Always declare the safe default action");
-    expect(result.tools.find((tool) => tool.name === "messages_inbox")?.description)
-      .toContain("instead of curling broker HTTP endpoints");
-    expect(result.tools.find((tool) => tool.name === "messages_channel")?.description)
-      .toContain("instead of curling broker HTTP endpoints");
-    expect(result.tools.find((tool) => tool.name === "broker_feed")?.description)
-      .toContain("native broker view");
-    expect(result.tools.find((tool) => tool.name === "tail_events")?.description)
-      .toContain("observed harness events");
-    expect(result.tools.find((tool) => tool.name === "messages_reply")?.description)
-      .toContain("current ScoutReplyContext");
-    expect(result.tools.find((tool) => tool.name === "work_update")?.description)
-      .toContain("progress, waiting, review, and done transitions");
-    expect(result.tools.find((tool) => tool.name === "labels_brief")?.description)
-      .toContain("sharing a Scout label");
-    expect(result.tools.find((tool) => tool.name === "labels_feed")?.description)
-      .toContain("normalized firehose-style event backlog");
-  });
-
-  test("sends notify and consult operator signals without creating work lifecycle", async () => {
-    const sent: Array<{
-      senderId: string;
-      body: string;
-      targetLabel?: string;
-      wake?: boolean;
-      operatorSignal?: ScoutOperatorSignal;
-    }> = [];
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "action.main",
-      sendMessage: async (input) => {
-        sent.push(input);
-        return {
-          usedBroker: true,
-          conversationId: "dm.action.operator",
-          messageId: `msg-${sent.length}`,
-          invokedTargets: ["operator"],
-          unresolvedTargets: [],
-          routeKind: "dm",
-        };
-      },
-    });
-
-    const notifyResult = await client.callTool({
-      name: "notify_operator",
-      arguments: {
-        message: "The HUD pass is ready for visual review.",
-      },
-    });
-    const consultResult = await client.callTool({
-      name: "consult_operator",
-      arguments: {
-        question: "Would you prefer the quieter animation?",
-        defaultAction: "Continue with the quieter animation.",
-      },
-    });
-
-    expect(sent).toEqual([
-      expect.objectContaining({
-        senderId: "action.main",
-        body: "The HUD pass is ready for visual review.",
-        targetLabel: "@operator",
-        wake: false,
-        operatorSignal: {
-          kind: "notify",
-          blocking: false,
-          replyExpectation: "none",
-        },
-      }),
-      expect.objectContaining({
-        senderId: "action.main",
-        body: "Would you prefer the quieter animation?\n\nDefault if there is no reply: Continue with the quieter animation.",
-        targetLabel: "@operator",
-        wake: false,
-        operatorSignal: {
-          kind: "consult",
-          blocking: false,
-          replyExpectation: "optional",
-          defaultAction: "Continue with the quieter animation.",
-        },
-      }),
-    ]);
-    expect(notifyResult.structuredContent).toEqual(expect.objectContaining({
-      kind: "notify",
-      status: "recorded",
-      blocking: false,
-      replyExpectation: "none",
-      notificationDelivery: "unconfirmed",
-      conversationId: "dm.action.operator",
-      messageId: "msg-1",
-      signalId: "msg-1",
-    }));
-    expect(consultResult.structuredContent).toEqual(expect.objectContaining({
-      kind: "consult",
-      status: "recorded",
-      blocking: false,
-      replyExpectation: "optional",
-      notificationDelivery: "unconfirmed",
-      defaultAction: "Continue with the quieter animation.",
-      messageId: "msg-2",
-      signalId: "msg-2",
-    }));
-    const consultContent = consultResult.content as Array<{ text?: string }>;
-    expect(consultContent[0]?.text).toContain("notification delivery is unconfirmed");
-  });
-
-  test("rejects blank operator signals and records explicit sender overrides", async () => {
-    let sendCount = 0;
-    let requestedSenderId: string | null | undefined;
-    const { client } = await connectTestServer({
-      resolveSenderId: async (senderId) => {
-        requestedSenderId = senderId;
-        return senderId ?? "operator";
-      },
-      sendMessage: async () => {
-        sendCount += 1;
-        return {
-          usedBroker: true,
-          conversationId: "dm.operator.operator",
-          messageId: "msg-self",
-          invokedTargets: [],
-          unresolvedTargets: [],
-        };
-      },
-    });
-
-    const blank = await client.callTool({
-      name: "consult_operator",
-      arguments: { question: " ", defaultAction: "\t" },
-    });
-    expect(blank.isError).toBe(true);
-
-    const overridden = await client.callTool({
-      name: "notify_operator",
-      arguments: { message: "A real update", senderId: "local-helper" },
-    });
-    expect(overridden.structuredContent).toEqual(expect.objectContaining({
-      status: "recorded",
-      senderId: "local-helper",
-      notificationDelivery: "unconfirmed",
-    }));
-    expect(requestedSenderId).toBe("local-helper");
-    expect(sendCount).toBe(1);
-  });
 
   test("returns a compact label brief", async () => {
     const { client } = await connectTestServer({
@@ -748,86 +505,6 @@ describe("createScoutMcpServer", () => {
     });
   });
 
-
-  test("surfaces and uses active Scout reply context", async () => {
-    let receivedReply: {
-      senderId: string;
-      body: string;
-      conversationId: string;
-      replyToMessageId: string;
-      currentDirectory: string;
-      source?: string;
-    } | undefined;
-    const { client } = await connectTestServer(
-      {
-        resolveSenderId: async (senderId, currentDirectory) =>
-          `${senderId ?? "operator"}@${currentDirectory}`,
-        replyMessage: async (input) => {
-          receivedReply = input;
-          return {
-            usedBroker: true,
-            conversationId: input.conversationId,
-            messageId: "msg-reply-1",
-            replyToMessageId: input.replyToMessageId,
-            notifiedActorIds: ["sender.agent"],
-          };
-        },
-      },
-      {
-        OPENSCOUT_REPLY_CONTEXT: JSON.stringify({
-          mode: "broker_reply",
-          fromAgentId: "sender.agent",
-          toAgentId: "target.agent",
-          conversationId: "dm.sender.target",
-          messageId: "msg-original",
-          replyToMessageId: "msg-original",
-          replyPath: "mcp_reply",
-          action: "consult",
-        }),
-      },
-    );
-
-    const contextResult = await client.callTool({
-      name: "current_reply_context",
-      arguments: {},
-    });
-    expect(contextResult.structuredContent).toMatchObject({
-      active: true,
-      context: {
-        mode: "broker_reply",
-        fromAgentId: "sender.agent",
-        toAgentId: "target.agent",
-        conversationId: "dm.sender.target",
-        replyToMessageId: "msg-original",
-        replyPath: "mcp_reply",
-      },
-    });
-
-    const replyResult = await client.callTool({
-      name: "messages_reply",
-      arguments: {
-        body: "Broker-visible reply",
-        currentDirectory: "/worktree/app",
-      },
-    });
-
-    expect(receivedReply).toEqual({
-      senderId: "target.agent@/worktree/app",
-      body: "Broker-visible reply",
-      conversationId: "dm.sender.target",
-      replyToMessageId: "msg-original",
-      currentDirectory: "/worktree/app",
-      source: "scout-mcp",
-    });
-    expect(replyResult.structuredContent).toMatchObject({
-      conversationId: "dm.sender.target",
-      messageId: "msg-reply-1",
-      replyToMessageId: "msg-original",
-      notifiedActorIds: ["sender.agent"],
-      routingError: null,
-    });
-  });
-
   test("reads active Scout reply context from a long-lived context file", async () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "openscout-mcp-reply-context-"));
     tempPaths.add(tempRoot);
@@ -864,29 +541,6 @@ describe("createScoutMcpServer", () => {
         replyToMessageId: "msg-original",
         replyPath: "mcp_reply",
       },
-    });
-  });
-
-  test("messages_reply explains missing reply context", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-    });
-
-    const result = await client.callTool({
-      name: "messages_reply",
-      arguments: { body: "No context" },
-    });
-
-    expect(result.content).toEqual([
-      {
-        type: "text",
-        text: "No active Scout broker reply context. Use messages_send for a new message, use ask for a new request, or pass conversationId and replyToMessageId explicitly.",
-      },
-    ]);
-    expect(result.structuredContent).toMatchObject({
-      routingError: "missing_reply_context",
-      conversationId: null,
-      replyToMessageId: null,
     });
   });
 
@@ -931,104 +585,6 @@ describe("createScoutMcpServer", () => {
     expect(structured.selector).toBe("@codex-current");
     expect(structured.endpointId).toBe("endpoint.codex.current");
     expect(structured.sessionId).toBe("pairing-019ddb1b");
-  });
-
-  test("advertises host-consumable agent picker metadata for Scout routing fields", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => ({
-        usedBroker: true,
-        invokedTargets: [],
-        unresolvedTargets: [],
-      }),
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => ({ usedBroker: true }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    });
-
-    const result = await client.listTools();
-    const sendTool = result.tools.find((tool) => tool.name === "messages_send") as
-      | {
-          _meta?: Record<string, unknown>;
-          inputSchema?: {
-            properties?: Record<string, { description?: string }>;
-          };
-        }
-      | undefined;
-    const askTool = result.tools.find((tool) => tool.name === "ask") as
-      | {
-          _meta?: Record<string, unknown>;
-          inputSchema?: {
-            properties?: Record<string, { description?: string }>;
-          };
-        }
-      | undefined;
-
-    expect(sendTool?._meta).toMatchObject({
-      [SCOUT_MCP_UI_META_KEY]: {
-        icon: {
-          kind: "semantic",
-          name: "agent",
-          fallbackGlyph: "@",
-        },
-        fields: {
-          targetLabel: {
-            kind: "agent-picker",
-            selection: "single",
-            sourceTool: "agents_search",
-            resolveTool: "agents_resolve",
-            valueField: "label",
-            labelField: "label",
-            descriptionField: "displayName",
-          },
-          mentionAgentIds: {
-            kind: "agent-picker",
-            selection: "multiple",
-            sourceTool: "agents_search",
-            valueField: "agentId",
-          },
-        },
-      },
-    });
-    expect(askTool?._meta).toMatchObject({
-      [SCOUT_MCP_UI_META_KEY]: {
-        fields: {
-          to: {
-            kind: "agent-picker",
-            selection: "single",
-            sourceTool: "agents_search",
-            resolveTool: "agents_resolve",
-            valueField: "label",
-          },
-        },
-      },
-    });
-    expect(sendTool?.inputSchema?.properties?.targetLabel?.description).toBe(
-      "Scout agent handle to contact when a specific target is known, such as @talkie, or a saved situated target such as target:talkie or ⌖talkie. For fresh capability work prefer projectPath plus optional harness; do not guess generic handles like claude.main. Treat harness/model/profile as instance constraints, not the base agent identity.",
-    );
-    expect(askTool?.inputSchema?.properties?.to?.description).toContain(
-      "Agent id, label",
-    );
-    expect(askTool?.inputSchema?.properties?.projectPath?.description).toContain(
-      "when you do not have a specific agent in mind",
-    );
   });
 
   test("surfaces broker-backed search results", async () => {
@@ -1189,7 +745,7 @@ describe("createScoutMcpServer", () => {
       },
     });
 
-    expect(receivedAsk).toEqual({
+    expect(receivedAsk).toMatchObject({
       senderId: "operator.main",
       to: "talkie",
       body: "How did you handle auth?",
@@ -1257,7 +813,7 @@ describe("createScoutMcpServer", () => {
       },
     });
 
-    expect(receivedAsk).toEqual({
+    expect(receivedAsk).toMatchObject({
       senderId: "operator.main",
       projectPath: "/tmp/openscout-test/talkie",
       body: "How did you handle auth?",
@@ -1976,7 +1532,7 @@ describe("createScoutMcpServer", () => {
       links: { work: string | null; follow: string | null; tail: string | null; observe: string | null };
     };
 
-    expect(receivedAsk).toEqual({
+    expect(receivedAsk).toMatchObject({
       senderId: "operator",
       targetAgentId: "hudson.main",
       replyToSessionId: "codex-thread-explicit",
@@ -2082,7 +1638,7 @@ describe("createScoutMcpServer", () => {
       followUrl: string | null;
     };
 
-    expect(receivedAsk).toEqual({
+    expect(receivedAsk).toMatchObject({
       targetSessionId: "codex-thread-target",
       replyToSessionId: "019ddb1b-test-thread",
       replyMode: "none",
@@ -2728,7 +2284,7 @@ describe("createScoutMcpServer", () => {
     expect(resolveSenderCalls).toEqual([
       { senderId: "operator", currentDirectory: "/tmp/openscout-test" },
     ]);
-    expect(receivedAsk).toEqual({
+    expect(receivedAsk).toMatchObject({
       senderId: "operator.main.mini",
       targetLabel: "@hudson",
       replyMode: "none",
@@ -3004,619 +2560,6 @@ describe("createScoutMcpServer", () => {
       "Exact targetAgentId paths cannot infer agents_start arguments",
     );
   });
-
-  test("documents unresolved explicit message target ids without a start suggestion", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => ({
-        usedBroker: true,
-        invokedTargets: [],
-        unresolvedTargets: [],
-      }),
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: ["ghost.main", "missing.main"],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => {
-        throw new Error("unexpected askAgentById path");
-      },
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    });
-
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Status update",
-        targetAgentId: "ghost.main",
-        mentionAgentIds: ["missing.main"],
-      },
-    });
-
-    const structured = result.structuredContent as {
-      unresolvedTargetIds: string[];
-      startSuggestion?: unknown;
-      targetDiagnostic: {
-        kind?: string;
-        unresolvedTargetIds?: string[];
-        startSuggestionAvailable?: boolean;
-      } | null;
-    };
-    const content = result.content as Array<{ type: string; text: string }> | undefined;
-
-    expect(structured.unresolvedTargetIds).toEqual([
-      "ghost.main",
-      "missing.main",
-    ]);
-    expect(structured.startSuggestion).toBeNull();
-    expect(structured.targetDiagnostic).toMatchObject({
-      kind: "exact_target_ids_unresolved",
-      unresolvedTargetIds: ["ghost.main", "missing.main"],
-      startSuggestionAvailable: false,
-    });
-    expect(content?.[0]?.text).toContain(
-      "Exact targetAgentId paths cannot infer agents_start arguments",
-    );
-  });
-
-  test("documents unresolved wake target ids without a start suggestion", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => ({
-        usedBroker: true,
-        invokedTargets: [],
-        unresolvedTargets: [],
-      }),
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async ({ targetAgentId }) => ({
-        usedBroker: true,
-        unresolvedTargetId: targetAgentId,
-      }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    });
-
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Please process this when you can.",
-        targetAgentId: "ghost.main",
-        wake: true,
-      },
-    });
-
-    const structured = result.structuredContent as {
-      unresolvedTargetIds: string[];
-      startSuggestion?: unknown;
-      targetDiagnostic: {
-        kind?: string;
-        unresolvedTargetIds?: string[];
-        startSuggestionAvailable?: boolean;
-      } | null;
-    };
-
-    expect(structured.unresolvedTargetIds).toEqual(["ghost.main"]);
-    expect(structured.startSuggestion).toBeNull();
-    expect(structured.targetDiagnostic).toMatchObject({
-      kind: "exact_target_id_unresolved",
-      unresolvedTargetIds: ["ghost.main"],
-      startSuggestionAvailable: false,
-    });
-  });
-
-  test("sends to a target label in one MCP call", async () => {
-    let receivedTargetLabel: string | undefined;
-    let receivedSource: string | undefined;
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async ({ targetLabel, source }) => {
-        receivedTargetLabel = targetLabel;
-        receivedSource = source;
-        return {
-          usedBroker: true,
-          conversationId: "dm.operator.hudson",
-          messageId: "msg-1",
-          invokedTargets: ["hudson.main"],
-          unresolvedTargets: [],
-          routeKind: "dm",
-        };
-      },
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => ({ usedBroker: true }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    });
-
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Take a look at the auth module.",
-        targetLabel: "@hudson",
-      },
-    });
-
-    const structured = result.structuredContent as {
-      mode: string;
-      conversationId: string | null;
-      messageId: string | null;
-      invokedTargetIds: string[];
-      unresolvedTargetIds: string[];
-      routeKind: string | null;
-    };
-
-    expect(receivedTargetLabel).toBe("@hudson");
-    expect(receivedSource).toBe("scout-mcp");
-    expect(structured.mode).toBe("target_label");
-    expect(structured.conversationId).toBe("dm.operator.hudson");
-    expect(structured.messageId).toBe("msg-1");
-    expect(structured.invokedTargetIds).toEqual(["hudson.main"]);
-    expect(structured.unresolvedTargetIds).toEqual([]);
-    expect(structured.routeKind).toBe("dm");
-    const content = result.content as Array<{ type: string; text: string }> | undefined;
-    expect(content?.[0]).toEqual({
-      type: "text",
-      text: "Message sent to hudson.main in dm.operator.hudson (msg-1).",
-    });
-  });
-
-  test("renders actionable advice for message routing errors", async () => {
-    let nextRoutingError:
-      | "missing_destination"
-      | "multi_target_requires_explicit_channel" = "missing_destination";
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => ({
-        usedBroker: true,
-        invokedTargets: [],
-        unresolvedTargets: [],
-        routingError: nextRoutingError,
-      }),
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => ({ usedBroker: true }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    });
-
-    const missingDestination = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Status update",
-      },
-    });
-    let structured = missingDestination.structuredContent as {
-      routingAdvice: { code: string; summary: string; nextAction: string } | null;
-    };
-    let content = missingDestination.content as Array<{ type: string; text: string }> | undefined;
-    expect(structured.routingAdvice).toMatchObject({
-      code: "missing_destination",
-      summary: "no destination",
-    });
-    expect(content?.[0]?.text).toBe(
-      "Message was not sent: no destination. Pass one targetAgentId or targetLabel for a DM, or pass channel for a group update.",
-    );
-
-    nextRoutingError = "multi_target_requires_explicit_channel";
-    const multiTarget = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "@hudson @arc please coordinate",
-      },
-    });
-    structured = multiTarget.structuredContent as {
-      routingAdvice: { code: string; summary: string; nextAction: string } | null;
-    };
-    content = multiTarget.content as Array<{ type: string; text: string }> | undefined;
-    expect(structured.routingAdvice).toMatchObject({
-      code: "multi_target_requires_explicit_channel",
-      summary: "multiple targets need an explicit channel",
-    });
-    expect(content?.[0]?.text).toBe(
-      "Message was not sent: multiple targets need an explicit channel. Pass channel for group coordination, or send separate one-target DMs.",
-    );
-  });
-
-  test("supports tell plus asynchronous wake from messages_send", async () => {
-    let receivedWake: boolean | undefined;
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async ({ wake }) => {
-        receivedWake = wake;
-        return {
-          usedBroker: true,
-          conversationId: "dm.operator.hudson",
-          messageId: "msg-1",
-          flight: {
-            id: "flt-1",
-            invocationId: "inv-1",
-            requesterId: "operator",
-            targetAgentId: "hudson.main",
-            state: "working",
-          },
-          invokedTargets: ["hudson.main"],
-          unresolvedTargets: [],
-          routeKind: "dm",
-        };
-      },
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => ({ usedBroker: true }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    }, {
-      OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
-    });
-
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Please process this when you can.",
-        targetLabel: "@hudson",
-        wake: true,
-      },
-    });
-
-    const structured = result.structuredContent as {
-      wake: boolean;
-      flightId: string | null;
-      followUrl: string | null;
-      links: {
-        follow: string | null;
-        observe: string | null;
-        tail: string | null;
-      };
-    };
-    const content = result.content as Array<{ type: string; text: string }> | undefined;
-
-    expect(receivedWake).toBe(true);
-    expect(structured.wake).toBe(true);
-    expect(structured.flightId).toBe("flt-1");
-    const observeUrl = "http://scout.test/agents/hudson.main?tab=observe";
-    const tailUrl =
-      "http://scout.test/follow?view=tail&flightId=flt-1&invocationId=inv-1&conversationId=dm.operator.hudson&targetAgentId=hudson.main";
-    expect(structured.followUrl).toBe(observeUrl);
-    expect(structured.links.follow).toBe(structured.followUrl);
-    expect(structured.links.observe).toBe(observeUrl);
-    expect(structured.links.tail).toBe(tailUrl);
-    expect(content?.[0]).toEqual({
-      type: "text",
-      text: `Message sent to hudson.main in dm.operator.hudson (msg-1). Wake queued as flt-1. Observe agent: ${observeUrl} Scout tail: ${tailUrl}`,
-    });
-  });
-
-  test("surfaces broker-dispatched direct messages without requiring wake", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => ({
-        usedBroker: true,
-        conversationId: "dm.operator.hudson",
-        messageId: "msg-1",
-        flight: {
-          id: "flt-1",
-          invocationId: "inv-1",
-          requesterId: "operator",
-          targetAgentId: "hudson.main",
-          state: "waking",
-        },
-        invokedTargets: ["hudson.main"],
-        unresolvedTargets: [],
-        routeKind: "dm",
-      }),
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async () => ({ usedBroker: true }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    }, {
-      OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
-    });
-
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Please process this when you can.",
-        targetLabel: "@hudson",
-      },
-    });
-
-    const structured = result.structuredContent as {
-      wake: boolean;
-      flightId: string | null;
-      followUrl: string | null;
-    };
-    const content = result.content as Array<{ type: string; text: string }> | undefined;
-
-    expect(structured.wake).toBe(false);
-    expect(structured.flightId).toBe("flt-1");
-    expect(structured.followUrl).toBe("http://scout.test/agents/hudson.main?tab=observe");
-    expect(content?.[0]?.text).toContain(
-      "Dispatch queued as flt-1. Observe agent: http://scout.test/agents/hudson.main?tab=observe Scout tail: http://scout.test/follow",
-    );
-  });
-
-  test("returns follow links for explicit target wake messages", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({
-        kind: "unresolved",
-        candidate: null,
-        candidates: [],
-      }),
-      sendMessage: async () => {
-        throw new Error("wake with targetAgentId should use askAgentById");
-      },
-      sendMessageToAgentIds: async () => ({
-        usedBroker: true,
-        invokedTargetIds: [],
-        unresolvedTargetIds: [],
-      }),
-      askQuestion: async () => ({ usedBroker: true }),
-      askAgentById: async ({ targetAgentId }) => ({
-        usedBroker: true,
-        conversationId: "dm.operator.hudson",
-        messageId: "msg-1",
-        flight: {
-          id: "flt-1",
-          invocationId: "inv-1",
-          requesterId: "operator",
-          targetAgentId,
-          state: "queued",
-        },
-      }),
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    }, {
-      OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
-    });
-
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Please process this when you can.",
-        targetAgentId: "hudson.main",
-        wake: true,
-      },
-    });
-
-    const structured = result.structuredContent as {
-      invokedTargetIds: string[];
-      followUrl: string | null;
-      ids: { flightId: string | null; targetAgentId: string | null };
-    };
-
-    expect(structured.invokedTargetIds).toEqual(["hudson.main"]);
-    expect(structured.ids).toMatchObject({
-      flightId: "flt-1",
-      targetAgentId: "hudson.main",
-    });
-    expect(structured.followUrl).toBe(
-      "http://scout.test/agents/hudson.main?tab=observe",
-    );
-    const content = result.content as Array<{ type: string; text: string }> | undefined;
-    expect(content?.[0]?.text).toContain(
-      "Wake queued as flt-1. Observe agent: http://scout.test/agents/hudson.main?tab=observe Scout tail: http://scout.test/follow",
-    );
-  });
-
-  test("uses the active broker reply agent as the default MCP sender", async () => {
-    let receivedSenderId: string | null | undefined;
-    let receivedMessageSenderId: string | undefined;
-    const { client } = await connectTestServer(
-      {
-        resolveSenderId: async (senderId) => {
-          receivedSenderId = senderId;
-          return senderId?.trim() || "operator";
-        },
-        sendMessage: async ({ senderId }) => {
-          receivedMessageSenderId = senderId;
-          return {
-            usedBroker: true,
-            conversationId: "dm.openscout.talkie",
-            messageId: "msg-1",
-            invokedTargets: ["talkie.main.mini"],
-            unresolvedTargets: [],
-            routeKind: "dm",
-          };
-        },
-        resolveBrokerUrl: () => "http://broker.test",
-        searchAgents: async () => [],
-        resolveAgent: async () => ({
-          kind: "unresolved",
-          candidate: null,
-          candidates: [],
-        }),
-        sendMessageToAgentIds: async () => ({
-          usedBroker: true,
-          invokedTargetIds: [],
-          unresolvedTargetIds: [],
-        }),
-        askQuestion: async () => ({ usedBroker: true }),
-        askAgentById: async () => ({ usedBroker: true }),
-        updateWorkItem: async () => {
-          throw new Error("not used");
-        },
-        waitForFlight: async () => {
-          throw new Error("not used");
-        },
-      },
-      {
-        OPENSCOUT_REPLY_CONTEXT: JSON.stringify({
-          mode: "broker_reply",
-          fromAgentId: "operator",
-          toAgentId: "openscout-card-h-jsjh6n",
-          conversationId: "dm.operator.openscout",
-          messageId: "msg-request",
-          replyToMessageId: "msg-request",
-          replyPath: "final_response",
-        }),
-      },
-    );
-
-    await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Delegating this to Talkie.",
-        targetLabel: "@talkie",
-      },
-    });
-
-    expect(receivedSenderId).toBe("openscout-card-h-jsjh6n");
-    expect(receivedMessageSenderId).toBe("openscout-card-h-jsjh6n");
-  });
-
-  test("preserves managed agent identity from the MCP environment", async () => {
-    let receivedSenderId: string | null | undefined;
-    let receivedMessageSenderId: string | undefined;
-    const { client } = await connectTestServer(
-      {
-        resolveSenderId: async (senderId) => {
-          receivedSenderId = senderId;
-          return "ranger.main.mini";
-        },
-        sendMessage: async ({ senderId }) => {
-          receivedMessageSenderId = senderId;
-          return {
-            usedBroker: true,
-            conversationId: "dm.hudson.main.mini.ranger.main.mini",
-            messageId: "msg-1",
-            invokedTargets: ["hudson.main.mini"],
-            unresolvedTargets: [],
-            routeKind: "dm",
-          };
-        },
-        resolveBrokerUrl: () => "http://broker.test",
-        searchAgents: async () => [],
-        resolveAgent: async () => ({
-          kind: "unresolved",
-          candidate: null,
-          candidates: [],
-        }),
-        sendMessageToAgentIds: async () => ({
-          usedBroker: true,
-          invokedTargetIds: [],
-          unresolvedTargetIds: [],
-        }),
-        askQuestion: async () => ({ usedBroker: true }),
-        askAgentById: async () => ({ usedBroker: true }),
-        updateWorkItem: async () => {
-          throw new Error("not used");
-        },
-        waitForFlight: async () => {
-          throw new Error("not used");
-        },
-      },
-      {
-        OPENSCOUT_AGENT: "ranger.main.mini",
-      },
-    );
-
-    await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "Status update",
-        targetLabel: "@hudson",
-      },
-    });
-
-    expect(receivedSenderId).toBeUndefined();
-    expect(receivedMessageSenderId).toBe("ranger.main.mini");
-  });
 });
 
 
@@ -3646,172 +2589,6 @@ test("disconnect cancels an unfinished MCP notification wait", async () => {
   expect(waitSignal?.aborted).toBe(true);
   expect(cancelled).toBe(true);
 });
-
-describe("messages_send interaction", () => {
-  function sendDeps(calls: {
-    sendMessage: Array<Record<string, unknown>>;
-    sendMessageToAgentIds: Array<Record<string, unknown>>;
-    askQuestion: Array<Record<string, unknown>>;
-    askAgentById: Array<Record<string, unknown>>;
-  }): Parameters<typeof createScoutMcpServer>[0]["dependencies"] {
-    const flight = {
-      id: "flt-1",
-      invocationId: "inv-1",
-      requesterId: "operator",
-      targetAgentId: "hudson.main",
-      state: "queued" as const,
-    };
-    return {
-      resolveSenderId: async () => "operator",
-      resolveBrokerUrl: () => "http://broker.test",
-      searchAgents: async () => [],
-      resolveAgent: async () => ({ kind: "unresolved", candidate: null, candidates: [] }),
-      sendMessage: async (input) => {
-        calls.sendMessage.push(input as Record<string, unknown>);
-        return { usedBroker: true, invokedTargets: ["hudson.main"], unresolvedTargets: [], conversationId: "dm.hudson", messageId: "msg-1" };
-      },
-      sendMessageToAgentIds: async (input) => {
-        calls.sendMessageToAgentIds.push(input as Record<string, unknown>);
-        return { usedBroker: true, invokedTargetIds: ["hudson.main"], unresolvedTargetIds: [], conversationId: "dm.hudson", messageId: "msg-1" };
-      },
-      askQuestion: async (input) => {
-        calls.askQuestion.push(input as Record<string, unknown>);
-        return { usedBroker: true, flight, conversationId: "dm.hudson", messageId: "msg-2" };
-      },
-      askAgentById: async (input) => {
-        calls.askAgentById.push(input as Record<string, unknown>);
-        return { usedBroker: true, flight, conversationId: "dm.hudson", messageId: "msg-2" };
-      },
-      updateWorkItem: async () => {
-        throw new Error("not used");
-      },
-      waitForFlight: async () => {
-        throw new Error("not used");
-      },
-    };
-  }
-
-  function emptyCalls() {
-    return { sendMessage: [], sendMessageToAgentIds: [], askQuestion: [], askAgentById: [] } as {
-      sendMessage: Array<Record<string, unknown>>;
-      sendMessageToAgentIds: Array<Record<string, unknown>>;
-      askQuestion: Array<Record<string, unknown>>;
-      askAgentById: Array<Record<string, unknown>>;
-    };
-  }
-
-  test("a directed send stays message-only by default", async () => {
-    const calls = emptyCalls();
-    const { client } = await connectTestServer(sendDeps(calls));
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: { body: "branch pushed", targetAgentId: "hudson.main" },
-    });
-    expect(result.isError).not.toBe(true);
-    expect(calls.askAgentById).toHaveLength(0);
-    expect(calls.sendMessageToAgentIds).toHaveLength(1);
-    expect((result.structuredContent as { interaction?: string }).interaction).toBe("message");
-  });
-
-  test("interaction='work' with a targetAgentId is tracked work on the ask lifecycle", async () => {
-    const calls = emptyCalls();
-    const { client } = await connectTestServer(sendDeps(calls));
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: { body: "run the sweep and report back", targetAgentId: "hudson.main", interaction: "work" },
-    });
-    expect(result.isError).not.toBe(true);
-    expect(calls.sendMessageToAgentIds).toHaveLength(0);
-    expect(calls.askAgentById).toHaveLength(1);
-    expect(calls.askAgentById[0]).toMatchObject({
-      targetAgentId: "hudson.main",
-      replyMode: "notify",
-      source: "scout-mcp-send",
-    });
-    const structured = result.structuredContent as Record<string, unknown>;
-    expect(structured).toMatchObject({
-      interaction: "work",
-      flightId: "flt-1",
-      invocationId: "inv-1",
-      replyMode: "notify",
-      invokedTargetIds: ["hudson.main"],
-      notification: { method: "notifications/scout/reply", status: "not_scheduled" },
-    });
-    const content = result.content as Array<{ type: string; text: string }>;
-    expect(content[0]?.text).toContain("Tracked send to hudson.main");
-  });
-
-  test("interaction='work' with a targetLabel and replyMode='none' suppresses the callback", async () => {
-    const calls = emptyCalls();
-    const { client } = await connectTestServer(sendDeps(calls));
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: { body: "nightly sweep", targetLabel: "hudson", interaction: "work", replyMode: "none" },
-    });
-    expect(result.isError).not.toBe(true);
-    expect(calls.sendMessage).toHaveLength(0);
-    expect(calls.askQuestion).toHaveLength(1);
-    expect(calls.askQuestion[0]).toMatchObject({ targetLabel: "hudson", replyMode: "none" });
-    expect((result.structuredContent as Record<string, unknown>).notification).toBeNull();
-    const content = result.content as Array<{ type: string; text: string }>;
-    expect(content[0]?.text).toContain("Completion notifications suppressed");
-  });
-
-  test("interaction='work' fails closed on message-only routes", async () => {
-    const calls = emptyCalls();
-    const { client } = await connectTestServer(sendDeps(calls));
-    for (const args of [
-      { body: "status", targetLabel: "hudson", channel: "triage" },
-      { body: "status", targetAgentId: "hudson.main", mentionAgentIds: ["vox.main"] },
-      { body: "[ask:flt-9] the answer", targetAgentId: "hudson.main" },
-      { body: "done", targetLabel: "ref:7f3a9c21" },
-      { body: "@hudson build passed" },
-    ]) {
-      const result = await client.callTool({
-        name: "messages_send",
-        arguments: { ...args, interaction: "work" },
-      });
-      expect(result.isError).toBe(true);
-      const content = result.content as Array<{ type: string; text: string }>;
-      expect(content[0]?.text).toContain("needs exactly one directed target");
-    }
-    expect(calls.askAgentById).toHaveLength(0);
-    expect(calls.askQuestion).toHaveLength(0);
-    expect(calls.sendMessage).toHaveLength(0);
-    expect(calls.sendMessageToAgentIds).toHaveLength(0);
-  });
-
-  test("interaction='work' rejects conflicting targetAgentId and targetLabel", async () => {
-    const calls = emptyCalls();
-    const { client } = await connectTestServer(sendDeps(calls));
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: {
-        body: "completed result",
-        targetAgentId: "hudson.main",
-        targetLabel: "ref:7f3a9c21",
-        interaction: "work",
-      },
-    });
-    expect(result.isError).toBe(true);
-    const content = result.content as Array<{ type: string; text: string }>;
-    expect(content[0]?.text).toContain("exactly one routing field");
-    expect(calls.askAgentById).toHaveLength(0);
-    expect(calls.askQuestion).toHaveLength(0);
-  });
-
-  test("replyMode without interaction='work' fails closed", async () => {
-    const calls = emptyCalls();
-    const { client } = await connectTestServer(sendDeps(calls));
-    const result = await client.callTool({
-      name: "messages_send",
-      arguments: { body: "fyi", targetAgentId: "hudson.main", replyMode: "none" },
-    });
-    expect(result.isError).toBe(true);
-    expect(calls.sendMessageToAgentIds).toHaveLength(0);
-  });
-});
-
 
 describe("explicit completion MCP contract", () => {
   const identity = { invocationId: "inv-1", flightId: "flt-1", revision: 0 };
@@ -3848,38 +2625,6 @@ describe("explicit completion MCP contract", () => {
         state: "running", metadata: { completion: { version: 1, revision: 3, obligations: [] } } }),
     }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
     expect((await client.callTool({ name: "current_reply_context", arguments: {} })).isError).toBe(true);
-  });
-
-  test("preserves typed replies and requires retry identity before calling the broker", async () => {
-    const replies: unknown[] = [];
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "worker",
-      replyMessage: async (input) => {
-        replies.push(input);
-        return { usedBroker: true, conversationId: input.conversationId, messageId: "reply-1", notifiedActorIds: ["parent"] };
-      },
-    }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
-    const completion = { ...identity, revision: 3, kind: "progress" };
-    const missing = await client.callTool({ name: "messages_reply", arguments: { body: "Still working", completion } });
-    expect(missing.isError).toBe(true);
-    expect(replies).toEqual([]);
-    const result = await client.callTool({ name: "messages_reply", arguments: { body: "Still working", requestId: "progress-1", completion } });
-    expect(result.isError).not.toBe(true);
-    expect(replies).toEqual([expect.objectContaining({ requestId: "progress-1", completion, senderId: "worker",
-      conversationId: "dm.test", replyToMessageId: "msg-1" })]);
-  });
-
-  test("typed replies never claim sent without a canonical broker receipt", async () => {
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "worker",
-      replyMessage: async () => ({ usedBroker: false, notifiedActorIds: [] }),
-    }, { OPENSCOUT_REPLY_CONTEXT: JSON.stringify(context) });
-    const result = await client.callTool({ name: "messages_reply", arguments: {
-      body: "Finished", requestId: "final-offline", completion: { ...identity, kind: "final" },
-    } });
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).not.toContain("Reply sent");
-    expect(result.structuredContent).toBeUndefined();
   });
 
   test("passes explicit ask and parent receipt metadata without stripping fields", async () => {
@@ -3969,4 +2714,81 @@ test("reply coalescing is per MCP server and disconnect cancels only its owned w
   expect(signals.map(signal => signal.aborted)).toEqual([true, false]);
   await second.client.close();
   expect(cancellations).toBe(2);
+});
+
+describe("two-verb MCP contract", () => {
+  test("registers only ask and reply for task sending; old tools have no definitions", async () => {
+    const { client } = await connectTestServer({});
+    const tools = (await client.listTools()).tools;
+    for (const name of ["messages_send", "messages_reply", "sessions_reply", "notify_operator", "consult_operator"])
+      expect(tools.some(tool => tool.name === name)).toBe(false);
+    expect(tools.find(tool => tool.name === "ask")?.description).toContain("return on acceptance");
+    expect(tools.find(tool => tool.name === "reply")?.description).toContain("first final wins");
+    for (const word of ["fyi=true", "operator=true", "reply"]) expect(client.getInstructions()).toContain(word);
+  });
+  test.each([
+    { to: "worker" },
+    { operator: true },
+    { operator: true, defaultAction: "staging", options: ["staging", "prod"], window: 60 },
+    { operator: true, permission: true, because: "deploy blocked" },
+    { operator: true, fyi: true },
+    { operator: true, fyi: true, notify: true },
+    { channel: "shared", fyi: true },
+    { ref: "inv-parent" },
+    { ref: "inv-parent", cancel: true },
+    { continue: "inv-finished", harness: "codex", on: "build-host" },
+    { to: "worker", fyi: true },
+  ])("ask routes %# once with stable retry identity and never waits by default", async route => {
+    const calls: ScoutAskCommand[] = [];
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "sender",
+      scoutAskHandler: async command => { calls.push(command); return { ok: true, state: "queued", ids: { messageId: "msg", ...(!route.fyi ? { flightId: "flight" } : {}) } }; },
+      waitForFlight: async () => { throw new Error("default must not wait"); },
+    });
+    const result = await client.callTool({ name: "ask", arguments: { ...route, requestId: "stable", body: "payload" } });
+    expect(result.isError).not.toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ requestId: "stable", senderId: "sender", body: "payload", replyMode: "notify", task: { version: 1 } });
+    for (const key of ["operator", "fyi", "ref", "continue", "cancel", "notify", "defaultAction", "options", "window", "permission", "because"] as const)
+      if (key in route) expect((calls[0]!.task as any)[key]).toEqual((route as any)[key]);
+  });
+  test.each([
+    { to: "worker", operator: true },
+    { to: "worker", notify: true },
+    { channel: "shared" },
+    { operator: true, fyi: true, options: ["yes"] },
+    { operator: true, defaultAction: "yes", permission: true },
+    { ref: "task", harness: "codex" },
+    { continue: "task", relation: { kind: "continuation", parentFlightId: "parent" }, requestId: "id" },
+    { to: "worker", typo: true },
+    { to: "worker", targetSessionId: "session" },
+  ])("invalid ask %# never calls the broker", async route => {
+    let calls = 0;
+    const { client } = await connectTestServer({ resolveSenderId: async () => "sender",
+      scoutAskHandler: async () => { calls++; throw new Error("must not dispatch"); } });
+    const result = await client.callTool({ name: "ask", arguments: { ...route, body: "payload" } });
+    expect(result.isError).toBe(true);
+    expect(calls).toBe(0);
+  });
+  test.each([{ ref: "task" }, { ref: "task", progress: true }, { ref: "task", failed: true }, { to: "message" }])
+    ("reply %# uses the canonical reply path", async flags => {
+      const replies: unknown[] = [];
+      const { client } = await connectTestServer({ resolveSenderId: async () => "worker",
+        replyTask: async input => { replies.push(input); return { messageId: "answer" }; } });
+      const result = await client.callTool({ name: "reply", arguments: { ...flags, body: "answer", requestId: "retry" } });
+      expect(result.isError).not.toBe(true);
+      expect(replies).toEqual([expect.objectContaining({ ...flags, body: "answer", requestId: "retry", senderId: "worker" })]);
+    });
+  test("reply validates route and outcome before dispatch and never reports success on broker failure", async () => {
+    let calls = 0;
+    const { client } = await connectTestServer({ resolveSenderId: async () => "worker",
+      replyTask: async () => { calls++; throw new Error("canonical reply unavailable"); } });
+    for (const flags of [{}, { ref: "task", to: "message" }, { ref: "task", progress: true, failed: true }, { to: "message", failed: true }])
+      expect((await client.callTool({ name: "reply", arguments: { ...flags, body: "answer" } })).isError).toBe(true);
+    expect(calls).toBe(0);
+    const failed = await client.callTool({ name: "reply", arguments: { ref: "task", body: "answer", requestId: "retry" } });
+    expect(failed.isError).toBe(true);
+    expect(JSON.stringify(failed.content)).toContain("canonical reply unavailable");
+    expect(calls).toBe(1);
+  });
 });

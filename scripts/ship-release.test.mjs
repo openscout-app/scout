@@ -43,6 +43,7 @@ test("public release plan is reviewed-source-only and complete-state idempotent"
   assert.ok(result.stdout.includes(`@openscout/scout@${currentVersion}`));
   assert.ok(result.stdout.includes(`packages/cli/src/lib/shared/product.ts: ${currentVersion}`));
   assert.ok(result.stdout.includes(`docs.json: ${currentVersion}`));
+  assert.ok(result.stdout.includes(`packages/cli/server.json: ${currentVersion}`));
   assert.match(result.stdout, /git fetch --no-tags origin refs\/heads\/main/);
   assert.match(result.stdout, /ship-npm\.sh --verify-state/);
   assert.match(result.stdout, /ship-npm\.sh --prepare/);
@@ -78,6 +79,50 @@ test("local execution requires explicit confirmation before any mutation", () =>
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Refusing to publish without --yes/);
 });
+
+test("stable execution publishes from GitHub Actions unless --local-publish is explicit", () => {
+  // CI sets GITHUB_ACTIONS, which this entry point refuses before the guard.
+  const local = (...args) => spawnSync(process.execPath, ["scripts/ship-release.mjs", ...args], {
+    cwd: repoRoot, encoding: "utf8", env: { ...process.env, GITHUB_ACTIONS: "" },
+  });
+  const result = local(currentVersion, "--execute", "--yes");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Stable releases publish from GitHub Actions, so npm records provenance/);
+  assert.ok(result.stderr.includes(`gh workflow run release-package-npm.yml --repo openscout-app/scout --ref main -f tag=v${currentVersion} -f npm_tag=latest`));
+  assert.match(result.stderr, /--local-publish only when the hosted workflow cannot run/);
+  assert.match(result.stderr, /tag the tip of public main/);
+  assert.doesNotMatch(result.stderr, /no candidate hold/);
+  const candidate = local(currentVersion, "--phase", "candidate", "--execute", "--yes");
+  assert.notEqual(candidate.status, 0);
+  assert.match(candidate.stderr, /Stable releases publish from GitHub Actions/);
+  assert.match(candidate.stderr, /no candidate hold: it publishes straight to npm latest/);
+  const hosted = spawnSync(process.execPath, ["scripts/ship-release.mjs", currentVersion, "--execute", "--yes"], {
+    cwd: repoRoot, encoding: "utf8", env: { ...process.env, GITHUB_ACTIONS: "true" },
+  });
+  assert.notEqual(hosted.status, 0);
+  assert.match(hosted.stderr, /local-only; dispatch release-package-npm\.yml/);
+  const dry = plan(currentVersion);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /local execution also needs --local-publish/);
+  const dryLocal = plan(currentVersion, "--local-publish");
+  assert.equal(dryLocal.status, 0, dryLocal.stderr);
+  assert.match(dryLocal.stdout, /Re-run with --execute --yes --local-publish/);
+  assert.doesNotMatch(dryLocal.stdout, /also needs --local-publish/);
+});
+
+for (const mode of [[], ["--publish-prepared"], ["--publish-candidate"]]) {
+  test(`ship-npm.sh ${mode[0] ?? "publish"} refuses a local upload without --local-publish`, () => {
+    const { fixture, stateDir } = createPublishFixture();
+    try {
+      const result = spawnSync("bash", ["scripts/ship-npm.sh", ...mode], {
+        cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only", SCOUT_NPM_LOCAL_PUBLISH: "" },
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /stable releases publish from release-package-npm\.yml; a local upload needs .*--local-publish/);
+      assert.equal(readFileSync(join(stateDir, "mutations.log"), "utf8"), "");
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  });
+}
 
 test("local npm-login authentication is an explicit plan option", () => {
   const result = plan(currentVersion, "--auth", "npm-login");
@@ -117,7 +162,59 @@ test("release versions are exact stable semver", () => {
   assert.match(result.stderr, /Invalid stable version/);
 });
 
-test("SCOUT_APP_VERSION participates in release lockstep", () => {
+test("each npm write takes a fresh one-time code from SCOUT_NPM_OTP_COMMAND and never prints it", () => {
+  const source = readFileSync(new URL("ship-npm.sh", import.meta.url), "utf8");
+  const start = source.indexOf("run_npm_with_config() {");
+  const functions = source.slice(start, source.indexOf("\n}\n", source.indexOf("run_npm_mutation() {")) + 3);
+  const dir = mkdtempSync(join(tmpdir(), "scout-npm-otp-test."));
+  try {
+    mkdirSync(join(dir, "bin"));
+    writeFileSync(join(dir, "bin/npm"), '#!/bin/bash\nprintf "%s otp=%s\\n" "$*" "${npm_config_otp:-none}" >> "$NPM_LOG"\n');
+    chmodSync(join(dir, "bin/npm"), 0o755);
+    writeFileSync(join(dir, "otp.sh"), '#!/bin/bash\nn=$(( $(cat "$OTP_COUNTER" 2>/dev/null || echo 0) + 1 ))\necho "$n" > "$OTP_COUNTER"\nprintf "%06d\\n" $((100000 + n))\n');
+    chmodSync(join(dir, "otp.sh"), 0o755);
+    const log = join(dir, "npm.log");
+    const run = (otpCommand, githubActions = "") => {
+      rmSync(log, { force: true });
+      const { npm_config_otp: _inherited, ...env } = process.env;
+      return spawnSync("bash", ["-c", `set -euo pipefail; NPMRC=""\n${functions}\nrun_npm_mutation publish a.tgz --tag staging\nrun_npm_mutation dist-tag add a@1.0.0 latest`], {
+        env: { ...env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, NPM_LOG: log, OTP_COUNTER: join(dir, "counter"), SCOUT_NPM_OTP_COMMAND: otpCommand, GITHUB_ACTIONS: githubActions },
+        encoding: "utf8",
+      });
+    };
+
+    let result = run(join(dir, "otp.sh"));
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+      "publish a.tgz --tag staging otp=100001",
+      "dist-tag add a@1.0.0 latest otp=100002",
+    ]);
+    assert.doesNotMatch(result.stdout + result.stderr, /10000[12]/);
+
+    result = run("echo not-a-code");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /did not print a one-time code/);
+    assert.equal(existsSync(log), false);
+
+    result = run("exit 3");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SCOUT_NPM_OTP_COMMAND failed/);
+    assert.equal(existsSync(log), false);
+
+    for (const [otpCommand, githubActions] of [["", ""], [join(dir, "otp.sh"), "true"]]) {
+      result = run(otpCommand, githubActions);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+        "publish a.tgz --tag staging otp=none",
+        "dist-tag add a@1.0.0 latest otp=none",
+      ]);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("SCOUT_APP_VERSION and the MCP Registry server version participate in release lockstep", () => {
   const fixture = mkdtempSync(join(tmpdir(), "scout-release-source-test."));
   try {
     mkdirSync(join(fixture, "scripts"), { recursive: true });
@@ -156,6 +253,10 @@ test("SCOUT_APP_VERSION participates in release lockstep", () => {
       'export const SCOUT_APP_VERSION = process.env.SCOUT_APP_VERSION?.trim() || "0.2.87";\n',
     );
     writeFileSync(join(fixture, "docs.json"), JSON.stringify({ version: "0.2.99" }));
+    writeFileSync(
+      join(fixture, "packages/cli/server.json"),
+      JSON.stringify({ version: "0.2.98", packages: [{ identifier: "@openscout/scout", version: "0.2.99" }] }),
+    );
 
     const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99"], {
       cwd: fixture,
@@ -163,6 +264,7 @@ test("SCOUT_APP_VERSION participates in release lockstep", () => {
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /product\.ts=0\.2\.87/);
+    assert.match(result.stderr, /server\.json=0\.2\.98/);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -310,6 +412,7 @@ function registryEnv(fixture) {
     GITHUB_ACTIONS: "false",
     NPM_TAG: "latest",
     SCOUT_NPM_RELEASE_STATE_DIR: join(fixture, "release-state"),
+    SCOUT_NPM_LOCAL_PUBLISH: "1",
   };
 }
 
@@ -1282,6 +1385,7 @@ function createLocalReleaseFixture({ corruptReceipt = false, initialRelease = "f
   mkdirSync(join(fixture, "packages/cli/src/lib/shared"), { recursive: true });
   writeFileSync(join(fixture, "packages/cli/src/lib/shared/product.ts"), `export const SCOUT_APP_VERSION = process.env.SCOUT_APP_VERSION?.trim() || "${version}";`);
   writeFileSync(join(fixture, "docs.json"), JSON.stringify({ version }));
+  writeFileSync(join(fixture, "packages/cli/server.json"), JSON.stringify({ version, packages: [{ identifier: "@openscout/scout", version }] }));
   const receipt = readFileSync(join(fixture, "release-state/receipt.json"));
   const remoteReceipt = join(fixture, "remote-receipt.json");
   if (corruptReceipt) {
@@ -1352,7 +1456,7 @@ for (const corruptReceipt of [false, true]) {
   test(`local release orchestration ${corruptReceipt ? "refuses conflicting public receipt" : "reuses candidates and verifies public receipt bytes"}`, () => {
     const { fixture, stateDir } = createLocalReleaseFixture({ corruptReceipt });
     try {
-      const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes"], {
+      const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes", "--local-publish"], {
         cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only" },
       });
       if (corruptReceipt) {
@@ -1374,8 +1478,8 @@ for (const initialRelease of ["missing", "draft", "prerelease"]) {
   test(`local release publishes a ${initialRelease} receipt-only release without claiming GitHub Latest`, () => {
     const { fixture } = createLocalReleaseFixture({ initialRelease });
     try {
-      const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes"], {
-        cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only" },
+      const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes", "--local-publish"], {
+        cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only", SCOUT_NPM_LOCAL_PUBLISH: "" },
       });
       assert.equal(result.status, 0, result.stderr);
       const calls = readFileSync(join(fixture, "gh-release-calls.log"), "utf8").trim().split("\n");
@@ -1391,11 +1495,43 @@ for (const initialRelease of ["missing", "draft", "prerelease"]) {
   });
 }
 
+for (const phase of ["release", "candidate"]) {
+  test(`a ${phase} run on a retained bundle with nothing uploaded needs --local-publish and changes nothing`, () => {
+    const { fixture, stateDir } = createLocalReleaseFixture({ initialRelease: "missing" });
+    try {
+      const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--phase", phase, "--execute", "--yes"], {
+        cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only" },
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /a local upload needs .*--local-publish/);
+      assert.doesNotMatch(readFileSync(join(stateDir, "mutations.log"), "utf8"), /publish/);
+      assert.doesNotMatch(result.stdout, /\$ git (tag|push)/);
+      assert.doesNotMatch(result.stdout, /^\$ bash scripts\/ship-npm\.sh --publish-(prepared|candidate)/m);
+      assert.equal(existsSync(join(fixture, "release-state/candidate-receipt.json")), false);
+    } finally { rmSync(fixture, { recursive: true, force: true }); }
+  });
+}
+
+test("a retained bundle whose pair is already on npm resumes without --local-publish", () => {
+  const { fixture, stateDir } = createLocalReleaseFixture({ initialRelease: "missing" });
+  try {
+    writeFileSync(join(stateDir, "protocol-exists"), "");
+    writeFileSync(join(stateDir, "scout-exists"), "");
+    const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes"], {
+      cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const mutations = readFileSync(join(stateDir, "mutations.log"), "utf8");
+    assert.doesNotMatch(mutations, /^publish /m);
+    assert.match(mutations, /^promote protocol/m);
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
+});
+
 test("retrying an existing final release preserves its GitHub Latest state", () => {
   const { fixture } = createLocalReleaseFixture({ initialRelease: "final" });
   try {
-    const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes"], {
-      cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only" },
+    const result = spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--execute", "--yes", "--local-publish"], {
+      cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only", SCOUT_NPM_LOCAL_PUBLISH: "" },
     });
     assert.equal(result.status, 0, result.stderr);
     // An existing stable release may be the verified native installer release;
@@ -1406,7 +1542,8 @@ test("retrying an existing final release preserves its GitHub Latest state", () 
 });
 
 function runCandidatePhase(fixture, phase, extraEnv = {}) {
-  return spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--phase", phase, "--execute", "--yes"], {
+  const local = phase === "promote" ? [] : ["--local-publish"];
+  return spawnSync(process.execPath, ["scripts/ship-release.mjs", "0.2.99", "--phase", phase, "--execute", "--yes", ...local], {
     cwd: fixture, encoding: "utf8", env: { ...registryEnv(fixture), NPM_TOKEN: "test-only", ...extraEnv },
   });
 }
@@ -1623,7 +1760,7 @@ function createOriginalCandidateFixture() {
   writeFileSync(markerPath, JSON.stringify({ schemaVersion: 1, kind: "scout-npm-candidate", releaseState: "CANDIDATE", repository: receipt.repository,
     releaseVersion: version, releaseSha: source, authority: "local-signed", provenance: "none", stagingTag: "scout-release-0-3-3",
     integrityReceiptSha256: digest(readFileSync(receiptPath)), packages: receipt.packages }, null, 2) + "\n");
-  const sourceFiles = ["package.json", "packages/agent-sessions/package.json", "packages/cli/package.json", "packages/protocol/package.json", "packages/runtime/package.json", "packages/session-trace/package.json", "packages/pairing/package.json", "packages/cli/src/lib/shared/product.ts", "docs.json", "bun.lock"];
+  const sourceFiles = ["package.json", "packages/agent-sessions/package.json", "packages/cli/package.json", "packages/protocol/package.json", "packages/runtime/package.json", "packages/session-trace/package.json", "packages/pairing/package.json", "packages/cli/src/lib/shared/product.ts", "docs.json", "packages/cli/server.json", "bun.lock"];
   for (const file of sourceFiles) {
     const target = join(fixture, "original-tree", file);
     mkdirSync(dirname(target), { recursive: true });
@@ -1684,7 +1821,7 @@ else name=\${url##*/}; cat '${fixture}/remote-'"$name"; fi
   for (const name of ["git", "npm", "curl"]) chmodSync(join(fixture, "fake-bin", name), 0o755);
   const identityArgs = ["--source", source, "--receipt-sha256", digest(readFileSync(receiptPath)), "--candidate-receipt-sha256", digest(readFileSync(markerPath))];
   const execute = (phase, extraEnv = {}, retained = true) => spawnSync(process.execPath, ["scripts/ship-release.mjs", version, "--phase", phase,
-    ...(retained ? identityArgs : []), "--execute", "--yes", "--auth", "npm-login"], {
+    ...(retained ? identityArgs : ["--local-publish"]), "--execute", "--yes", "--auth", "npm-login"], {
     cwd: fixture, encoding: "utf8", env: { ...process.env, PATH: join(fixture, "fake-bin") + ":" + process.env.PATH,
       NPM_TOKEN: "", NODE_AUTH_TOKEN: "", SCOUT_NPM_RELEASE_STATE_DIR: "", GITHUB_ACTIONS: "", ...extraEnv },
   });
@@ -1772,7 +1909,7 @@ for (const conflict of ["partial pair", "missing public marker", "changed public
 test("default release and fresh candidate/promotion still require the current HEAD version tag", () => {
   const f = createOriginalCandidateFixture();
   try {
-    for (const file of ["package.json", "packages/agent-sessions/package.json", "packages/cli/package.json", "packages/protocol/package.json", "packages/runtime/package.json", "packages/session-trace/package.json", "packages/pairing/package.json", "packages/cli/src/lib/shared/product.ts", "docs.json", "bun.lock"]) {
+    for (const file of ["package.json", "packages/agent-sessions/package.json", "packages/cli/package.json", "packages/protocol/package.json", "packages/runtime/package.json", "packages/session-trace/package.json", "packages/pairing/package.json", "packages/cli/src/lib/shared/product.ts", "docs.json", "packages/cli/server.json", "bun.lock"]) {
       copyFileSync(join(f.fixture, "original-tree", file), join(f.fixture, file));
     }
     for (const phase of ["release", "candidate", "promote"]) {

@@ -1,3 +1,4 @@
+import { MessageIdConflictError } from "./broker-message-idempotency.js";
 import { readRuntimeMessage } from "./broker-message-records.js";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalMessageRecord } from "./message-record-canonical.js";
@@ -57,6 +58,8 @@ export type BrokerMeshHttpServiceDeps = {
   }>;
   messageFor: (messageId: string) => Promise<MessageRecord | undefined>;
   rememberInvocation: (invocation: InvocationRequest) => void;
+  /** Canonical message admission while runDurableWrite is held. */
+  recordAuthorityMessage?: (message: MessageRecord) => Promise<{ entries: BrokerJournalEntry[]; deliveries: DeliveryIntent[]; duplicate?: MessageRecord }>;
   completeInvocationsForBrokerReply?: (message: MessageRecord) => Promise<void>;
   /**
    * Cardless session targets carry no agent card, so authority rides on the
@@ -86,7 +89,7 @@ export class BrokerMeshHttpService {
       if (bundle.conversation.authorityNodeId === this.deps.nodeId && bundle.message.attachments?.some(a => a.blob !== undefined)
         && (!existingMessage || !sameCanonicalMessage(existingMessage, bundle.message))) throw new Error("attachment_inline_write_required");
       if (bundle.conversation.authorityNodeId === this.deps.nodeId
-        && existingMessage && !sameCanonicalMessage(existingMessage, bundle.message)) {
+        && !this.deps.recordAuthorityMessage && existingMessage && !sameCanonicalMessage(existingMessage, bundle.message)) {
         throw new Error(`mesh message ${bundle.message.id} conflicts with existing record`);
       }
       const bundleEntries = await this.deps.applyMeshBundle(bundle, {
@@ -101,7 +104,7 @@ export class BrokerMeshHttpService {
         };
       }
 
-      if (existingMessage) {
+      if (existingMessage && sameCanonicalMessage(existingMessage, bundle.message)) {
         return {
           kind: "duplicate" as const,
           message: existingMessage,
@@ -109,6 +112,22 @@ export class BrokerMeshHttpService {
           messageEntries: [] as BrokerJournalEntry[],
           deliveries: [] as DeliveryIntent[],
         };
+      }
+
+      if (this.deps.recordAuthorityMessage && !existingMessage?.attachments?.some(a => a.blob)) {
+        const recorded = await this.deps.recordAuthorityMessage(bundle.message).catch(error => {
+          if (existingMessage && error instanceof MessageIdConflictError)
+            throw new Error(`mesh message ${bundle.message.id} conflicts with existing record`);
+          throw error;
+        });
+        const message = recorded.duplicate ?? await readRuntimeMessage(this.deps.runtime, bundle.message.id);
+        if (!message) throw new Error(`mesh message ${bundle.message.id} was not committed`);
+        return { kind: recorded.duplicate ? "duplicate" as const : "ok" as const,
+          message, bundleEntries, messageEntries: recorded.entries, deliveries: recorded.deliveries };
+      }
+
+      if (existingMessage) {
+        throw new Error(`mesh message ${bundle.message.id} conflicts with existing record`);
       }
 
       const deliveries = this.deps.runtime.planMessage(bundle.message, { localOnly: true });

@@ -1,3 +1,4 @@
+import { TaskClosedError, validateTaskAsk, validateTaskReply, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
 import { principalSchema } from "./identity.ts";
 import { labelBrief, labelFeed, matchingLabelWorks } from "./label-views.ts";
 import { createHash, randomUUID } from 'node:crypto';
@@ -116,50 +117,32 @@ export class CoreHttpAdapter {
       await request('/v1/collaboration/events', { id: `evt.${randomUUID()}`, recordId: updated.id, recordKind: 'work_item', kind: updated.acceptanceState !== previous.acceptanceState && ['accepted','reopened'].includes(updated.acceptanceState) ? updated.acceptanceState : state !== previous.state ? ({ waiting: 'waiting', review: 'review_requested', done: 'done', cancelled: 'cancelled', working: previous.state === 'open' ? 'claimed' : 'progressed' } as Record<string,string>)[state] ?? 'progressed' : updated.ownerId !== previous.ownerId || updated.nextMoveOwnerId !== previous.nextMoveOwnerId ? 'handoff' : 'progressed', actorId: senderId, at: now, summary: a.work.eventSummary ?? updated.summary ?? updated.title, metadata: { source: 'scout-mesh-http' } });
       return { ...context, usedBroker: true, workItem: updated, workId: updated.id };
     }
-    if (name === 'messages_reply') {
-      const reply = { ...pick(this.options.replyContext ?? {}, ['conversationId','replyToMessageId']), ...pick(a, ['requestId','body','conversationId','replyToMessageId','shouldSpeak','attachments','completion']) };
-      if (!reply.conversationId || !reply.replyToMessageId) throw new Error('reply requires an exact conversation and message context');
-      const s = await snapshot();
-      const conversation = values(s.conversations).find(v => v.id === reply.conversationId);
-      const original = values(s.messages).find(v => v.id === reply.replyToMessageId);
-      if (!conversation || !original || original.conversationId !== conversation.id) throw new Error('reply target does not match conversation');
-      if (!conversation.participantIds?.includes(senderId)) throw new Error('sender is not a conversation participant');
-      const node = await request('/v1/node');
-      const id = a.requestId ? `msg.request.${createHash('sha256').update(JSON.stringify([senderId,a.requestId])).digest('hex')}` : `msg.${randomUUID()}`;
-      return request(a.completion ? '/v1/messages/reply' : '/v1/messages', {
-        id, ...pick(reply,['requestId','body','conversationId','replyToMessageId','attachments']), actorId: senderId,
-        originNodeId: node.nodeId ?? node.id, class: conversation.kind === 'system' ? 'system' : 'agent', visibility: conversation.visibility, policy: 'durable', createdAt: Date.now(),
-        ...(original.actorId !== senderId ? { audience: { notify: [original.actorId], reason: 'thread_reply' } } : {}),
-        ...(a.shouldSpeak ? { speech: { text: a.body } } : {}),
-        metadata: { source: 'scout-mesh-http', ...(a.completion ? { completionReply: a.completion } : {}) },
-      });
-    }
-    if (name === 'ask' || name === 'messages_send' || name === 'notify_operator' || name === 'consult_operator') {
-      const isAsk = name === 'ask' || name === 'messages_send' && a.interaction === 'work', operator = name === 'notify_operator' || name === 'consult_operator';
-      const mentions = [...new Set<string>(a.mentionAgentIds ?? [])];
-      if (mentions.length > 1 && isAsk) throw new Error('owned-work messages require one explicit target');
-      if (mentions.length > 1 && !a.channel) throw new Error('multiple targets require an explicit channel');
-      if (mentions.length && a.channel && name === 'messages_send' && !isAsk) {
-        const s = await snapshot();
-        if (mentions.some(id => !values(s.agents).some(v => v.id === id))) throw new Error('unknown exact group target');
-        const channel = channelIdentity(a.channel);const previous = values(s.conversations).find(v => v.id === channel.id);
-        const node = await request('/v1/node');
-        const participants = [...new Set<string>([...(previous?.participantIds ?? []), senderId, 'operator', ...mentions])].sort();
-        const conversation = { ...previous, id: channel.id, kind: channel.channel === 'system' ? 'system' : 'channel', title: channel.channel,
-          authorityNodeId: previous?.authorityNodeId ?? node.nodeId ?? node.id, visibility: previous?.visibility ?? 'workspace', shareMode: previous?.shareMode ?? 'local',
-          participantIds: participants, metadata: { ...previous?.metadata, naturalKey: channel.naturalKey, channel: channel.channel } };
-        await request('/v1/conversations', conversation);
-        const id = a.requestId ? `msg.request.${createHash('sha256').update(JSON.stringify([senderId,a.requestId])).digest('hex')}` : `msg.${randomUUID()}`;
-        await request('/v1/messages', { id, ...pick(a,['requestId','body']), conversationId: channel.id, actorId: senderId,
-          originNodeId: node.nodeId ?? node.id, class: 'agent', visibility: conversation.visibility, policy: 'durable', createdAt: Date.now(),
-          mentions: mentions.map(actorId => ({ actorId, label: actorId })), audience: { notify: mentions, reason: 'mention' },
-          metadata: { source: 'scout-mesh-http', relayTargetIds: mentions, relayMessageId: id } });
-        return { ...context, usedBroker: true, conversationId: channel.id, messageId: id, invokedTargetIds: mentions, unresolvedTargetIds: [] };
+    if (name === 'reply') {
+      validateTaskReply(a);
+      if (a.sessionId || a.deliveryId || a.replyToken) {
+        if (!a.ref || !a.sessionId || !a.deliveryId || a.image)
+          throw new Error('external reply requires its exact task and correlated return address');
+        return request('/v1/external-sessions/reply', { ...pick(a, ['sessionId','deliveryId','replyToken','body','ref','progress','failed','attachments']), requestId: a.requestId ?? `external-${createHash("sha256").update(JSON.stringify([a.deliveryId, a.progress ? ["progress", a.body] : ["final"]])).digest("hex")}`, ownerId: senderId });
       }
-      if (mentions.length === 1 && !a.targetAgentId) a.targetAgentId = mentions[0];
+      const node = await request('/v1/node');
+      if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`runtime requires ${SCOUT_TASKS_CAPABILITY}`);
+      if (a.image) throw new Error('image paths are host-local; submit inline evidence through a local Scout client');
+      return request('/v1/messages/reply', { ...pick(a, ['ref','to','progress','failed','body','attachments']),
+        requestId: a.requestId ?? `reply-${randomUUID()}`, senderId });
+    }
+    if (name === 'ask') {
+      const isAsk = !a.fyi, operator = a.operator === true;
+      const task = { version: 1, ...pick(a, ['operator','ref','continue','cancel','fyi','notify','defaultAction','options','permission','because','window']) } as import('@openscout/protocol').ScoutTaskAsk;
+      validateTaskAsk(task, { to: a.to ?? a.targetSessionId, channel: a.channel, capability: !a.continue && Boolean(a.projectPath || a.profile),
+        execution: Boolean(a.harness || a.model || a.reasoningEffort || a.on || a.runtime || a.placement || a.projectPath), relation: Boolean(a.relation) });
+      const node = await request('/v1/node');
+      if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`runtime requires ${SCOUT_TASKS_CAPABILITY}`);
+      if (a.image) throw new Error('image paths are host-local; submit inline evidence through a local Scout client');
+      a.requestId ??= `ask-${randomUUID()}`;
       if (a.profile && !a.projectPath) { if (!this.options.currentDirectory || this.options.currentDirectory === '/') throw new Error('profile requires an explicit projectPath');a.projectPath = this.options.currentDirectory; }
-      if (a.on && (!a.projectPath || a.to || a.targetSessionId || a.profile)) throw new Error('on requires projectPath and cannot combine with an exact target or profile');
-      let target = operator ? { kind: 'agent_id', agentId: 'operator' } : a.targetAgentId ? { kind: 'agent_id', agentId: a.targetAgentId }
+      if (a.on && !a.continue && (!a.projectPath || a.to || a.targetSessionId || a.profile)) throw new Error('on requires projectPath and cannot combine with an exact target or profile');
+      if (a.continue && (a.on || a.projectPath)) task.successor = { host: a.on, projectPath: a.projectPath };
+      let target = a.ref || a.continue ? { kind: 'binding_ref', ref: a.ref ?? a.continue } : operator ? { kind: 'agent_id', agentId: 'operator' } : a.targetAgentId ? { kind: 'agent_id', agentId: a.targetAgentId }
         : a.targetSessionId ? { kind: 'session_id', sessionId: a.targetSessionId }
         : a.projectPath ? { kind: 'project_path', projectPath: a.projectPath, ...(a.on ? { host: a.on } : {}) }
         : parseScoutComposerRouteTarget(a.to ?? a.targetLabel ?? (a.channel ? `channel:${a.channel}` : ''));
@@ -173,21 +156,19 @@ export class CoreHttpAdapter {
         execution = { ...spec.value, ...execution };
       }
       if (target.kind === 'session_id') a.targetSessionId = target.sessionId;
-      const body = name === 'consult_operator' ? `${a.question}\n\nDefault if there is no reply: ${a.defaultAction}` : operator ? a.message : a.body;
+      const body = a.body;
       if (target.kind === 'route_alias' && (a.aliasProject || a.aliasHost)) target = { ...target, scope: { ...(a.aliasProject ? { projectRoot: a.aliasProject } : {}), ...(a.aliasHost ? { authorityNodeId: a.aliasHost } : {}) } } as typeof target;
-      const intent = isAsk ? a.completion || a.relation ? 'explicit_consult' : 'consult' : 'tell';
+      const intent = 'task_ask';
       const workRecordId = a.workItem ? a.requestId ? `work-request-${createHash('sha256').update(JSON.stringify([senderId,a.requestId])).digest('hex')}` : `work.${randomUUID()}` : undefined;
       const metadata = { source: 'scout-mesh-http', ...(a.workspace ? { askWorkspace: a.workspace } : {}),
         ...(workRecordId ? { collaborationRecordId: workRecordId, workId: workRecordId } : {}),
         ...(a.labels ? { labels: a.labels } : {}), ...(a.replyToSessionId ? { replyToSessionId: a.replyToSessionId } : {}),
         replyMode: a.wait ? 'inline' : a.replyMode ?? 'notify', senderContext: { agentId: senderId, cwd: currentDirectory } };
-      const result = await request('/v1/deliver', { caller: { actorId: senderId, currentDirectory, metadata: { source: 'scout-mesh-http' } }, target, body, intent,
+      const result = await request('/v1/deliver', { caller: { actorId: senderId, currentDirectory, metadata: { source: 'scout-mesh-http' } }, target, body, intent, task,
         ...pick(a,['requestId','completion','relation','targetSessionId','replyToSessionId','labels','channel']),
-        ...(isAsk ? { execution: { ...execution, session: a.targetSessionId ? 'existing' : 'new' } } : {}), ...(operator ? {} : { ensureAwake: isAsk || a.wake === true }), ...(a.shouldSpeak ? { speechText: body } : {}),
+        ...(isAsk && !a.ref && !operator ? { execution: { ...execution, session: a.targetSessionId ? 'existing' : 'new' } } : {}), ...(operator ? {} : { ensureAwake: isAsk || a.wake === true }), ...(a.shouldSpeak ? { speechText: body } : {}),
         ...(a.workItem ? { collaborationRecordId: workRecordId, workItem: { id: workRecordId, ...a.workItem } } : {}),
         messageMetadata: isAsk ? metadata : { source: 'scout-mesh-http' }, ...(isAsk ? { invocationMetadata: metadata } : {}),
-        ...(name === 'notify_operator' ? { operatorSignal: { kind: 'notify', blocking: false, replyExpectation: 'none' } } : {}),
-        ...(name === 'consult_operator' ? { operatorSignal: { kind: 'consult', blocking: false, replyExpectation: 'optional', defaultAction: a.defaultAction } } : {}),
       });
       const flightId = result.flight?.id ?? result.flightId;
       const inline = isAsk && (a.wait || a.replyMode === 'inline') && flightId ? await this.call('invocations_wait', { flightId, timeoutSeconds: a.timeoutSeconds ?? 30 }, signal) : undefined;
@@ -202,7 +183,8 @@ export class CoreHttpAdapter {
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       try { const result = await this.call(request.params.name, request.params.arguments, extra.signal);
         return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result && typeof result === 'object' && !Array.isArray(result) ? result : { result } }; }
-      catch { return { isError: true, content: [{ type: 'text', text: `Scout tool ${request.params.name} failed; check arguments, consent and runtime availability.` }] }; }
+      catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof TaskClosedError
+        ? error.message : `Scout tool ${request.params.name} failed; check arguments, consent and runtime availability.` }] }; }
     });
     return server;
   }

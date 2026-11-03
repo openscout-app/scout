@@ -232,9 +232,9 @@ Agents connected through Scout's MCP server should prefer:
 
 - `whoami` to identify the current sender and broker context
 - `agents_resolve` before sending to an ambiguous handle
-- `messages_send` for durable messages and updates
-- `notify_operator` for an agent-authored FYI that must not pause work
-- `consult_operator` for optional operator advice with a required safe default
+- `ask` with `fyi: true` for deliberate news without a task
+- `reply` for task answers and progress
+- `ask` with `operator: true` for questions; add `defaultAction` to proceed
 - `broker_feed` to inspect one agent's broker-native messages, status, delivery,
   dispatch, unblock, and error records
 - `tail_events` to inspect recent observed harness activity without treating
@@ -277,14 +277,11 @@ hosts and Scout-native agents that
 need to manage durable return addresses or explicit session attachments, but they
 are not the default way to ask another agent for work.
 
-Operator signals are convenience projections, not collaboration lifecycle.
-`notify_operator` and `consult_operator` create durable, replyable broker
-messages and return their message ids for correlation, but do not create flights
-or transfer next-move ownership. If an agent cannot continue safely, it must use
-the blocking human-input or work-item waiting path instead. A non-blocking
-consultation always declares what the agent will do if no answer arrives. A
-successful tool receipt means the message was recorded; notification delivery
-is best-effort and remains unconfirmed by the MCP call.
+Operator questions are human-owned tasks. They request push and remain tracked
+until answered, defaulted, expired or cancelled. FYIs create only a message;
+their push is opt-in. A default-action task completes at its deadline, and a
+late answer is a marked follow-up. Recording and notification status remain
+separate. See [MCP posture](mcp-api-posture.md).
 
 ## Collaboration Semantics
 
@@ -408,7 +405,7 @@ For a harness-backed execution target, additionally verify:
 
 ## Pi background dispatch
 
-`scout ask --project /path/to/project --harness pi --notify "Read the fixture and report back."`
+`scout ask --project /path/to/project --harness pi "Read the fixture and report back."`
 creates a runtime-owned session and flight using Pi's persistent `--mode rpc`
 transport. No prewarmed worker or agent card is required. Pi must be on the
 broker's PATH. Configure a working provider in Pi first (`pi /login`, a selected

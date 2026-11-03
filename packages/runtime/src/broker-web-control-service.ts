@@ -206,6 +206,7 @@ export class BrokerWebControlService {
   private webStartInFlight: Promise<WebControlStatus> | null = null;
   private webRestartInFlight: Promise<WebControlStatus> | null = null;
   private stopping = false;
+  private webExpected = false;
   private readonly intentionalStops = new Set<RuntimeChildProcessLike>();
   private monitorTimer: ReturnType<typeof setTimeout> | null = null;
   private monitorInFlight = false;
@@ -417,6 +418,7 @@ export class BrokerWebControlService {
     const webRunning = isChildProcessRunning(this.webServerProcess);
     return {
       web: {
+        expected: this.webExpected,
         managed: true,
         managedBy: "broker",
         state: this.webStartInFlight || this.webRestartInFlight ? "starting" : webRunning ? (this.recovery.state === "paused" || this.recovery.state === "unavailable" ? "unavailable" : "running") : "stopped",
@@ -459,6 +461,7 @@ export class BrokerWebControlService {
   }
 
   async startIfNeeded(context: WebStartContext = {}, fromRestart = false): Promise<WebControlStatus> {
+    this.webExpected = true;
     if (this.stopping) {
       return this.failureStatus("Scout web cannot start while the broker is stopping.");
     }

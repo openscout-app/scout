@@ -277,6 +277,14 @@ jobs:
             throw new Error(`docs.json version must match ${tag}, got ${docs.version}`);
           }
 
+          const server = JSON.parse(readFileSync("packages/cli/server.json", "utf8"));
+          const serverPackage = server.packages?.find((entry) => entry.identifier === "@openscout/scout");
+          if (server.version !== expected || serverPackage?.version !== expected) {
+            throw new Error(
+              `packages/cli/server.json versions must match ${tag}, got ${server.version} and ${serverPackage?.version}`,
+            );
+          }
+
           const cli = JSON.parse(readFileSync("packages/cli/package.json", "utf8"));
           if (cli.name !== "@openscout/scout") {
             throw new Error(`Unexpected public package name: ${cli.name}`);

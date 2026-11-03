@@ -46,7 +46,7 @@ export type ScoutOperatorSignalKind = "notify" | "consult" | "need";
  * what I want from you", authored by the agent, and cannot be created without
  * a question (enforced at the CLI boundary, not filtered downstream).
  */
-export type ScoutOperatorSignal =
+export type ScoutOperatorSignal = { notificationPolicy?: import("./tasks.js").ScoutNotificationPolicy } & (
   | {
       kind: "notify";
       blocking: false;
@@ -69,7 +69,7 @@ export type ScoutOperatorSignal =
       options?: string[];
       /** Why the agent cannot continue without it. */
       blockedReason?: string;
-    };
+    });
 
 export type ScoutDeliverRouteKind = "dm" | "channel" | "broadcast";
 
@@ -111,6 +111,8 @@ export interface ScoutSessionInputReceipt {
 }
 
 export interface ScoutDeliverRequest {
+  task?: import("./tasks.js").ScoutTaskAsk;
+  image?: import("./attachments.js").AttachmentUpload;
   completion?: ScoutCompletionRequest;
   relation?: ScoutCompletionRelation;
   /** Caller-supplied, requester-scoped idempotency key. */
@@ -159,7 +161,7 @@ export interface ScoutDeliverRequest {
  * The current boundary normalizes session_input to the consult command above.
  */
 export type ScoutDeliverHttpRequest = Omit<ScoutDeliverRequest, "intent"> & {
-  intent: ScoutDeliverIntent | "session_input" | "explicit_consult";
+  intent: ScoutDeliverIntent | "session_input" | "explicit_consult" | "task_ask";
 };
 
 export interface ScoutDeliveryReceipt {

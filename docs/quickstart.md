@@ -68,7 +68,7 @@ scout ask --project . --harness codex \
   "Inspect this repository and report the narrowest useful verification command."
 ```
 
-Use `scout tell --to <target>` for a tell or update where no reply is expected.
+Use `scout ask --fyi --to <target>` for a tell or update where no reply is expected.
 Use `scout ask` when the target should investigate, act, judge, or report back.
 
 ## Next steps

@@ -34,7 +34,9 @@ import {
 } from "./instance.ts";
 import { normalizeScoutInstanceName, scoutUserSpawnEnvironment } from "../../agent-sessions/src/scout-state-paths.ts";
 
-const HOME = "/home/tester";
+// Not under /home: macOS mounts it with autofs, and every path lookup there
+// costs milliseconds, which pushed this file past the test timeout.
+const HOME = "/openscout-test-home/tester";
 const base = { home: HOME, hostname: "Archie.local", platform: "linux" } as const;
 
 describe("instance names", () => {
@@ -500,12 +502,12 @@ describe("checkout instance names are unique per checkout", () => {
     const env = { OPENSCOUT_INSTANCE_REGISTRY: join(dir, "registry") };
     try {
       const firstEnv: Record<string, string | undefined> = { ...env };
-      expect(applyCheckoutOpenScoutInstanceDefault(join(first, "packages", "runtime", "src"), firstEnv, "/home/tester")).toBe("dev");
+      expect(applyCheckoutOpenScoutInstanceDefault(join(first, "packages", "runtime", "src"), firstEnv, HOME)).toBe("dev");
       const secondEnv: Record<string, string | undefined> = { ...env };
-      const name = applyCheckoutOpenScoutInstanceDefault(join(second, "packages", "runtime", "src"), secondEnv, "/home/tester");
+      const name = applyCheckoutOpenScoutInstanceDefault(join(second, "packages", "runtime", "src"), secondEnv, HOME);
       expect(name).toMatch(/^dev-[0-9a-f]{4}$/);
       // The first checkout keeps its name.
-      expect(applyCheckoutOpenScoutInstanceDefault(join(first, "packages", "runtime", "src"), { ...env }, "/home/tester")).toBe("dev");
+      expect(applyCheckoutOpenScoutInstanceDefault(join(first, "packages", "runtime", "src"), { ...env }, HOME)).toBe("dev");
     } finally {
       for (const path of [first, second]) rmSync(join(path, ".."), { recursive: true, force: true });
       rmSync(dir, { recursive: true, force: true });
@@ -802,7 +804,7 @@ console.log(JSON.stringify(entry));
       expect(claimOpenScoutInstance("dev-bad", { ...env, OPENSCOUT_INSTANCE_PORT_BASE: "43100" }, home)).toBeNull();
       expect(claimOpenScoutInstance("dev-bad", { ...env, OPENSCOUT_INSTANCE_ROOT: join(home, ".scout") }, home)).toBeNull();
       expect(readOpenScoutInstanceLedger(env, home).instances).toEqual({});
-      expect(claimOpenScoutInstance("dev-unclaimed", {}, "/home/tester")).toBeNull();
+      expect(claimOpenScoutInstance("dev-unclaimed", {}, HOME)).toBeNull();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

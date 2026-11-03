@@ -342,8 +342,7 @@ implement; new interoperability work should prefer A2A primitives.
 ### MCP
 
 Scout's agent-facing tool surface is standard MCP. This is the protocol's front
-door for agents: the core tools are `whoami`, `ask`, `messages_send` and
-`messages_reply`, and `work_update`, with `invocations_get`, `invocations_wait`,
+door for agents: the core tools are `whoami`, `ask`, `reply` and `work_update`, with `invocations_get`, `invocations_wait`,
 `broker_feed`, and `tail_events` for observation and `agents_search` /
 `agents_resolve` for routing help. Deeper identity and lifecycle tools —
 `card_create`, `agents_start`, `session_attach_current` — sit in a pro tier that

@@ -1,3 +1,4 @@
+import { removedScoutVerbError } from "../removed-verbs.ts";
 import type { ScoutCommandContext } from "../context.ts";
 
 export type ScoutCommandHandler = (context: ScoutCommandContext, args: string[]) => Promise<void>;
@@ -9,6 +10,7 @@ export type ScoutCommandName =
   | "notify"
   | "operator"
   | "ask"
+  | "reply"
   | "alias"
   | "broadcast"
   | "card"
@@ -69,6 +71,7 @@ export type ScoutCommandName =
   | "whoami";
 
 export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<ScoutCommandHandler> {
+  if (removedScoutVerbError(name, [])) return async (_context, args) => { throw removedScoutVerbError(name, args)!; };
   switch (name) {
     case "integration":
       return (await import("./integration.ts")).runIntegrationCommand;
@@ -78,16 +81,12 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./quarantine.ts")).runQuarantineCommand;
     case "status":
       return (await import("./status.ts")).runStatusCommand;
-    case "notify":
-      return (await import("./notify.ts")).runNotifyCommand;
-    case "operator":
-      return (await import("./operator.ts")).runOperatorCommand;
+    case "reply":
+      return (await import("./reply.ts")).runReplyCommand;
     case "ask":
       return (await import("./ask.ts")).runAskCommand;
     case "alias":
       return (await import("./alias.ts")).runAliasCommand;
-    case "broadcast":
-      return (await import("./broadcast.ts")).runBroadcastCommand;
     case "card":
       return (await import("./card.ts")).runCardCommand;
     case "chat":
@@ -155,16 +154,12 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./locate.ts")).runLocateCommand;
     case "search":
       return (await import("./search.ts")).runSearchCommand;
-    case "send":
-      return (await import("./send.ts")).runSendCommand;
     case "session":
       return (await import("./session.ts")).runSessionCommand;
     case "server":
       return (await import("./server.ts")).runServerCommand;
     case "setup":
       return (await import("./setup.ts")).runSetupCommand;
-    case "speak":
-      return (await import("./speak.ts")).runSpeakCommand;
     case "voice":
       return (await import("./voice.ts")).runVoiceCommand;
     case "statusline":
@@ -175,8 +170,6 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./auth.ts")).runAuthCommand;
     case "tail":
       return (await import("./tail.ts")).runTailCommand;
-    case "tell":
-      return (await import("./tell.ts")).runTellCommand;
     case "tui":
       return (await import("./tui.ts")).runTuiCommand;
     case "up":
@@ -197,4 +190,5 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
     case "whoami":
       return (await import("./whoami.ts")).runWhoAmICommand;
   }
+  throw new Error(`No handler for reserved command ${name}`);
 }

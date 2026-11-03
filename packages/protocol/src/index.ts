@@ -87,3 +87,4 @@ export type { ObservedSessionIdentity, ObservedSessionLink, SessionReadAvailabil
 export type { ObservedSessionMaterialFile, ObservedSessionMaterials } from "./session-materials.js";
 
 export * from "./host-attention.js";
+export * from "./tasks.js";
