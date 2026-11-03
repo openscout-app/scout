@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { refusesLoopbackHttpProxy } from "./mesh-loopback-proxy.js";
 import { webStartContextFromRequest } from "./broker-web-control-service.js";
@@ -292,12 +294,12 @@ test("actual base startup and retry use allowlisted metadata without proxy heade
     const brokerControlUrl = "http://127.0.0.1:24400";
     const log = () => {}, warn = () => {};
     ${declaration("forwardedProtoForEdgeScheme")}
-    ${declaration("startWebWhenBrokerIsReady")}
+    ${declaration("startWebWhenBrokerIsReady").replaceAll("import.meta.url", JSON.stringify(import.meta.url))}
     return startWebWhenBrokerIsReady;
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const start = new Function(
     "waitForBrokerHealth", "readTailscaleSelfWebHosts", "resolveEdgeConfig",
-    "fetch", "scheduleWebStartRetry", factory,
+    "fetch", "scheduleWebStartRetry", "resolveLegacyWebEntry", "dirname", "fileURLToPath", factory,
   )(
     async () => true,
     async () => ["mesh.example.test"],
@@ -314,6 +316,9 @@ test("actual base startup and retry use allowlisted metadata without proxy heade
         { status: requests.length === 1 ? 503 : 200 });
     },
     () => { retries++; },
+    () => "/fixture/web.mjs",
+    dirname,
+    fileURLToPath,
   );
   await start();
   expect(retries).toBe(1);
