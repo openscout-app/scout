@@ -90,7 +90,7 @@ export function resolveRuntimeServiceEntrypoint(options: ResolveRuntimeServiceEn
   }
 
   throw new Error(
-    "openscout-runtime not found on PATH. Install @openscout/runtime (e.g. npm i -g @openscout/runtime) or set OPENSCOUT_RUNTIME_BIN.",
+    "openscout-runtime not found on PATH. Install Scout with `bun add -g @openscout/scout`, or set OPENSCOUT_RUNTIME_BIN.",
   );
 }
 

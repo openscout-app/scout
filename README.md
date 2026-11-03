@@ -47,7 +47,7 @@ adopting any of those clients or services.
 <!-- diagram:layers:end -->
 
 This repository is the core box. Everything in it runs on each host.
-`npm install -g @openscout/scout` installs the CLI with the runtime it runs, and
+`bun add -g @openscout/scout` installs the CLI with the runtime it runs, and
 `scout tui` fetches the Rust TUI on first use. The Scout apps and hosted
 services are separate. They reach the core through the released packages,
 runtime API, CLI JSON and MCP server, the same interfaces your own client uses.
@@ -58,10 +58,10 @@ rules in full.
 
 Local coordination requires [Bun 1.4.4 or newer](https://bun.sh), Apple-silicon
 macOS or Linux, and an installed, authenticated coding-agent harness for routed
-work. Install the package with npm; Bun runs the local runtime.
+work. Bun installs the package and runs the local runtime.
 
 ```bash
-npm install -g @openscout/scout
+bun add -g @openscout/scout
 scout --version
 scout setup
 scout doctor

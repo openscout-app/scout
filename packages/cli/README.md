@@ -41,17 +41,16 @@ macOS or Linux, and an installed, authenticated coding-agent harness for routed
 work.
 
 ```bash
-npm install -g @openscout/scout
+bun add -g @openscout/scout
 scout --version
 scout setup
 scout doctor
 ```
 
-`bun add -g @openscout/scout` installs the same package. Installing the package
-does not start services. On macOS, `scout setup` configures and starts the
-local runtime. On Linux, `scout setup` saves configuration. Run the foreground
-runtime in a separate terminal or under your process manager, then run
-`scout doctor` again:
+Installing the package does not start services. On macOS, `scout setup`
+configures and starts the local runtime. On Linux, `scout setup` saves
+configuration. Run the foreground runtime in a separate terminal or under
+your process manager, then run `scout doctor` again:
 
 ```bash
 openscout-runtime broker
@@ -308,7 +307,7 @@ the same released packages and APIs.
 - on Apple-silicon macOS, the `scoutd` service supervisor.
 
 The Rust TUI launched by `scout tui` is part of the core. Its native binary is
-not installed by `npm install -g @openscout/scout`. `scout tui` uses a local
+not installed by `bun add -g @openscout/scout`. `scout tui` uses a local
 copy or downloads the release binary for this version on first use.
 
 The package ships no web app. `scout server` and `scout web` serve a web client

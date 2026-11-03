@@ -20,7 +20,7 @@ Install Bun from [bun.sh](https://bun.sh) if `bun --version` is unavailable.
 ## Installation
 
 ```bash
-npm install -g @openscout/scout
+bun add -g @openscout/scout
 scout --version
 ```
 

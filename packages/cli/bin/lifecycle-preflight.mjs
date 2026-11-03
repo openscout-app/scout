@@ -314,7 +314,7 @@ export const INSTALL_HELP = [
   "  Quarantine attributes are not cleared.",
   "",
   "  The app connects to the local service from @openscout/scout.",
-  "  Install with `npm install -g @openscout/scout` or `bun add -g @openscout/scout`.",
+  "  Install with `bun add -g @openscout/scout`.",
   "  The normal macOS local service requires Bun 1.4.4 or newer.",
   "",
   QUICK_LINKS,
