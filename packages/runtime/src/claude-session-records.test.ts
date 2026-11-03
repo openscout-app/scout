@@ -253,3 +253,8 @@ test("preserves native registry status timestamps and waitingFor verbatim", () =
   }
   expect(parseClaudeSessionRecord('{"pid":123,"sessionId":"native","status":"unknown"}', "/records/123.json")?.status).toBeNull();
 });
+
+test("keeps a background session's job id, and only a plain one", () => {
+  expect(parseClaudeSessionRecord('{"pid":1,"sessionId":"s","kind":"bg","jobId":"6d2d72b9"}', "/r.json")).toMatchObject({ kind: "bg", jobId: "6d2d72b9" });
+  expect(parseClaudeSessionRecord('{"pid":1,"sessionId":"s","jobId":"x; rm -rf /"}', "/r.json")?.jobId).toBeNull();
+});

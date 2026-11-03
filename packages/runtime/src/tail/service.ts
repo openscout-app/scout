@@ -6,6 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { redactSecrets, redactSecretsDeep } from "@openscout/agent-sessions/secret-redaction";
 
+import { findClaudePendingToolCall } from "@openscout/agent-sessions";
 import { readClaudeSessionRecords, type ClaudeSessionRecord } from "../claude-session-records.js";
 
 import { ClaudeSource } from "./claude-source.js";
@@ -27,6 +28,7 @@ import type {
   TailEvent,
   TailEventKind,
   TailContext,
+  TailPendingToolCall,
   TranscriptSource,
 } from "./types.js";
 
@@ -988,6 +990,37 @@ export function joinClaudeRegistryStatus(
   });
 }
 
+/** A waiting session's transcript tail is re-read only when the file changed. */
+const PENDING_CALL_READ_BYTES = 256 * 1024;
+const pendingCallReads = new Map<string, { size: number; mtimeMs: number; pending: TailPendingToolCall | null }>();
+
+/**
+ * A Claude session waiting on its own prompt: the call it asks about, read
+ * from the transcript (a tool_use with no tool_result). Only waiting
+ * sessions are read, each once per transcript change.
+ */
+export async function withPendingToolCalls(
+  transcripts: DiscoveredTranscript[],
+  readTail: (path: string, maxBytes: number) => Promise<string> = readTranscriptText,
+  statFile: (path: string) => Promise<{ size: number; mtimeMs: number } | null> = (path) => stat(path).catch(() => null),
+): Promise<DiscoveredTranscript[]> {
+  const waiting = new Set<string>();
+  const out = await Promise.all(transcripts.map(async (transcript) => {
+    if (transcript.source !== "claude" || !transcript.attention || transcript.attention.source !== "registry") return transcript;
+    waiting.add(transcript.transcriptPath);
+    const now = await statFile(transcript.transcriptPath);
+    if (!now) return transcript;
+    let read = pendingCallReads.get(transcript.transcriptPath);
+    if (!read || read.size !== now.size || read.mtimeMs !== now.mtimeMs) {
+      read = { size: now.size, mtimeMs: now.mtimeMs, pending: findClaudePendingToolCall(await readTail(transcript.transcriptPath, PENDING_CALL_READ_BYTES)) };
+      pendingCallReads.set(transcript.transcriptPath, read);
+    }
+    return read.pending ? { ...transcript, attention: { ...transcript.attention, pending: read.pending } } : transcript;
+  }));
+  for (const path of pendingCallReads.keys()) if (!waiting.has(path)) pendingCallReads.delete(path);
+  return out;
+}
+
 async function refreshDiscovery(
   scope: TailDiscoveryScope = "shallow",
   options: { pruneMissing: boolean } = { pruneMissing: scope !== "hot" },
@@ -1144,10 +1177,10 @@ async function refreshDiscovery(
     );
   }
 
-  const allTranscripts = joinClaudeRegistryStatus(
+  const allTranscripts = await withPendingToolCalls(joinClaudeRegistryStatus(
     [...knownTranscripts.values()].sort((a, b) => b.mtimeMs - a.mtimeMs),
     await readClaudeSessionRecords().catch(() => []),
-  );
+  ));
 
   let scoutManaged = 0;
   let hudsonManaged = 0;

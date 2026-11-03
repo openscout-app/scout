@@ -60,6 +60,22 @@ export type DiscoveredProcess = {
   source: string;
 };
 
+/**
+ * The tool call a waiting session asks about, as its own prompt shows it:
+ * a heading ("Bash command", "Edit file") and the command, path or address.
+ * Observed from the transcript; it is context, not an answer path.
+ */
+export type TailPendingToolCall = {
+  toolUseId: string;
+  tool: string;
+  title: string;
+  subject: string | null;
+  detail: string | null;
+  subjectKind: "command" | "path" | "url" | "query" | "arguments" | null;
+  at: number | null;
+  alsoPending: number;
+};
+
 export type DiscoveredTranscript = {
   /** Harness-native title (custom title > agent name > AI title; newest of each wins). */
   title?: string | null;
@@ -67,7 +83,14 @@ export type DiscoveredTranscript = {
   status?: "busy" | "idle" | "shell" | "waiting" | null;
   statusUpdatedAt?: number | null;
   waitingFor?: string | null;
-  attention?: { kind: "ask"; source: "herdr" | "registry"; reason?: string | null; since?: number | null } | null;
+  attention?: {
+    kind: "ask";
+    source: "herdr" | "registry";
+    reason?: string | null;
+    since?: number | null;
+    /** The call the session waits on, read from its transcript (a tool_use with no tool_result). */
+    pending?: TailPendingToolCall | null;
+  } | null;
   /** Claude workflow run containing this child transcript. */
   workflowRunId?: string | null;
 
