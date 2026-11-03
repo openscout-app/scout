@@ -37,4 +37,15 @@ describe("Scout host integration catalog", () => {
       herdr && scoutHostIntegrationHasRole(herdr, "agent_state_surface"),
     ).toBe(true);
   });
+
+  test("represents Zed as an agent and MCP host, not a harness", () => {
+    const zed = scoutHostIntegrationById("zed");
+
+    expect(zed?.harness).toBeUndefined();
+    expect(AGENT_HARNESSES).not.toContain("zed");
+    expect(zed && scoutHostIntegrationHasRole(zed, "agent_host")).toBe(true);
+    expect(zed && scoutHostIntegrationHasRole(zed, "mcp_host")).toBe(true);
+    expect(zed && scoutHostIntegrationHasRole(zed, "execution_harness")).toBe(false);
+    expect(zed?.installHint).toBe("scout mcp install --host zed");
+  });
 });

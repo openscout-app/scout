@@ -192,7 +192,13 @@ your agent host:
 ```bash
 scout mcp install --host claude
 scout mcp install --host codex
+scout mcp install --host zed
 ```
+
+Zed has no command for adding MCP servers, so Scout adds `context_servers.scout`
+to Zed's user `settings.json` and keeps the rest of the file, comments included.
+Zed reloads its settings without a restart. Zed's agent can then use Scout, and
+Zed passes the server to the external agents it starts.
 
 Add `--dry-run` to show the configuration change without applying it. Another
 client that accepts command-based stdio servers can use the installed CLI:

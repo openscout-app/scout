@@ -39,7 +39,7 @@ export function renderMcpCommandHelp(): string {
   return [
     "Usage:",
     "  scout mcp [--context-root <path>] [--notifications]",
-    "  scout mcp install [--host <codex|claude>] [--force] [--dry-run]",
+    "  scout mcp install [--host <codex|claude|zed>] [--force] [--dry-run]",
     "",
     "Run or install the Scout MCP server.",
     "",

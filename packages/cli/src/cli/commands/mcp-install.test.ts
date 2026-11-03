@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   installScoutMcpForHosts,
@@ -17,6 +20,12 @@ describe("parseMcpInstallCommandOptions", () => {
       force: true,
       dryRun: true,
     });
+  });
+
+  test("accepts zed and rejects unknown hosts", () => {
+    expect(parseMcpInstallCommandOptions(["--host", "zed"], process.env).hosts).toEqual(["zed"]);
+    expect(() => parseMcpInstallCommandOptions(["--host", "vim"], process.env))
+      .toThrow("expected codex, claude, or zed");
   });
 });
 
@@ -129,4 +138,103 @@ test("launch registration uses a stable executable rather than the active packag
   const { resolveCurrentScoutMcpLaunchCommand } = await import("./mcp-install.ts");
   expect(resolveCurrentScoutMcpLaunchCommand({ OPENSCOUT_CLI_BIN: process.execPath, PATH: "" }))
     .toEqual({ command: process.execPath, args: ["mcp"] });
+});
+
+describe("installScoutMcpForHosts for Zed", () => {
+  const launch = { command: "/opt/scout/bin/scout", args: ["mcp"] };
+
+  function installZed(settingsPath: string | null, options: { force?: boolean; dryRun?: boolean } = {}) {
+    const [outcome] = installScoutMcpForHosts({
+      env: process.env,
+      hosts: ["zed"],
+      force: options.force ?? false,
+      dryRun: options.dryRun ?? false,
+      resolveHostPath: () => settingsPath,
+      resolveLaunchCommand: () => launch,
+      run: () => {
+        throw new Error("Zed installs edit settings.json and run no commands");
+      },
+    });
+    return outcome;
+  }
+
+  function settingsFile(): string {
+    return join(mkdtempSync(join(tmpdir(), "scout-zed-")), "zed", "settings.json");
+  }
+
+  test("creates the settings file when Zed has none yet", () => {
+    const settingsPath = settingsFile();
+
+    expect(installZed(settingsPath)).toEqual({
+      host: "zed",
+      status: "installed",
+      detail: `Installed scout MCP for Zed in ${settingsPath}.`,
+    });
+    expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+      context_servers: { scout: launch },
+    });
+    expect(existsSync(`${settingsPath}.scout-backup`)).toBe(false);
+  });
+
+  test("edits an existing file, keeps its comments, and saves a backup", () => {
+    const settingsPath = settingsFile();
+    installZed(settingsPath);
+    const original = "// my settings\n{\n  \"vim_mode\": true\n}\n";
+    writeFileSync(settingsPath, original);
+
+    expect(installZed(settingsPath)?.status).toBe("installed");
+    const next = readFileSync(settingsPath, "utf8");
+    expect(next.startsWith("// my settings\n{\n  \"vim_mode\": true,\n  \"context_servers\": {")).toBe(true);
+    expect(readFileSync(`${settingsPath}.scout-backup`, "utf8")).toBe(original);
+
+    expect(installZed(settingsPath)).toEqual({
+      host: "zed",
+      status: "already_installed",
+      detail: "Zed already has a scout MCP entry.",
+    });
+  });
+
+  test("leaves a different scout entry unless forced", () => {
+    const settingsPath = settingsFile();
+    installZed(settingsPath);
+    writeFileSync(settingsPath, "{\n  \"context_servers\": {\n    \"scout\": { \"command\": \"scout\" }\n  }\n}\n");
+
+    expect(installZed(settingsPath)).toEqual({
+      host: "zed",
+      status: "skipped",
+      detail: `Zed has a different scout entry in ${settingsPath}. Rerun with --force to replace it.`,
+    });
+    expect(installZed(settingsPath, { force: true })?.status).toBe("installed");
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).context_servers.scout).toEqual(launch);
+  });
+
+  test("dry-run describes the change without writing", () => {
+    const settingsPath = settingsFile();
+
+    expect(installZed(settingsPath, { dryRun: true })).toEqual({
+      host: "zed",
+      status: "installed",
+      detail: `Would add context_servers.scout in ${settingsPath}: /opt/scout/bin/scout mcp`,
+    });
+    expect(existsSync(settingsPath)).toBe(false);
+  });
+
+  test("reports a settings file it cannot edit safely without touching it", () => {
+    const settingsPath = settingsFile();
+    installZed(settingsPath);
+    writeFileSync(settingsPath, "{ \"vim_mode\": }");
+
+    const outcome = installZed(settingsPath);
+    expect(outcome?.status).toBe("failed");
+    expect(outcome?.detail).toContain("not valid JSON with comments");
+    expect(readFileSync(settingsPath, "utf8")).toBe("{ \"vim_mode\": }");
+  });
+
+  test("skips Zed when it is not installed", () => {
+    expect(installZed(null)).toEqual({
+      host: "zed",
+      status: "skipped",
+      detail: "Skipped zed: Zed not found.",
+    });
+  });
 });
