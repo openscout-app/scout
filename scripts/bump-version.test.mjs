@@ -16,7 +16,8 @@ test("dev bumps lockstep versions and workspace pack ranges, orders dev numerica
     }
     const run = (script, ...args) => spawnSync(process.execPath, [`scripts/${script}.mjs`, ...args], { cwd: fixture, encoding: "utf8" });
     const current = JSON.parse(readFileSync(join(fixture, "package.json"))).version;
-    const [major, minor, patch] = current.split(".").map(Number);
+    // Main reads a -dev.N version between a dev release and the stable one after it.
+    const [major, minor, patch] = current.split("-")[0].split(".").map(Number);
     const base = `${major}.${minor}.${patch + 1}`;
     for (const version of [`${base}-dev.9`, `${base}-dev.10`]) {
       const r = run("bump-version", version);
@@ -64,7 +65,9 @@ test("a server.json version out of lockstep refuses the bump before any write", 
     server.packages.find(p => p.identifier === "@openscout/scout").version = "0.0.1";
     writeFileSync(serverPath, JSON.stringify(server, null, 2));
     const before = readFileSync(join(fixture, "package.json"), "utf8");
-    const r = spawnSync(process.execPath, ["scripts/bump-version.mjs", "patch"], { cwd: fixture, encoding: "utf8" });
+    // An explicit version: `patch` cannot step from a -dev.N version.
+    const [major, minor, patch] = JSON.parse(before).version.split("-")[0].split(".").map(Number);
+    const r = spawnSync(process.execPath, ["scripts/bump-version.mjs", `${major}.${minor}.${patch + 1}`], { cwd: fixture, encoding: "utf8" });
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /server\.json/);
     assert.equal(readFileSync(join(fixture, "package.json"), "utf8"), before);
