@@ -6,6 +6,7 @@ import ts from "typescript";
 import { refusesLoopbackHttpProxy } from "./mesh-loopback-proxy.js";
 import { webStartContextFromRequest } from "./broker-web-control-service.js";
 import { createBaseEdgeRefresh } from "./base-edge-refresh.js";
+import { webStartRequestHeaders } from "./web-start-context.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -299,7 +300,7 @@ test("actual base startup and retry use allowlisted metadata without proxy heade
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const start = new Function(
     "waitForBrokerHealth", "readTailscaleSelfWebHosts", "resolveEdgeConfig",
-    "fetch", "scheduleWebStartRetry", "resolveLegacyWebEntry", "dirname", "fileURLToPath", factory,
+    "fetch", "scheduleWebStartRetry", "resolveLegacyWebEntry", "dirname", "fileURLToPath", "webStartRequestHeaders", factory,
   )(
     async () => true,
     async () => ["mesh.example.test"],
@@ -319,6 +320,7 @@ test("actual base startup and retry use allowlisted metadata without proxy heade
     () => "/fixture/web.mjs",
     dirname,
     fileURLToPath,
+    webStartRequestHeaders,
   );
   await start();
   expect(retries).toBe(1);

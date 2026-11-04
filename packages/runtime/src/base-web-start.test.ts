@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { resolveLegacyWebEntry } from "./legacy-app-services.js";
+import { webStartRequestHeaders } from "./web-start-context.js";
 
 // Exercise the actual base wiring without booting any service or app.
 const source = readFileSync(new URL("./base-daemon.ts", import.meta.url), "utf8");
@@ -21,12 +22,12 @@ function harness(env: Record<string, string>) {
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const wiring = new Function("process", "resolveLegacyWebEntry", "dirname", "fileURLToPath",
     "scheduleWebStartRetry", "warn", "waitForBrokerHealth", "readTailscaleSelfWebHosts",
-    "resolveEdgeConfig", "forwardedProtoForEdgeScheme", "fetch", "brokerControlUrl", "log", body)(
+    "resolveEdgeConfig", "forwardedProtoForEdgeScheme", "fetch", "brokerControlUrl", "log", "webStartRequestHeaders", body)(
     { env }, resolveLegacyWebEntry, dirname, fileURLToPath, () => { retries++; },
     (...args: unknown[]) => warnings.push(args), async () => true, async () => [],
     () => ({ scheme: "http" }), () => "http", async () => {
       starts++; return { ok: true, json: async () => ({ ok: true }) };
-    }, "http://127.0.0.1:24400", () => {},
+    }, "http://127.0.0.1:24400", () => {}, webStartRequestHeaders,
   );
   return { ...wiring, warnings, retries: () => retries, starts: () => starts };
 }
