@@ -120,6 +120,107 @@ Commit the source, version manifests, `packages/cli/src/lib/shared/product.ts`,
 `docs.json`, and lockfile on a review branch. Merge only after the standalone
 checks and packed artifact audit pass.
 
+## 0.5.0 ask and reply
+
+Scout now has two verbs for moving work. `scout ask` sends anything: new work,
+a follow-up, a question for the operator, or an FYI. `scout reply` answers it.
+Work items move through lifecycles that the runtime checks. Install with
+`bun add -g @openscout/scout`.
+
+### Before you upgrade
+
+- **Six CLI verbs are removed.** `scout send`, `tell`, `operator`, `notify`,
+  `broadcast` and `speak` now stop with
+  `scout <verb> was removed. Nothing was sent.` and print the `scout ask` or
+  `scout reply` command to use instead. They never fall through to an implicit
+  ask. Update scripts and agent instructions that call them:
+  - an FYI: `scout ask --to <agent> --fyi "..."`
+  - an answer to a task: `scout reply --ref <task> "..."`
+  - the operator: `scout ask --operator "..."`, with `--option` for choices,
+    or `scout ask --operator --fyi --notify "..."` for an update
+  - a channel: `scout ask --channel shared --fyi "..."`
+  - `speak`: removed. Speaking aloud is the operator's device setting.
+- **Five MCP tools are removed.** `messages_send`, `messages_reply`,
+  `sessions_reply`, `notify_operator` and `consult_operator` are replaced by
+  `ask` and `reply`. `ask` takes `fyi`, `operator`, `options`,
+  `defaultAction` and `permission`. `reply` answers both Scout tasks and
+  external sessions. Harness permission settings that list the old tool names
+  need `mcp__scout__ask` and `mcp__scout__reply` instead.
+- **Finished work goes to done.** New work items start with acceptance
+  `none`, so an item that finishes moves to `done` instead of `review`. An
+  asker that wants to review first sets acceptance `pending`.
+  `scripts/settle-review-work.ts` reports the review items left by the old
+  default, and with `--apply` moves them to done through the runtime API.
+- **Do not downgrade the runtime after it runs 0.5.** A control event in the
+  journal now stores a checked reference to the record that its command
+  journaled one line earlier, not a second copy. 0.4 runtimes do not restore
+  those references.
+
+### Ask and reply
+
+- `scout ask` routes by exactly one of `--to`, `--project`, `--ref`,
+  `--continue`, `--operator` or `--channel`. Unknown flags and combined routes
+  are errors. Message text never cancels work.
+- `--ref <task>` follows up on unfinished work without a second task.
+  `--ref <task> --cancel` cancels it and reports whether the worker was
+  interrupted. `--continue <task>` starts a successor to a finished task.
+- `--fyi` creates a message and no task. It pushes to the operator only with
+  `--notify`.
+- `scout ask --operator` creates a task that the operator owns. `--option`
+  gives answer choices. `--default-action` proceeds when the answer window
+  ends: 30 minutes by default, or `--window`. `--permission` makes a blocking
+  permission request.
+- `scout reply --ref <task>` answers. A final reply closes the task, and the
+  first final reply wins. `--progress` keeps the task open. An automatic final
+  turn and an explicit reply never both land.
+
+### Work lifecycles
+
+A lifecycle is a set of stations and the moves between them. The runtime
+compiles it into a state machine and checks every move.
+
+- Routes: `GET` and `POST /v1/work/lifecycles`, `GET /v1/work/board`,
+  `GET /v1/work/moves`, `POST /v1/work/move` and `POST /v1/work/review`.
+- MCP: `work_move`, `work_review` and `work_lifecycle`. The portable mesh
+  adapter serves them too.
+- The lifecycle's checks decide each move. Allow applies it, hold and consult
+  record it without moving the item, and deny explains why. A move into a
+  station with review criteria is applied and marked for review.
+- A review names the revision it judged. If the item moved since, the review
+  is recorded as stale and changes nothing.
+
+### Runtime and host health
+
+- scoutd sweeps host health every 30 seconds and reports conditions to local
+  clients: a degraded projection, low disk, web expected but not running,
+  pairing without a relay listener, version skew, and stale files. It restarts
+  only its own base child. [scoutd health sweep](./scoutd-health-sweep.md)
+  lists the conditions and their actions.
+- Health is answered from a cache on its own worker thread, so a long turn on
+  the runtime's main thread no longer reads as a stopped runtime.
+- Pairing supervision comes back after a reboot. A pid file written before the
+  current boot counts as absent.
+- A permission request survives a runtime restart. The runtime rebinds it to
+  its session while the prompt still shows, and otherwise declines it with the
+  reason. `POST /v1/operator-requests/dismiss` lets the operator end a request
+  that nothing can answer.
+- Operator questions asked by an agent on another host are recorded and
+  settled on this host too.
+- Web starts after a runtime restart again. The portal host travels in
+  `x-openscout-web-host` and `x-openscout-web-scheme`, because the loopback
+  gate refuses forwarding headers.
+
+### Other changes
+
+- `scout mcp install --host zed` registers Scout's MCP server in Zed's
+  settings. It keeps the file's comments and saves a backup first.
+- For a Claude session that waits on a permission prompt, discovery reads the
+  pending tool call from its transcript and shows the same heading and subject
+  as the prompt. Registered secret values are redacted.
+- Install lines across the docs use `bun add -g @openscout/scout`.
+- Stable releases publish from GitHub Actions, so npm records provenance for
+  them.
+
 ## 0.4.2 the openscout-app organization
 
 Scout's GitHub organization is now `openscout-app`. GitHub redirects the old
