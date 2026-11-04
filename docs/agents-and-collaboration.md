@@ -123,7 +123,12 @@ agree this is done."
 
 - `pending` — a requester or reviewer exists and has not yet weighed in. A `review`
   item typically sits at acceptance `pending`.
-- `none` — a self-driven item with no external reviewer.
+- `none` — no review was asked for. This is the default for a new work item:
+  when its flight completes, the item goes straight to `done`.
+
+Review is the asker's choice. An asker that wants a verdict before `done` sets
+`acceptanceState: "pending"` on the work item, and the finished item then moves
+to `review` with the next move on the requester.
 
 ### Progress And Waiting
 

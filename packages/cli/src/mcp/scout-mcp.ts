@@ -776,7 +776,8 @@ const workItemInputSchema = z.object({
   parentId: z.string().optional(),
   acceptanceState: z
     .enum(["none", "pending", "accepted", "reopened"])
-    .optional(),
+    .optional()
+    .describe("Omit to let finished work go straight to done. Set \"pending\" only when you want to review the result before it is done."),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
