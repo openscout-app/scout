@@ -4831,7 +4831,9 @@ mod tests {
         let config = test_config("/tmp/runtime", "/tmp/scoutd", "app.openscout");
         assert_eq!(
             super::broker_health_socket_path(&config),
-            PathBuf::from("/Users/test/Library/Application Support/OpenScout/runtime/broker-health.sock"),
+            PathBuf::from(
+                "/Users/test/Library/Application Support/OpenScout/runtime/broker-health.sock"
+            ),
         );
     }
 
