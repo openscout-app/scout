@@ -41,7 +41,7 @@ import type { ServerWebSocket } from "bun";
 import { realpathSync } from "fs";
 import { homedir } from "os";
 import type { SessionState } from "@openscout/agent-sessions";
-import { agentNotificationForSessionAttention } from "@openscout/runtime/agent-notification-builders";
+import { agentNotificationForSessionAttention, pushDeliveryForLevel } from "@openscout/runtime/agent-notification-builders";
 import { broadcastApnsAlertToActiveMobileDevices } from "@openscout/runtime/mobile-push";
 
 import { log } from "./log.ts";
@@ -157,10 +157,12 @@ function mobileConversationLifecycleEvent(lifecycle: ScoutBrokerConversationLife
 }
 
 async function sendMobileInboxPushNotification(item: MobileInboxItem, snapshot: SessionState | null) {
+  // The command, diff, or question itself, sealed to each paired phone.
+  const notification = agentNotificationForSessionAttention({ item, snapshot });
   const result = await broadcastApnsAlertToActiveMobileDevices({
     title: "Scout",
     body: genericMobileInboxAlertBody(item.kind),
-    sound: "default",
+    ...pushDeliveryForLevel(notification.level),
     threadId: "scout.inbox",
     payload: {
       destination: "inbox",
@@ -170,8 +172,7 @@ async function sendMobileInboxPushNotification(item: MobileInboxItem, snapshot: 
       turnId: item.turnId,
       blockId: item.blockId,
     },
-    // The command, diff, or question itself, sealed to each paired phone.
-    notification: agentNotificationForSessionAttention({ item, snapshot }),
+    notification,
   });
 
   if (result.attemptedCount === 0) {

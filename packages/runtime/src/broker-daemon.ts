@@ -2986,6 +2986,11 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
   messageVisibilityForConversation,
   postConversationMessage,
   broadcastApnsAlertToActiveMobileDevices,
+  agentDisplayName: (actorId) => {
+    const snapshot = runtime.snapshot();
+    const name = brokerActorDisplayName(snapshot, actorId);
+    return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
+  },
   warn: (message) => console.warn(message),
 });
 
@@ -3007,12 +3012,19 @@ const permissionService = new BrokerPermissionService({
     state, summary: requestId ? "Waiting on permission" : "Permission wait resolved; continuing live session.",
     metadata: { permissionRequestId: requestId, waitingOnPermission: Boolean(requestId), nextMoveOwnerId: requestId ? operatorActorId : null },
   }),
-  notify: (invocation, record, prompt) => operatorAttentionService.queueOperatorSignal({
-    signal: { kind: "need", blocking: true, replyExpectation: "required", question: prompt.text, requestKind: "permission" },
-    messageId: record.id, conversationId: invocation.conversationId!,
-    requesterId: invocation.targetAgentId, requesterNodeId: nodeId,
-    body: prompt.text, projectRoot: prompt.projectRoot, createdAt: record.createdAt,
-  }),
+  // A harness dialog, not a question an agent put to the operator: it reads
+  // and rings as a permission request, and a tap opens the request.
+  notify: (invocation, record, prompt) => {
+    const flightId = runtime.flightForInvocation(invocation.id)?.id;
+    operatorAttentionService.queuePermissionRequest({
+      requestId: record.id, text: prompt.text, agentId: invocation.targetAgentId, requesterNodeId: nodeId,
+      projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: record.createdAt,
+      ...(invocation.conversationId ? { conversationId: invocation.conversationId } : {}),
+      ...(invocation.messageId ? { messageId: invocation.messageId } : {}),
+      ...(flightId ? { flightId } : {}),
+      invocationId: invocation.id,
+    });
+  },
 });
 configureManagedPermissionHandler((invocation, prompt) => permissionService.wait(invocation, prompt));
 
