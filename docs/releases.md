@@ -140,6 +140,16 @@ Work items move through lifecycles that the runtime checks. Install with
     or `scout ask --operator --fyi --notify "..."` for an update
   - a channel: `scout ask --channel shared --fyi "..."`
   - `speak`: removed. Speaking aloud is the operator's device setting.
+- **`--notify` is for the operator only.** Every ask now returns on
+  acceptance, and `scout wait <handle>` follows it. An ask to an agent or a
+  project with `--notify` stops with
+  `--notify now pushes to the operator; asks return on acceptance by default`.
+  Drop the flag there. `scout ask --operator --fyi --notify` pushes an update.
+- **A route inside the message no longer routes.** The composer form
+  `scout ask '>> project:../app review this'` stops with
+  `ask requires exactly one routing mode`. Use `--to`, `--project`, `--ref`,
+  `--continue`, `--operator` or `--channel`. `scout ask --harness codex "..."`
+  still asks in the current project.
 - **Five MCP tools are removed.** `messages_send`, `messages_reply`,
   `sessions_reply`, `notify_operator` and `consult_operator` are replaced by
   `ask` and `reply`. `ask` takes `fyi`, `operator`, `options`,
@@ -159,8 +169,9 @@ Work items move through lifecycles that the runtime checks. Install with
 ### Ask and reply
 
 - `scout ask` routes by exactly one of `--to`, `--project`, `--ref`,
-  `--continue`, `--operator` or `--channel`. Unknown flags and combined routes
-  are errors. Message text never cancels work.
+  `--continue`, `--operator` or `--channel`. With only `--harness` or
+  `--runtime`, it asks in the current project. Unknown flags and combined
+  routes are errors. Message text never routes or cancels work.
 - `--ref <task>` follows up on unfinished work without a second task.
   `--ref <task> --cancel` cancels it and reports whether the worker was
   interrupted. `--continue <task>` starts a successor to a finished task.
