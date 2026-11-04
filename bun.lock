@@ -17,7 +17,7 @@
     },
     "packages/agent-sessions": {
       "name": "@openscout/agent-sessions",
-      "version": "0.5.0",
+      "version": "0.5.1-dev.1",
       "dependencies": {
         "@opencode/client": "2.0.21",
       },
@@ -29,7 +29,7 @@
     },
     "packages/cli": {
       "name": "@openscout/scout",
-      "version": "0.5.0",
+      "version": "0.5.1-dev.1",
       "bin": {
         "scout": "./bin/scout",
         "openscout-runtime": "./bin/openscout-runtime.mjs",
@@ -74,7 +74,7 @@
     },
     "packages/pairing": {
       "name": "@openscout/pairing",
-      "version": "0.5.0",
+      "version": "0.5.1-dev.1",
       "dependencies": {
         "@openscout/agent-sessions": "workspace:*",
         "@openscout/protocol": "workspace:*",
@@ -94,14 +94,14 @@
     },
     "packages/protocol": {
       "name": "@openscout/protocol",
-      "version": "0.5.0",
+      "version": "0.5.1-dev.1",
       "devDependencies": {
         "typescript": "^5",
       },
     },
     "packages/runtime": {
       "name": "@openscout/runtime",
-      "version": "0.5.0",
+      "version": "0.5.1-dev.1",
       "bin": {
         "openscout-runtime": "./bin/openscout-runtime.mjs",
       },
@@ -137,7 +137,7 @@
     },
     "packages/session-trace": {
       "name": "@openscout/session-trace",
-      "version": "0.5.0",
+      "version": "0.5.1-dev.1",
       "dependencies": {
         "@openscout/agent-sessions": "workspace:*",
       },
