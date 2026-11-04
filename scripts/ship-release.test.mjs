@@ -19,6 +19,11 @@ import { findFootprintFailures, findCorePackedFilesFailures, SCOUT_INSTALL_DEPEN
 const repoRoot = new URL("..", import.meta.url);
 const currentVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
   .version;
+// Between a dev release and the stable one after it, main reads a -dev.N
+// version. The stable plan needs stable sources, so the tests that plan this
+// checkout skip until then, and the refusal is tested instead.
+const devMain = /-dev\.(0|[1-9]\d*)$/.test(currentVersion);
+const stableMain = devMain ? { skip: `main reads ${currentVersion}; the stable plan needs stable sources` } : {};
 
 test("TUI fallback releases leave GitHub Latest to the native installer", () => {
   const workflow = readFileSync(new URL("../.github/workflows/release-scout-tui.yml", import.meta.url), "utf8");
@@ -36,7 +41,13 @@ function plan(...args) {
   });
 }
 
-test("public release plan is reviewed-source-only and complete-state idempotent", () => {
+test("a dev main refuses the stable plan", { skip: !devMain && "main reads a stable version" }, () => {
+  const result = plan(currentVersion);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Invalid stable version/);
+});
+
+test("public release plan is reviewed-source-only and complete-state idempotent", stableMain, () => {
   const result = plan(currentVersion);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(result.stdout.includes(`@openscout/protocol@${currentVersion}`));
@@ -74,13 +85,13 @@ test("ambiguous mutating and partial-release options are rejected", () => {
   }
 });
 
-test("local execution requires explicit confirmation before any mutation", () => {
+test("local execution requires explicit confirmation before any mutation", stableMain, () => {
   const result = plan(currentVersion, "--execute");
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Refusing to publish without --yes/);
 });
 
-test("stable execution publishes from GitHub Actions unless --local-publish is explicit", () => {
+test("stable execution publishes from GitHub Actions unless --local-publish is explicit", stableMain, () => {
   // CI sets GITHUB_ACTIONS, which this entry point refuses before the guard.
   const local = (...args) => spawnSync(process.execPath, ["scripts/ship-release.mjs", ...args], {
     cwd: repoRoot, encoding: "utf8", env: { ...process.env, GITHUB_ACTIONS: "" },
@@ -124,7 +135,7 @@ for (const mode of [[], ["--publish-prepared"], ["--publish-candidate"]]) {
   });
 }
 
-test("local npm-login authentication is an explicit plan option", () => {
+test("local npm-login authentication is an explicit plan option", stableMain, () => {
   const result = plan(currentVersion, "--auth", "npm-login");
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /local npm-login authentication/);
@@ -143,6 +154,7 @@ test("0.2.89 GitHub publication refuses legacy npm token authentication", () => 
       GITHUB_ACTIONS: "true",
       GITHUB_REPOSITORY: "openscout-app/scout",
       GITHUB_WORKFLOW_REF: "openscout-app/scout/.github/workflows/release-package-npm.yml@refs/heads/main",
+      NPM_TAG: devMain ? "dev" : "latest",
       NPM_TOKEN: "legacy-token-must-not-be-used",
     },
   });
@@ -1549,7 +1561,7 @@ function runCandidatePhase(fixture, phase, extraEnv = {}) {
 }
 
 for (const phase of ["candidate", "promote"]) {
-  test(`${phase} has an explicit local plan and requires confirmation`, () => {
+  test(`${phase} has an explicit local plan and requires confirmation`, stableMain, () => {
     const result = plan(currentVersion, "--phase", phase);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`Local ${phase} steps`));
