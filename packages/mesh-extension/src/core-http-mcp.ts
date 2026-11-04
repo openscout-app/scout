@@ -117,6 +117,31 @@ export class CoreHttpAdapter {
       await request('/v1/collaboration/events', { id: `evt.${randomUUID()}`, recordId: updated.id, recordKind: 'work_item', kind: updated.acceptanceState !== previous.acceptanceState && ['accepted','reopened'].includes(updated.acceptanceState) ? updated.acceptanceState : state !== previous.state ? ({ waiting: 'waiting', review: 'review_requested', done: 'done', cancelled: 'cancelled', working: previous.state === 'open' ? 'claimed' : 'progressed' } as Record<string,string>)[state] ?? 'progressed' : updated.ownerId !== previous.ownerId || updated.nextMoveOwnerId !== previous.nextMoveOwnerId ? 'handoff' : 'progressed', actorId: senderId, at: now, summary: a.work.eventSummary ?? updated.summary ?? updated.title, metadata: { source: 'scout-mesh-http' } });
       return { ...context, usedBroker: true, workItem: updated, workId: updated.id };
     }
+    // The runtime decides every move; the relay principal is always the mover or reviewer.
+    if (name === 'work_move') {
+      const result = await request('/v1/work/move', { ...pick(a, ['workId','to','note','waitingOn','evidence','claim','dryRun']), actorId: senderId });
+      return { senderId, applied: result.applied, verdict: result.decision.verdict, from: result.decision.from, to: result.decision.to,
+        state: result.decision.toState, review: result.decision.review,
+        reasons: values(result.decision.reasons).filter(r => r.outcome === 'fail').map(r => `${r.shadow ? 'shadow ' : ''}${r.effect}: ${r.message}`),
+        moveId: result.move?.id ?? null, revision: result.move?.revision ?? null };
+    }
+    if (name === 'work_review') {
+      const result = await request('/v1/work/review', { ...pick(a, ['workId','moveId','revision','verdict','note']), actorId: senderId });
+      return { senderId, status: result.status, station: result.station ?? null };
+    }
+    if (name === 'work_lifecycle') {
+      const workId = typeof a.workId === 'string' && a.workId.trim() ? a.workId.trim() : undefined;
+      const read = await request(query('/v1/work/lifecycles', { workId }));
+      const moves = workId ? values((await request(query('/v1/work/moves', { workId, limit: 20 }))).moves) : [];
+      return {
+        lifecycles: values(read.lifecycles).map(({ lifecycle }) => ({ id: lifecycle.id, name: lifecycle.name, version: lifecycle.version,
+          stations: values(lifecycle.stations).map(s => ({ id: s.id, name: s.name, state: s.state,
+            rules: values(s.rules).map(r => `${r.effect}: ${r.message}`), judges: values(s.judges).map(j => j.criterion) })) })),
+        position: read.position ? pick(read.position, ['workId','lifecycleId','station','stationName','state','reviewPending','revision','next']) : null,
+        moves: moves.map(m => ({ id: m.id, from: m.from, to: m.to, moverId: m.moverId, verdict: m.verdict, review: m.review,
+          revision: m.revision ?? null, note: m.note ?? null, at: m.createdAt })),
+      };
+    }
     if (name === 'reply') {
       validateTaskReply(a);
       if (a.sessionId || a.deliveryId || a.replyToken) {

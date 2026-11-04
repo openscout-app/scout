@@ -1192,5 +1192,179 @@
     "execution": {
       "taskSupport": "forbidden"
     }
+  },
+  {
+    "name": "work_move",
+    "title": "Move Scout Work",
+    "description": "Move a work item to another station of its lifecycle. The runtime runs the lifecycle's checks: allow applies the move, hold and consult record it without moving, deny explains why. Moves into stations with review criteria are applied and marked for review. Use work_lifecycle first to see the stations open to the item. Use dryRun to check without recording.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "currentDirectory": {
+          "type": "string"
+        },
+        "senderId": {
+          "type": "string"
+        },
+        "workId": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string",
+          "description": "Target station id, for example doing, waiting, review, done, dropped."
+        },
+        "note": {
+          "description": "Why. Required by some stations, for example dropping work.",
+          "type": "string"
+        },
+        "waitingOn": {
+          "description": "What the item waits on. Required for waiting stations.",
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "actor",
+                "work_item",
+                "approval",
+                "artifact",
+                "condition"
+              ]
+            },
+            "targetId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "additionalProperties": false
+        },
+        "evidence": {
+          "description": "Links that back the move, for example a PR or a test run.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "ref"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "claim": {
+          "description": "Become the owner before the checks run.",
+          "type": "boolean"
+        },
+        "dryRun": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "workId",
+        "to"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "work_review",
+    "title": "Review Scout Work Move",
+    "description": "Settle a move that is pending review: confirm it, reopen it (the item goes back to where it came from), or consult (ask a person). Pass the revision you judged; if the item moved since, the review is recorded as stale and changes nothing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "currentDirectory": {
+          "type": "string"
+        },
+        "senderId": {
+          "type": "string"
+        },
+        "workId": {
+          "type": "string"
+        },
+        "moveId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "confirm",
+            "reopen",
+            "consult"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workId",
+        "moveId",
+        "revision",
+        "verdict"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "work_lifecycle",
+    "title": "Read Scout Work Lifecycle",
+    "description": "Read work lifecycles: their stations, the moves between them, and each station's rules and review criteria. With workId, also returns where that item sits, the stations it can move to, and its recent moves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
   }
 ]

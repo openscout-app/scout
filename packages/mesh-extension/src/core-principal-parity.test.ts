@@ -16,9 +16,11 @@ const cases: Record<string, Record<string, unknown>> = {
   invocations_get: { flightId: "f" },
   invocations_wait: { flightId: "f", timeoutSeconds: 1 }, labels_brief: { label: "label" }, labels_feed: { label: "label" },
   work_update: { work: { workId: "w", state: "working" } },
+  work_move: { workId: "w", to: "doing" }, work_review: { workId: "w", moveId: "mv", revision: 1, verdict: "confirm" },
+  work_lifecycle: { workId: "w" },
 };
 const actorTools = new Set(["sessions_attach", "sessions_get", "sessions_poll", "sessions_ack", "whoami",
-  "feedback_send", "messages_inbox", "broker_feed", "reply", "ask", "work_update"]);
+  "feedback_send", "messages_inbox", "broker_feed", "reply", "ask", "work_update", "work_move", "work_review"]);
 function stdioIdentity(name: string, calls: any[], result: any): unknown {
   if (name === "whoami") return result.structuredContent?.defaultSenderId;
   const input = calls[0];
@@ -26,7 +28,7 @@ function stdioIdentity(name: string, calls: any[], result: any): unknown {
   if (name === "feedback_send") return input?.reporter?.agentId;
   if (name === "messages_inbox") return input?.participantId;
   if (name === "broker_feed") return input?.agentId;
-  if (name === "work_update") return input?.actorId;
+  if (name === "work_update" || name === "work_move" || name === "work_review") return input?.actorId;
   return input?.senderId;
 }
 function httpIdentity(name: string, calls: any[], result: any): unknown {
@@ -37,6 +39,7 @@ function httpIdentity(name: string, calls: any[], result: any): unknown {
   if (name === "broker_feed") return calls[0]?.query?.agentId;
   if (name === "work_update") return calls.find(c => c.path === "/v1/collaboration/events")?.body?.actorId;
   if (name === "reply") return calls.find(c => c.path === "/v1/messages/reply")?.body?.senderId;
+  if (name === "work_move" || name === "work_review") return calls.find(c => c.path.startsWith("/v1/work/"))?.body?.actorId;
   return calls.find(c => c.path === "/v1/deliver")?.body?.caller?.actorId;
 }
 async function connect(server: any) {
@@ -46,7 +49,7 @@ async function connect(server: any) {
   return client;
 }
 
-test("all 20 core SDK tools retain authenticated identity across HTTP and relay-configured stdio", async () => {
+test("all 23 core SDK tools retain authenticated identity across HTTP and relay-configured stdio", async () => {
   expect(Object.keys(cases).sort()).toEqual([...SCOUT_MCP_CORE_TOOL_NAMES].sort());
   for (const actor of ["principal-a", "principal-b"]) {
     const principal: McpEventPrincipal = { kind: actor === "principal-a" ? "oauth" : "agent_token", ...(actor === "principal-a" ? { userId: "user-a" } : {}), id: `identity-${actor}`, ownerKey: `owner-${actor}`, node: "fixture-node", agentId: actor };
@@ -74,6 +77,9 @@ test("all 20 core SDK tools retain authenticated identity across HTTP and relay-
         scoutAskHandler: record({ ok: true, state: "queued", ids: {}, delivery: "none" }), updateWorkItem: record(null),
         getInvocationLifecycle: record(null), getFlight: record(null), waitForFlight: record({ id: "f", invocationId: "i", requesterId: actor, targetAgentId: "target", state: "completed" }),
         readLabelBrief: record(null), readLabelFeed: record(null),
+        moveWorkItem: record({applied:true,decision:{verdict:"allow",from:"todo",to:"doing",toState:"working",review:"none",reasons:[]},move:{id:"mv",revision:1}}),
+        reviewWorkMove: record({ status: "confirmed", station: "done" }),
+        readWorkLifecycles: record({ lifecycles:[{lifecycle:{id:"default",name:"Default",version:1,stations:[{id:"doing",name:"Doing",state:"working"}]}}],position:{workId:"w",lifecycleId:"default",station:"doing",stationName:"Doing",state:"working",reviewPending:false,revision:1,next:[]}, moves: [] }),
       } as any,
     });
     const http = new CoreHttpAdapter({ principal, currentDirectory: "/fixture", client: new RuntimeHttpClient({ brokerUrl: origin, fetch: (async (input: any, init: any) => {
@@ -81,7 +87,9 @@ test("all 20 core SDK tools retain authenticated identity across HTTP and relay-
       httpCalls.push({ path: url.pathname, query: Object.fromEntries(url.searchParams), body });
       const result = url.pathname === "/v1/snapshot" ? snapshot : url.pathname === "/v1/node" ? { nodeId: "fixture-node", capabilities: ["ask-reply/1"] }
         : url.pathname.endsWith("/collect") ? { id: "r", status: "saved" } : url.pathname === "/v1/messages" && !body ? []
-        : url.pathname === "/v1/tail/recent" ? { events: [], limit: 80, cursor: null, generatedAt: 1 } : url.pathname === "/v1/deliver" ? { kind: "delivery", message: { id: "m" } } : { ok: true };
+        : url.pathname === "/v1/tail/recent" ? { events: [], limit: 80, cursor: null, generatedAt: 1 } : url.pathname === "/v1/deliver" ? { kind: "delivery", message: { id: "m" } }
+        : url.pathname === "/v1/work/move" ? {applied:true,decision:{verdict:"allow",from:"todo",to:"doing",toState:"working",review:"none",reasons:[]},move:{id:"mv",revision:1}} : url.pathname === "/v1/work/review" ? { status: "confirmed", station: "done" }
+        : url.pathname === "/v1/work/lifecycles" ? {lifecycles:[{lifecycle:{id:"default",name:"Default",version:1,stations:[{id:"doing",name:"Doing",state:"working"}]}}],position:{workId:"w",lifecycleId:"default",station:"doing",stationName:"Doing",state:"working",reviewPending:false,revision:1,next:[]}} : url.pathname === "/v1/work/moves" ? { moves: [] } : { ok: true };
       return Response.json(result);
     }) as typeof fetch }) }).server();
     let stdioClient: Client | undefined, httpClient: Client | undefined;
