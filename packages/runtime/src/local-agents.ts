@@ -1147,6 +1147,9 @@ export const DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS = [
   "mcp__scout__invocations_get",
   "mcp__scout__invocations_wait",
   "mcp__scout__work_update",
+  "mcp__scout__work_move",
+  "mcp__scout__work_review",
+  "mcp__scout__work_lifecycle",
   "Bash(scout:*)",
 ] as const;
 

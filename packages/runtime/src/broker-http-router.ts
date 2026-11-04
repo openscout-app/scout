@@ -112,6 +112,8 @@ import {
   threadWatchError,
   throwIfAborted,
 } from "./broker-http-helpers.js";
+import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
+import type { WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -207,6 +209,8 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 ]);
 
 export type BrokerHttpRouterDeps = {
+  /** Work lifecycles: stations, moves and reviews. */
+  workLifecycles?: BrokerWorkLifecycleService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
   attachments?: AttachmentHttpDeps;
@@ -1731,6 +1735,46 @@ export function createBrokerHttpRouter(
       conversationId: url.searchParams.get("conversationId") ?? undefined,
     }));
     return;
+  }
+
+  if (deps.workLifecycles && url.pathname.startsWith("/v1/work/")) {
+    const work = deps.workLifecycles;
+    try {
+      if (method === "GET" && url.pathname === "/v1/work/lifecycles") {
+        const workId = url.searchParams.get("workId")?.trim();
+        json(response, 200, { lifecycles: work.lifecycles(), ...(workId ? { position: work.position(workId) } : {}) });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/work/lifecycles") {
+        json(response, 200, work.saveLifecycle(await readRequestBody<WorkLifecycle>(request, { maxBytes: 256 * 1024 })));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/work/board") {
+        const closedSince = Number(url.searchParams.get("closedSince"));
+        json(response, 200, work.board({
+          lifecycleId: url.searchParams.get("lifecycleId") ?? undefined,
+          closedSince: Number.isFinite(closedSince) && closedSince > 0 ? closedSince : undefined,
+          limit: parseLimit(url),
+        }));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/work/moves") {
+        json(response, 200, { moves: work.moves({ workId: url.searchParams.get("workId") ?? undefined, limit: parseLimit(url) }) });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/work/move") {
+        json(response, 200, await work.move(await readRequestBody<WorkMoveRequest>(request, { maxBytes: 64 * 1024 })));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/work/review") {
+        json(response, 200, await work.review(await readRequestBody<WorkReviewRequest>(request, { maxBytes: 64 * 1024 })));
+        return;
+      }
+    } catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+      return;
+    }
   }
 
   if (method === "GET" && url.pathname === "/v1/collaboration/records") {

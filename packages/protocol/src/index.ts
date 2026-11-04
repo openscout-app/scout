@@ -15,6 +15,7 @@ export * from "./channel-invites.js";
 export * from "./channel-membership.js";
 export * from "./channel-reception.js";
 export * from "./collaboration.js";
+export * from "./work-lifecycle.js";
 export * from "./assigned-roles.js";
 export * from "./orchestrator-prompt.js";
 export * from "./orchestration-provider-map.js";

@@ -46,6 +46,12 @@ export type BrokerWorkItemStoreOptions = {
   /** Journal state remains canonical even if the runtime apply callback failed. */
   durableFlight?: (flightId: string) => FlightRecord | undefined;
   durableWorkItem?: (workId: string) => CollaborationRecord | undefined;
+  /** Gives a runtime-driven state change its lifecycle placement and ledger move. */
+  placeWorkChange?: (
+    before: CollaborationRecord,
+    after: CollaborationRecord,
+    context: { now: number; actorId: string; moveId: string },
+  ) => { record: CollaborationRecord; move?: unknown };
   warn?: (message: string, error: unknown) => void;
 };
 
@@ -399,7 +405,7 @@ export class BrokerWorkItemStore {
         ?? compactWorkSummary(flight.error)
         ?? compactWorkSummary(flight.summary)
         ?? `${flight.targetAgentId} completed.`;
-      const nextRecord: CollaborationRecord = {
+      const promotedRecord: CollaborationRecord = {
         ...record,
         state: nextState,
         acceptanceState: requiresReview ? "pending" : record.acceptanceState,
@@ -437,6 +443,10 @@ export class BrokerWorkItemStore {
         },
       };
 
+      const placed = this.options.placeWorkChange?.(record, promotedRecord, {
+        now, actorId: flight.targetAgentId, moveId: `${intent.eventId}:move`,
+      });
+      const nextRecord = placed?.record ?? promotedRecord;
       const event: CollaborationEvent = {
         id: intent.eventId,
         recordId: nextRecord.id,
@@ -452,6 +462,7 @@ export class BrokerWorkItemStore {
           flightState: flight.state,
           conversationId: invocation.conversationId,
           messageId: invocation.messageId,
+          ...(placed?.move ? { workMove: placed.move } : {}),
         },
       };
       assertValidCollaborationRecord(nextRecord);

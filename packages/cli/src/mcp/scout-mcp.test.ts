@@ -169,6 +169,9 @@ describe("createScoutMcpServer", () => {
       "labels_brief",
       "labels_feed",
       "work_update",
+      "work_move",
+      "work_review",
+      "work_lifecycle",
     ]);
     expect(result.tools.find((tool) => tool.name === "aliases_set")?.description)
       .toContain("never creates or mutates an agent card");
