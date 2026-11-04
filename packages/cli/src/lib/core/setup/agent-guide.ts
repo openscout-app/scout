@@ -15,6 +15,7 @@ export const SCOUT_BLOCK_BODY = [
   "## Scout",
   "",
   "- Work for another agent, or on another machine, goes through Scout: `scout ask` (MCP `ask`).",
+  "- An ask creates a task; use `--fyi` only for news. Answer with `scout reply --ref <task>`; `--progress` keeps it open. A harness final is already an answer: do not reply twice.",
   "- Another machine: `scout ask --on <host> --project <path on that host> --harness <claude|codex>`; `scout hosts` lists machines and their projects. Don't ssh in to launch agents.",
   "- Syntax: `scout ask --help`, `scout help --detail`. Added by `scout setup agents-md`; `scout setup agents-md --remove` takes it out.",
 ].join("\n");
@@ -108,7 +109,7 @@ export function runAgentGuide(options: {
 
 /**
  * Read-only Scout MCP tools a harness can allow without a prompt. Everything
- * that sends or starts work (`ask`, `messages_send`, …) is left to the
+ * that sends or starts work (`ask`, `reply`, …) is left to the
  * harness's normal approval on purpose.
  */
 export const SCOUT_READ_ONLY_TOOLS = [

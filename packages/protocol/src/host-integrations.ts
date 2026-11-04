@@ -14,6 +14,7 @@ export type ScoutHostIntegrationId =
   | "cursor"
   | "pi"
   | "hermes"
+  | "zed"
   | "herdr"
   | "orca"
   | "t3-orchestrator";
@@ -81,6 +82,14 @@ export const SCOUT_HOST_INTEGRATIONS: readonly ScoutHostIntegration[] = [
     repositoryUrl: "https://github.com/arach/hermes-scout",
     installHint: "Install Hermes Scout as a Hermes plugin after Scout is healthy.",
     summary: "Hermes hosts Scout tools through its plugin and MCP system; it is not a Scout harness.",
+  },
+  {
+    id: "zed",
+    label: "Zed",
+    roles: ["agent_host", "mcp_host"],
+    homepage: "https://zed.dev",
+    installHint: "scout mcp install --host zed",
+    summary: "Zed hosts its own agent and external ACP agents and gives them Scout's tools through its context_servers setting; it is not a Scout harness.",
   },
   {
     id: "herdr",

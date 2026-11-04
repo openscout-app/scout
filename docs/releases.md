@@ -56,12 +56,21 @@ This public repository owns `@openscout/protocol` and `@openscout/scout`.
 Other workspaces share the source version but are not separately supported npm
 releases. Native macOS/iOS apps remain in the private product repository.
 
-Local execution is the default for reviewed, explicitly authorized releases.
-Hosted CI and npm publication remain opt-in. Do not dispatch Actions as a
-fallback for missing local credentials or local validation failures. Record
-proportional local checks against the exact reviewed head and current main base;
-observe required GitHub rules and feedback before merging. Hosted runs can
-provide additional evidence when explicitly requested.
+Stable releases publish from the hosted `release-package-npm.yml` workflow, so
+npm records provenance for each version it publishes. See
+[Hosted publication](#hosted-publication). `bun run ship -- <version> --execute --yes`
+refuses a new upload and prints the tag and dispatch commands. Add
+`--local-publish` only when the hosted workflow cannot run. A local publish has
+no npm provenance, and because npm versions are immutable, that version never
+gains it. Recover a failed hosted run with
+`recovery_run_id`, not with a local publish. Record proportional local checks
+against the exact reviewed head and current main base; observe required GitHub
+rules and feedback before merging.
+
+These versions have no npm provenance: 0.2.104 through 0.2.110, 0.3.2 through
+0.3.5, and 0.3.6 through 0.4.2. npm versions are immutable, so they keep that
+state. Before hosted publication became the default, the last version with
+provenance was 0.3.6-dev.4.
 
 ## Package publication versus the latest downloadable installer
 
@@ -70,8 +79,9 @@ version does not make them one publication: package publication and the
 downloadable installer have separate owners and separate release steps.
 
 - **Package publication** (this repository): `@openscout/protocol` and
-  `@openscout/scout` on npm, plus a GitHub release on `openscout-app/scout` whose only
-  asset is the npm integrity `receipt.json`.
+  `@openscout/scout` on npm, plus a GitHub release on `openscout-app/scout` that
+  carries the npm integrity `receipt.json` and, once `release-scout-tui.yml` has
+  run, the `scout tui` archives.
 - **Latest downloadable installer** (private product): the signed macOS DMG,
   built and verified as a local operator task rather than in CI. GitHub's
   **Latest** release, and therefore `/releases/latest` download links, belongs
@@ -109,6 +119,118 @@ bash scripts/ship-npm.sh --dry-run
 Commit the source, version manifests, `packages/cli/src/lib/shared/product.ts`,
 `docs.json`, and lockfile on a review branch. Merge only after the standalone
 checks and packed artifact audit pass.
+
+## 0.5.0 ask and reply
+
+Scout now has two verbs for moving work. `scout ask` sends anything: new work,
+a follow-up, a question for the operator, or an FYI. `scout reply` answers it.
+Work items move through lifecycles that the runtime checks. Install with
+`bun add -g @openscout/scout`.
+
+### Before you upgrade
+
+- **Six CLI verbs are removed.** `scout send`, `tell`, `operator`, `notify`,
+  `broadcast` and `speak` now stop with
+  `scout <verb> was removed. Nothing was sent.` and print the `scout ask` or
+  `scout reply` command to use instead. They never fall through to an implicit
+  ask. Update scripts and agent instructions that call them:
+  - an FYI: `scout ask --to <agent> --fyi "..."`
+  - an answer to a task: `scout reply --ref <task> "..."`
+  - the operator: `scout ask --operator "..."`, with `--option` for choices,
+    or `scout ask --operator --fyi --notify "..."` for an update
+  - a channel: `scout ask --channel shared --fyi "..."`
+  - `speak`: removed. Speaking aloud is the operator's device setting.
+- **`--notify` is for the operator only.** Every ask now returns on
+  acceptance, and `scout wait <handle>` follows it. An ask to an agent or a
+  project with `--notify` stops with
+  `--notify now pushes to the operator; asks return on acceptance by default`.
+  Drop the flag there. `scout ask --operator --fyi --notify` pushes an update.
+- **A route inside the message no longer routes.** The composer form
+  `scout ask '>> project:../app review this'` stops with
+  `ask requires exactly one routing mode`. Use `--to`, `--project`, `--ref`,
+  `--continue`, `--operator` or `--channel`. `scout ask --harness codex "..."`
+  still asks in the current project.
+- **Five MCP tools are removed.** `messages_send`, `messages_reply`,
+  `sessions_reply`, `notify_operator` and `consult_operator` are replaced by
+  `ask` and `reply`. `ask` takes `fyi`, `operator`, `options`,
+  `defaultAction` and `permission`. `reply` answers both Scout tasks and
+  external sessions. Harness permission settings that list the old tool names
+  need `mcp__scout__ask` and `mcp__scout__reply` instead.
+- **Finished work goes to done.** New work items start with acceptance
+  `none`, so an item that finishes moves to `done` instead of `review`. An
+  asker that wants to review first sets acceptance `pending`.
+  `scripts/settle-review-work.ts` reports the review items left by the old
+  default, and with `--apply` moves them to done through the runtime API.
+- **Do not downgrade the runtime after it runs 0.5.** A control event in the
+  journal now stores a checked reference to the record that its command
+  journaled one line earlier, not a second copy. 0.4 runtimes do not restore
+  those references.
+
+### Ask and reply
+
+- `scout ask` routes by exactly one of `--to`, `--project`, `--ref`,
+  `--continue`, `--operator` or `--channel`. With only `--harness` or
+  `--runtime`, it asks in the current project. Unknown flags and combined
+  routes are errors. Message text never routes or cancels work.
+- `--ref <task>` follows up on unfinished work without a second task.
+  `--ref <task> --cancel` cancels it and reports whether the worker was
+  interrupted. `--continue <task>` starts a successor to a finished task.
+- `--fyi` creates a message and no task. It pushes to the operator only with
+  `--notify`.
+- `scout ask --operator` creates a task that the operator owns. `--option`
+  gives answer choices. `--default-action` proceeds when the answer window
+  ends: 30 minutes by default, or `--window`. `--permission` makes a blocking
+  permission request.
+- `scout reply --ref <task>` answers. A final reply closes the task, and the
+  first final reply wins. `--progress` keeps the task open. An automatic final
+  turn and an explicit reply never both land.
+
+### Work lifecycles
+
+A lifecycle is a set of stations and the moves between them. The runtime
+compiles it into a state machine and checks every move.
+
+- Routes: `GET` and `POST /v1/work/lifecycles`, `GET /v1/work/board`,
+  `GET /v1/work/moves`, `POST /v1/work/move` and `POST /v1/work/review`.
+- MCP: `work_move`, `work_review` and `work_lifecycle`. The portable mesh
+  adapter serves them too.
+- The lifecycle's checks decide each move. Allow applies it, hold and consult
+  record it without moving the item, and deny explains why. A move into a
+  station with review criteria is applied and marked for review.
+- A review names the revision it judged. If the item moved since, the review
+  is recorded as stale and changes nothing.
+
+### Runtime and host health
+
+- scoutd sweeps host health every 30 seconds and reports conditions to local
+  clients: a degraded projection, low disk, web expected but not running,
+  pairing without a relay listener, version skew, and stale files. It restarts
+  only its own base child. [scoutd health sweep](./scoutd-health-sweep.md)
+  lists the conditions and their actions.
+- Health is answered from a cache on its own worker thread, so a long turn on
+  the runtime's main thread no longer reads as a stopped runtime.
+- Pairing supervision comes back after a reboot. A pid file written before the
+  current boot counts as absent.
+- A permission request survives a runtime restart. The runtime rebinds it to
+  its session while the prompt still shows, and otherwise declines it with the
+  reason. `POST /v1/operator-requests/dismiss` lets the operator end a request
+  that nothing can answer.
+- Operator questions asked by an agent on another host are recorded and
+  settled on this host too.
+- Web starts after a runtime restart again. The portal host travels in
+  `x-openscout-web-host` and `x-openscout-web-scheme`, because the loopback
+  gate refuses forwarding headers.
+
+### Other changes
+
+- `scout mcp install --host zed` registers Scout's MCP server in Zed's
+  settings. It keeps the file's comments and saves a backup first.
+- For a Claude session that waits on a permission prompt, discovery reads the
+  pending tool call from its transcript and shows the same heading and subject
+  as the prompt. Registered secret values are redacted.
+- Install lines across the docs use `bun add -g @openscout/scout`.
+- Stable releases publish from GitHub Actions, so npm records provenance for
+  them.
 
 ## 0.4.2 the openscout-app organization
 
@@ -415,12 +537,13 @@ server bundle, regardless of total size. Every final candidate must pass the
 exact tarball audit; this scope change does not waive signing, artifact checks,
 or authorize incidental limit increases.
 
-After the chosen version and source are reviewed and merged, run from a clean
-public `main` checkout:
+Use local publication only when the hosted workflow cannot run. After the
+chosen version and source are reviewed and merged, run from a clean public
+`main` checkout:
 
 ```bash
-bun run ship -- <version>                 # read-only plan; does not build
-bun run ship -- <version> --execute --yes # authorized local release
+bun run ship -- <version>                                 # read-only plan; does not build
+bun run ship -- <version> --execute --yes --local-publish # authorized local release
 ```
 
 Execution never selects a version, bumps manifests, commits source, or starts
@@ -451,15 +574,30 @@ select the operator's existing npm login instead:
 
 ```bash
 npm login --registry https://registry.npmjs.org # establish a login separately
-bun run ship -- <version> --execute --yes --auth npm-login
+bun run ship -- <version> --execute --yes --local-publish --auth npm-login
 ```
 
 Run this mode in an interactive terminal so npm can present browser or OTP
 challenges. It verifies the existing login with `npm whoami` and inherits npm
 configuration and terminal input/output. It does not read, copy, or write
-credentials, call secret-store helpers, or fall back to another authentication
-mode. `NPM_TOKEN` and `NODE_AUTH_TOKEN` must be unset; hosted execution rejects
-this mode. The lower-level publisher accepts `SCOUT_NPM_AUTH_MODE=npm-login`.
+credentials, or fall back to another authentication mode. `NPM_TOKEN` and
+`NODE_AUTH_TOKEN` must be unset; hosted execution rejects this mode.
+
+Without a terminal for npm to prompt in, name a command that prints a fresh
+one-time code in `SCOUT_NPM_OTP_COMMAND`. The publisher runs it immediately
+before each npm write and passes the code to that write only, as
+`npm_config_otp`. It never prints the code. One code cannot cover a whole
+release: a code lasts about 30 seconds, and the publisher waits for registry
+propagation between writes.
+
+```bash
+SCOUT_NPM_OTP_COMMAND='<command that prints a code>' \
+  bun run ship -- <version> --execute --yes --local-publish --auth npm-login
+```
+
+The publisher calls no secret-store helper unless you name one this way.
+
+The lower-level publisher accepts `SCOUT_NPM_AUTH_MODE=npm-login`.
 Default and `@openscout` scoped registries are pinned to npmjs for every package
 read and mutation, including when the inherited login has a different scope registry.
 Token authentication remains the default, and both local modes retain the same
@@ -470,7 +608,10 @@ tag, verifies both against retained candidates, and only then promotes the pair
 to `latest`. A fresh release must advance the current versions and begin with
 both package versions unused. A matching completed release is idempotent. A
 complete immutable pair may resume missing dist-tag promotion only with its
-exact retained receipt. The ordinary publisher still rejects a partial local pair. A protocol-first
+exact retained receipt. A retained bundle for the current HEAD marks a local
+release already in progress: finishing a pair that is already on npm does not
+need `--local-publish`, but uploading either package still does.
+The ordinary publisher still rejects a partial local pair. A protocol-first
 local interruption may use the explicit retained recovery command below. Changed
 artifacts, wrong source, missing receipt, foreign authority, and historical
 candidates remain forbidden.
@@ -480,21 +621,51 @@ public GitHub release, without marking it Latest, and attaches `receipt.json`. E
 clobbered: their size and anonymously downloaded SHA-256 must match the retained
 receipt. An upload command succeeding alone is not a verified release.
 
+## List the release in the MCP Registry
+
+The official MCP Registry lists `io.github.openscout-app/scout`. Each registry
+version names one exact `@openscout/scout` npm version, so each stable release
+gets its own registry version.
+
+- `bump-version.mjs` writes the release version into `packages/cli/server.json`,
+  both as the server version and in its npm package entry. The ship command
+  and the hosted npm workflow refuse a `server.json` that does not match.
+- A stable GitHub release starts `publish-mcp-registry.yml` when it is
+  published or when a candidate prerelease is promoted to stable. The workflow
+  waits until npm lists the exact version with its `mcpName`, signs in to the
+  registry with GitHub OIDC, and publishes `server.json`. It uses no stored
+  credential.
+- The hosted npm path creates its GitHub release in `release-scout-tui.yml`
+  with the workflow token. That token starts no release-event workflow, so the
+  same job dispatches `publish-mcp-registry.yml` for each stable version.
+- Prereleases, drafts and dev versions are skipped, including on a manual run.
+  A version that the registry already lists is left unchanged, so a rerun is
+  safe.
+
+To publish or retry one release by hand:
+
+```bash
+gh workflow run publish-mcp-registry.yml -R openscout-app/scout -f tag=v<version>
+```
+
 ## Validate a candidate before promotion
 
-The full stable command above remains the default. For releases that require a
-real installation pass before changing npm `latest`, explicitly split candidate
-publication from promotion:
+A local release normally uploads and promotes in one command. For releases that
+require a real installation pass before changing npm `latest`, explicitly split
+candidate publication from promotion:
 
 ```bash
 # From clean reviewed public main already versioned at the exact unused version.
 # Run in an interactive terminal using the operator's existing npm login.
-bun run ship -- <version> --phase candidate --execute --yes --auth npm-login
+bun run ship -- <version> --phase candidate --execute --yes --local-publish --auth npm-login
 
 # Install the exact published version and validate the retained candidate.
 # After operator approval of that result, promote the same source and bytes.
 bun run ship -- <version> --phase promote --execute --yes --auth npm-login
 ```
+
+Promotion and retained-candidate finalization finish an upload that already
+happened, so they do not need `--local-publish`.
 
 Candidate mode establishes the ordinary `v<version>` tag at the reviewed public
 source, prepares the exact signed pair once, and publishes both under the existing
@@ -688,11 +859,27 @@ and skipped. Versions through `0.2.90` remain frozen. Staging tags are left as
 harmless recovery evidence. GitHub release creation and attaching/verifying the
 original receipt remain separate steps after the pair succeeds.
 
-## Explicit hosted publication
+## Hosted publication
 
-When the operator deliberately chooses hosted publication, dispatch the public
-`release-package-npm.yml` workflow directly. It verifies its canonical workflow
-identity and refuses token authentication. There is no automatic transition
+Stable releases publish this way. After the reviewed release merges to public
+`main`, tag the tip of `main` and dispatch the public `release-package-npm.yml`
+workflow before anything else merges. The workflow requires the tag to resolve
+to the commit that `main` points at when you dispatch:
+
+```bash
+git fetch <public remote> main
+git tag -a v<version> FETCH_HEAD -m "Scout <version>"
+git push <public remote> refs/tags/v<version>
+gh workflow run release-package-npm.yml --repo openscout-app/scout --ref main \
+  -f tag=v<version> -f npm_tag=latest
+```
+
+The hosted path has no candidate hold: it publishes straight to npm `latest`.
+A release that must be validated before `latest` uses the local candidate
+sequence above, with `--local-publish`, and has no npm provenance.
+
+The workflow verifies its canonical workflow identity and refuses token
+authentication. There is no automatic transition
 between local and hosted authority; retained receipts cannot cross authorities.
 The hosted path uses npm trusted publishing/OIDC and these signing secrets:
 
@@ -736,7 +923,9 @@ After both packages match the retained candidates and reach `latest`, the
 workflow performs a separate registry-verification pass and uploads the final
 integrity receipt. Attach that receipt to the GitHub release only after the
 package set succeeds. Do not weaken the signing gate or publish a GitHub release
-before that verification completes.
+before that verification completes. When the run succeeds,
+`release-scout-tui.yml` attaches the terminal UI archives and creates the GitHub
+release if it does not exist, without marking it Latest.
 
 ## Verify
 

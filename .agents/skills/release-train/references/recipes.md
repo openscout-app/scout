@@ -71,7 +71,7 @@ Reply within 10 minutes with exactly one disposition:
 Do not mutate another lane. HOLD/EXCLUDE is authoritative.
 ```
 
-Prefer `scout ask --to session:<id> --notify` for exact continuity. Use
+Prefer `scout ask --to session:<id>` for exact continuity. Use
 project+harness routing only when no owner session exists. A failed Scout poll
 is `BLOCK`, not implied consent, but only after the transport diagnostic gate
 below. Broadcast only the final project-scoped convergence ledger to relevant

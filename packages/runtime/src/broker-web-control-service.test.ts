@@ -84,6 +84,22 @@ describe("BrokerWebControlService", () => {
     }), new Set(["mesh.example.test"]))).toEqual({});
   });
 
+  test("startup metadata is optional and never trusts forwarding headers", () => {
+    expect(webStartContextFromRequest(fakeRequest({}))).toEqual({});
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-forwarded-host": "scout.local",
+      "x-forwarded-proto": "https",
+    }))).toEqual({});
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-openscout-web-host": ["scout.local", "evil.example.test"],
+      "x-openscout-web-scheme": ["https", "http"],
+    }))).toEqual({ publicOrigin: "https://scout.local", trustedHost: "scout.local" });
+    expect(webStartContextFromRequest(fakeRequest({
+      "x-openscout-web-host": "scout.local",
+      "x-openscout-web-scheme": "javascript",
+    }))).toEqual({ publicOrigin: "http://scout.local", trustedHost: "scout.local" });
+  });
+
   test("merges trusted host CSV values without duplicate casing", () => {
     expect(appendCsvValues("scout.local, Mesh.Example.Test", [
       "mesh.example.test",
@@ -102,11 +118,26 @@ describe("BrokerWebControlService", () => {
 
     expect(service.readChildServiceSnapshots().web).toEqual(expect.objectContaining({
       managedBy: "broker",
+      expected: false,
       state: "stopped",
       pid: null,
       port: 4321,
       healthy: null,
     }));
+  });
+
+  test("retains explicit web intent when the configured entry is missing", async () => {
+    const service = new BrokerWebControlService({
+      brokerControlUrl: "http://127.0.0.1:4321",
+      env: { OPENSCOUT_WEB_AUTH_TOKEN: "test-web-token" },
+      healthCheck: async () => false,
+      resolveWebPort: () => 4321,
+      resolveEntry: () => null,
+    });
+    expect(service.readChildServiceSnapshots().web?.expected).toBe(false);
+    await service.startIfNeeded();
+    expect(service.readChildServiceSnapshots().web).toEqual(expect.objectContaining({expected: true, state: "stopped"}));
+    await service.stop();
   });
 
   test("refuses to restart a healthy web server the broker does not own", async () => {

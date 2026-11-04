@@ -35,7 +35,7 @@ export default {
       "At least one supported coding-agent harness for routed work",
     ],
     steps: [
-      { description: "Install the Scout CLI and bundled runtime", command: "npm install -g @openscout/scout" },
+      { description: "Install the Scout CLI and bundled runtime", command: "bun add -g @openscout/scout" },
       { description: "Initialize local Scout state and services", command: "scout setup" },
       { description: "Verify local readiness", command: "scout doctor" },
       { description: "Confirm the inferred sender identity", command: "scout whoami" },

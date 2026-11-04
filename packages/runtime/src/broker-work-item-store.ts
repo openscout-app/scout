@@ -507,7 +507,8 @@ export class BrokerWorkItemStore {
       id: recordId,
       kind: "work_item",
       state: "working",
-      acceptanceState: workItem.acceptanceState ?? "pending",
+      // Finished work goes to done unless the asker chose review.
+      acceptanceState: workItem.acceptanceState ?? "none",
       title: workItem.title.trim(),
       ...(workItem.summary?.trim() ? { summary: workItem.summary.trim() } : {}),
       createdById: input.requesterId,

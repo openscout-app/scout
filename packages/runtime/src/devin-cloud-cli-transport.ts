@@ -103,7 +103,7 @@ export function devinCloudCliTransport(
             else reject(new ExternalSessionTransportError(true, "devin_cli_delivery_unconfirmed"));
           });
         });
-        // The correlated sessions_reply call, never CLI output or exit, completes the flight.
+        // The correlated reply call, never CLI output or exit, completes the flight.
         return { nativeSessionId: observed.nativeSessionId, state: "accepted" };
       } finally {
         await rm(directory, { recursive: true, force: true });

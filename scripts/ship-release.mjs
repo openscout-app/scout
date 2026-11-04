@@ -38,6 +38,8 @@ const VERSION_MANIFESTS = [
 
 const APP_VERSION_SOURCE = "packages/cli/src/lib/shared/product.ts";
 const DOCS_VERSION_SOURCE = "docs.json";
+// The MCP Registry entry names one exact npm version of the Scout package.
+const REGISTRY_SERVER_SOURCE = "packages/cli/server.json";
 const LOCKFILE_SOURCE = "bun.lock";
 const APP_VERSION_PATTERN =
   /export const SCOUT_APP_VERSION = process\.env\.SCOUT_APP_VERSION\?\.trim\(\) \|\| "([^"]+)";/;
@@ -61,6 +63,8 @@ function usage() {
     "  --source <original-sha> --receipt-sha256 <digest>",
     "    --candidate-receipt-sha256 <digest>",
     "                         Finalize/promote original retained candidate using newer tooling.",
+    "  --local-publish        Publish a stable release from this machine. Use only",
+    "                         when the hosted workflow cannot run.",
     "  --release-notes-file <path>",
     "                         Use explicit GitHub release notes.",
     "",
@@ -69,8 +73,9 @@ function usage() {
     "",
     "Execution never bumps or commits. Prepare and merge the reviewed release",
     "version first, then run from a clean public main checkout.",
-    "Execution uses explicit local authentication and signed artifacts, without OIDC",
-    "provenance. Hosted publication is a separate, explicitly opted-in workflow.",
+    "Stable releases publish from the hosted release-package-npm.yml workflow, so",
+    "npm records provenance for them. Local execution needs --local-publish; it uses",
+    "explicit local authentication and signed artifacts, without OIDC provenance.",
     "",
   ].join("\n");
 }
@@ -98,6 +103,7 @@ function parseArgs(argv) {
     source: null,
     receiptSha256: null,
     candidateReceiptSha256: null,
+    localPublish: false,
   };
   let target = null;
 
@@ -114,6 +120,7 @@ function parseArgs(argv) {
       );
     }
     if (arg === "--execute") options.execute = true;
+    else if (arg === "--local-publish") options.localPublish = true;
     else if (arg === "--yes") options.yes = true;
     else if (arg === "--phase") options.phase = argv[++index];
     else if (arg.startsWith("--phase=")) options.phase = arg.slice("--phase=".length);
@@ -245,6 +252,12 @@ function readAppVersion(source = null) {
   return match[1];
 }
 
+function readRegistryServerVersions(source = null) {
+  const server = readJson(REGISTRY_SERVER_SOURCE, source);
+  const scoutPackage = server.packages?.find((entry) => entry.identifier === "@openscout/scout");
+  return { server: server.version, package: scoutPackage?.version };
+}
+
 function lockfileWorkspaceVersion(relativePath, source = null) {
   const contents = readSource(LOCKFILE_SOURCE, source);
   const marker = `    "${relativePath}": {`;
@@ -267,6 +280,11 @@ function verifyReleaseVersion(version, source = null) {
   if (appVersion !== version) drift.push(APP_VERSION_SOURCE + "=" + appVersion);
   const docsVersion = readJson(DOCS_VERSION_SOURCE, source).version;
   if (docsVersion !== version) drift.push(DOCS_VERSION_SOURCE + "=" + docsVersion);
+  const registryVersions = readRegistryServerVersions(source);
+  if (registryVersions.server !== version) drift.push(REGISTRY_SERVER_SOURCE + "=" + registryVersions.server);
+  if (registryVersions.package !== version) {
+    drift.push(REGISTRY_SERVER_SOURCE + ":@openscout/scout=" + registryVersions.package);
+  }
   for (const relativeDir of VERSION_MANIFESTS.filter((entry) => entry !== ".")) {
     const lockVersion = lockfileWorkspaceVersion(relativeDir, source);
     if (lockVersion !== version) drift.push(`${LOCKFILE_SOURCE}:${relativeDir}=${lockVersion}`);
@@ -293,9 +311,28 @@ function printVersionTable(version, source = null) {
   }
   console.log("  " + APP_VERSION_SOURCE + ": " + readAppVersion(source));
   console.log("  " + DOCS_VERSION_SOURCE + ": " + readJson(DOCS_VERSION_SOURCE, source).version);
+  console.log("  " + REGISTRY_SERVER_SOURCE + ": " + readRegistryServerVersions(source).server);
   console.log(`  ${LOCKFILE_SOURCE}: all workspace versions ${version}`);
   console.log("\nPublished package set:");
   for (const pkg of PUBLIC_PACKAGES) console.log("  " + pkg.name + "@" + version);
+}
+
+function hostedPublicationMessage(version, phase) {
+  const tag = "v" + version;
+  return [
+    "Stable releases publish from GitHub Actions, so npm records provenance for them.",
+    ...(phase === "candidate" ? [
+      "The hosted workflow has no candidate hold: it publishes straight to npm latest.",
+      "A held candidate needs --local-publish and has no npm provenance.",
+    ] : []),
+    "After the reviewed release merges, tag the tip of public main and dispatch before",
+    "anything else merges; the workflow requires the tag to be main's tip:",
+    "  git fetch <public remote> main",
+    `  git tag -a ${tag} FETCH_HEAD -m "Scout ${version}"`,
+    `  git push <public remote> refs/tags/${tag}`,
+    `  gh workflow run release-package-npm.yml --repo openscout-app/scout --ref main -f tag=${tag} -f npm_tag=latest`,
+    "Add --local-publish only when the hosted workflow cannot run. A local publish has no npm provenance.",
+  ].join("\n");
 }
 
 function printPlan(version, options) {
@@ -626,7 +663,11 @@ function main() {
   printPlan(version, options);
 
   if (!options.execute) {
-    console.log("\nDry run only. Re-run with --execute --yes after review and merge.");
+    if (options.localPublish || options.source || options.phase === "promote") {
+      console.log(`\nDry run only. Re-run with --execute --yes${options.localPublish ? " --local-publish" : ""} after review and merge.`);
+    } else {
+      console.log("\nDry run only. Stable releases publish from GitHub Actions for npm provenance; --execute --yes prints the dispatch, and local execution also needs --local-publish.");
+    }
     return;
   }
   if (!options.yes) throw new Error("Refusing to publish without --yes.");
@@ -635,8 +676,20 @@ function main() {
     throw new Error("Historical unsupported versions are read-only; select a reviewed unused version.");
   }
   if (process.env.GITHUB_ACTIONS === "true") {
-    throw new Error("This entry point is local-only; opt into the hosted workflow separately.");
+    throw new Error("This entry point is local-only; dispatch release-package-npm.yml for hosted publication.");
   }
+  // Every new upload goes through the hosted workflow. Promotion, retained-candidate
+  // finalization, and a release whose local bundle already exists for this HEAD
+  // only finish a local release that was already started. ship-npm.sh still
+  // refuses to upload anything new unless --local-publish set the marker.
+  const resumingLocalRelease = existsSync(npmReleaseReceiptPath(version, currentHead()));
+  if (!options.localPublish && !options.source && options.phase !== "promote" && !resumingLocalRelease) {
+    throw new Error(hostedPublicationMessage(version, options.phase));
+  }
+  if (options.localPublish) process.env.SCOUT_NPM_LOCAL_PUBLISH = "1";
+  else delete process.env.SCOUT_NPM_LOCAL_PUBLISH;
+  if (!options.localPublish && options.phase !== "promote") process.env.SCOUT_NPM_RESUME_ONLY = "1";
+  else delete process.env.SCOUT_NPM_RESUME_ONLY;
   process.env.SCOUT_NPM_AUTH_MODE = options.auth;
 
   assertCanonicalLocalSource();

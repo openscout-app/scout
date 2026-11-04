@@ -371,6 +371,7 @@ export class BrokerInvocationDispatchService {
   };
 
   readonly dispatchAcceptedInvocation = async (invocation: InvocationRequest): Promise<void> => {
+    if (invocation.metadata?.humanOwned === true) return;
     const flight = this.deps.runtime.flightForInvocation(invocation.id);
     if (!flight) {
       this.deps.warn?.(`[openscout-runtime] dispatch skipped - flight missing for invocation ${invocation.id}`);

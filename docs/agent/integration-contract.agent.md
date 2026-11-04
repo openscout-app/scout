@@ -62,7 +62,7 @@ this digest does not add wire fields or assert Poppy compatibility.
 | resolve ambiguous target | `agents_resolve` |
 | broker-native messages/status/errors | `broker_feed` |
 | observed harness activity | `tail_events` |
-| message/update | `messages_send` |
+| message/update | `ask` with `fyi: true` |
 | work/requested reply | `ask` |
 | project/capability known, agent unknown | `ask({ projectPath, harness })` |
 | inspect flight | `invocations_get` |

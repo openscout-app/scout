@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir, uptime } from "node:os";
 import { join } from "node:path";
 
 import {
   claimScoutPairingSupervision,
+  isScoutPairingFileFromPreviousBoot,
   readScoutPairingProcessPid,
   readScoutPairingSupervisorIntent,
   releaseScoutPairingSupervision,
@@ -86,5 +87,39 @@ describe("pairing supervision ownership", () => {
     expect(existsSync(paths.supervisorPidPath)).toBe(true);
     releaseScoutPairingSupervision(process.pid, paths.supervisorPidPath);
     expect(existsSync(paths.supervisorPidPath)).toBe(false);
+  });
+
+  test("ignores a pid file from before this boot, even when that pid is alive now", () => {
+    const paths = createPaths();
+    writeFileSync(paths.supervisorPidPath, `${process.pid}\n`);
+    const beforeBootSeconds = (Date.now() - uptime() * 1000 - 120_000) / 1000;
+    utimesSync(paths.supervisorPidPath, beforeBootSeconds, beforeBootSeconds);
+
+    expect(readScoutPairingProcessPid(paths.supervisorPidPath)).toBeNull();
+    claimScoutPairingSupervision(process.pid + 1, paths.supervisorPidPath);
+    expect(readScoutPairingProcessPid(paths.supervisorPidPath)).toBe(process.pid + 1);
+  });
+
+  test("dates a file against the boot time, with slack for clock steps", () => {
+    const paths = createPaths();
+    writeFileSync(paths.supervisorPidPath, `${process.pid}\n`);
+    const bootTimeMs = 1_800_000_000_000;
+    const setWrittenAt = (ms: number) => utimesSync(paths.supervisorPidPath, ms / 1000, ms / 1000);
+
+    setWrittenAt(bootTimeMs - 31_000);
+    expect(isScoutPairingFileFromPreviousBoot(paths.supervisorPidPath, bootTimeMs)).toBe(true);
+    setWrittenAt(bootTimeMs - 29_000);
+    expect(isScoutPairingFileFromPreviousBoot(paths.supervisorPidPath, bootTimeMs)).toBe(false);
+    setWrittenAt(bootTimeMs + 5_000);
+    expect(isScoutPairingFileFromPreviousBoot(paths.supervisorPidPath, bootTimeMs)).toBe(false);
+  });
+
+  test("counts a file as current when the boot time is unknown or the file is missing", () => {
+    const paths = createPaths();
+    writeFileSync(paths.supervisorPidPath, `${process.pid}\n`);
+    utimesSync(paths.supervisorPidPath, 0, 0);
+
+    expect(isScoutPairingFileFromPreviousBoot(paths.supervisorPidPath, null)).toBe(false);
+    expect(isScoutPairingFileFromPreviousBoot(join(paths.supervisorPidPath, "missing"), 1_800_000_000_000)).toBe(false);
   });
 });

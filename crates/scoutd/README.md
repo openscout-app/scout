@@ -53,3 +53,22 @@ are wrapped as `openscout.repo.response/v1` with `{ operation, value, error,
 daemonVersion }`. Repo jobs are executed per request with no daemon-side TTL or
 snapshot cache; the TypeScript repo-watch/repo-diff job/cache layers remain the
 freshness owners.
+
+## Health sweep
+
+The supervisor samples startup health, filesystem availability, web expectation,
+and pairing intent every 30 seconds. It checks version skew and Scout-owned
+stale files at startup and every 10 minutes. Projection recovery uses bounded
+owned-child restarts. Relay, web, and version conditions are report-only.
+
+`status --json` exposes `healthSweep`, also persisted as `scoutd-health.json`
+beside daemon state. Active conditions include `condition`, `cause`, `action`,
+`since`, `notifiedAt`, and `notifyAfter`. Consumers must check `checkedAt` for
+staleness. A confirmed recovery removes the condition; it sends no notification.
+
+The sweep bounds fixed Scout-owned child logs while their append descriptors
+remain open. It does not walk user directories on the periodic path. Disk
+threshold transitions trigger a bounded inventory of Scout-owned directories.
+
+See [health sweep contract](../../docs/scoutd-health-sweep.md) for thresholds,
+notification durability, cleanup guards, and the isolated recovery smoke test.

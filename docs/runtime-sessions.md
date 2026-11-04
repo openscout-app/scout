@@ -608,8 +608,8 @@ coordination. The happy path stays small:
 
 ```bash
 scout ask --to hudson "Review this and report back."
-scout send --to hudson "Heads up: I am taking the runtime side."
-scout ask --to hudson --notify "Run the longer review and report back."
+scout ask --to hudson --fyi "Heads up: I am taking the runtime side."
+scout ask --to hudson "Run the longer review and report back."
 scout who
 scout latest
 ```
@@ -638,7 +638,7 @@ Future CLI, MCP, and skill updates should converge on these names:
 | Start a session | `scout session start ...` | `sessions_start` |
 | Attach a session | `scout session attach ...` | `sessions_attach` |
 | Inspect runtime state | `scout session inspect ...` | `sessions_inspect` |
-| Message receipt | `scout send ...` | `messages_send` |
+| Message receipt | `scout ask --fyi ...` | `ask` with `fyi: true` |
 | Ask receipt | `scout ask ...` | `ask` |
 
 Old commands should continue to work while emitting behavior that maps cleanly
@@ -650,7 +650,7 @@ The runtime's `sessions_attach` MCP primitive binds an explicitly selected nativ
 session to a durable, exact-session mailbox using the existing MCP connection.
 It reuses endpoints and a single integration actor, creates no per-session agent,
 and returns the same opaque handle on repeated attachment. `sessions_poll`,
-`sessions_ack`, and `sessions_reply` distinguish receipt from completed work.
+`sessions_ack`, and `reply` distinguish receipt from completed work.
 An explicit `replyToSessionId` routes the result back to the originating mailbox.
 Polling does not wake a suspended host. An optional configured Devin API transport
 can resume a suspended Devin session.

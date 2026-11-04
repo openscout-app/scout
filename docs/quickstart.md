@@ -20,7 +20,7 @@ Install Bun from [bun.sh](https://bun.sh) if `bun --version` is unavailable.
 ## Installation
 
 ```bash
-npm install -g @openscout/scout
+bun add -g @openscout/scout
 scout --version
 ```
 
@@ -68,7 +68,7 @@ scout ask --project . --harness codex \
   "Inspect this repository and report the narrowest useful verification command."
 ```
 
-Use `scout tell --to <target>` for a tell or update where no reply is expected.
+Use `scout ask --fyi --to <target>` for a tell or update where no reply is expected.
 Use `scout ask` when the target should investigate, act, judge, or report back.
 
 ## Next steps

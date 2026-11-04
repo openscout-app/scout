@@ -155,6 +155,8 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 function createHarness(input: {
+  pendingTaskFollowups?: (invocationId: string) => Promise<MessageRecord[]>;
+  failOnHistoryScan?: boolean;
   endpoint?: AgentEndpoint;
   resolveEndpoint?: (invocation: InvocationRequest) => Promise<AgentEndpoint | undefined>;
   readMessage?: (messageId: string) => Promise<MessageRecord | undefined>;
@@ -240,6 +242,7 @@ function createHarness(input: {
     },
   });
   const service = new BrokerLocalInvocationService({
+    pendingTaskFollowups: input.pendingTaskFollowups,
     nodeId: "node-1",
     runtime: {
       actor: (actorId) => actors[actorId],
@@ -256,7 +259,7 @@ function createHarness(input: {
         endpoints,
         conversations,
         bindings: {},
-        messages,
+        messages: input.failOnHistoryScan ? new Proxy(messages, { ownKeys: () => { throw new Error("dispatch scanned history"); } }) : messages,
         readCursors: {},
         invocations: {},
         flights,
@@ -1645,4 +1648,22 @@ describe("tmux session observation across the invocation boundary", () => {
       observedSessionId: nativeId,
     }));
   });
+});
+
+
+test("local dispatch reads queued follow-ups by task index without enumerating history", async () => {
+  let observed: InvocationRequest | undefined;
+  const ids: string[] = [];
+  const followup = testMessage({ body: "Narrow scope", metadata: { taskFollowup: { invocationId: "invocation-1" } } });
+  const h = createHarness({ endpoint: testEndpoint({ transport: "codex_app_server" }), failOnHistoryScan: true,
+    pendingTaskFollowups: async id => { ids.push(id); return [followup]; },
+    invokeEndpoint: async (_endpoint, invocation) => { observed = invocation; return { output: "done" }; },
+  });
+  const invocation = testInvocation();
+  // Match the fixture's canonical task id, not an assumed one.
+  followup.metadata = { taskFollowup: { invocationId: invocation.id } };
+  h.seedFlight(testFlight());
+  await h.service.execute(invocation);
+  expect(ids).toEqual([invocation.id]);
+  expect(observed?.task).toContain("Task follow-ups:\nNarrow scope");
 });

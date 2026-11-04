@@ -1,10 +1,14 @@
 # Operator image attachments
 
-`scout notify --message <text> --image <path>` and plain
-`scout operator <text> --image <path>` submit one image to the local runtime.
+`scout ask --operator --fyi --notify --image <path> "<text>"` submits news
+with one image and requests a push. Task asks and replies also accept `--image`.
 The runtime chooses the operator DM and records one message with a canonical
 blob reference. No pairing store, web cookie, file-server URL, or app package
 participates in this write.
+
+The CLI ask/reply path uses versioned task delivery and the canonical attachment
+writer. The older operator upload route below remains a supported transport API;
+removing CLI verbs does not remove runtime routes.
 
 ## Local write contract
 

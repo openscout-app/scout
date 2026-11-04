@@ -35,6 +35,11 @@ const RELEASE_VERSION_SOURCES = [
 ];
 
 const RELEASE_JSON_VERSION_FILES = ["docs.json"];
+// The MCP Registry entry names one exact npm version of the Scout package, both
+// as its own version and in its package entry. Both are rewritten in place so
+// the file keeps its hand formatting.
+const REGISTRY_SERVER_FILE = "packages/cli/server.json";
+const REGISTRY_PACKAGE = "@openscout/scout";
 const LOCKFILE_PATH = "bun.lock";
 const LOCKFILE_WORKSPACES = RELEASE_MANIFESTS.filter((relativePath) => relativePath !== ".");
 
@@ -72,6 +77,26 @@ function compareSemver(left, right) {
   if (leftDev === undefined) return rightDev === undefined ? 0 : 1;
   if (rightDev === undefined) return -1;
   return Number(leftDev) - Number(rightDev);
+}
+
+function registryServerVersions(contents) {
+  const server = JSON.parse(contents);
+  const scoutPackage = server.packages?.find((entry) => entry.identifier === REGISTRY_PACKAGE);
+  return { server: server.version, package: scoutPackage?.version };
+}
+
+function rewriteRegistryServer(contents, currentVersion, nextVersion) {
+  let replaced = 0;
+  const rewritten = contents.replace(/("version"\s*:\s*")([^"]+)(")/g, (match, open, version, close) => {
+    if (version !== currentVersion) return match;
+    replaced += 1;
+    return `${open}${nextVersion}${close}`;
+  });
+  const written = registryServerVersions(rewritten);
+  if (replaced !== 2 || written.server !== nextVersion || written.package !== nextVersion) {
+    throw new Error(`Could not rewrite the server and ${REGISTRY_PACKAGE} versions in ${REGISTRY_SERVER_FILE}`);
+  }
+  return rewritten;
 }
 
 function lockfileWorkspaceVersion(contents, relativePath) {
@@ -143,6 +168,17 @@ async function main() {
       );
     }
   }
+  const registryServerContents = await fs.readFile(path.join(REPO_ROOT, REGISTRY_SERVER_FILE), "utf8");
+  const registryVersions = registryServerVersions(registryServerContents);
+  if (registryVersions.server !== currentVersion || registryVersions.package !== currentVersion) {
+    throw new Error(
+      `Release sources are not lockstep before bump: ${REGISTRY_SERVER_FILE}=${registryVersions.server}, `
+        + `${REGISTRY_PACKAGE}=${registryVersions.package}, expected ${currentVersion}.`,
+    );
+  }
+  const registryServerRewrite = nextVersion === currentVersion
+    ? registryServerContents
+    : rewriteRegistryServer(registryServerContents, currentVersion, nextVersion);
   const lockfileContents = await fs.readFile(path.join(REPO_ROOT, LOCKFILE_PATH), "utf8");
   for (const relativePath of LOCKFILE_WORKSPACES) {
     const observed = lockfileWorkspaceVersion(lockfileContents, relativePath).version;
@@ -234,6 +270,12 @@ async function main() {
     }
     touched += 1;
     console.log(`  ${relativePath}: ${priorVersion} -> ${nextVersion}${dryRun ? " (dry)" : ""}`);
+  }
+
+  if (registryServerRewrite !== registryServerContents) {
+    if (!dryRun) await fs.writeFile(path.join(REPO_ROOT, REGISTRY_SERVER_FILE), registryServerRewrite);
+    touched += 1;
+    console.log(`  ${REGISTRY_SERVER_FILE}: ${currentVersion} -> ${nextVersion}${dryRun ? " (dry)" : ""}`);
   }
 
   let rewrittenLockfile = lockfileContents;
