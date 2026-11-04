@@ -12,6 +12,7 @@ import type {
   NodeDefinition,
 } from "@openscout/protocol";
 import {
+  TaskClosedError, taskClosedRefusal,
   OPENSCOUT_IROH_MESH_ALPN,
   OPENSCOUT_MESH_PROTOCOL_VERSION,
   collaborationRequesterId,
@@ -487,6 +488,7 @@ async function forwardMeshEnvelope<TResponse>(
         JSON.stringify(response.body),
       );
     } catch (error) {
+      if (error instanceof PeerRejectedError && !error.retryable) throw error;
       if (httpUrls.length === 0) {
         throw new PeerUnreachableError(
           `Iroh peer unreachable and no HTTP broker URL is available: ${error instanceof Error ? error.message : String(error)}`,
@@ -536,7 +538,15 @@ export async function forwardMeshMessage(
   bundle: MeshMessageBundle,
   options?: MeshForwardRequestOptions,
 ): Promise<{ ok: true; message?: MessageRecord; deliveries?: DeliveryIntent[]; duplicate?: boolean }> {
-  return forwardMeshEnvelope(target, "messages", "/v1/mesh/messages", bundle, options);
+  try { return await forwardMeshEnvelope(target, "messages", "/v1/mesh/messages", bundle, options); }
+  catch (error) {
+    if (error instanceof PeerRejectedError && error.status === 409 && error.body) {
+      let refusal;
+      try { refusal = taskClosedRefusal(JSON.parse(error.body)); } catch { /* Not a typed authority refusal. */ }
+      if (refusal && refusal.messageId === bundle.message.id) throw new TaskClosedError(refusal, `task ${refusal.taskId} is closed: ${refusal.reason}`);
+    }
+    throw error;
+  }
 }
 
 export async function forwardMeshInvocation(

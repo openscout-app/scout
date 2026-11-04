@@ -129,7 +129,7 @@ test("built-ins retain maintenance and cannot be overridden by valid extensions"
 
 test("unknown verbs retain the implicit ask and unknown-help behavior", async () => {
   const f = fixture();
-  const ask = await f.run(["unregistered-fixture", "@fixture", "hello"]);
+  const ask = await f.run(["unregistered-fixture", "--to", "fixture", "hello"]);
   expect(ask.code).toBe(0); expect(ask.events).toEqual(["maintenance", "implicit_ask"]);
   const unknown = await f.run(["unregistered-fixture"]);
   expect(unknown.code).toBe(1); expect(unknown.events).toEqual(["maintenance"]);
@@ -197,4 +197,15 @@ test("a matching alternate-instance artifact dispatches with its selected broker
   expect(mode).toBe("plain"); expect(broker).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
   expect(broker).not.toBe("http://127.0.0.1:43110"); expect(arg).toBe("status");
   expect(result.events).toEqual(["maintenance", "extension"]);
+});
+
+test("a mistyped command with no route gets unknown-command help, not ask validation", async () => {
+  const f = fixture();
+  const typo = await f.run(["stauts"]);
+  expect(typo.code).toBe(1);
+  expect(typo.stderr).toContain("unknown command: stauts");
+  expect(typo.stderr).toContain("scout status");
+  expect(typo.stderr).not.toContain("exactly one routing mode");
+  const ask = await f.run(["review", "--to", "fixture", "this"]);
+  expect(ask.code).toBe(0); expect(ask.events).toContain("implicit_ask");
 });

@@ -27,6 +27,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -52,6 +55,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -86,12 +92,15 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "sessions_ack",
     "title": "Acknowledge External Session Item",
-    "description": "Acknowledge receipt of a mailbox item. This does not complete work; use sessions_reply for the final answer. Acknowledged result notifications leave the mailbox.",
+    "description": "Acknowledge receipt of a mailbox item. This does not complete work; use reply with the task ref for the final answer. Acknowledged result notifications leave the mailbox.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -116,53 +125,15 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
-    }
-  },
-  {
-    "name": "sessions_reply",
-    "title": "Reply to External Session Item",
-    "description": "Reply to the exact Scout delivery address supplied with your task. Completes its original flight; retries with the same body are idempotent.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "sessionId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "deliveryId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "replyToken": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
-        },
-        "body": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100000
-        }
-      },
-      "required": [
-        "sessionId",
-        "deliveryId",
-        "body"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "additionalProperties": false
     },
-    "annotations": {
-      "readOnlyHint": false,
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": false
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "whoami",
     "title": "Scout Whoami",
-    "description": "Inspect the default Scout sender identity and broker URL for a working directory. Use this when host or workspace context is unclear; direct ask and messages_send calls can route without a whoami preflight.",
+    "description": "Inspect the default Scout sender identity and broker URL for a working directory. Use this when host or workspace context is unclear; direct ask calls can route without a whoami preflight.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -181,12 +152,15 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "feedback_send",
     "title": "Send Scout Feedback",
-    "description": "File feedback about Scout itself with the OpenScout team: a bug, a rough edge, a missing capability. The note is redacted, saved locally, then uploaded; the report names the sender (agent, harness, project, host). Set diagnostics only when the note is about Scout misbehaving on this machine \u2014 it attaches bounded, redacted service logs. This is not a message to another agent; use messages_send or ask for that.",
+    "description": "File feedback about Scout itself with the OpenScout team: a bug, a rough edge, a missing capability. The note is redacted, saved locally, then uploaded; the report names the sender (agent, harness, project, host). Set diagnostics only when the note is about Scout misbehaving on this machine — it attaches bounded, redacted service logs. This is not a message to another agent; use ask for that.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -219,6 +193,9 @@
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -251,6 +228,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -283,6 +263,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -321,6 +304,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -382,6 +368,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -399,72 +388,65 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
-    "name": "messages_reply",
-    "title": "Reply to Scout Message",
-    "description": "Reply in an existing Scout conversation/thread. Replies with completion report explicit progress or final completion for a flight; refresh current_reply_context first and supply a stable requestId. A final is rejected while joined work is pending; submit a new final after it settles. Other replies are normal threaded conversation messages. If conversationId and replyToMessageId are omitted, this uses the current ScoutReplyContext. If there is no active context, use messages_send for a new message or ask for a new request.",
+    "name": "reply",
+    "title": "Reply",
+    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "requestId": {
+          "description": "Reuse after an uncertain receipt.",
           "type": "string",
           "minLength": 1,
           "maxLength": 256
         },
-        "completion": {
-          "type": "object",
-          "properties": {
-            "invocationId": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "\\S"
-            },
-            "flightId": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "\\S"
-            },
-            "revision": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "progress",
-                "final"
-              ]
-            }
-          },
-          "required": [
-            "invocationId",
-            "flightId",
-            "revision",
-            "kind"
-          ],
-          "additionalProperties": false
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionId": {
+          "description": "External mailbox return address, copied from the task.",
+          "type": "string",
+          "minLength": 1
+        },
+        "deliveryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "replyToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "progress": {
+          "type": "boolean"
+        },
+        "failed": {
+          "type": "boolean"
         },
         "body": {
           "type": "string",
           "minLength": 1
         },
-        "currentDirectory": {
-          "type": "string"
-        },
         "senderId": {
           "type": "string"
         },
-        "conversationId": {
+        "currentDirectory": {
           "type": "string"
         },
-        "replyToMessageId": {
+        "image": {
+          "description": "Local image path.",
           "type": "string"
-        },
-        "shouldSpeak": {
-          "type": "boolean"
         },
         "attachments": {
           "type": "array",
@@ -501,14 +483,17 @@
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": false,
-      "idempotentHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "agents_search",
     "title": "Search Scout Agents",
-    "description": "Search the runtime HTTP agent inventory for matching identities; results describe known records, not proof of host reachability.",
+    "description": "Search the live Scout broker and discovered agent inventory for routing candidates. Use this when the target is unknown or ambiguous, not as a required preflight for every send. When the query names a machine (e.g. build-host), the result also says whether that machine answers, its projects, and the `ask` with `on` that starts fresh work there; offline agent cards do not mean the machine is down.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -533,6 +518,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -562,15 +550,64 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "ask",
     "title": "Ask",
-    "description": "Ask another agent to answer, review, try, build, compare, or give feedback \u2014 on this machine or on another mesh machine. To start work on another machine, pass `on` (the machine, e.g. peer-machine) with `projectPath` as the folder on that machine, plus harness/runtime; Scout starts a fresh session there and forwards the ask, so never ssh in to launch an agent yourself. Exact runtime requests accept `runtime` as harness/model/effort (for example codex/gpt-5.6-sol/xhigh), or separate harness/model/reasoningEffort fields. A profile is a base preset and explicit dimensions override it when legal. Exact runtime requests create a fresh isolated session; targetSessionId fails closed unless the selected session's observed runtime matches. Ask may create message, invocation, flight, delivery, and work records as side effects; use invocations_get/invocations_wait and the execution-resolution receipt to verify requested, resolved, and observed values.",
+    "description": "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "operator": {
+          "type": "boolean"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "continue": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cancel": {
+          "type": "boolean"
+        },
+        "fyi": {
+          "type": "boolean"
+        },
+        "notify": {
+          "type": "boolean"
+        },
+        "defaultAction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "permission": {
+          "type": "boolean"
+        },
+        "because": {
+          "type": "string",
+          "minLength": 1
+        },
+        "window": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "image": {
+          "description": "Local image path.",
+          "type": "string"
+        },
         "completion": {
           "description": "Require an explicit final reply; exact local id or session targets only, with a stable requestId.",
           "type": "object",
@@ -613,7 +650,7 @@
           "maxLength": 256
         },
         "to": {
-          "description": "Agent id, label, sibling, specialist, recent collaborator, target:<name>, or \u2316name.",
+          "description": "Agent id, label, sibling, specialist, recent collaborator, target:<name>, or ⌖name.",
           "type": "string",
           "minLength": 1
         },
@@ -627,7 +664,7 @@
           "description": "Project root to ask when you do not have a specific agent in mind; pair with harness when the capability matters. Scout resolves or creates the concrete worker and returns durable follow-up handles."
         },
         "on": {
-          "description": "Mesh machine to start the session on (e.g. peer-machine). Requires projectPath, read as a path on that machine (sent as typed, `~` expands there). Starts a fresh session; list machines with whoami or `scout machines`.",
+          "description": "Mesh machine to start the session on (e.g. build-host). Requires projectPath, read as a path on that machine (sent as typed, `~` expands there). Starts a fresh session; list machines with whoami or `scout machines`.",
           "type": "string",
           "minLength": 1
         },
@@ -712,9 +749,6 @@
         "channel": {
           "type": "string"
         },
-        "shouldSpeak": {
-          "type": "boolean"
-        },
         "replyMode": {
           "type": "string",
           "enum": [
@@ -722,7 +756,7 @@
             "inline",
             "notify"
           ],
-          "description": "Reply delivery mode (default 'notify'): 'notify' returns durable ids quickly and emits notifications/scout/reply when OPENSCOUT_MCP_ENABLE_NOTIFICATIONS=1 (always on for the hosted bridge), 'inline' waits briefly, and 'none' returns durable ids only."
+          "description": "Legacy replyMode='notify' means return on acceptance, unrelated to the operator notify flag. Reply delivery mode (default 'notify'): 'notify' returns durable ids quickly and emits notifications/scout/reply when OPENSCOUT_MCP_ENABLE_NOTIFICATIONS=1 (always on for the hosted bridge), 'inline' waits briefly, and 'none' returns durable ids only."
         },
         "timeoutSeconds": {
           "description": "Caller wait budget in seconds for inline waits only; it never cancels or fails the broker ask.",
@@ -818,162 +852,15 @@
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": false
-    }
-  },
-  {
-    "name": "notify_operator",
-    "title": "Notify Operator",
-    "description": "Send the human operator a useful, non-blocking FYI and continue working. This creates a durable broker message for delivery and correlation, but it does not create a flight, request a reply, or change task lifecycle. Do not use it for routine progress chatter or when work cannot safely continue.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "message": {
-          "type": "string"
-        },
-        "currentDirectory": {
-          "type": "string"
-        },
-        "senderId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "message"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "additionalProperties": false
     },
-    "annotations": {
-      "readOnlyHint": false,
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true
-    }
-  },
-  {
-    "name": "consult_operator",
-    "title": "Consult Operator Without Blocking",
-    "description": "Ask the human operator for optional advice while continuing the current task. Always declare the safe default action you will take if no reply arrives. This creates a durable, replyable broker message but no invocation, flight, waiting state, or lifecycle transition. Use a blocking human-input mechanism instead when there is no responsible default.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "question": {
-          "type": "string"
-        },
-        "defaultAction": {
-          "type": "string"
-        },
-        "currentDirectory": {
-          "type": "string"
-        },
-        "senderId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "question",
-        "defaultAction"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "additionalProperties": false
-    },
-    "annotations": {
-      "readOnlyHint": false,
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true
-    }
-  },
-  {
-    "name": "messages_send",
-    "title": "Send Scout Message",
-    "description": "Post a broker-backed Scout message/update/reply. Use this for heads-up, threaded conversation, and status when no new owned-work lifecycle is needed. Pass targets as fields: one explicit target without a channel becomes a DM, group delivery requires an explicit channel, and the body remains payload text. Targeted DMs are dispatched by the broker when the target can be reached; callers should not preflight wake/session mechanics. Use channel='shared' only for shared updates. Pass targetLabel for the single-call broker-resolved path; mentionAgentIds remains available for exact-id compatibility. If a requested target is unresolved or mismatched, report it instead of substituting a different agent. For new agent-to-agent work, use ask instead. To continue prior context, pass targetSessionId through ask. Opt-in: interaction='work' turns one directed send into tracked work on the ask lifecycle (same as scout send --tracked); the default stays message-only.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "requestId": {
-          "description": "Requester-scoped idempotency key; reuse on retries.",
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
-        },
-        "body": {
-          "type": "string",
-          "minLength": 1
-        },
-        "currentDirectory": {
-          "type": "string"
-        },
-        "senderId": {
-          "type": "string"
-        },
-        "targetAgentId": {
-          "type": "string",
-          "description": "Exact Scout agent/card id when already known, such as talkie.master.mini. This is not a session target; use targetSessionId for exact prior context."
-        },
-        "targetLabel": {
-          "type": "string",
-          "description": "Scout agent handle to contact when a specific target is known, such as @talkie, or a saved situated target such as target:talkie or \u2316talkie. For fresh capability work prefer projectPath plus optional harness; do not guess generic handles like claude.main. Treat harness/model/profile as instance constraints, not the base agent identity."
-        },
-        "aliasProject": {
-          "description": "Explicit project root for targetLabel=alias:<name>.",
-          "type": "string"
-        },
-        "aliasHost": {
-          "description": "Explicit authority node id/name for targetLabel=alias:<name>.",
-          "type": "string"
-        },
-        "channel": {
-          "type": "string"
-        },
-        "shouldSpeak": {
-          "type": "boolean"
-        },
-        "mentionAgentIds": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Exact Scout agent ids to target directly when you already know them"
-        },
-        "interaction": {
-          "type": "string",
-          "enum": [
-            "message",
-            "work"
-          ],
-          "description": "Default 'message': a durable FYI/update with no owned work (the CLI's scout send / scout tell). Pass 'work' to opt one directed target into tracked work on the ask invocation lifecycle (the CLI's scout send --tracked): returns with durable handles and reports completion back to the sender. 'work' fails closed on channel, multi-target, ref-reply, and [ask:...] completion sends. For richer work options (projectPath, harness, runtime, inline wait) use ask."
-        },
-        "replyMode": {
-          "type": "string",
-          "enum": [
-            "notify",
-            "none"
-          ],
-          "description": "interaction='work' only. 'notify' (default) reports completion back to the requesting agent/session; 'none' suppresses the completion callback while keeping the tracked result inspectable via invocations_wait."
-        },
-        "wake": {
-          "type": "boolean",
-          "description": "Advanced override: force a visible wake turn after posting. Omit this for normal targeted DMs; the broker dispatches reachable targets automatically. Redundant with interaction='work', which already dispatches."
-        }
-      },
-      "required": [
-        "body"
-      ],
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "additionalProperties": false
-    },
-    "annotations": {
-      "readOnlyHint": false,
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": false
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "invocations_get",
-    "title": "Get Scout Ask",
-    "description": "Fetch the current broker flight state for a previously-created Scout ask or invocation. Use this with a flightId returned by ask to observe long-running work without blocking the original ask call.",
+    "title": "Get Scout Task",
+    "description": "Fetch the current broker flight state for a previously-created Scout task. Use this with a flightId returned by ask to observe long-running work without blocking the original ask call.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -996,12 +883,15 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
     "name": "invocations_wait",
-    "title": "Wait For Scout Ask",
-    "description": "Wait briefly for a previously-created Scout ask flight to finish, then return the latest flight state. This is a bounded follow-up wait, not the long-running ask submission path.",
+    "title": "Wait For Scout Task",
+    "description": "Wait briefly for a previously-created Scout task to finish, then return the latest flight state. This is a bounded follow-up wait, not the long-running ask submission path.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1031,6 +921,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -1059,6 +952,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -1095,6 +991,9 @@
       "destructiveHint": false,
       "idempotentHint": true,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   },
   {
@@ -1289,6 +1188,9 @@
       "destructiveHint": false,
       "idempotentHint": false,
       "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
     }
   }
 ]

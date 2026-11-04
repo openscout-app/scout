@@ -1,12 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
+import { planZedScoutContextServer, zedSettingsPath } from "./zed-settings.ts";
 
-export type ScoutMcpInstallHost = "claude" | "codex";
+export type ScoutMcpInstallHost = "claude" | "codex" | "zed";
+
+const SUPPORTED_HOSTS = ["codex", "claude", "zed"] as const;
 
 type ScoutMcpInstallOptions = {
   dryRun: boolean;
@@ -85,12 +88,31 @@ function resolveExecutableFromSearchPath(
   return null;
 }
 
-function resolveHostExecutable(
+/**
+ * Zed has no command for adding an MCP server, so Scout edits its user
+ * settings file. Zed counts as installed when its config directory, its app,
+ * or its CLI is present.
+ */
+function resolveZedSettingsPath(env: NodeJS.ProcessEnv): string | null {
+  const settingsPath = zedSettingsPath(env);
+  const home = env.HOME || homedir();
+  const installed = existsSync(dirname(settingsPath))
+    || (process.platform === "darwin"
+      && [join("/Applications", "Zed.app"), join(home, "Applications", "Zed.app")].some((app) => existsSync(app)))
+    || resolveExecutableFromSearchPath(["zed", "zeditor"], env) !== null;
+  return installed ? settingsPath : null;
+}
+
+/** The host's executable, or for Zed its settings file. */
+function resolveHostPath(
   host: ScoutMcpInstallHost,
   env: NodeJS.ProcessEnv,
 ): string | null {
   if (host === "codex") {
     return resolveExecutableFromSearchPath(["codex"], env);
+  }
+  if (host === "zed") {
+    return resolveZedSettingsPath(env);
   }
   return resolveExecutableFromSearchPath(["claude"], env);
 }
@@ -148,25 +170,28 @@ function parseFlagValue(args: string[], index: number, flag: string): {
 }
 
 function parseHostValue(value: string): ScoutMcpInstallHost {
-  if (value === "codex" || value === "claude") {
-    return value;
+  if ((SUPPORTED_HOSTS as readonly string[]).includes(value)) {
+    return value as ScoutMcpInstallHost;
   }
-  throw new ScoutCliError(`unsupported MCP host "${value}" (expected codex or claude)`);
+  throw new ScoutCliError(`unsupported MCP host "${value}" (expected codex, claude, or zed)`);
 }
 
 export function renderMcpInstallHelp(): string {
   return [
-    "Usage: scout mcp install [--host <codex|claude>] [--force] [--dry-run]",
+    "Usage: scout mcp install [--host <codex|claude|zed>] [--force] [--dry-run]",
     "",
     "Register the current Scout MCP server command with supported local hosts.",
     "",
     "Defaults to every detected host. Codex is installed through its global",
-    "config, and Claude Code is installed at user scope.",
+    "config, and Claude Code is installed at user scope. Zed is installed as",
+    "context_servers.scout in its user settings.json; the rest of that file,",
+    "comments included, stays as it was, and Zed reloads it without a restart.",
     "",
     "Examples:",
     "  scout mcp install",
     "  scout mcp install --host codex --force",
     "  scout mcp install --host claude --dry-run",
+    "  scout mcp install --host zed",
   ].join("\n");
 }
 
@@ -205,7 +230,7 @@ export function parseMcpInstallCommandOptions(
 
   const resolvedHosts = hosts.length > 0
     ? [...new Set(hosts)]
-    : (["codex", "claude"] as const).filter((host) => resolveHostExecutable(host, env) !== null);
+    : SUPPORTED_HOSTS.filter((host) => resolveHostPath(host, env) !== null);
 
   return {
     dryRun,
@@ -355,6 +380,84 @@ function installForClaude(input: {
   };
 }
 
+function installForZed(input: {
+  settingsPath: string;
+  launch: ScoutMcpLaunchCommand;
+  force: boolean;
+  dryRun: boolean;
+}): HostInstallOutcome {
+  let text = "";
+  try {
+    text = readFileSync(input.settingsPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return {
+        host: "zed",
+        status: "failed",
+        detail: `Could not read ${input.settingsPath}: ${(error as Error).message}`,
+      };
+    }
+  }
+
+  let plan: ReturnType<typeof planZedScoutContextServer>;
+  try {
+    plan = planZedScoutContextServer(text, { command: input.launch.command, args: input.launch.args }, { force: input.force });
+  } catch (error) {
+    return {
+      host: "zed",
+      status: "failed",
+      detail: `${(error as Error).message} (${input.settingsPath})`,
+    };
+  }
+
+  if (plan.action === "unchanged") {
+    return {
+      host: "zed",
+      status: "already_installed",
+      detail: "Zed already has a scout MCP entry.",
+    };
+  }
+  if (plan.action === "conflict") {
+    return {
+      host: "zed",
+      status: "skipped",
+      detail: `Zed has a different scout entry in ${input.settingsPath}. Rerun with --force to replace it.`,
+    };
+  }
+
+  const change = plan.replaced ? "replace" : "add";
+  if (input.dryRun) {
+    return {
+      host: "zed",
+      status: "installed",
+      detail: `Would ${change} context_servers.scout in ${input.settingsPath}: ${input.launch.command} ${input.launch.args.join(" ")}`,
+    };
+  }
+
+  try {
+    mkdirSync(dirname(input.settingsPath), { recursive: true });
+    if (text !== "") {
+      writeFileSync(`${input.settingsPath}.scout-backup`, text);
+    }
+    // writeFileSync follows a symlinked settings file instead of replacing it.
+    writeFileSync(input.settingsPath, plan.text);
+  } catch (error) {
+    return {
+      host: "zed",
+      status: "failed",
+      detail: `Could not write ${input.settingsPath}: ${(error as Error).message}`,
+    };
+  }
+
+  return {
+    host: "zed",
+    status: "installed",
+    detail: text === ""
+      ? `Installed scout MCP for Zed in ${input.settingsPath}.`
+      : `Installed scout MCP for Zed in ${input.settingsPath} (previous file saved as settings.json.scout-backup).`,
+  };
+}
+
 export function installScoutMcpForHosts(input: {
   env: NodeJS.ProcessEnv;
   hosts: ScoutMcpInstallHost[];
@@ -368,19 +471,27 @@ export function installScoutMcpForHosts(input: {
   const launch = (input.resolveLaunchCommand ?? resolveCurrentScoutMcpLaunchCommand)(input.env);
   const run = input.run
     ?? (input.context ? defaultCommandRunner(input.context) : undefined);
-  const resolveHostPath = input.resolveHostPath ?? resolveHostExecutable;
+  const resolvePath = input.resolveHostPath ?? resolveHostPath;
   if (!run) {
     throw new ScoutCliError("A command runner or command context is required.");
   }
 
   return input.hosts.map((host) => {
-    const executablePath = resolveHostPath(host, input.env);
+    const executablePath = resolvePath(host, input.env);
     if (!executablePath) {
       return {
         host,
         status: "skipped",
-        detail: `Skipped ${host}: executable not found.`,
+        detail: host === "zed" ? "Skipped zed: Zed not found." : `Skipped ${host}: executable not found.`,
       };
+    }
+    if (host === "zed") {
+      return installForZed({
+        settingsPath: executablePath,
+        launch,
+        force: input.force,
+        dryRun: input.dryRun,
+      });
     }
     if (host === "codex") {
       return installForCodex({
@@ -412,7 +523,7 @@ export async function runMcpInstallCommand(
 
   const options = parseMcpInstallCommandOptions(args, context.env);
   if (options.hosts.length === 0) {
-    context.output.writeText("No supported hosts detected. Looked for codex and claude.");
+    context.output.writeText("No supported hosts detected. Looked for codex, claude, and zed.");
     return;
   }
 

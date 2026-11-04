@@ -1554,3 +1554,27 @@ describe("journal append failures", () => {
     expect([...reloaded.retiredActorIds()].sort()).toEqual(["after", "before"]);
   });
 });
+
+test("task indexes replay, exclude closed history and retain only queued follow-ups until terminal", async () => {
+  const { journal, journalPath } = createJournal();
+  await journal.load();
+  const task = { ...sampleInvocation(), metadata: { humanOwned: true, defaultAction: "staging", operatorAnswerDeadline: 200 } };
+  await journal.appendEntries([{ kind: "invocation.record", invocation: task }, { kind: "flight.record", flight: sampleFlight() }]);
+  const followup = { ...sampleMessage(), audience: { delivery: "none" as const }, metadata: { taskFollowup: { invocationId: task.id } } };
+  await journal.appendEntries([
+    { kind: "message.record", message: followup },
+    { kind: "message.record", message: { ...followup, id: "live", audience: { notify: ["agent-1"] } } },
+    { kind: "message.record", message: { ...followup, id: "cancel", metadata: { taskFollowup: { invocationId: task.id, cancel: true } } } },
+  ]);
+  expect([...journal.openOperatorTasks()].map(item => item.id)).toEqual([task.id]);
+  expect((await journal.pendingTaskFollowups(task.id)).map(item => item.id)).toEqual([followup.id]);
+  const reopened = new FileBackedBrokerJournal(journalPath); await reopened.load();
+  expect([...reopened.openOperatorTasks()].map(item => item.id)).toEqual([task.id]);
+  expect((await reopened.pendingTaskFollowups(task.id)).map(item => item.id)).toEqual([followup.id]);
+  await reopened.appendEntries({ kind: "flight.record", flight: { ...sampleFlight(), state: "completed", completedAt: 300 } });
+  expect([...reopened.openOperatorTasks()]).toEqual([]);
+  expect(await reopened.pendingTaskFollowups(task.id)).toEqual([]);
+  const closed = new FileBackedBrokerJournal(journalPath); await closed.load();
+  expect([...closed.openOperatorTasks()]).toEqual([]);
+  expect(await closed.pendingTaskFollowups(task.id)).toEqual([]);
+});

@@ -90,6 +90,8 @@ export class BrokerOperatorAttentionService {
 
   async sendOperatorSignalAlert(input: OperatorSignalInput): Promise<void> {
     const signal = input.signal;
+    if (signal.notificationPolicy?.requested === false) return;
+    const interrupting = signal.notificationPolicy ? signal.notificationPolicy.priority === "interrupting" : signal.kind === "need";
     // The alert text stays generic; what the agent said rides sealed to each
     // paired phone, which is the only place it can be read.
     const isNeed = signal.kind === "need";
@@ -112,8 +114,8 @@ export class BrokerOperatorAttentionService {
           ? "An agent would value your input"
           : "Agent update",
       body: isNeed ? "An agent is asking a question. Open Scout for details." : "Open Scout for details.",
-      sound: isNeed ? "default" : null,
-      urgency: isNeed ? "interrupt" : "silent",
+      sound: interrupting ? "default" : null,
+      urgency: interrupting ? "interrupt" : "silent",
       threadId: "scout.agent-signal",
       payload: {
         destination: "inbox",

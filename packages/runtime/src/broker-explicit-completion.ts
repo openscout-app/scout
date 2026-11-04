@@ -1,5 +1,6 @@
+import { pendingInvocationResultReply } from "./broker-invocation-result-delivery-service.js";
 import { endpointMatchesTargetSessionAddress } from "./runtime-session-address.js";
-import { completionReply, flightCompletion, flightSessionTrace, hasExplicitCompletion,
+import { TaskClosedError, completionReply, flightCompletion, flightSessionTrace, hasExplicitCompletion,
   SCOUT_COMPLETION_MAX_OBLIGATIONS, type FlightRecord, type InvocationRequest, type MessageRecord,
   type ScoutCompletionRelation } from "@openscout/protocol";
 import type { RuntimeRegistrySnapshot } from "./registry.js";
@@ -25,6 +26,21 @@ export function assertExplicitReplyAdmission(message: MessageRecord, snapshot: R
   if (!reply) throw new Error("completion_reply_invalid");
   const invocation = snapshot.invocations[reply.invocationId], flight = snapshot.flights[reply.flightId];
   const state = flightCompletion(flight);
+  if (flight && terminal(flight)) {
+    // Harness results are committed before their outbox is delivered. Admit only
+    // that exact captured final, never a new explicit answer to a closed task.
+    const captured = pendingInvocationResultReply(flight)?.message;
+    if (captured && captured.id === message.id && captured.body === message.body
+      && captured.actorId === message.actorId && captured.conversationId === message.conversationId
+      && captured.replyToMessageId === message.replyToMessageId) return;
+    const lateDefault = invocation?.metadata?.humanOwned === true && flight.metadata?.operatorOutcome === "proceeded_with_default";
+    if (lateDefault && message.actorId === invocation?.targetAgentId && message.conversationId === invocation.conversationId
+      && message.replyToMessageId === invocation.messageId && message.class === "agent" && reply.kind === "final") return;
+    throw new TaskClosedError({ error: "task_closed", taskId: reply.invocationId, flightId: flight.id, messageId: message.id,
+      reason: flight.state as "completed" | "failed" | "cancelled" }, flight.state === "cancelled" ? "task was cancelled" : `task is already ${flight.state}`);
+  }
+  if (flight?.metadata?.taskFinalReplyMessageId && flight.metadata.taskFinalReplyMessageId !== message.id
+    && flight.metadata.taskFinalReplyRevision === (state?.revision ?? 0)) throw new TaskClosedError({ error: "task_closed", taskId: reply.invocationId, flightId: flight.id, messageId: message.id, reason: "already_answered" }, "task already has a final reply");
   if (!invocation || !flight || (hasExplicitCompletion(invocation) && !state) || terminal(flight)
     || flight.invocationId !== invocation.id || message.actorId !== invocation.targetAgentId
     || message.class !== "agent" || message.conversationId !== invocation.conversationId

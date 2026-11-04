@@ -127,7 +127,7 @@ Suppose Codex implements a retry policy. Record the base and head commits and st
 Put that brief in a file the reviewer can read, then point Scout at the file. `--prompt-file` replaces the inline message; do not pass both.
 
 ```bash
-scout ask --project . --harness claude --notify \
+scout ask --project . --harness claude \
   --prompt-file ./reviews/retry-review.md
 ```
 
@@ -171,14 +171,14 @@ The mechanism generalizes. These are illustrative assignments, not claims that a
 Example, Grok investigates and Codex later implements. First request, from the repo:
 
 ```bash
-scout ask --project . --harness grok-acp --notify \
+scout ask --project . --harness grok-acp \
   --prompt-file ./reviews/retry-research.md
 ```
 
 `grok-acp` is the listed Grok route; the unlisted `grok` id also works where that route is installed. After you accept the approach, start a fresh ask to Codex. Pass the accepted file and the decisions. Do not assume the Codex session can see Grok's chat:
 
 ```bash
-scout ask --project ../payments-retry --harness codex --notify \
+scout ask --project ../payments-retry --harness codex \
   --prompt-file ./reviews/retry-implement.md
 ```
 
@@ -248,7 +248,7 @@ Devin is a catalogued route with its own environment. A catalog entry does not e
 
 They solve different joins. Using one does not imply the others.
 
-**MCP** connects an application (the host) to tool servers. Each connection is an MCP client. Servers expose tools, resources, and prompts. `scout mcp` is Scout's local stdio coordination server; the runtime still owns the messages and asks. Local hosts such as Claude Code, Codex, and Cursor can launch it, and Grok Bot reaches the same tools through the hosted gateway. The connection does not pour another agent's conversation into the caller. Tool names can change while the [MCP posture](https://github.com/openscout-app/scout/blob/main/docs/mcp-api-posture.md) is v0 guidance, so use `tools/list` to see what your server exposes. Ordinary handoffs are still `ask` or `messages_send`. [MCP architecture](https://modelcontextprotocol.io/docs/2026-07-28/learn/architecture).
+**MCP** connects an application (the host) to tool servers. Each connection is an MCP client. Servers expose tools, resources, and prompts. `scout mcp` is Scout's local stdio coordination server; the runtime still owns the messages and asks. Local hosts such as Claude Code, Codex, and Cursor can launch it, and Grok Bot reaches the same tools through the hosted gateway. The connection does not pour another agent's conversation into the caller. Tool names can change while the [MCP posture](https://github.com/openscout-app/scout/blob/main/docs/mcp-api-posture.md) is v0 guidance, so use `tools/list` to see what your server exposes. Ordinary handoffs are still `ask` or `ask` with `fyi: true`. [MCP architecture](https://modelcontextprotocol.io/docs/2026-07-28/learn/architecture).
 
 **ACP**, the Agent Client Protocol, is how a coding client talks to a coding agent, analogous to the Language Server Protocol. Local agents typically use JSON-RPC over stdio. The introduction describes remote agents over HTTP or WebSocket, and says full remote support is still in progress. Scout's `grok-acp` route uses ACP as a client adapter: Scout talks to that agent. Scout does not become an ACP server, and this ACP is not BeeAI's Agent Communication Protocol. [ACP introduction](https://agentclientprotocol.com/get-started/introduction).
 
@@ -324,7 +324,7 @@ scout ask --ref ref:RETURNED \
 Status with no new work:
 
 ```bash
-scout send --to TARGET \
+scout ask --to TARGET --fyi \
   "FYI: review ref:RETURNED is in flight. No action until it returns."
 ```
 

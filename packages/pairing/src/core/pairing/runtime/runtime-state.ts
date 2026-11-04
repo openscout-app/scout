@@ -1,5 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
+import {
+  isScoutPairingFileFromPreviousBoot,
+  readScoutPairingProcessPid,
+} from "@openscout/runtime/pairing-supervisor";
+
 import { pairingPaths, resolvedPairingConfig } from "./config.ts";
 import { loadOrCreateIdentity, trustedPeerCount, bytesToHex } from "./security.ts";
 
@@ -101,18 +106,7 @@ export function clearPairingRuntimeSnapshot() {
 }
 
 export function readPairingRuntimePid(): number | null {
-  const { runtimePidPath } = pairingPaths();
-  if (!existsSync(runtimePidPath)) {
-    return null;
-  }
-
-  try {
-    const raw = readFileSync(runtimePidPath, "utf8").trim();
-    const pid = Number(raw);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
+  return readScoutPairingProcessPid(pairingPaths().runtimePidPath);
 }
 
 export function writePairingRuntimePid(pid: number) {
@@ -152,7 +146,8 @@ export function stalePairingRuntimeOwnerPid() {
 }
 
 export function clearStalePairingRuntimeFiles() {
-  if (stalePairingRuntimeOwnerPid() === null) {
+  const { runtimePidPath } = pairingPaths();
+  if (!isScoutPairingFileFromPreviousBoot(runtimePidPath) && stalePairingRuntimeOwnerPid() === null) {
     return;
   }
   clearPairingRuntimePid();

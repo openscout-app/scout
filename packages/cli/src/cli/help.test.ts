@@ -13,15 +13,15 @@ describe("renderScoutHelp", () => {
     expect(help).toContain("scout search status");
     expect(help).toContain("Lifecycle:");
     expect(help).toContain("one target -> DM");
-    expect(help).toContain("multiple targets + no channel");
+    expect(help).toContain("independent task and receipt per target");
     expect(help).toContain("File-backed input:");
     expect(help).toContain("--prompt-file");
-    expect(help).toContain("--message-file");
+    expect(help).toContain("unknown flags are errors");
     expect(help).toContain("Project targets:");
     expect(help).toContain("scout ask --project ../talkie");
     expect(help).toContain("scout ask --harness codex");
-    expect(help).toContain("no agent id needed");
-    expect(help).toContain("quote >> in shells");
+    expect(help).toContain("broker chooses the worker");
+    expect(help).toContain("reply --ref <task>");
     expect(help).toContain("Doctor flags:");
     expect(help).toContain("scout doctor --fix --yes");
     expect(help).toContain("scout providers usage");
@@ -43,4 +43,12 @@ describe("renderScoutHelp", () => {
     expect(output).toContain("https://openscout.app/docs/quickstart");
     expect(output).toContain("Troubleshooting: scout doctor");
   }
+});
+
+
+test("news uses FYI and help never teaches positional recipients", () => {
+  const help = renderScoutHelp(undefined, true);
+  expect(help).toContain('scout ask --operator --fyi "Ready to review"');
+  expect(help).not.toContain("scout @agent");
+  expect(help).not.toContain("current ask state");
 });

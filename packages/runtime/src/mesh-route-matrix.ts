@@ -69,6 +69,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/mesh/discover": "control",
   "POST /v1/mesh/flights": "control",
   "POST /v1/mesh/invocations": "control",
+  "POST /v1/mesh/tasks/ask": "control",
+  "POST /v1/mesh/tasks/reply": "control",
   "POST /v1/mesh/messages": "control",
   // T4 flat session dispatch: a peer asks this node to wake a session found in
   // its local harness store. Registers a cardless endpoint — control tier, the

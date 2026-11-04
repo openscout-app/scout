@@ -40,40 +40,69 @@ transcripts.
 | binding | `ConversationBinding` |
 | dispatch | `ScoutDispatchRecord` |
 
-## Workflows
+## Two verbs
 
-| Workflow | Use | API/tool |
-|---|---|---|
-| message/update | durable message with broker receipt ids | `scout send` (explicit alias: `scout tell`), `messages_send` |
-| tracked send (opt-in) | one directed target; same invocation/flight lifecycle as `ask --notify` | `scout send --tracked [--no-notifs \| --wait]`, `messages_send({ interaction: "work", replyMode? })` |
-| ask/reply | answer/work expected, creates invocation/flight | `scout ask`, `ask` |
-| asynchronous ask | answer/work expected, caller returns after receipt and completion is reported later | `scout ask --notify`, `ask({ replyMode: "notify" })` |
-| project/capability-routed ask | project known, concrete agent/session unknown | `scout ask --project --harness`, `ask({ projectPath, harness })` |
-| exact runtime ask | exact harness/model/effort required; creates an isolated session | `scout ask --project ../x --runtime codex/gpt-5.6-sol/xhigh`, or separate `--harness --model --effort` fields |
-| situated target follow-up | saved project/profile/harness situation | `scout ask --to target:<name>`, compact `⌖name` in agent/UI text |
-| exact session ask | continue one concrete prior harness session | canonical `scout ask --to session:sess.<token>` or `ask({ targetSessionId })`; native-id forms are compatibility inputs |
-| reserved runtime profile | fresh current-project session with runtime-owned harness/model defaults | `scout ask Fable to review this`, `scout ask --profile fable "review this"` |
-| exact natural existing handle | one already-known live agent/session; no locality/fuzzy tiebreak | `scout ask agent Composer Review to fix this` → exact `@composer-review` |
-| threaded reply | continue an existing broker conversation or ask reply context | final response or `messages_reply` depending on `replyPath` |
-| durable work | progress/waiting/review/done lifecycle | `work_update` |
-| operator FYI | agent-authored, no reply or lifecycle expected | `notify_operator` |
-| optional operator advice | agent continues with a required default | `consult_operator` |
+The user-facing noun is **task**. Record names remain invocation, flight and
+work item. The runtime is the only writer.
 
-## Operator Signals
+| Intent | CLI | MCP |
+| --- | --- | --- |
+| New work | `ask --to <agent> "request"` | `ask({to, body})` |
+| Capability route | `ask --project <path> --harness <runtime> "request"` | `ask({projectPath, harness, body})` |
+| Other machine | `ask --on <host> --project <path-on-host> --harness <runtime> "request"` | `ask({on, projectPath, harness, body})` |
+| Context for unfinished task | `ask --ref <task> "context"` | `ask({ref, body})` |
+| Cancel | `ask --ref <task> --cancel "reason"` | `ask({ref, cancel: true, body})` |
+| Successor to finished task | `ask --continue <task> "request"` | `ask({continue: task, body})` |
+| Deliberate FYI | `ask --to <agent> --fyi "news"` | `ask({to, fyi: true, body})` |
+| Channel FYI | `ask --channel <name> --fyi "news"` | `ask({channel, fyi: true, body})` |
+| Final answer | `reply --ref <task> "answer"` | `reply({ref, body})` |
+| Progress | `reply --ref <task> --progress "update"` | `reply({ref, progress: true, body})` |
+| Failure | `reply --ref <task> --failed "reason"` | `reply({ref, failed: true, body})` |
+| Conversation reply only | `reply --to <message> "answer"` | `reply({to: message, body})` |
 
-- `notify_operator` and `consult_operator` are attention-plane messages, not
-  lifecycle states.
-- `consult_operator` requires `defaultAction`; silence means the agent follows
-  that default.
-- neither tool creates an invocation, flight, question, work item, or waiting
-  transition
-- notify has `replyExpectation: "none"`; consult has
-  `replyExpectation: "optional"` plus a nonblank `defaultAction`
-- the durable broker `messageId` is the signal id and reply correlation point
-- MCP reports `recorded` separately from unconfirmed notification delivery
-- a late reply is steering, not a retroactive lifecycle transition
-- when no responsible default exists, use the blocking human-input or
-  `work_item.waiting` path instead
+Routing modes are exclusive. CLI `--to` can repeat for independent tasks and
+per-target receipts. Unknown flags are errors, not body text. `--image`
+attaches evidence to any recipient.
+
+An ask returns on acceptance. Exit 0 never means completed. Use `scout wait`
+or `invocations_wait` on the returned task handle. MCP `replyMode: "inline"`
+explicitly waits; its legacy value `"notify"` means acceptance and is unrelated
+to operator push. Reuse request IDs after an uncertain receipt.
+
+An FYI creates no invocation, flight or work item. A tracked channel task is
+rejected. `--ref` preserves the recipient and creates no new work; finished
+tasks require `--continue`. Text never cancels. Cancellation receipts report
+whether interruption was confirmed. The asker and operator may cancel or start
+a successor; conversation participants may add context. Only the current
+recipient may answer. The first final wins; progress updates the work record
+without closing it. The harness final is already an answer: never answer twice.
+
+`--continue-for` and `--join-to` remain active-parent completion obligations.
+Neither combines with successor `--continue`. `work_update` is for work that
+is not tied to a task.
+
+## Operator tasks and notification policy
+
+`ask --operator` creates a human-owned task, tracked until answered, defaulted,
+expired or cancelled. `--option` offers choices. `--permission --because`
+adds metadata; permission requests block and cannot have a default action.
+
+`--default-action "X"` proceeds with X if unanswered at the deadline (default
+1800 seconds; `--window` overrides it). A late answer is a marked follow-up,
+not a replacement for the recorded outcome. If options are supplied, X must be
+one of them.
+
+Operator questions always request a push. Default-action tasks request normal
+priority. Operator FYIs do not request push unless `--notify` is present;
+then they request interrupting priority. The policy is stored on the task or
+FYI message. APNs enforces it. The apps adopt this policy separately. Receipts
+separate recording from requested, unconfirmed notification delivery.
+
+The removed CLI verbs are reserved tombstones with argument-preserving
+replacement commands. They never deliver or become implicit asks. Transport
+HTTP APIs and old dispatch journal operations remain unchanged. Before dispatch
+to another runtime, the upgraded side requires its advertised `ask-reply/1`
+capability.
 
 ## Spec-Backed Handoffs
 
@@ -152,7 +181,7 @@ handoff.
 - body text is payload, not routing metadata
 - preserve `conversationId`, `messageId`, `replyToMessageId`, `flightId`
 - ambiguous target -> fail closed or ask one concise clarification
-- bare `Fable`, `Kimi`, `Grok`, and `Opus` in leading natural-target position -> structured `runtime_profile`, never `ask --to`
+- explicit `ask --profile fable` launches a runtime profile; positional text never selects an ask recipient
 - RuntimeSpec is `<harness>[/<model>[/<effort>]]` and never an agent identity;
   sparse tuples use separate fields
 - bare-token priority is profile id, then harness-only RuntimeSpec; model-family
@@ -201,8 +230,8 @@ composers should prefer `>>` and strip the route operator from payload before
 calling the runtime. Agent-authored prompts and compact UI may render
 `target:<handle>` as `⌖handle`.
 
-CLI composer routing currently uses labels, refs, and project paths for asks;
-`channel:<name>` and `broadcast` are send/update routes. Direct `id:<agentId>`
+Composers translate routes into explicit flags before invoking the CLI.
+Channels use `ask --channel <name> --fyi`. Direct `id:<agentId>`
 targets are for clients that can submit `targetAgentId`.
 
 ## Reply Context
@@ -224,8 +253,8 @@ Rules:
 
 - `final_response`: final assistant message is broker-visible reply.
 - `mcp_reply`: call reply tool exactly once.
-- Use the configured reply path, either final response or `messages_reply`;
-  do not answer the original ask with `messages_send`, `ask`, or another new
+- Use the configured reply path, either final response or `reply`;
+  do not answer the original ask with `ask`, or another new
   broker ask.
 
 ## Scout Contact Line

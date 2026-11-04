@@ -14,7 +14,7 @@ runtime is ready to route work.
 ## Install the published package
 
 ```bash
-npm install -g @openscout/scout
+bun add -g @openscout/scout
 scout --version
 ```
 
@@ -35,7 +35,7 @@ The packaged `scoutd` supervisor is macOS-only and is never executed on Linux.
 Linux uses the foreground runtime by default:
 
 ```bash
-npm install -g @openscout/scout
+bun add -g @openscout/scout
 scout setup --source-root ~/dev
 openscout-runtime broker
 ```

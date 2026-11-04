@@ -153,6 +153,7 @@ jobs:
     needs: [resolve, build]
     runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -187,3 +188,15 @@ jobs:
           # any archive, so it never sees a checksum for a missing file.
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber scout-tui-"$VERSION"-*.tar.gz
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$manifest"
+
+      - name: List the release in the MCP Registry
+        if: ${{ !contains(needs.resolve.outputs.version, '-') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # A release created above with github.token starts no release-event
+          # workflow. The registry workflow skips a version it already lists.
+          gh workflow run publish-mcp-registry.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"

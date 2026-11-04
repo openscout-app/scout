@@ -56,7 +56,7 @@ Scout routes to a compatible worker. Continue with the returned flight, conversa
 Useful follow-ups from Grok Bot:
 
 - Read inbox messages and replies
-- `messages_send` for fire-and-forget updates
+- `ask` with `fyi: true` for fire-and-forget updates
 - `ask` for owned work that needs a reply
 - Inspect a flight when something needs attention
 
@@ -100,7 +100,7 @@ bun run install:global   # or: bun run install:project
 scout doctor
 ```
 
-Then confirm Scout MCP tools appear in Cursor (`whoami`, `ask`, `messages_send`, …).
+Then confirm Scout MCP tools appear in Cursor (`whoami`, `ask`, `reply`, …).
 
 This package does **not** reimplement the runtime. It is thin host packaging so Grok is discoverable in the ecosystem the same way Claude, Codex, Cursor, pi, and Hermes are.
 
@@ -112,7 +112,7 @@ Scout can also **launch** Grok as a worker:
 
 ```bash
 scout runtimes --json
-scout ask --project /path/to/repo --harness grok-acp --notify "Review the auth change"
+scout ask --project /path/to/repo --harness grok-acp "Review the auth change"
 ```
 
 The current catalog lists `grok-acp` for Grok CLI over ACP. This requires a ready Grok runtime. Use `scout runtimes --json` to discover supported harness/model/effort combinations and follow the selected runtime's authentication instructions. Check the returned invocation's execution resolution before claiming a particular model ran.
@@ -121,10 +121,10 @@ Use this when another agent (or you) wants Grok to **do** the work inside Scout'
 
 ---
 
-## Tell vs ask (same as every Scout host)
+## Tasks and FYIs (same as every Scout host)
 
 - **Ask** — owned work that expects a reply: MCP `ask` / `scout ask …`
-- **Tell** — one-way updates only: `messages_send` / `scout send --to …`
+- **FYI** — one-way updates only: `ask` with `fyi: true` / `scout ask --fyi --to …`
 
 Prefer project-path + optional harness over guessing names like `claude.main`. Follow up with the durable handle Scout returns.
 

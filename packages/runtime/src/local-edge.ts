@@ -616,6 +616,11 @@ function renderCaddyDefaultRouteBlock(
     + `  @openscout_web_start_local {\n`
     + `    path /__openscout/web/start\n`
     + `    remote_ip 127.0.0.1 ::1\n`
+    // Never launder inbound proxy evidence while stripping Caddy's own headers.
+    + `    header !X-Forwarded-For\n`
+    + `    header !X-Forwarded-Host\n`
+    + `    header !X-Forwarded-Proto\n`
+    + `    header !Via\n`
     + `  }\n`
     + `  handle @openscout_web_start_local {\n`
     + `    rewrite * /v1/web/start\n`
@@ -627,6 +632,11 @@ function renderCaddyDefaultRouteBlock(
     + `  @openscout_web_status_local {\n`
     + `    path /__openscout/web/status\n`
     + `    remote_ip 127.0.0.1 ::1\n`
+    // Never launder inbound proxy evidence while stripping Caddy's own headers.
+    + `    header !X-Forwarded-For\n`
+    + `    header !X-Forwarded-Host\n`
+    + `    header !X-Forwarded-Proto\n`
+    + `    header !Via\n`
     + `  }\n`
     + `  handle @openscout_web_status_local {\n`
     + `    rewrite * /v1/web/status\n`

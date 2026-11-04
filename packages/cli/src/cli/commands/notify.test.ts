@@ -16,7 +16,7 @@ test("operator permission is an explicit question, and public help teaches the n
   expect(renderOperatorQuestionHelp()).toContain("does not grant harness permissions");
   const help = renderScoutHelp();
   expect(help).toContain("scout status --all --blocked");
-  expect(help).toContain("scout operator --question");
+  expect(help).toContain("scout ask --operator");
   expect(help).not.toContain("scout attention");
   expect(help).not.toContain("scout need");
 });

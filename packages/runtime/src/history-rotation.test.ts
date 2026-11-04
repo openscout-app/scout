@@ -1051,3 +1051,31 @@ describe("history.rotate delivery attempts", () => {
     expect(journal.listDeliveryAttempts("d-keep").map((a) => a.id)).toEqual(["a-keep"]);
   });
 });
+
+test("queued task follow-ups survive rotation and compacted replay until their task closes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scout-followup-rotation-")); roots.add(root);
+  const path = join(root, "journal.jsonl");
+  let journal = new FileBackedBrokerJournal(path); await journal.load();
+  const task = invocation("queued-task", { messageId: "request" });
+  const queued = flight("queued-flight", task.id, { state: "queued", completedAt: undefined });
+  const followup = { ...message("queued-context"), replyToMessageId: "request", audience: { delivery: "none" as const },
+    metadata: { taskFollowup: { invocationId: task.id } } };
+  await journal.appendEntries([
+    { kind: "message.record", message: message("request") },
+    { kind: "message.record", message: message("unrelated-old-message") },
+    { kind: "invocation.record", invocation: task }, { kind: "flight.record", flight: queued },
+    { kind: "message.record", message: followup },
+  ]);
+  const plan = planHistoryRotation(journal.snapshot(), CUTOFF, journal.historyRotationContext());
+  expect(plan.messageIds.has(followup.id)).toBe(false);
+  await journal.appendEntries({ kind: "history.rotate", cutoff: CUTOFF, rotatedAt: NEW });
+  expect((await journal.pendingTaskFollowups(task.id)).map(m => m.id)).toEqual([followup.id]);
+  await journal.close();
+  journal = new FileBackedBrokerJournal(path, { compactionPolicy: { minimumReclaimBytes: 1, minimumReclaimRatio: 0 } });
+  await journal.load();
+  expect((await journal.pendingTaskFollowups(task.id)).map(m => m.id)).toEqual([followup.id]);
+  await journal.appendEntries({ kind: "flight.record", flight: { ...queued, state: "completed", completedAt: OLD + 1000 } });
+  expect(await journal.pendingTaskFollowups(task.id)).toEqual([]);
+  expect(planHistoryRotation(journal.snapshot(), CUTOFF, journal.historyRotationContext()).messageIds.has(followup.id)).toBe(true);
+  await journal.close();
+});

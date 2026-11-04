@@ -8,6 +8,7 @@ import { closeSync, existsSync, mkdirSync, openSync, writeFileSync, statSync } f
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveLegacyWebEntry } from "./legacy-app-services.js";
 
 import {
   buildLocalBrokerControlUrl,
@@ -17,6 +18,7 @@ import {
 import {
   claimScoutPairingSupervision,
   isScoutPairingProcessRunning,
+  readLiveScoutPairingSupervisorPid,
   readScoutPairingProcessPid,
   readScoutPairingSupervisorIntent,
   releaseScoutPairingSupervision,
@@ -128,6 +130,7 @@ let pairingRestartGeneration: number | null = null;
 let pairingRestartDelayMs = RESTART_MIN_DELAY_MS;
 let pairingNextStartAt = 0;
 let pairingSupervisionClaimed = false;
+let pairingClaimRefused = false;
 let meshBridgeProcess: ChildProcess | null = null;
 let meshBridgeRunningKey: string | null = null;
 let meshBridgeSelectionKey: string | null = null;
@@ -597,6 +600,12 @@ async function startWebWhenBrokerIsReady(): Promise<void> {
   }
   webStartInFlight = true;
   try {
+    // A core-only host has no web intent, but an app may publish its entry later.
+    // Retry discovery without sending a start request until an entry exists.
+    if (!resolveLegacyWebEntry(process.env, dirname(fileURLToPath(import.meta.url)))) {
+      scheduleWebStartRetry();
+      return;
+    }
     if (!(await waitForBrokerHealth())) {
       warn("broker did not become healthy before web startup timeout");
       scheduleWebStartRetry();
@@ -624,6 +633,11 @@ async function startWebWhenBrokerIsReady(): Promise<void> {
       warn("web server startup failed", error instanceof Error ? error.message : String(error));
       scheduleWebStartRetry();
     }
+  } catch (error) {
+    // Resolver/configuration failures must not reject this fire-and-forget task
+    // and strand the broker, pairing and edge children when base exits.
+    warn("web entry discovery failed", error instanceof Error ? error.message : String(error));
+    scheduleWebStartRetry();
   } finally {
     webStartInFlight = false;
   }
@@ -876,19 +890,37 @@ async function reconcilePairingController(): Promise<void> {
   }
 }
 
-function startPairingSupervision(): void {
+function tryClaimPairingSupervision(): boolean {
   try {
     claimScoutPairingSupervision(process.pid, pairingPaths.supervisorPidPath);
   } catch (error) {
-    warn("pairing supervision is owned by another live process", error instanceof Error ? error.message : String(error));
-    return;
+    if (!pairingClaimRefused) {
+      warn("pairing supervision claim refused; retrying", error instanceof Error ? error.message : String(error));
+    }
+    pairingClaimRefused = true;
+    return false;
   }
+  if (pairingClaimRefused) log("pairing supervision claimed after the previous owner exited");
+  pairingClaimRefused = false;
   pairingSupervisionClaimed = true;
+  return true;
+}
+
+// Keeps trying the claim, so pairing comes back when a previous owner exits.
+// Re-reads the claim on each tick: when another live process holds it, this
+// base stands down, so two supervisors never run the relay at once.
+function startPairingSupervision(): void {
   pairingReconcileTimer = setInterval(() => {
-    void reconcilePairingController();
+    if (
+      pairingSupervisionClaimed
+      && readLiveScoutPairingSupervisorPid(pairingPaths.supervisorPidPath) !== process.pid
+    ) {
+      pairingSupervisionClaimed = false;
+    }
+    if (pairingSupervisionClaimed || tryClaimPairingSupervision()) void reconcilePairingController();
   }, PAIRING_RECONCILE_INTERVAL_MS);
   pairingReconcileTimer.unref();
-  void reconcilePairingController();
+  if (tryClaimPairingSupervision()) void reconcilePairingController();
 }
 
 function writeMeshBridgeState(state: Record<string, unknown>): void {

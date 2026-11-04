@@ -32,7 +32,7 @@ test('bridge fails closed with exit78, no env-token fallback and named tools ref
   let r=await result(command(['bridge'],{OPENSCOUT_MCP_TOKEN:'must-not-appear'}));expect(r.code).toBe(78);expect(r.err).not.toContain('must-not-appear');
   const path=join(dir,'config.json');writeFileSync(path,JSON.stringify({brokerUrl:'http://127.0.0.1:1',relayUrl:'https://relay.invalid',token:'redact-me',tools:['private_desktop_tool']}),{mode:0o600});
   r=await result(command(['bridge','--config',path]));expect(r.code).toBe(78);expect(r.err).toContain('private_desktop_tool');expect(r.err).not.toContain('redact-me');
-  expect((await bridgeLaunch(path,'core')).toolNames).toHaveLength(24);
+  expect((await bridgeLaunch(path,'core')).toolNames).toHaveLength(20);
   chmodSync(path,0o644);await expect(bridgeLaunch(path)).rejects.toThrow();
 });
 test('credential reader rejects symlinks, oversized and world-readable files',()=>{
@@ -77,7 +77,7 @@ writeFileSync(${JSON.stringify(pidFile)},String(child.pid));setInterval(()=>{},1
   try{await until(()=>Bun.file(ready).size>0);child=Number(readFileSync(pidFile,'utf8'));parent.kill('SIGKILL');await parent.exited;await until(()=>Bun.file(closed).size>0);expect(readFileSync(closed,'utf8')).toBe('closed');}finally{parent.kill();if(child)try{process.kill(child,'SIGKILL');}catch{}}
 },12000);
 
-test('relay pins full principals, rejects agent-only envelopes and serves all24 HTTP tools',async()=>{
+test('relay pins full principals, rejects agent-only envelopes and serves all20 HTTP tools',async()=>{
   const original=globalThis.WebSocket;const sent:any[]=[];let socket:any;
   class Socket extends EventTarget {static OPEN=1;readyState=1;constructor(){super();socket=this;}send(s:string){sent.push(JSON.parse(s));}close(){this.readyState=3;} frame(value:any){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}));}}
   globalThis.WebSocket=Socket as any;const {startScoutMeshMcpBridge}=await import('./mesh-bridge.ts');
@@ -89,7 +89,7 @@ test('relay pins full principals, rejects agent-only envelopes and serves all24 
     socket.frame({v:1,kind:'mcp_request',id:'no-principal',agent:'remote-agent',payload:'{}'});await until(()=>sent.length>0);expect(sent.shift()).toMatchObject({status:403});
     const send=(id:string,payload:any,p:any=principal)=>socket.frame({v:1,kind:'mcp_request',id,agent:'remote-agent',principal:p,payload:JSON.stringify(payload)});
     send('init',{jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'test',version:'1'}}});await until(()=>sent.some(x=>x.id==='init'));
-    send('list',{jsonrpc:'2.0',id:2,method:'tools/list',params:{}});await until(()=>sent.some(x=>x.id==='list'));expect(JSON.parse(sent.find(x=>x.id==='list').payload).result.tools).toHaveLength(24);
+    send('list',{jsonrpc:'2.0',id:2,method:'tools/list',params:{}});await until(()=>sent.some(x=>x.id==='list'));expect(JSON.parse(sent.find(x=>x.id==='list').payload).result.tools).toHaveLength(20);
     send('mismatch',{jsonrpc:'2.0',id:3,method:'tools/list',params:{}},{...principal,agentId:'somebody-else'});await until(()=>sent.some(x=>x.id==='mismatch'));expect(sent.find(x=>x.id==='mismatch').status).toBe(403);
   }finally{await handle?.close();globalThis.WebSocket=original;}
 });

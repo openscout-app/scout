@@ -282,7 +282,7 @@ describe("listScoutAgents", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -872,7 +872,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -942,6 +942,7 @@ describe("scoutAskHandler", () => {
 
     expect(receipt).toEqual({
       ok: true,
+      recording: "recorded",
       state: "queued",
       ids: {
         targetAgentId: "talkie.main",
@@ -995,7 +996,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1093,7 +1094,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1155,7 +1156,7 @@ describe("scoutAskHandler", () => {
         env: { CODEX_THREAD_ID: "codex-thread-123" },
         stdout: () => {},
         stderr: () => {},
-      }), ["--as", "operator", "--to", "hudson.main", "--notify", "Review this."]);
+      }), ["--as", "operator", "--to", "hudson.main", "Review this."]);
     } else {
       const result = await askScoutAgentById({
         senderId: "operator",
@@ -1212,7 +1213,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1318,7 +1319,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1413,7 +1414,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1542,7 +1543,7 @@ describe("scoutAskHandler", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1650,7 +1651,7 @@ describe("askScoutQuestion", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -1841,7 +1842,7 @@ describe("askScoutQuestion", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -2016,7 +2017,7 @@ describe("askScoutQuestion", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -2140,7 +2141,7 @@ describe("askScoutQuestion", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -2400,7 +2401,7 @@ describe("updateScoutWorkItem", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse(snapshot);
@@ -2869,7 +2870,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse(snapshot);
@@ -3013,7 +3014,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse(snapshot);
@@ -3090,7 +3091,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3205,7 +3206,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3296,7 +3297,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3390,7 +3391,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3510,7 +3511,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3614,7 +3615,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3687,7 +3688,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3753,7 +3754,7 @@ describe("sendScoutMessage", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3812,7 +3813,7 @@ describe("watchScoutMessages", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3889,7 +3890,7 @@ describe("watchScoutMessages", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (request.method === "GET" && url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (request.method === "GET" && url.pathname === "/v1/snapshot") {
         return jsonResponse({
@@ -3975,7 +3976,7 @@ describe("loadScoutBrokerContextResult", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (url.pathname === "/v1/snapshot") {
         return jsonResponse({ error: "snapshot exploded" }, 500);
@@ -4045,7 +4046,7 @@ describe("loadScoutBrokerContextResult", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (url.pathname === "/v1/snapshot") {
         return jsonResponse(createRuntimeRegistrySnapshot());
@@ -4155,7 +4156,7 @@ describe("loadScoutBrokerContextResult", () => {
         });
       }
       if (url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (url.pathname === "/v1/actors" && request.method === "POST") {
         return jsonResponse({ ok: true });
@@ -4220,7 +4221,7 @@ describe("loadScoutBrokerContextResult", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (url.pathname === "/v1/snapshot") {
         expect(url.searchParams.get("scope")).toBe("identity");
@@ -4304,7 +4305,7 @@ describe("scoutAskHandler preflight diagnostics", () => {
         return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
       }
       if (url.pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1" });
+        return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
       }
       if (url.pathname === "/v1/snapshot") {
         return jsonResponse({ error: "snapshot exploded" }, 500);
@@ -4366,7 +4367,7 @@ describe("explicit completion client fences", () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init);
       if (new URL(request.url).pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1", capabilities: ["explicit-completion/1"] });
+        return jsonResponse({ id: "node-1", capabilities: ["explicit-completion/1", "ask-reply/1"] });
       }
       expect(new URL(request.url).pathname).toBe("/v1/deliver");
       payload = await request.json() as Record<string, any>;
@@ -4393,7 +4394,7 @@ describe("explicit completion client fences", () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init);
       if (new URL(request.url).pathname === "/v1/node") {
-        return jsonResponse({ id: "node-1", capabilities: ["explicit-completion/1"] });
+        return jsonResponse({ id: "node-1", capabilities: ["explicit-completion/1", "ask-reply/1"] });
       }
       expect(new URL(request.url).pathname).toBe("/v1/deliver");
       payload = await request.json() as Record<string, any>;
@@ -4403,8 +4404,8 @@ describe("explicit completion client fences", () => {
     }) as typeof fetch;
     await runAskCommand(createScoutCommandContext({ cwd: workspaceRoot, env: {}, stdout: () => {},
       stderr: (message) => { diagnostics.push(message); } }),
-      ["--as", "operator", "--to", "id:agent-1", "--completion", "explicit", "--join-to", "parent-1", "--notify", "Review"]);
-    expect(payload).toMatchObject({ intent: "explicit_consult", completion, relation: { kind: "joined", parentFlightId: "parent-1" } });
+      ["--as", "operator", "--to", "id:agent-1", "--completion", "explicit", "--join-to", "parent-1", "Review"]);
+    expect(payload).toMatchObject({ intent: "task_ask", task: { version: 1 }, completion, relation: { kind: "joined", parentFlightId: "parent-1" } });
     expect(payload?.requestId).toMatch(/^ask-/);
     expect(diagnostics.some((line) => line.includes(payload!.requestId))).toBe(true);
   });

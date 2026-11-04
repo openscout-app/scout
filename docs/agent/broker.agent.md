@@ -102,8 +102,8 @@ Endpoint `idle` + flight `waiting` is valid. Endpoint `superseded` is diagnostic
 
 | Surface | Write path | Read path |
 |---|---|---|
-| CLI | `scout send`, `scout ask`, … | `scout who`, `scout latest`, `scout inbox` |
-| MCP | `messages_send`, `ask`, `work_update` | `messages_inbox`, `invocations_get`, `broker_feed` |
+| CLI | `scout ask`, `scout reply`, … | `scout who`, `scout latest`, `scout inbox` |
+| MCP | `ask`, `reply`, `work_update` | `messages_inbox`, `invocations_get`, `broker_feed` |
 | HTTP | `/v1/*` broker API | `/v1/snapshot`, SSE watch |
 | Mesh | forward to authority broker | peer snapshot merge |
 
@@ -137,7 +137,7 @@ Mesh ≠ exactly-once, consensus, or transcript replication.
 1. One canonical writer per coordination record class.
 2. Routing uses explicit target fields; body text is payload.
 3. One explicit target → DM; groups need explicit `channel`.
-4. `scout ask` creates invocation + flight; `scout send` does not.
+4. `scout ask` creates invocation + flight; `scout ask --fyi` does not.
 5. Receipt ids (`conversationId`, `messageId`, `flightId`, `workId`) always returned on success paths.
 6. Remote agents resolve via `authorityNodeId` forward, not local guess.
 7. Broker journal + SQLite projections are derived from owned records only.
@@ -181,7 +181,7 @@ Refactor context: the 2026-06-18 broker-daemon architecture review (removed from
 scout doctor --json
 scout who --json
 scout whoami
-scout send --to <agent-from-who> "broker-smoke"
+scout ask --to <agent-from-who> "broker-smoke"
 ```
 
 Live broker (example): `http://127.0.0.1:43110`.

@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ActorIdentity, AgentDefinition, AgentEndpoint, DeliveryIntent, FlightRecord, InvocationRequest, MessageRecord } from "@openscout/protocol";
+import { taskMessageId } from "./broker-tasks.js";
+import { validateTaskReply, type ScoutTaskReply } from "@openscout/protocol";
 import { endpointMatchesTargetSession } from "./broker-endpoint-selection.js";
 import { runtimeSessionHandleForEndpoint } from "./runtime-session-handle.js";
 import { invocationTargetSessionId } from "./broker-local-invocation-helpers.js";
@@ -24,6 +26,7 @@ export interface ExternalSessionServiceOptions {
   flight: (id: string) => FlightRecord | undefined;
   recordFlight: (flight: FlightRecord) => Promise<void>;
   postMessage: (message: MessageRecord) => Promise<unknown>;
+  replyTask?: (input: ScoutTaskReply) => Promise<unknown>;
   now?: () => number;
 }
 
@@ -88,7 +91,7 @@ export class BrokerExternalSessionService {
       provider: endpoint.harness, nativeSessionId: endpoint.metadata?.nativeSessionId, state: endpoint.state,
       providerState: endpoint.metadata?.providerState, returnTransport: endpoint.transport === "mcp_poll" ? "mcp_poll" : endpoint.transport === "devin_cloud_cli" ? "cloud_cli" : "provider_api",
       wake: endpoint.transport === "mcp_poll" ? "none" : "resume_on_message",
-      ...(endpoint.transport === "mcp_poll" ? { instructions: "Poll sessions_poll with this sessionId. Acknowledge receipt with sessions_ack; reply to work with sessions_reply. Use this handle as replyToSessionId on every ask to receive the result here. Polling never wakes a stopped host." } : {}) };
+      ...(endpoint.transport === "mcp_poll" ? { instructions: "Poll sessions_poll with this sessionId. Acknowledge receipt with sessions_ack; reply to work with reply and its task ref. Use this handle as replyToSessionId on every ask to receive the result here. Polling never wakes a stopped host." } : {}) };
   }
   get(input: { ownerId: string; sessionId: string }) {
     const endpoint = this.ownedEndpoint(input.ownerId, input.sessionId);
@@ -128,7 +131,7 @@ export class BrokerExternalSessionService {
         }
         const token = randomBytes(32).toString("base64url");
         const sessionId = runtimeSessionHandleForEndpoint(endpoint)!;
-        const body = `${invocation.task}\n\nScout reply address (coordination metadata):\n${JSON.stringify({ tool: "sessions_reply", sessionId, deliveryId: id, ...(endpoint.transport === "mcp_poll" ? {} : { replyToken: token }) })}\nWhen finished, call sessions_reply with that address and your final body. This completes the original Scout flight. Do not start another session.`;
+        const body = `${invocation.task}\n\nScout reply address (coordination metadata):\n${JSON.stringify({ tool: "reply", ref: invocation.id, sessionId, deliveryId: id, ...(endpoint.transport === "mcp_poll" ? {} : { replyToken: token }) })}\nWhen finished, call reply with that task ref and your final body. This completes the original Scout flight. Do not start another session.`;
         await this.deliver(endpoint, id, body, { invocationId: invocation.id, messageId: invocation.messageId,
           metadata: { ...(endpoint.transport === "mcp_poll" ? {} : { replyTokenHash: digest(token) }), sessionId } });
       }
@@ -211,7 +214,8 @@ export class BrokerExternalSessionService {
     if (!this.endpointFor(invocation)) return true;
     const delivery = this.deps.delivery(`external-invocation-${digest(invocation.id).slice(0, 24)}`);
     return Boolean(delivery && delivery.metadata?.replyBodyHash === digest(message.body)
-      && message.id === `external-reply-${digest(delivery.id).slice(0, 24)}`);
+      && (message.id === `external-reply-${digest(delivery.id).slice(0, 24)}`
+        || message.id === delivery.metadata?.taskReplyMessageId));
   }
   hasPendingInvocation(invocationId: string): boolean {
     const receipt = this.deps.delivery(`external-invocation-${digest(invocationId).slice(0, 24)}`);
@@ -302,7 +306,7 @@ export class BrokerExternalSessionService {
     if (!receipt) throw new Error("external_delivery_not_found");
     return { deliveryId: receipt.id, status: receipt.status };
   }
-  async reply(input: { ownerId: string; sessionId: string; deliveryId: string; replyToken?: string; body: string; authorize?: () => void }) {
+  async reply(input: { ownerId: string; sessionId: string; deliveryId: string; replyToken?: string; body: string; ref?: string; requestId?: string; progress?: boolean; failed?: boolean; attachments?: ScoutTaskReply["attachments"]; image?: ScoutTaskReply["image"]; authorize?: () => void }) {
     const endpoint = this.ownedEndpoint(input.ownerId, input.sessionId);
     if (typeof input.body !== "string" || !input.body.trim() || input.body.length > 100_000) throw new Error("invalid_reply_body");
     if (endpoint.transport !== "mcp_poll" && (typeof input.replyToken !== "string" || input.replyToken.length > 256)) throw new Error("invalid_reply_token");
@@ -312,6 +316,38 @@ export class BrokerExternalSessionService {
       if (!delivery || delivery.metadata?.resultNotification || delivery.metadata?.endpointId !== endpoint.id || (endpoint.transport !== "mcp_poll" && delivery.metadata.replyTokenHash !== digest(input.replyToken!))) throw new Error("external_reply_address_invalid");
       const invocation = delivery.invocationId ? this.deps.invocation(delivery.invocationId) : undefined;
       if (!invocation?.conversationId || !invocation.messageId) throw new Error("external_reply_invocation_missing");
+      if (input.ref) {
+        validateTaskReply({ ref: input.ref, progress: input.progress, failed: input.failed });
+        if (input.ref !== invocation.id) throw new Error("external_reply_task_mismatch");
+        if (!input.requestId?.trim() || !this.deps.replyTask) throw new Error("external task reply requires requestId and ask-reply/1");
+        const messageId = taskMessageId(endpoint.agentId, input.requestId);
+        input.authorize?.();
+        if (!input.progress) await this.deps.mutateDelivery(delivery.id, current => {
+          if (current.metadata?.taskReplyMessageId && (current.metadata.taskReplyMessageId !== messageId
+            || current.metadata.replyBodyHash !== digest(input.body))) throw new Error("task already has a final reply");
+          return { ...current, metadata: { ...current.metadata, taskReplyMessageId: messageId, replyBodyHash: digest(input.body) } };
+        });
+        let result: unknown;
+        try {
+          result = await this.deps.replyTask({ ref: invocation.id, senderId: endpoint.agentId,
+            requestId: input.requestId, body: input.body, progress: input.progress, failed: input.failed,
+            attachments: input.attachments, image: input.image });
+        } catch (error) {
+          const flight = this.deps.flight(invocation.id);
+          // Preserve an observed committed claim after an uncertain apply/ack.
+          // Otherwise a failed write must not own the next final attempt.
+          if (!input.progress && flight?.metadata?.taskFinalReplyMessageId !== messageId
+            && flight?.metadata?.replyMessageId !== messageId) await this.deps.mutateDelivery(delivery.id, current => {
+            if (current.metadata?.taskReplyMessageId !== messageId) return current;
+            const { taskReplyMessageId: _claim, replyBodyHash: _hash, ...metadata } = current.metadata;
+            return { ...current, metadata };
+          });
+          throw error;
+        }
+        if (!input.progress) await this.deps.mutateDelivery(delivery.id, current => ({ ...current,
+          status: input.failed ? "failed" : "completed", metadata: { ...current.metadata, phase: "replied", replyMessageId: messageId } }));
+        return result;
+      }
       const flight = this.deps.flight(invocation.id);
       if (!flight || flight.state === "cancelled" || flight.state === "failed") throw new Error("external_reply_flight_terminal");
       const messageId = `external-reply-${digest(delivery.id).slice(0, 24)}`;

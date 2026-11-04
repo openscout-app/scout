@@ -618,7 +618,7 @@ describe("local agent prompts", () => {
     expect(prompt).toContain("If you need multiple agents, use separate DMs or an explicit channel");
     expect(prompt).toContain("Do not use the shared channel for ordinary delegation or follow-up");
     expect(prompt).toContain("Treat known offline / on-demand agents as wakeable");
-    expect(prompt).toContain("Use send only for tells/status where no reply or work is expected");
+    expect(prompt).toContain("Use ask --fyi only for news where no reply or task is expected");
     expect(prompt).toContain("If the meaning is 'do this and get back to me,' or you are unsure, use ask");
     expect(prompt).toContain(`${scoutCli} ask --notify`);
     expect(prompt).toContain("For substantial reports, specs, code, diffs, logs, or research bundles, create or update a durable file when you have write access");
@@ -757,7 +757,7 @@ describe("local agent prompts", () => {
     expect(prompt).toContain("Keep one-to-one handoffs in a DM");
     expect(prompt).toContain("If you need multiple agents, use separate DMs or an explicit channel");
     expect(prompt).toContain("Treat known offline / on-demand agents as wakeable");
-    expect(prompt).toContain("Use send only for tells/status where no reply or work is expected");
+    expect(prompt).toContain("Use ask --fyi only for news where no reply or task is expected");
     expect(prompt).toContain("If the meaning is 'do this and get back to me,' or you are unsure, use ask");
     expect(prompt).toContain("bun relay ask --notify");
     expect(prompt).toContain(scoutSkillPath);
@@ -790,7 +790,7 @@ describe("local agent prompts", () => {
     expect(prompt).toContain('Context: {"file":"ShaperProvider.tsx"}');
     expect(prompt).toContain(`${scoutCli} latest --agent shaper --limit 20`);
     expect(prompt).toContain("Reply in the existing thread, not by addressing @hudson.");
-    expect(prompt).toContain(`${scoutCli} tell --as shaper --ref msg-request-1 "<your response>"`);
+    expect(prompt).toContain(`${scoutCli} reply --as shaper --ref msg-request-1 "<your response>"`);
     expect(prompt).toContain("final assistant text is not captured automatically");
     expect(prompt).not.toContain("[ask:flt-1]");
     expect(prompt).not.toContain("@hudson <your response>");
@@ -1017,7 +1017,7 @@ describe("local agent prompts", () => {
     expect(prompt).toContain("ScoutReplyContext:");
     expect(prompt).toContain("<summary>Scout routing context</summary>");
     expect(prompt).toContain("Do not publish a separate acknowledgement or progress update through Scout for this request.");
-    expect(prompt).toContain("Do not call `messages_reply`, `scout_reply`, `scout send`, `messages_send`, or `ask` to answer this request.");
+    expect(prompt).toContain("Do not call `reply` or `ask` to answer this request.");
     expect(prompt).toContain('"mode": "broker_reply"');
     expect(prompt).toContain('"fromAgentId": "operator"');
     expect(prompt).toContain('"toAgentId": "ranger"');
@@ -1580,4 +1580,17 @@ describe("waitForReadyComposer deadline", () => {
     })).rejects.toThrow("tmux session sess: Claude Code is waiting on its folder-trust prompt.");
     expect(pane.elapsed()).toBe(0);
   });
+});
+
+test("canonical task images expose authorized attachment reads instead of invented public URLs", () => {
+  const prompt = buildLocalAgentNudge("worker", {
+    id: "inv-image", requesterId: "operator", requesterNodeId: "node", targetAgentId: "worker", action: "consult",
+    task: "Inspect this evidence", messageId: "msg-image", conversationId: "conversation", ensureAwake: true, stream: false, createdAt: 1,
+    context: { scoutMessageAttachments: [{ id: "image", mediaType: "image/png", blob: { sha256: "a".repeat(64), mediaType: "image/png", byteSize: 8 },
+      conversationId: "conversation", messageId: "msg-image" }] },
+  }, "flight-image");
+  expect(prompt).toContain("attachments_read");
+  expect(prompt).toContain('"messageId":"msg-image"');
+  expect(prompt).toContain('"conversationId":"conversation"');
+  expect(prompt).not.toContain("/api/blobs/");
 });

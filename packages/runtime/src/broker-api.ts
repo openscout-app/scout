@@ -52,6 +52,8 @@ export type ScoutBrokerChildServiceState =
   | "unavailable";
 
 export type ScoutBrokerChildServiceSnapshot = {
+  /** Explicit start intent, even when a child could not be spawned. */
+  expected?: boolean;
   state: ScoutBrokerChildServiceState;
   managed: boolean;
   managedBy?: "broker" | "web" | "base" | "external" | "unknown";

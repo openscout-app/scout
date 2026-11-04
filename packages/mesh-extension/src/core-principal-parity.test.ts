@@ -9,17 +9,16 @@ import { RuntimeHttpClient } from "./http-client.ts";
 // Same valid request for both SDK surfaces. No tool may silently disappear.
 const cases: Record<string, Record<string, unknown>> = {
   sessions_attach: { nativeSessionId: "native" }, sessions_get: { sessionId: "s" }, sessions_poll: { sessionId: "s" },
-  sessions_ack: { sessionId: "s", deliveryId: "d" }, sessions_reply: { sessionId: "s", deliveryId: "d", body: "reply" },
+  sessions_ack: { sessionId: "s", deliveryId: "d" },
   whoami: {}, feedback_send: { note: "note", localOnly: true }, messages_inbox: {}, messages_channel: { channel: "room" },
-  broker_feed: {}, tail_events: {}, current_reply_context: {}, messages_reply: { body: "reply", conversationId: "c", replyToMessageId: "m" },
+  broker_feed: {}, tail_events: {}, current_reply_context: {}, reply: { body: "reply", to: "m" },
   agents_search: { query: "target" }, agents_resolve: { label: "target" }, ask: { to: "id:target", body: "work" },
-  notify_operator: { message: "note" }, consult_operator: { question: "advice?", defaultAction: "continue" },
-  messages_send: { targetAgentId: "target", body: "hello" }, invocations_get: { flightId: "f" },
+  invocations_get: { flightId: "f" },
   invocations_wait: { flightId: "f", timeoutSeconds: 1 }, labels_brief: { label: "label" }, labels_feed: { label: "label" },
   work_update: { work: { workId: "w", state: "working" } },
 };
-const actorTools = new Set(["sessions_attach", "sessions_get", "sessions_poll", "sessions_ack", "sessions_reply", "whoami",
-  "feedback_send", "messages_inbox", "broker_feed", "messages_reply", "ask", "notify_operator", "consult_operator", "messages_send", "work_update"]);
+const actorTools = new Set(["sessions_attach", "sessions_get", "sessions_poll", "sessions_ack", "whoami",
+  "feedback_send", "messages_inbox", "broker_feed", "reply", "ask", "work_update"]);
 function stdioIdentity(name: string, calls: any[], result: any): unknown {
   if (name === "whoami") return result.structuredContent?.defaultSenderId;
   const input = calls[0];
@@ -37,7 +36,7 @@ function httpIdentity(name: string, calls: any[], result: any): unknown {
   if (name === "messages_inbox") return calls[0]?.query?.participantId;
   if (name === "broker_feed") return calls[0]?.query?.agentId;
   if (name === "work_update") return calls.find(c => c.path === "/v1/collaboration/events")?.body?.actorId;
-  if (name === "messages_reply") return calls.find(c => c.path === "/v1/messages")?.body?.actorId;
+  if (name === "reply") return calls.find(c => c.path === "/v1/messages/reply")?.body?.senderId;
   return calls.find(c => c.path === "/v1/deliver")?.body?.caller?.actorId;
 }
 async function connect(server: any) {
@@ -47,7 +46,7 @@ async function connect(server: any) {
   return client;
 }
 
-test("all 24 core SDK tools retain authenticated identity across HTTP and relay-configured stdio", async () => {
+test("all 20 core SDK tools retain authenticated identity across HTTP and relay-configured stdio", async () => {
   expect(Object.keys(cases).sort()).toEqual([...SCOUT_MCP_CORE_TOOL_NAMES].sort());
   for (const actor of ["principal-a", "principal-b"]) {
     const principal: McpEventPrincipal = { kind: actor === "principal-a" ? "oauth" : "agent_token", ...(actor === "principal-a" ? { userId: "user-a" } : {}), id: `identity-${actor}`, ownerKey: `owner-${actor}`, node: "fixture-node", agentId: actor };
@@ -71,7 +70,7 @@ test("all 24 core SDK tools retain authenticated identity across HTTP and relay-
         searchAgents: record([]), resolveAgent: record({ kind: "unresolved", candidate: null, candidates: [] }),
         submitFeedback: record({ id: "r", status: "saved", localPath: "/fixture/report" }),
         sendMessage: record({ usedBroker: true, invokedTargets: [], unresolvedTargets: [], messageId: "m", conversationId: "c" }),
-        sendMessageToAgentIds: record({ usedBroker: true, invokedTargetIds: ["target"], unresolvedTargetIds: [] }), replyMessage: record(reply),
+        sendMessageToAgentIds: record({ usedBroker: true, invokedTargetIds: ["target"], unresolvedTargetIds: [] }), replyMessage: record(reply), replyTask: record(reply),
         scoutAskHandler: record({ ok: true, state: "queued", ids: {}, delivery: "none" }), updateWorkItem: record(null),
         getInvocationLifecycle: record(null), getFlight: record(null), waitForFlight: record({ id: "f", invocationId: "i", requesterId: actor, targetAgentId: "target", state: "completed" }),
         readLabelBrief: record(null), readLabelFeed: record(null),
@@ -80,7 +79,7 @@ test("all 24 core SDK tools retain authenticated identity across HTTP and relay-
     const http = new CoreHttpAdapter({ principal, currentDirectory: "/fixture", client: new RuntimeHttpClient({ brokerUrl: origin, fetch: (async (input: any, init: any) => {
       const url = new URL(input), body = init.body ? JSON.parse(init.body) : undefined;
       httpCalls.push({ path: url.pathname, query: Object.fromEntries(url.searchParams), body });
-      const result = url.pathname === "/v1/snapshot" ? snapshot : url.pathname === "/v1/node" ? { nodeId: "fixture-node" }
+      const result = url.pathname === "/v1/snapshot" ? snapshot : url.pathname === "/v1/node" ? { nodeId: "fixture-node", capabilities: ["ask-reply/1"] }
         : url.pathname.endsWith("/collect") ? { id: "r", status: "saved" } : url.pathname === "/v1/messages" && !body ? []
         : url.pathname === "/v1/tail/recent" ? { events: [], limit: 80, cursor: null, generatedAt: 1 } : url.pathname === "/v1/deliver" ? { kind: "delivery", message: { id: "m" } } : { ok: true };
       return Response.json(result);
@@ -104,9 +103,14 @@ test("all 24 core SDK tools retain authenticated identity across HTTP and relay-
         // HTTP additionally rejects unknown fields and explicit mismatches.
         stdioCalls.length = 0; httpCalls.length = 0;
         const forged = await stdioClient.callTool({ name, arguments: { ...cases[name], senderId: "attacker", ownerId: "attacker", principal: { agentId: "attacker" } } }, undefined, { timeout: 2_000 });
-        expect(forged.isError, `${name} pinned stdio call`).not.toBe(true);
-        if (actorTools.has(name)) expect(stdioIdentity(name, stdioCalls, forged), `${name} spoof cannot change stdio identity`).toBe(actor);
-        expect(JSON.stringify({ calls: stdioCalls, result: forged })).not.toContain("attacker");
+        if (name === "ask" || name === "reply") {
+          expect(forged.isError).toBe(true);
+          expect(stdioCalls).toHaveLength(0);
+        } else {
+          expect(forged.isError, `${name} pinned stdio call`).not.toBe(true);
+          if (actorTools.has(name)) expect(stdioIdentity(name, stdioCalls, forged), `${name} spoof cannot change stdio identity`).toBe(actor);
+          expect(JSON.stringify({ calls: stdioCalls, result: forged })).not.toContain("attacker");
+        }
         for (const identityOverride of [{ senderId: "attacker" }, { ownerId: "attacker" }, { principal: { ...principal, agentId: "attacker" } }]) {
           const refused = await httpClient.callTool({ name, arguments: { ...cases[name], ...identityOverride } }, undefined, { timeout: 2_000 });
           expect(refused.isError, `${name} HTTP refuses caller identity`).toBe(true);

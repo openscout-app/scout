@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
-import type { FlightRecord, MessageRecord } from "@openscout/protocol";
+import { TaskClosedError, type TaskClosedRefusal, type FlightRecord, type MessageRecord } from "@openscout/protocol";
 import type { BrokerJournalEntry } from "./broker-journal.js";
 import type { QuarantineMetadata } from "./broker-quarantine.js";
 
 /** Saved atomically with terminal output; delivery never invokes an executor. */
 export type InvocationResultReplyIntent = {
   version: 1;
-  status: "pending" | "delivered";
+  status: "pending" | "delivered" | "superseded";
+  supersededAt?: number;
+  refusal?: TaskClosedRefusal;
   message: MessageRecord;
   deliveredAt?: number;
 };
@@ -60,7 +62,7 @@ export function matchesPendingInvocationResultReply(
   return isDeepStrictEqual(pendingInvocationResultReply(flight), expected);
 }
 
-export type InvocationResultDeliveryOutcome = "delivered" | "deferred" | "stale" | "failed" | "quarantined";
+export type InvocationResultDeliveryOutcome = "delivered" | "deferred" | "stale" | "failed" | "quarantined" | "superseded";
 
 export type BrokerInvocationResultDeliveryServiceOptions = {
   /** Must synchronously return the latest durable state at the post boundary. */
@@ -69,6 +71,7 @@ export type BrokerInvocationResultDeliveryServiceOptions = {
   postMessage: (message: MessageRecord) => Promise<unknown>;
   /** Compare the current pending intent with expected inside the durable writer. */
   markDelivered: (invocationId: string, expected: InvocationResultReplyIntent) => Promise<boolean>;
+  markSuperseded?: (invocationId: string, expected: InvocationResultReplyIntent, refusal: TaskClosedRefusal) => Promise<boolean>;
   /** Preserve complete malformed intent evidence; acknowledgement never retries an executor. */
   quarantineRecord?: (entry: BrokerJournalEntry, reason: string) => QuarantineMetadata | Promise<QuarantineMetadata>;
   maxPending?: number;
@@ -160,7 +163,15 @@ export class BrokerInvocationResultDeliveryService {
         // with valid evidence, but acknowledging a warning does not deliver it.
         return "quarantined";
       }
-      await this.options.postMessage(intent.message);
+      try { await this.options.postMessage(intent.message); }
+      catch (error) {
+        // Only a typed, exactly correlated authority refusal can retire output.
+        // Generic HTTP errors and text (even "already completed") stay retryable.
+        if (!(error instanceof TaskClosedError) || error.refusal.taskId !== invocationId
+          || error.refusal.flightId !== flight!.id || error.refusal.messageId !== intent.message.id
+          || !this.options.markSuperseded) throw error;
+        return await this.options.markSuperseded(invocationId, intent, error.refusal) ? "superseded" : "stale";
+      }
       return await this.options.markDelivered(invocationId, intent) ? "delivered" : "stale";
     } catch (error) {
       // Both post failure and a crash/failure before acknowledgement leave the

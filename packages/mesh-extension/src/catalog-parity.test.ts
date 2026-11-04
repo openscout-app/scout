@@ -16,13 +16,13 @@ function wire(value:any, stdio=false):any {
   }
   return value;
 }
-test('all 24 HTTP tool argument schemas retain the existing public core wire types',async()=>{
+test('all 20 HTTP tool argument schemas retain the existing public core wire types',async()=>{
   const server=createScoutMcpServer({defaultCurrentDirectory:'/',env:{},toolFilter:n=>SCOUT_MCP_CORE_TOOL_NAMES.includes(n as never)});
   const client=new Client({name:'parity',version:'1'});const[a,b]=InMemoryTransport.createLinkedPair();
   try {
     await Promise.all([server.connect(a),client.connect(b)]);const current=(await client.listTools()).tools;
     expect(current.map(t=>t.name).sort()).toEqual([...SCOUT_MCP_CORE_TOOL_NAMES].sort());
-    expect(selectCoreTools()).toHaveLength(24);
+    expect(selectCoreTools()).toHaveLength(20);
     for(const tool of selectCoreTools())expect({name:tool.name,schema:wire(tool.inputSchema),annotations:tool.annotations}).toEqual({name:tool.name,schema:wire(current.find(v=>v.name===tool.name)!.inputSchema,true),annotations:current.find(v=>v.name===tool.name)!.annotations});
   } finally {await client.close();await server.close();}
 });

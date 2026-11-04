@@ -13,6 +13,9 @@ export type ScoutAskSenderContext = {
 };
 
 type ScoutAskCommandBase = {
+  task?: import("@openscout/protocol").ScoutTaskAsk;
+  image?: import("@openscout/protocol").AttachmentUpload;
+  attachments?: import("./service.ts").OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;
   relation?: ScoutCompletionRelation;
@@ -94,6 +97,9 @@ export type ScoutAskReceipt = {
   };
   delivery?: "none" | "inline" | "mcp_notification";
   executionResolution?: ScoutExecutionResolution;
+  workerInterrupted?: boolean;
+  recording?: "recorded";
+  notificationStatus?: "not_requested" | "requested_unconfirmed";
   completion?: ScoutCompletionState & { invocationId: string; flightId: string };
   parentCompletion?: { flightId: string; revision: number };
   notification?: {
