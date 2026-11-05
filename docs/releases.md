@@ -120,12 +120,47 @@ Commit the source, version manifests, `packages/cli/src/lib/shared/product.ts`,
 `docs.json`, and lockfile on a review branch. Merge only after the standalone
 checks and packed artifact audit pass.
 
+### Write the release notes
+
+Add a `## <version> <name>` section below for the version. The hosted release
+path publishes it as the GitHub release's notes, with the title
+`Scout v<version>`. It reads the section from the tagged commit and does not
+change a release that already exists, so the section must be in that commit.
+
+1. Start with one short paragraph that says what the release does.
+2. Follow it with `### What's changed` and a list of `* ` bullets.
+3. Make the first bullet the release's headline. openscout.app shows it under
+   "Recently shipped" and leaves out a release whose notes have no `* `
+   bullet. Write it as one sentence that starts with a verb, in 72 characters
+   or fewer, with no backticks or emoji. It shows as plain text.
+4. Put the details in `###` sections after the list, with `- ` bullets.
+
+Check the result:
+
+```bash
+node scripts/release-notes.mjs <version>
+```
+
+`scripts/release-notes.test.mjs` fails when a section from 0.5.1 on has no
+headline bullet.
+
 ## 0.5.1 ask and reply
 
 Scout now has two verbs for moving work. `scout ask` sends anything: new work,
 a follow-up, a question for the operator, or an FYI. `scout reply` answers it.
 Work items move through lifecycles that the runtime checks. Install with
 `bun add -g @openscout/scout`.
+
+### What's changed
+
+* Replace six CLI verbs with ask and reply, and add work lifecycles
+* Answer health from a cache on its own thread, so a long turn no longer
+  reads as a stopped runtime
+* Sweep host health every 30 seconds from scoutd
+* Keep a permission request across a runtime restart, and let the operator
+  dismiss one that nothing can answer
+* Register Scout's MCP server in Zed with `scout mcp install --host zed`
+* Publish stable releases from GitHub Actions, with npm provenance
 
 ### Before you upgrade
 
