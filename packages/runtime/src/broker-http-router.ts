@@ -153,6 +153,8 @@ import {
   BrokerRouteAliasError,
   type BrokerRouteAliasService,
 } from "./broker-route-alias-service.js";
+import { AgentRosterError, type AgentRosterService } from "./agent-roster-service.js";
+import type { AgentRosterImportRequest, RosterProjectCodeSetRequest } from "@openscout/protocol";
 import type { SignedNodeCard } from "./node-identity.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
 import type { MeshGateMode } from "./mesh-ingress-gate.js";
@@ -313,6 +315,7 @@ export type BrokerHttpRouterDeps = {
   externalSessionService?: BrokerExternalSessionService;
   t3Service?: BrokerT3Service;
   routeAliasService?: BrokerRouteAliasService;
+  agentRosterService?: AgentRosterService;
   integrationSetupService?: BrokerIntegrationSetupService;
   integrationSlackDelivery?: IntegrationSlackDeliveryService;
   integrationSlackEvents?: IntegrationSlackEvents;
@@ -508,6 +511,7 @@ export function createBrokerHttpRouter(
     deliveryAcceptanceService,
     rendezvousService,
     routeAliasService,
+    agentRosterService,
     integrationSetupService,
     integrationSlackDelivery,
     integrationSlackEvents,
@@ -868,6 +872,59 @@ export function createBrokerHttpRouter(
       else json(response, 500, { error: "integration_setup_failed", detail: "Integration setup could not be persisted. Read status before retrying." });
     }
     return;
+  }
+
+  if (url.pathname === "/v1/roster" || url.pathname.startsWith("/v1/roster/")) {
+    if (!agentRosterService) {
+      json(response, 503, { error: "roster_unavailable", detail: "the agent roster requires broker SQLite persistence" });
+      return;
+    }
+    const handleRosterError = (error: unknown): void => {
+      if (error instanceof AgentRosterError) {
+        json(response, error.code === "project_code_held" ? 409 : error.code === "unknown_project" ? 404 : 400, {
+          error: error.code,
+          detail: error.message,
+          ...(error.details ?? {}),
+        });
+        return;
+      }
+      badRequest(response, error);
+    };
+    if (method === "GET" && url.pathname === "/v1/roster") {
+      json(response, 200, agentRosterService.list());
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/roster/projects/code") {
+      try {
+        const body = await readRequestBody<RosterProjectCodeSetRequest>(request);
+        json(response, 200, { project: agentRosterService.setProjectCode(body) });
+      } catch (error) {
+        handleRosterError(error);
+      }
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/roster/import") {
+      try {
+        const body = await readRequestBody<AgentRosterImportRequest>(request);
+        if (!body || !Array.isArray(body.entries)) {
+          json(response, 400, { error: "invalid_import", detail: "the body needs an entries array of { agentId, number, projectCode }" });
+          return;
+        }
+        json(response, 200, agentRosterService.importEntries(body));
+      } catch (error) {
+        handleRosterError(error);
+      }
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/roster/resolve") {
+      try {
+        const body = await readRequestBody<{ address?: string }>(request);
+        json(response, 200, agentRosterService.resolve(String(body?.address ?? "")));
+      } catch (error) {
+        handleRosterError(error);
+      }
+      return;
+    }
   }
 
   if ((url.pathname.startsWith("/v1/aliases") || url.pathname.startsWith("/v1/mesh/aliases")) && !routeAliasService) {

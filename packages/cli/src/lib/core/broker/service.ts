@@ -1,4 +1,4 @@
-import { SCOUT_TASKS_CAPABILITY, type ScoutTaskReply, type AttachmentUpload } from "@openscout/protocol";
+import { SCOUT_TASKS_CAPABILITY, agentRosterTag, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -252,6 +252,8 @@ export type ScoutTargetDiagnostic =
       state: AgentState | "discovered" | "unknown";
       registrationKind: ScoutWhoRegistrationKind | null;
       projectRoot: string | null;
+      /** Why the broker found no target, such as an unknown roster code. */
+      detail?: string;
     }
   | {
       agentId: string;
@@ -619,6 +621,8 @@ export type ScoutWhoEntry = {
   messages: number;
   lastSeen: number | null;
   registrationKind: ScoutWhoRegistrationKind;
+  /** The agent's roster code (`OS-003`), when it holds a roster number. */
+  roster?: AgentRosterTag;
   /** Route pointers targeting this agent; never separate roster entries. */
   aliases?: Array<Pick<RouteAliasBinding, "id" | "alias" | "revision" | "state" | "scopeProjectKey" | "scopeProjectRoot" | "scopeNodeId" | "target">>;
 };
@@ -1175,6 +1179,7 @@ function scoutTargetDiagnosticFromDeliveryFailure(
       state: "unknown",
       registrationKind: null,
       projectRoot: null,
+      ...(dispatch.detail ? { detail: dispatch.detail } : {}),
     };
   }
   if (delivery.kind === "rejected" && dispatch.kind === "unparseable") {
@@ -5410,6 +5415,17 @@ async function loadDiscoveredAgentMap(
   }
 }
 
+/** Roster tags by agent id; empty when the broker has no roster (older runtimes). */
+export async function loadScoutRosterTags(baseUrl: string): Promise<Map<string, AgentRosterTag>> {
+  const roster = await brokerReadJson<AgentRosterListResult>(baseUrl, "/v1/roster").catch(() => null);
+  const tags = new Map<string, AgentRosterTag>();
+  for (const entry of roster?.agents ?? []) {
+    if (entry.goneAt) continue;
+    tags.set(entry.agentId, agentRosterTag(entry));
+  }
+  return tags;
+}
+
 export async function listScoutAgents(
   options: { currentDirectory?: string; machine?: string } = {},
 ): Promise<ScoutWhoEntry[]> {
@@ -5426,6 +5442,7 @@ export async function listScoutAgents(
     brokerReadJson<{ bindings: RouteAliasBinding[] }>(broker.baseUrl, `/v1/aliases?${aliasParams}`)
       .catch(() => ({ bindings: [] })),
   ]);
+  const rosterByAgent = await loadScoutRosterTags(broker.baseUrl);
   const aliasesByAgent = new Map<string, RouteAliasBinding[]>();
   for (const binding of aliasResult.bindings) {
     if (binding.state !== "active") continue;
@@ -5497,7 +5514,12 @@ export async function listScoutAgents(
       const nodeName = nodeId ? nodes[nodeId]?.name ?? null : null;
       const projectRoot = metadataString(agent?.metadata, "projectRoot")
         ?? endpoint?.projectRoot ?? discovered?.projectRoot ?? configuredAgents.get(agentId)?.projectRoot ?? null;
-      return { agentId, nodeId, nodeName, projectRoot, state, messages, lastSeen, registrationKind, ...(aliases?.length ? { aliases } : {}) };
+      const roster = rosterByAgent.get(agentId);
+      return {
+        agentId, nodeId, nodeName, projectRoot, state, messages, lastSeen, registrationKind,
+        ...(roster ? { roster } : {}),
+        ...(aliases?.length ? { aliases } : {}),
+      };
     })
     .filter((entry) => !selectedNodeIds || (entry.nodeId !== null && selectedNodeIds.has(entry.nodeId)))
     .sort((lhs, rhs) => {

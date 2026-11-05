@@ -336,6 +336,8 @@ import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 import { BrokerUnavailableTargetService, localEndpointCanReceive, localEndpointSupportsQueue } from "./broker-unavailable-target-service.js";
 import { BrokerRouteAliasStore } from "./broker-route-alias-store.js";
 import { BrokerRouteAliasError, BrokerRouteAliasService } from "./broker-route-alias-service.js";
+import { AgentRosterService } from "./agent-roster-service.js";
+import { AgentRosterStore } from "./agent-roster-store.js";
 import { LazyControlPlaneStore } from "./lazy-control-plane-store.js";
 import {
   buildSignedNodeCard,
@@ -620,6 +622,14 @@ const routeAliasService = routeAliasDatabase
       operatorActorId: "operator",
       runtimeSnapshot: () => runtime.routingSnapshot(),
       createId: createRuntimeId,
+    })
+  : undefined;
+// The agent roster (docs/agent-roster.md): roster numbers and project codes.
+const agentRosterService = routeAliasDatabase
+  ? new AgentRosterService({
+      store: new AgentRosterStore(routeAliasDatabase),
+      registry: () => runtime.routingSnapshot(),
+      log: (message) => console.log(message),
     })
   : undefined;
 
@@ -1028,6 +1038,7 @@ const deliveryRouter = new BrokerDeliveryRouter({
   log: (message) => console.log(message),
   warn: (message) => console.warn(message),
   routeAliasService,
+  rosterService: agentRosterService,
   wakeExactHarnessSession: async (input) => {
     const wake = await wakeLocalSessionForBroker(input);
     if (wake.ok) {
@@ -1211,6 +1222,32 @@ const presenceStaleAfterMs = Number.isFinite(presenceSampleIntervalMs) && presen
 let meshRendezvousPublisher: MeshRendezvousPublisher | null = null;
 let parentWatcher: ReturnType<typeof setInterval> | null = null;
 let routeAliasSweepTimer: ReturnType<typeof setInterval> | null = null;
+let agentRosterTimer: ReturnType<typeof setInterval> | null = null;
+let agentRosterDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function reconcileAgentRoster(reason: string): void {
+  if (!agentRosterService) return;
+  try {
+    const result = agentRosterService.reconcile();
+    if (result.assigned.length > 0 || result.freed.length > 0) {
+      console.log(
+        `[openscout-runtime] agent roster (${reason}): ${result.assigned.length} numbered, ${result.freed.length} freed`,
+      );
+    }
+  } catch (error) {
+    console.error(`[openscout-runtime] agent roster reconcile (${reason}) failed:`, error);
+  }
+}
+
+/** Registry changes number new agents within a couple of seconds, coalesced. */
+function scheduleAgentRosterReconcile(): void {
+  if (!agentRosterService || agentRosterDebounce || shuttingDown) return;
+  agentRosterDebounce = setTimeout(() => {
+    agentRosterDebounce = null;
+    reconcileAgentRoster("registry");
+  }, 2_000);
+  agentRosterDebounce.unref?.();
+}
 
 type LegacyRelayMessage = {
   id: string;
@@ -1226,6 +1263,9 @@ type LegacyRelayMessage = {
 runtime.subscribe((event) => {
   controlStreams.streamEvent(event);
   publishControlEvent(event);
+  if (event.kind === "agent.registered" || event.kind === "agent.endpoint.upserted") {
+    scheduleAgentRosterReconcile();
+  }
 });
 
 // Presence: broker-observed, ephemeral, latest-per-agent. Deliberately not on
@@ -3415,6 +3455,7 @@ const routeRequest = createBrokerHttpRouter({
   externalSessionService,
   t3Service,
   routeAliasService,
+  agentRosterService,
   integrationSetupService,
   integrationSlackDelivery,
   integrationSlackEvents,
@@ -3960,6 +4001,7 @@ setTimeout(() => {
     console.error("[openscout-runtime] startup relay-agent sweep failed:", error);
   });
   routeAliasService?.sweepExpired();
+  reconcileAgentRoster("startup");
 }, 0).unref();
 
 function sweepAndCompactMeshNodes(): void {
@@ -4071,6 +4113,10 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
     }, 60_000);
     routeAliasSweepTimer.unref();
   }
+  if (agentRosterService) {
+    agentRosterTimer = setInterval(() => reconcileAgentRoster("periodic"), 60_000);
+    agentRosterTimer.unref();
+  }
 }
 
 async function shutdownBroker(exitCode = 0): Promise<void> {
@@ -4095,6 +4141,14 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   if (routeAliasSweepTimer) {
     clearInterval(routeAliasSweepTimer);
     routeAliasSweepTimer = null;
+  }
+  if (agentRosterTimer) {
+    clearInterval(agentRosterTimer);
+    agentRosterTimer = null;
+  }
+  if (agentRosterDebounce) {
+    clearTimeout(agentRosterDebounce);
+    agentRosterDebounce = null;
   }
   await scoutbotService.stop();
   await webControl.stop();

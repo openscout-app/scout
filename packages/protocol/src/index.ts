@@ -2,6 +2,7 @@ export * from "./common.js";
 export * from "./time.js";
 export * from "./actors.js";
 export * from "./agent-identity.js";
+export * from "./agent-roster.js";
 export * from "./provisional-agent-names.js";
 export * from "./a2a.js";
 export * from "./scout-agent-card.js";

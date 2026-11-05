@@ -18,7 +18,7 @@ import {
   type ScoutDispatchEnvelope,
   type ScoutDispatchKind,
   type ScoutId,
-  type RouteAliasDiagnosticCode,
+  type ScoutDispatchDiagnosticCode,
   type ScoutRoutePolicy,
   type ScoutRouteTarget,
   normalizeAgentSelectorSegment,
@@ -68,7 +68,7 @@ export type BrokerLabelResolution =
   | { kind: "resolved_session"; session: ResolvedSessionTarget }
   | { kind: "ambiguous"; label: string; candidates: AgentDefinition[]; detail?: string }
   | { kind: "unparseable"; label: string }
-  | { kind: "unknown"; label: string; detail?: string; candidates?: AgentDefinition[]; diagnosticCode?: RouteAliasDiagnosticCode; sessionWakeReason?: string };
+  | { kind: "unknown"; label: string; detail?: string; candidates?: AgentDefinition[]; diagnosticCode?: ScoutDispatchDiagnosticCode; sessionWakeReason?: string };
 
 export interface BrokerRouteTargetInput {
   target?: ScoutRouteTarget | null;

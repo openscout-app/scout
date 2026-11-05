@@ -1,0 +1,617 @@
+import {
+  ROSTER_NUMBER_MAX,
+  agentRosterTag,
+  cleanProjectCode,
+  parseRosterAddress,
+  parseRosterNumber,
+  rosterCode,
+  rosterIdentityMonogram,
+  rosterLabel,
+  rosterNumberText,
+  rosterProjectCodeCandidates,
+  rosterProjectKey,
+  type AgentDefinition,
+  type AgentEndpoint,
+  type AgentRosterDiagnosticCode,
+  type AgentRosterEntry,
+  type AgentRosterImportConflict,
+  type AgentRosterImportRequest,
+  type AgentRosterImportResult,
+  type AgentRosterListResult,
+  type AgentRosterResolveResult,
+  type AgentRosterTag,
+  type RosterProjectCodeSetRequest,
+  type RosterProjectRecord,
+} from "@openscout/protocol";
+
+import type { AgentRosterStore, RosterAgentRow, RosterProjectRow } from "./agent-roster-store.js";
+
+/**
+ * The agent roster (docs/agent-roster.md): a three-digit number per agent,
+ * one roster across projects, and a two- or three-letter code per project.
+ *
+ * The same agent is the same Scout agent id. A number never follows a
+ * handle, a display name or a session: agents that share the handle
+ * `claude` hold one number each, and every session of one agent shares its
+ * number because sessions do not mint agent ids.
+ *
+ * An agent takes the lowest free number the first time the runtime sees it
+ * active (registered, or its endpoint touched, within `activeWindowMs`).
+ * It keeps that number across restarts and sessions. It gives the number up
+ * once it is deleted or retired (no longer listed) for `goneGraceMs`, so a
+ * re-registration inside that window keeps it.
+ */
+
+/** How long an agent stays deleted or retired before its number is freed: the apps' ROSTER_GONE_MS. */
+export const ROSTER_GONE_GRACE_MS = 10 * 60_000;
+/** How recently an agent must have been active for the runtime to number it. */
+export const ROSTER_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** The registry fields the roster reads. */
+export type AgentRosterRegistryView = {
+  agents: Readonly<Record<string, AgentDefinition>>;
+  actors?: Readonly<Record<string, { createdAt?: number }>>;
+  endpoints?: Readonly<Record<string, AgentEndpoint>>;
+};
+
+export type AgentRosterServiceOptions = {
+  store: AgentRosterStore;
+  registry: () => AgentRosterRegistryView;
+  now?: () => number;
+  goneGraceMs?: number;
+  activeWindowMs?: number;
+  log?: (message: string) => void;
+};
+
+export type AgentRosterReconcileResult = {
+  assigned: Array<{ agentId: string; number: number }>;
+  freed: Array<{ agentId: string; number: number }>;
+  /** Agents seen active that found no free number. */
+  unnumbered: number;
+};
+
+export class AgentRosterError extends Error {
+  constructor(
+    readonly code: AgentRosterDiagnosticCode,
+    message: string,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "AgentRosterError";
+  }
+}
+
+const AGENT_ACTIVITY_KEYS = [
+  "lastSeenAt",
+  "lastActivityAt",
+  "updatedAt",
+  "registeredAt",
+  "startedAt",
+  "lastCompletedAt",
+] as const;
+
+const ENDPOINT_ACTIVITY_KEYS = [
+  "lastSeenAt",
+  "lastEnsuredAt",
+  "lastStartedAt",
+  "lastCompletedAt",
+  "lastFailedAt",
+  "lastResumedAt",
+  "lastInterruptedAt",
+  "startedAt",
+  "updatedAt",
+  "registeredAt",
+] as const;
+
+function timestampMs(value: unknown): number {
+  const numeric = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim()
+    ? (/^\d+(\.\d+)?$/u.test(value.trim()) ? Number(value) : Date.parse(value))
+    : Number.NaN;
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  // Legacy records carry seconds.
+  return numeric < 1_000_000_000_000 ? Math.round(numeric * 1000) : numeric;
+}
+
+function latestMetadataTimestamp(metadata: Record<string, unknown> | undefined, keys: readonly string[]): number {
+  let latest = 0;
+  for (const key of keys) latest = Math.max(latest, timestampMs(metadata?.[key]));
+  return latest;
+}
+
+/** The agent's project name as its record carries it (the apps read the same field). */
+export function rosterProjectNameForAgent(agent: AgentDefinition | undefined): string | null {
+  const value = agent?.metadata?.["project"];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Deleted or retired, for the roster: the runtime no longer lists the agent.
+ * Retired from the fleet, or superseded locally. A mesh agent whose peer has
+ * gone quiet is not retired; it keeps its number until its record is deleted.
+ */
+export function isRosterRetiredAgent(agent: AgentDefinition | undefined): boolean {
+  if (!agent) return true;
+  const metadata = agent.metadata ?? {};
+  if (metadata["retiredFromFleet"] === true) return true;
+  return metadata["staleLocalRegistration"] === true && metadata["staleMeshRegistration"] !== true;
+}
+
+type RosterState = {
+  agents: Map<string, RosterAgentRow>;
+  byNumber: Map<number, RosterAgentRow>;
+  projects: Map<string, RosterProjectRow>;
+  codes: Map<string, string>;
+};
+
+export class AgentRosterService {
+  private readonly now: () => number;
+  private readonly goneGraceMs: number;
+  private readonly activeWindowMs: number;
+  private fullWarned = false;
+
+  constructor(private readonly options: AgentRosterServiceOptions) {
+    this.now = options.now ?? Date.now;
+    this.goneGraceMs = options.goneGraceMs ?? ROSTER_GONE_GRACE_MS;
+    this.activeWindowMs = options.activeWindowMs ?? ROSTER_ACTIVE_WINDOW_MS;
+  }
+
+  /** Number newly active agents, mark deleted and retired ones, and free numbers past their grace. */
+  reconcile(): AgentRosterReconcileResult {
+    const registry = this.options.registry();
+    const now = this.now();
+    return this.options.store.transaction(() => {
+      const state = this.load();
+      const result: AgentRosterReconcileResult = { assigned: [], freed: [], unnumbered: 0 };
+
+      for (const row of [...state.agents.values()]) {
+        const agent = registry.agents[row.agentId];
+        if (agent && !isRosterRetiredAgent(agent)) {
+          const project = rosterProjectNameForAgent(agent);
+          const projectKey = project ? rosterProjectKey(project) : null;
+          if (project) this.ensureProject(state, project, now);
+          if (row.goneAt !== null || row.projectKey !== projectKey || row.project !== project) {
+            this.writeAgent(state, { ...row, project, projectKey, goneAt: null, updatedAt: now });
+          }
+          continue;
+        }
+        if (row.goneAt === null) {
+          this.writeAgent(state, { ...row, goneAt: now, updatedAt: now });
+          continue;
+        }
+        if (now - row.goneAt >= this.goneGraceMs) {
+          this.removeAgent(state, row.agentId);
+          result.freed.push({ agentId: row.agentId, number: row.number });
+        }
+      }
+
+      const newcomers = this.activeNewcomers(registry, state, now);
+      for (const { agentId, agent } of newcomers) {
+        const number = this.lowestFreeNumber(state);
+        if (number === null) {
+          result.unnumbered = newcomers.length - result.assigned.length;
+          if (!this.fullWarned) {
+            this.fullWarned = true;
+            this.options.log?.(`[openscout-runtime] agent roster is full (${ROSTER_NUMBER_MAX} numbers held); ${result.unnumbered} active agent(s) have no number`);
+          }
+          break;
+        }
+        const project = rosterProjectNameForAgent(agent);
+        if (project) this.ensureProject(state, project, now);
+        this.writeAgent(state, {
+          agentId,
+          number,
+          project,
+          projectKey: project ? rosterProjectKey(project) : null,
+          source: "auto",
+          assignedAt: now,
+          updatedAt: now,
+          goneAt: null,
+        });
+        result.assigned.push({ agentId, number });
+      }
+      if (result.unnumbered === 0) this.fullWarned = false;
+      return result;
+    });
+  }
+
+  list(): AgentRosterListResult {
+    const state = this.load();
+    return {
+      agents: [...state.agents.values()]
+        .sort((a, b) => a.number - b.number)
+        .map((row) => this.entryFrom(state, row)),
+      projects: [...state.projects.values()].map((row) => this.projectRecord(row)),
+      capacity: { max: ROSTER_NUMBER_MAX, held: state.agents.size },
+    };
+  }
+
+  entry(agentId: string): AgentRosterEntry | null {
+    const state = this.load();
+    const row = state.agents.get(agentId);
+    return row ? this.entryFrom(state, row) : null;
+  }
+
+  /** Roster tags by agent id, for decorating agent records in bulk. */
+  tags(): Map<string, AgentRosterTag> {
+    const state = this.load();
+    const tags = new Map<string, AgentRosterTag>();
+    for (const row of state.agents.values()) {
+      if (row.goneAt !== null) continue;
+      tags.set(row.agentId, agentRosterTag(this.entryFrom(state, row)));
+    }
+    return tags;
+  }
+
+  /** Set a project's code; a null code gives it back its default. Refuses a code another project holds. */
+  setProjectCode(request: RosterProjectCodeSetRequest): RosterProjectRecord {
+    const name = request.project?.trim();
+    if (!name) throw new AgentRosterError("unknown_project", "a project name is required");
+    const key = rosterProjectKey(name);
+    const now = this.now();
+    return this.options.store.transaction(() => {
+      const state = this.load();
+      let project = state.projects.get(key);
+      if (!project) {
+        const known = Object.values(this.options.registry().agents)
+          .map(rosterProjectNameForAgent)
+          .find((candidate) => candidate !== null && rosterProjectKey(candidate) === key);
+        if (!known) {
+          throw new AgentRosterError("unknown_project", `no agent lists project "${name}"`, { project: name });
+        }
+        project = this.ensureProject(state, known, now);
+      }
+
+      if (request.code === null || request.code === undefined || request.code === "") {
+        const code = this.firstFreeCode(state, project.name, key);
+        return this.projectRecord(this.writeProject(state, { ...project, code, codeSource: "default", updatedAt: now }));
+      }
+
+      const code = cleanProjectCode(request.code);
+      if (!code) {
+        throw new AgentRosterError(
+          "invalid_project_code",
+          `"${request.code}" is not a project code: use two or three letters or digits, with at least one letter`,
+          { code: request.code },
+        );
+      }
+      const holder = state.codes.get(code);
+      if (holder && holder !== key) {
+        const held = state.projects.get(holder);
+        throw new AgentRosterError(
+          "project_code_held",
+          `${code} is held by project "${held?.name ?? holder}"`,
+          { code, heldBy: held?.name ?? holder },
+        );
+      }
+      return this.projectRecord(this.writeProject(state, { ...project, code, codeSource: "operator", updatedAt: now }));
+    });
+  }
+
+  /**
+   * Take the numbers and project codes the apps handed out locally. An
+   * entry keeps its number when no other imported agent holds it; a number
+   * the runtime gave on its own moves aside (`renumbered`), since the apps'
+   * numbers are the ones the operator has seen. Everything else that cannot
+   * be kept is reported, never guessed.
+   */
+  importEntries(request: AgentRosterImportRequest): AgentRosterImportResult {
+    const dryRun = request.dryRun === true;
+    const registry = this.options.registry();
+    const now = this.now();
+    const run = (): AgentRosterImportResult => {
+      const state = this.load();
+      const result: AgentRosterImportResult = { dryRun, imported: [], renumbered: [], projectCodes: [], conflicts: [] };
+      const conflict = (entry: AgentRosterImportConflict) => result.conflicts.push(entry);
+      const claimedNumbers = new Map<number, string>();
+      const claimedAgents = new Set<string>();
+      const accepted: Array<{ agentId: string; number: number; project: string | null; projectCode: string | null | undefined }> = [];
+
+      for (const raw of Array.isArray(request.entries) ? request.entries : []) {
+        const agentId = typeof raw?.agentId === "string" ? raw.agentId.trim() : "";
+        const number = parseRosterNumber(raw?.number as number | string | undefined);
+        if (!agentId || number === null) {
+          conflict({
+            agentId,
+            reason: "invalid_entry",
+            detail: !agentId ? "entry has no agentId" : `"${String(raw?.number)}" is not a roster number from 001 to 999`,
+          });
+          continue;
+        }
+        if (claimedAgents.has(agentId)) {
+          conflict({ agentId, number, reason: "duplicate_agent", detail: `${agentId} appears more than once; the first entry was kept` });
+          continue;
+        }
+        const firstClaim = claimedNumbers.get(number);
+        if (firstClaim) {
+          conflict({ agentId, number, reason: "duplicate_number", detail: `${rosterNumberText(number)} is also claimed by ${firstClaim} earlier in the import`, heldBy: firstClaim });
+          continue;
+        }
+        const agent = registry.agents[agentId];
+        if (!agent) {
+          conflict({ agentId, number, reason: "unknown_agent", detail: `the runtime does not know agent ${agentId}` });
+          continue;
+        }
+        if (isRosterRetiredAgent(agent)) {
+          conflict({ agentId, number, reason: "agent_not_listed", detail: `${agentId} is retired or superseded, so it holds no number` });
+          continue;
+        }
+        const current = state.agents.get(agentId);
+        if (current?.source === "import" && current.number !== number) {
+          conflict({ agentId, number, reason: "agent_already_imported", detail: `${agentId} already holds imported number ${rosterNumberText(current.number)}`, heldBy: agentId });
+          continue;
+        }
+        const holder = state.byNumber.get(number);
+        if (holder && holder.agentId !== agentId && holder.source === "import") {
+          conflict({ agentId, number, reason: "number_held", detail: `${rosterNumberText(number)} is held by ${holder.agentId}, imported earlier`, heldBy: holder.agentId });
+          continue;
+        }
+        claimedAgents.add(agentId);
+        claimedNumbers.set(number, agentId);
+        accepted.push({ agentId, number, project: rosterProjectNameForAgent(agent), projectCode: raw.projectCode });
+      }
+
+      // Move every accepted agent onto its number. Rows leave the unique
+      // number index before any row takes a number, so swaps cannot collide.
+      const importedAgentIds = new Set(accepted.map((entry) => entry.agentId));
+      const displaced: RosterAgentRow[] = [];
+      for (const entry of accepted) {
+        const holder = state.byNumber.get(entry.number);
+        if (holder && !importedAgentIds.has(holder.agentId)) displaced.push(holder);
+      }
+      for (const entry of accepted) this.removeAgent(state, entry.agentId);
+      for (const row of displaced) this.removeAgent(state, row.agentId);
+      for (const entry of accepted) {
+        this.writeAgent(state, {
+          agentId: entry.agentId,
+          number: entry.number,
+          project: entry.project,
+          projectKey: entry.project ? rosterProjectKey(entry.project) : null,
+          source: "import",
+          assignedAt: now,
+          updatedAt: now,
+          goneAt: null,
+        });
+      }
+      for (const row of displaced) {
+        const to = this.lowestFreeNumber(state);
+        if (to !== null) this.writeAgent(state, { ...row, number: to, assignedAt: now, updatedAt: now });
+        result.renumbered.push({ agentId: row.agentId, from: row.number, to });
+      }
+
+      // Project codes, first entry per project wins.
+      const decided = new Map<string, string | null>();
+      for (const entry of accepted) {
+        const requested = entry.projectCode;
+        if (requested === undefined || requested === null || requested === "") {
+          if (entry.project) this.ensureProject(state, entry.project, now);
+          continue;
+        }
+        const code = cleanProjectCode(requested);
+        if (!code) {
+          conflict({ agentId: entry.agentId, number: entry.number, projectCode: requested, reason: "invalid_project_code", detail: `"${requested}" is not a project code` });
+          continue;
+        }
+        if (!entry.project) {
+          conflict({ agentId: entry.agentId, number: entry.number, projectCode: code, reason: "no_project", detail: `${entry.agentId} has no project, so ${code} was not set` });
+          continue;
+        }
+        const key = rosterProjectKey(entry.project);
+        const project = this.ensureProject(state, entry.project, now);
+        const earlier = decided.get(key);
+        if (earlier !== undefined) {
+          if (earlier !== code) {
+            conflict({ agentId: entry.agentId, number: entry.number, projectCode: code, reason: "project_code_differs", detail: `an earlier entry set project "${project.name}" to ${earlier ?? "no code"}`, heldBy: project.name });
+          }
+          continue;
+        }
+        if (project.code === code) {
+          decided.set(key, code);
+          continue;
+        }
+        if (project.codeSource !== "default") {
+          decided.set(key, project.code);
+          conflict({ agentId: entry.agentId, number: entry.number, projectCode: code, reason: "project_code_differs", detail: `project "${project.name}" already has code ${project.code ?? "none"}, set by ${project.codeSource}`, heldBy: project.name });
+          continue;
+        }
+        const holder = state.codes.get(code);
+        if (holder && holder !== key) {
+          decided.set(key, project.code);
+          const held = state.projects.get(holder);
+          conflict({ agentId: entry.agentId, number: entry.number, projectCode: code, reason: "project_code_held", detail: `${code} is held by project "${held?.name ?? holder}"`, heldBy: held?.name ?? holder });
+          continue;
+        }
+        this.writeProject(state, { ...project, code, codeSource: "import", updatedAt: now });
+        decided.set(key, code);
+        result.projectCodes.push({ projectKey: key, code });
+      }
+
+      for (const entry of accepted) {
+        const row = state.agents.get(entry.agentId)!;
+        result.imported.push({ agentId: entry.agentId, number: entry.number, code: this.entryFrom(state, row).code });
+      }
+      return result;
+    };
+
+    if (!dryRun) return this.options.store.transaction(run);
+    // A dry run does the same work inside a transaction it then rolls back.
+    let preview: AgentRosterImportResult | null = null;
+    try {
+      this.options.store.transaction(() => {
+        preview = run();
+        throw new DryRunRollback();
+      });
+    } catch (error) {
+      if (!(error instanceof DryRunRollback)) throw error;
+    }
+    return preview!;
+  }
+
+  /** Resolve `OS-003`, `os003`, `OS 003` or `003` to the agent that holds it. */
+  resolve(address: string): AgentRosterResolveResult {
+    const text = address?.trim() ?? "";
+    const parsed = parseRosterAddress(text);
+    if (!parsed) {
+      return this.unresolved(text, "invalid_roster_address", `"${text}" is not a roster code: use OS-003, os003 or 003`);
+    }
+    const state = this.load();
+    const number = rosterNumberText(parsed.number);
+    if (parsed.projectCode && !state.codes.has(parsed.projectCode)) {
+      return this.unresolved(text, "unknown_project_code", `no project has code ${parsed.projectCode}; scout roster lists the codes`);
+    }
+    const row = state.byNumber.get(parsed.number);
+    if (!row) {
+      return this.unresolved(text, "unknown_roster_number", `no agent holds roster number ${number}`);
+    }
+    const entry = this.entryFrom(state, row);
+    const agent = this.options.registry().agents[row.agentId];
+    if (row.goneAt !== null || !agent || isRosterRetiredAgent(agent)) {
+      return { ...this.unresolved(text, "roster_agent_gone", `${entry.code} belonged to ${row.agentId}, which the runtime no longer lists`), entry };
+    }
+    if (parsed.projectCode && parsed.projectCode !== entry.projectCode) {
+      return {
+        ...this.unresolved(text, "roster_code_mismatch", `${parsed.projectCode}-${number} names no agent: ${number} is ${entry.code} (${row.agentId})`),
+        entry,
+      };
+    }
+    return { address: text, resolved: true, entry };
+  }
+
+  private unresolved(address: string, code: AgentRosterDiagnosticCode, detail: string): AgentRosterResolveResult {
+    return { address, resolved: false, diagnostic: { code, detail } };
+  }
+
+  private load(): RosterState {
+    const agents = new Map<string, RosterAgentRow>();
+    const byNumber = new Map<number, RosterAgentRow>();
+    for (const row of this.options.store.agents()) {
+      agents.set(row.agentId, row);
+      byNumber.set(row.number, row);
+    }
+    const projects = new Map<string, RosterProjectRow>();
+    const codes = new Map<string, string>();
+    for (const row of this.options.store.projects()) {
+      projects.set(row.projectKey, row);
+      if (row.code) codes.set(row.code, row.projectKey);
+    }
+    return { agents, byNumber, projects, codes };
+  }
+
+  private writeAgent(state: RosterState, row: RosterAgentRow): void {
+    const previous = state.agents.get(row.agentId);
+    if (previous && state.byNumber.get(previous.number)?.agentId === row.agentId) {
+      state.byNumber.delete(previous.number);
+    }
+    this.options.store.upsertAgent(row);
+    state.agents.set(row.agentId, row);
+    state.byNumber.set(row.number, row);
+  }
+
+  private removeAgent(state: RosterState, agentId: string): void {
+    const previous = state.agents.get(agentId);
+    if (!previous) return;
+    this.options.store.deleteAgent(agentId);
+    state.agents.delete(agentId);
+    if (state.byNumber.get(previous.number)?.agentId === agentId) state.byNumber.delete(previous.number);
+  }
+
+  private writeProject(state: RosterState, row: RosterProjectRow): RosterProjectRow {
+    const previous = state.projects.get(row.projectKey);
+    if (previous?.code && state.codes.get(previous.code) === row.projectKey) state.codes.delete(previous.code);
+    this.options.store.upsertProject(row);
+    state.projects.set(row.projectKey, row);
+    if (row.code) state.codes.set(row.code, row.projectKey);
+    return row;
+  }
+
+  /** The project's record, made on first sight with its default code (or the first free candidate). */
+  private ensureProject(state: RosterState, name: string, now: number): RosterProjectRow {
+    const key = rosterProjectKey(name);
+    const existing = state.projects.get(key);
+    if (existing) return existing;
+    return this.writeProject(state, {
+      projectKey: key,
+      name,
+      code: this.firstFreeCode(state, name, key),
+      codeSource: "default",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  private firstFreeCode(state: RosterState, name: string, key: string): string | null {
+    for (const candidate of rosterProjectCodeCandidates(name)) {
+      const holder = state.codes.get(candidate);
+      if (!holder || holder === key) return candidate;
+    }
+    return null;
+  }
+
+  private lowestFreeNumber(state: RosterState): number | null {
+    for (let number = 1; number <= ROSTER_NUMBER_MAX; number++) {
+      if (!state.byNumber.has(number)) return number;
+    }
+    return null;
+  }
+
+  /** Listed agents without a number, active within the window, in the order the runtime first saw them. */
+  private activeNewcomers(
+    registry: AgentRosterRegistryView,
+    state: RosterState,
+    now: number,
+  ): Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number }> {
+    const endpointActivity = new Map<string, number>();
+    for (const endpoint of Object.values(registry.endpoints ?? {})) {
+      const at = latestMetadataTimestamp(endpoint.metadata, ENDPOINT_ACTIVITY_KEYS);
+      if (at > (endpointActivity.get(endpoint.agentId) ?? 0)) endpointActivity.set(endpoint.agentId, at);
+    }
+    const cutoff = now - this.activeWindowMs;
+    const newcomers: Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number }> = [];
+    for (const [agentId, agent] of Object.entries(registry.agents)) {
+      if (state.agents.has(agentId) || isRosterRetiredAgent(agent)) continue;
+      const firstSeenAt = timestampMs(registry.actors?.[agentId]?.createdAt)
+        || timestampMs(agent.metadata?.["registeredAt"]);
+      const activeAt = Math.max(
+        firstSeenAt,
+        latestMetadataTimestamp(agent.metadata, AGENT_ACTIVITY_KEYS),
+        endpointActivity.get(agentId) ?? 0,
+      );
+      if (activeAt < cutoff) continue;
+      newcomers.push({ agentId, agent, firstSeenAt: firstSeenAt || activeAt });
+    }
+    newcomers.sort((a, b) => a.firstSeenAt - b.firstSeenAt || (a.agentId < b.agentId ? -1 : a.agentId > b.agentId ? 1 : 0));
+    return newcomers;
+  }
+
+  private entryFrom(state: RosterState, row: RosterAgentRow): AgentRosterEntry {
+    const projectCode = row.projectKey ? state.projects.get(row.projectKey)?.code ?? null : null;
+    return {
+      agentId: row.agentId,
+      number: row.number,
+      numberText: rosterNumberText(row.number),
+      projectKey: row.projectKey,
+      project: row.project,
+      projectCode,
+      code: rosterCode(projectCode, row.number),
+      label: rosterLabel(projectCode, row.number),
+      source: row.source,
+      assignedAt: row.assignedAt,
+      ...(row.goneAt !== null ? { goneAt: row.goneAt } : {}),
+    };
+  }
+
+  private projectRecord(row: RosterProjectRow): RosterProjectRecord {
+    return {
+      projectKey: row.projectKey,
+      name: row.name,
+      code: row.code,
+      codeSource: row.codeSource,
+      defaultCode: rosterIdentityMonogram(row.name),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+}
+
+class DryRunRollback extends Error {}

@@ -1,5 +1,6 @@
 import {
   parseAgentIdentity,
+  parseRosterAddress,
   type AgentDefinition,
   type AgentHarness,
   type InvocationRequest,
@@ -26,6 +27,7 @@ import {
   type BrokerRouteAliasService,
   type RouteAliasDispatchResolution,
 } from "./broker-route-alias-service.js";
+import type { AgentRosterService } from "./agent-roster-service.js";
 
 export type InvocationResolution =
   | { kind: "resolved"; agent: AgentDefinition; aliasResolution?: RouteAliasResolutionProof }
@@ -65,6 +67,8 @@ export type BrokerDeliveryRouterOptions = {
   log?: (message: string) => void;
   warn?: (message: string) => void;
   routeAliasService?: BrokerRouteAliasService;
+  /** Resolves roster codes (`OS-003`, `os003`, `003`) before names. */
+  rosterService?: AgentRosterService;
   resolveRemoteRouteAlias?: (
     target: Extract<ScoutRouteTarget, { kind: "route_alias" }>,
     caller: ScoutCallerContext,
@@ -76,6 +80,21 @@ export type BrokerDeliveryRouterOptions = {
    */
   wakeExactHarnessSession?: (input: ExactSessionWakeInput) => Promise<ExactSessionWakeResult>;
 };
+
+/** The text of an agent target that reads as a roster code (`OS-003`, `os003`, `003`), or null. */
+function rosterAddressText(input: BrokerRouteTargetInput): string | null {
+  const target = input.target;
+  const text = target?.kind === "agent_label"
+    ? target.label
+    : target?.kind === "target_handle"
+    ? target.handle
+    : !target
+    ? input.targetLabel ?? undefined
+    : undefined;
+  if (!text) return null;
+  const trimmed = text.trim();
+  return parseRosterAddress(trimmed) ? trimmed.replace(/^@/u, "") : null;
+}
 
 export function callerContextForDelivery(
   payload: ScoutDeliverRequest,
@@ -374,7 +393,26 @@ export class BrokerDeliveryRouter {
         };
       }
     }
+    // A roster code names one agent, so it resolves before any name does.
+    // When no agent holds it, a name that happens to look like a code still
+    // resolves natively; otherwise the roster's diagnostic is the answer.
+    const rosterAddress = rosterAddressText(input);
+    let rosterMiss: InvocationResolution | null = null;
+    if (rosterAddress && this.options.rosterService) {
+      const roster = this.options.rosterService.resolve(rosterAddress);
+      if (roster.resolved && roster.entry) {
+        const { targetLabel: _label, ...rest } = input;
+        return this.resolveTarget({ ...rest, target: { kind: "agent_id", agentId: roster.entry.agentId } });
+      }
+      rosterMiss = {
+        kind: "unknown",
+        label: rosterAddress,
+        detail: roster.diagnostic?.detail ?? `no agent holds roster code ${rosterAddress}`,
+        ...(roster.diagnostic ? { diagnosticCode: roster.diagnostic.code } : {}),
+      };
+    }
     const native = this.resolveTarget(input);
+    if (rosterMiss && native.kind !== "resolved" && native.kind !== "resolved_session") return rosterMiss;
 
     // Exact session targets never fall through to project/label/capability
     // routing. If unknown, try harness-store wake then re-resolve only that id.

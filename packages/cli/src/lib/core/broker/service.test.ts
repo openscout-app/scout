@@ -234,6 +234,11 @@ describe("listScoutAgents", () => {
       if (path === "/health") return jsonResponse({ ok: true, nodeId: mini.id });
       if (path === "/v1/node") return jsonResponse(mini);
       if (path === "/v1/aliases") return jsonResponse({ bindings: [] });
+      if (path === "/v1/roster") return jsonResponse({
+        agents: [{ agentId: "remote-agent", number: 3, numberText: "003", projectKey: "remote", project: "remote", projectCode: "RM", code: "RM-003", label: "RM 003", source: "auto", assignedAt: 1 }],
+        projects: [],
+        capacity: { max: 999, held: 1 },
+      });
       if (path === "/v1/snapshot") return jsonResponse({
         nodes: { [mini.id]: mini, [remote.id]: remote, [otherMini.id]: otherMini },
         agents: {
@@ -250,6 +255,8 @@ describe("listScoutAgents", () => {
     }) as typeof fetch;
     const all = await listScoutAgents({ currentDirectory: home });
     expect(all.find((entry) => entry.agentId === "remote-agent")).toMatchObject({ nodeId: remote.id, nodeName: "archie", projectRoot: "/remote/project" });
+    expect(all.find((entry) => entry.agentId === "remote-agent")?.roster).toEqual({ number: 3, numberText: "003", projectCode: "RM", code: "RM-003", label: "RM 003" });
+    expect(all.find((entry) => entry.agentId === "local-agent")?.roster).toBeUndefined();
     expect(all.find((entry) => entry.agentId === "local-agent")).toMatchObject({ nodeId: mini.id, nodeName: "arts-mini", projectRoot: "/local/project" });
     const configured = all.find((entry) => entry.registrationKind === "configured");
     expect(configured).toMatchObject({ nodeId: mini.id, projectRoot: "/configured/project" });

@@ -292,6 +292,41 @@ export const routeAliasRevisionsTable = sqliteTable("route_alias_revisions", {
   index("idx_route_alias_revisions_binding_created").on(table.bindingId, desc(table.createdAt)),
 ]);
 
+// -- roster_projects --------------------------------------------------------
+// Runtime-owned project codes ("OS" in "OS-003"), keyed by the project's
+// name in lower case. A code is unique across projects.
+export const rosterProjectsTable = sqliteTable("roster_projects", {
+  projectKey: text("project_key").primaryKey(),
+  name: text("name").notNull(),
+  code: text("code"),
+  codeSource: text("code_source").notNull(),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  check("roster_projects_code_source_check", sql`${table.codeSource} IN ('default', 'operator', 'import')`),
+  uniqueIndex("idx_roster_projects_code").on(table.code).where(sql`code IS NOT NULL`),
+]);
+
+// -- roster_agents ----------------------------------------------------------
+// Runtime-owned roster numbers (001–999), one roster across projects, keyed
+// by the Scout agent id. No foreign key: a number outlives its agent row by
+// the grace period before it is freed.
+export const rosterAgentsTable = sqliteTable("roster_agents", {
+  agentId: text("agent_id").primaryKey(),
+  number: integer("number").notNull(),
+  projectKey: text("project_key"),
+  project: text("project"),
+  source: text("source").notNull(),
+  assignedAt: integer("assigned_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  goneAt: integer("gone_at"),
+}, (table) => [
+  check("roster_agents_number_check", sql`${table.number} BETWEEN 1 AND 999`),
+  check("roster_agents_source_check", sql`${table.source} IN ('auto', 'import')`),
+  uniqueIndex("idx_roster_agents_number").on(table.number),
+  index("idx_roster_agents_project_key").on(table.projectKey),
+]);
+
 // -- conversations -----------------------------------------------------------
 export const conversationsTable = sqliteTable("conversations", {
   id: text("id").primaryKey(),
@@ -1191,6 +1226,8 @@ export const controlPlaneDrizzleSchema = {
   runtimeSessionAliases: runtimeSessionAliasesTable,
   routeAliasBindings: routeAliasBindingsTable,
   routeAliasRevisions: routeAliasRevisionsTable,
+  rosterProjects: rosterProjectsTable,
+  rosterAgents: rosterAgentsTable,
   conversations: conversationsTable,
   conversationMembers: conversationMembersTable,
   messages: messagesTable,

@@ -12,6 +12,7 @@ export type ScoutCommandName =
   | "ask"
   | "reply"
   | "alias"
+  | "roster"
   | "broadcast"
   | "card"
   | "channel"
@@ -87,6 +88,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./ask.ts")).runAskCommand;
     case "alias":
       return (await import("./alias.ts")).runAliasCommand;
+    case "roster":
+      return (await import("./roster.ts")).runRosterCommand;
     case "card":
       return (await import("./card.ts")).runCardCommand;
     case "chat":

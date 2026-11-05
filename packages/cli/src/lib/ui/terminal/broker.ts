@@ -56,7 +56,7 @@ export function renderScoutAgentList(entries: ScoutWhoEntry[], options: { groupB
       const registrationLabel =
         entry.registrationKind === "discovered" ? "auto-discovered" : null;
       const primary = [
-        entry.agentId,
+        entry.roster ? `${entry.roster.label}  ${entry.agentId}` : entry.agentId,
         `machine ${entry.nodeName ? `${entry.nodeName} (${entry.nodeId})` : entry.nodeId ?? "unknown"}`,
         `project ${entry.projectRoot ?? "unknown"}`,
         entry.state,

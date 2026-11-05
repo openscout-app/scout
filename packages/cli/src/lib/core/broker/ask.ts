@@ -125,13 +125,17 @@ function nextCallForAskFailure(input: {
   }
 
   if (!input.result.flight) {
+    const diagnostic = input.result.targetDiagnostic;
+    const detail = diagnostic?.state === "unknown" && "detail" in diagnostic ? diagnostic.detail?.trim() : undefined;
     return {
       tool: "agents_search",
       arguments: {
         query: input.target.display,
         currentDirectory: input.currentDirectory,
       },
-      reason: "Find a routable target, then retry the ask.",
+      reason: detail
+        ? `${detail.charAt(0).toUpperCase()}${detail.slice(1).replace(/\.?$/u, ".")} Find a routable target, then retry the ask.`
+        : "Find a routable target, then retry the ask.",
     };
   }
 
