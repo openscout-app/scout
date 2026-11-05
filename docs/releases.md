@@ -120,7 +120,7 @@ Commit the source, version manifests, `packages/cli/src/lib/shared/product.ts`,
 `docs.json`, and lockfile on a review branch. Merge only after the standalone
 checks and packed artifact audit pass.
 
-## 0.5.0 ask and reply
+## 0.5.1 ask and reply
 
 Scout now has two verbs for moving work. `scout ask` sends anything: new work,
 a follow-up, a question for the operator, or an FYI. `scout reply` answers it.
