@@ -712,6 +712,12 @@ describe("runInstallCommand", () => {
     expect(parseJsonOutput(result.stdout).installed).toBe("0.2.70");
     expect(world.calls.some(c => c.command === "codesign")).toBe(true);
     expect(world.calls.some(c => c.command === "spctl")).toBe(true);
+    // The current repository name is accepted alongside the former one; any other is not.
+    writeFileSync(receipt, JSON.stringify({ ...metadata, source: { ...metadata.source, repository: "openscout-app/scout-apps" } }));
+    expect(loadInstallCandidate(receipt, dmg).tag_name).toBe("v0.2.70");
+    writeFileSync(receipt, JSON.stringify({ ...metadata, source: { ...metadata.source, repository: "someone/else" } }));
+    expect(() => loadInstallCandidate(receipt, dmg)).toThrow(/Invalid/);
+    writeFileSync(receipt, JSON.stringify(metadata));
     writeFileSync(dmg, "corrupted bytes");
     expect(() => loadInstallCandidate(receipt, dmg)).toThrow(/mismatch/);
     metadata.verification.team = "WRONG";
