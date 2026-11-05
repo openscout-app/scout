@@ -1,6 +1,6 @@
 {
   "name": "@openscout/scout",
-  "version": "0.5.1-dev.1",
+  "version": "0.5.1",
   "mcpName": "io.github.openscout-app/scout",
   "description": "Coordinate Claude Code, Codex, Cursor, OpenCode, Kimi, Grok, Pi, and Devin agents with local-first messaging, task orchestration, and MCP.",
   "keywords": [
