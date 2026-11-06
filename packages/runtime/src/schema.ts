@@ -128,6 +128,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_route_alias_revisions_binding_revision
   ON route_alias_revisions (binding_id, revision);
 CREATE INDEX IF NOT EXISTS idx_route_alias_revisions_binding_created
   ON route_alias_revisions (binding_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS roster_projects (
+  project_key TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  code TEXT,
+  code_source TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CONSTRAINT roster_projects_code_source_check CHECK (code_source IN ('default', 'operator', 'import'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_projects_code
+  ON roster_projects (code)
+  WHERE code IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS roster_agents (
+  agent_id TEXT PRIMARY KEY NOT NULL,
+  number INTEGER NOT NULL,
+  project_key TEXT,
+  project TEXT,
+  source TEXT NOT NULL,
+  assigned_at INTEGER NOT NULL,
+  active_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  gone_at INTEGER,
+  CONSTRAINT roster_agents_number_check CHECK (number BETWEEN 1 AND 999),
+  CONSTRAINT roster_agents_source_check CHECK (source IN ('auto', 'import'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_agents_number
+  ON roster_agents (number);
+CREATE INDEX IF NOT EXISTS idx_roster_agents_project_key
+  ON roster_agents (project_key);
 `;
 
 // Scout-owned registry of harness sessions and the disposable terminal surfaces

@@ -15,7 +15,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-import type { ConversationDefinition, TrustedPeerRecord } from "@openscout/protocol";
+import { agentRosterTag, type ConversationDefinition, type TrustedPeerRecord } from "@openscout/protocol";
 
 import {
   createBrokerHttpRouter,
@@ -502,6 +502,86 @@ describe("createBrokerHttpRouter", () => {
       { since: null, scope: "agents" },
       { since: null, scope: "agents" },
     ]);
+  });
+
+  test("local snapshot agents carry their roster tags; the mesh snapshot leaves them out", async () => {
+    const tag = agentRosterTag({ number: 3, projectCode: "OS" });
+    const brokerService = {
+      ...createHarness().deps.brokerService,
+      readSnapshot: async () => ({ agents: { "agent-a": { id: "agent-a" }, "agent-b": { id: "agent-b" } } }) as never,
+    };
+    const harness = createHarness({ brokerService, agentRosterService: { tags: () => new Map([["agent-a", tag]]) } as never });
+
+    const local = await requestRouter(harness, "GET", "/v1/snapshot?scope=agents");
+    expect(local.body).toEqual({ agents: { "agent-a": { id: "agent-a", roster: tag }, "agent-b": { id: "agent-b" } } });
+    const mesh = await requestRouter(harness, "GET", "/v1/mesh/snapshot");
+    expect(mesh.body).toEqual({ agents: { "agent-a": { id: "agent-a" }, "agent-b": { id: "agent-b" } } });
+
+    // A roster that cannot be read leaves the snapshot untagged, never unserved.
+    const failing = createHarness({
+      brokerService,
+      agentRosterService: { tags: () => { throw new Error("database is locked"); } } as never,
+    });
+    const untagged = await requestRouter(failing, "GET", "/v1/snapshot");
+    expect(untagged.response.status).toBe(200);
+    expect(untagged.body).toEqual({ agents: { "agent-a": { id: "agent-a" }, "agent-b": { id: "agent-b" } } });
+  });
+
+  test("both snapshots drop a roster field that a record carries without a current tag", async () => {
+    const stale = agentRosterTag({ number: 3, projectCode: "OS" });
+    const brokerService = {
+      ...createHarness().deps.brokerService,
+      readSnapshot: async () => ({ agents: { "agent-a": { id: "agent-a", roster: stale } } }) as never,
+    };
+    const services = [
+      { tags: () => new Map() },
+      { tags: () => { throw new Error("database is locked"); } },
+      undefined,
+    ];
+    for (const agentRosterService of services) {
+      const harness = createHarness({ brokerService, agentRosterService: agentRosterService as never });
+      for (const path of ["/v1/snapshot", "/v1/mesh/snapshot"]) {
+        expect((await requestRouter(harness, "GET", path)).body).toEqual({ agents: { "agent-a": { id: "agent-a" } } });
+      }
+    }
+  });
+
+  test("roster routes refuse remote, guest and scoped callers even when ingress only warns", async () => {
+    const calls: string[] = [];
+    const agentRosterService = {
+      list: () => { calls.push("list"); return { agents: [], projects: [], capacity: { max: 999, held: 0 } }; },
+      setProjectCode: () => { calls.push("set"); return {}; },
+      importEntries: () => { calls.push("import"); return {}; },
+      resolve: () => { calls.push("resolve"); return {}; },
+      tags: () => new Map(),
+    };
+    const harness = createHarness({ agentRosterService: agentRosterService as never });
+    const routes: Array<[string, string, unknown]> = [
+      ["GET", "/v1/roster", undefined],
+      ["POST", "/v1/roster/projects/code", { project: "openscout", code: "ZZ" }],
+      ["POST", "/v1/roster/import", { entries: [] }],
+      ["POST", "/v1/roster/resolve", { address: "OS-001" }],
+    ];
+    // A scoped grant is refused before the roster block (access_denied); the
+    // roster refuses remote and guest callers itself.
+    const refused: Array<[unknown, string]> = [
+      [{ transport: "remote", remoteAddress: "192.168.1.50" }, "local_only"],
+      [{ transport: "loopback", guest: {} }, "local_only"],
+      [{ transport: "loopback", scoped: {} }, "access_denied"],
+    ];
+    for (const [transportContext, error] of refused) {
+      for (const [method, path, body] of routes) {
+        const result = await requestRouter(harness, method, path, { body, transportContext: transportContext as never });
+        expect(result.response.status).toBe(403);
+        expect(result.body).toMatchObject({ error });
+      }
+    }
+    expect(calls).toEqual([]);
+    for (const [method, path, body] of routes) {
+      const result = await requestRouter(harness, method, path, { body, transportContext: { transport: "loopback" } });
+      expect(result.response.status).toBe(200);
+    }
+    expect(calls).toEqual(["list", "set", "import", "resolve"]);
   });
 
   test("notification routing is metadata-only, machine-local, and absent on older services", async () => {

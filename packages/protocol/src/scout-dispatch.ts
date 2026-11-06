@@ -1,5 +1,6 @@
 import type { AgentHarness, WakePolicy } from "./actors.js";
 import type { AdvertiseScope, DeliveryTransport, MetadataMap, ScoutId } from "./common.js";
+import type { AgentRosterDiagnosticCode } from "./agent-roster.js";
 import type { RouteAliasDiagnosticCode, RouteAliasResolutionProof, RouteAliasScope } from "./route-aliases.js";
 
 export type ScoutDispatchKind = "ambiguous" | "unknown" | "unparseable" | "unavailable";
@@ -120,6 +121,9 @@ export interface ScoutDispatchUnavailableTarget {
   projectRoot?: string | null;
 }
 
+/** Why a target did not resolve: a route alias or a roster code diagnostic. */
+export type ScoutDispatchDiagnosticCode = RouteAliasDiagnosticCode | AgentRosterDiagnosticCode;
+
 export interface ScoutDispatchEnvelope {
   kind: ScoutDispatchKind;
   askedLabel: string;
@@ -128,7 +132,7 @@ export interface ScoutDispatchEnvelope {
   target?: ScoutDispatchUnavailableTarget;
   dispatchedAt: number;
   dispatcherNodeId: ScoutId;
-  diagnosticCode?: RouteAliasDiagnosticCode;
+  diagnosticCode?: ScoutDispatchDiagnosticCode;
   /** Exact-session wake refusal code (session_unknown, session_live_unbound, …). */
   sessionWakeReason?: string;
   aliasResolution?: RouteAliasResolutionProof;

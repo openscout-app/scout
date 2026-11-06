@@ -153,6 +153,8 @@ import {
   BrokerRouteAliasError,
   type BrokerRouteAliasService,
 } from "./broker-route-alias-service.js";
+import { AgentRosterError, withRosterTags, type AgentRosterService } from "./agent-roster-service.js";
+import type { AgentRosterImportRequest, RosterProjectCodeSetRequest } from "@openscout/protocol";
 import type { SignedNodeCard } from "./node-identity.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
 import type { MeshGateMode } from "./mesh-ingress-gate.js";
@@ -313,6 +315,7 @@ export type BrokerHttpRouterDeps = {
   externalSessionService?: BrokerExternalSessionService;
   t3Service?: BrokerT3Service;
   routeAliasService?: BrokerRouteAliasService;
+  agentRosterService?: AgentRosterService;
   integrationSetupService?: BrokerIntegrationSetupService;
   integrationSlackDelivery?: IntegrationSlackDeliveryService;
   integrationSlackEvents?: IntegrationSlackEvents;
@@ -508,6 +511,7 @@ export function createBrokerHttpRouter(
     deliveryAcceptanceService,
     rendezvousService,
     routeAliasService,
+    agentRosterService,
     integrationSetupService,
     integrationSlackDelivery,
     integrationSlackEvents,
@@ -868,6 +872,66 @@ export function createBrokerHttpRouter(
       else json(response, 500, { error: "integration_setup_failed", detail: "Integration setup could not be persisted. Read status before retrying." });
     }
     return;
+  }
+
+  if (url.pathname === "/v1/roster" || url.pathname.startsWith("/v1/roster/")) {
+    // Local tier. Refused here too, so verify-warn ingress cannot let a peer
+    // read or rename the roster (same rule as the other machine-local routes).
+    const context = request.transportContext;
+    if (context && (context.transport === "remote" || context.guest || context.scoped)) {
+      json(response, 403, { error: "local_only", detail: "the agent roster is machine-local" });
+      return;
+    }
+    if (!agentRosterService) {
+      json(response, 503, { error: "roster_unavailable", detail: "the agent roster requires broker SQLite persistence" });
+      return;
+    }
+    const handleRosterError = (error: unknown): void => {
+      if (error instanceof AgentRosterError) {
+        json(response, error.code === "project_code_held" ? 409 : error.code === "unknown_project" ? 404 : 400, {
+          error: error.code,
+          detail: error.message,
+          ...(error.details ?? {}),
+        });
+        return;
+      }
+      badRequest(response, error);
+    };
+    if (method === "GET" && url.pathname === "/v1/roster") {
+      json(response, 200, agentRosterService.list());
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/roster/projects/code") {
+      try {
+        const body = await readRequestBody<RosterProjectCodeSetRequest>(request);
+        json(response, 200, { project: agentRosterService.setProjectCode(body) });
+      } catch (error) {
+        handleRosterError(error);
+      }
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/roster/import") {
+      try {
+        const body = await readRequestBody<AgentRosterImportRequest>(request);
+        if (!body || !Array.isArray(body.entries)) {
+          json(response, 400, { error: "invalid_import", detail: "the body needs an entries array of { agentId, number, projectCode }" });
+          return;
+        }
+        json(response, 200, agentRosterService.importEntries(body));
+      } catch (error) {
+        handleRosterError(error);
+      }
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/roster/resolve") {
+      try {
+        const body = await readRequestBody<{ address?: string }>(request);
+        json(response, 200, agentRosterService.resolve(String(body?.address ?? "")));
+      } catch (error) {
+        handleRosterError(error);
+      }
+      return;
+    }
   }
 
   if ((url.pathname.startsWith("/v1/aliases") || url.pathname.startsWith("/v1/mesh/aliases")) && !routeAliasService) {
@@ -1429,12 +1493,20 @@ export function createBrokerHttpRouter(
       : requestedScope === "conversations" || requestedScope === "agents" || requestedScope === "identity"
         ? requestedScope
         : undefined;
+    // Local agent records carry their roster tag (OS-003). The mesh twin
+    // leaves it out: a roster number names an agent only on this runtime.
+    // Both strip a `roster` field a record carries without a current tag.
+    let rosterTags: ReturnType<AgentRosterService["tags"]> = new Map();
+    if (url.pathname === "/v1/snapshot" && agentRosterService) {
+      try { rosterTags = agentRosterService.tags(); } catch { rosterTags = new Map(); }
+    }
+    const tagged=<T extends Parameters<typeof writeBrokerSnapshot>[1]>(snapshot:T):T=>withRosterTags(snapshot,rosterTags);
     const controller=new AbortController();const abort=()=>controller.abort(new Error('Snapshot request closed'));
     response.on('close',abort);response.on('error',abort);request.on('aborted',abort);
     try{
       const query={since:parseSince(url),scope:scope as "agents"|"conversations"|"identity"|undefined};
-      if(brokerService.withSnapshot)await brokerService.withSnapshot(query,snapshot=>writeBrokerSnapshot(response,snapshot,{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes,signal:controller.signal}),{signal:controller.signal});
-      else await writeBrokerSnapshot(response,await brokerService.readSnapshot(query),{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes});
+      if(brokerService.withSnapshot)await brokerService.withSnapshot(query,snapshot=>writeBrokerSnapshot(response,tagged(snapshot),{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes,signal:controller.signal}),{signal:controller.signal});
+      else await writeBrokerSnapshot(response,tagged(await brokerService.readSnapshot(query)),{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes});
     }finally{response.off?.('close',abort);response.off?.('error',abort);}
     return;
   }

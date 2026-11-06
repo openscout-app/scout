@@ -1,6 +1,6 @@
 import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
-import { validateTaskAsk, validateTaskReply, type ScoutTaskReply } from "@openscout/protocol";
+import { parseRosterAddress, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
@@ -76,6 +76,7 @@ import {
   readScoutLabelFeed,
   readScoutLabelBrief,
   resolveScoutBrokerUrl,
+  loadScoutRosterTags,
   resolveScoutSenderId,
   sendScoutMessage,
   sendScoutMessageToAgentIds,
@@ -414,6 +415,8 @@ export type ScoutMcpAgentCandidate = {
   projectRoot: string | null;
   transport: string | null;
   sessionId?: string | null;
+  /** The agent's roster code (`OS-003`), when it holds a roster number. */
+  roster?: AgentRosterTag;
 };
 
 export type ScoutMcpResolveResult = {
@@ -848,6 +851,13 @@ const agentCandidateSchema = z.object({
   projectRoot: z.string().nullable(),
   transport: z.string().nullable(),
   sessionId: z.string().nullable().optional(),
+  roster: z.object({
+    number: z.number().int(),
+    numberText: z.string(),
+    projectCode: z.string().nullable(),
+    code: z.string(),
+    label: z.string(),
+  }).optional(),
 });
 
 const scoutReturnAddressSchema = z.object({
@@ -2854,6 +2864,27 @@ async function loadScoutAgentDirectory(
   });
 }
 
+/** Roster tags by agent id; empty when the broker has no roster. */
+async function loadRosterTagsForMcp(): Promise<Map<string, AgentRosterTag>> {
+  return loadScoutRosterTags(resolveScoutBrokerUrl()).catch(() => new Map<string, AgentRosterTag>());
+}
+
+/** The agent a roster code (`OS-003`, `os003`, `003`) names, or null. Never a guess. */
+function rosterAgentIdFor(label: string | undefined, tags: Map<string, AgentRosterTag>): string | null {
+  const address = parseRosterAddress(label);
+  if (!address) return null;
+  for (const [agentId, tag] of tags) {
+    if (tag.number !== address.number) continue;
+    return !address.projectCode || address.projectCode === tag.projectCode ? agentId : null;
+  }
+  return null;
+}
+
+function withRosterTag(candidate: ScoutMcpAgentCandidate, tags: Map<string, AgentRosterTag>): ScoutMcpAgentCandidate {
+  const roster = tags.get(candidate.agentId);
+  return roster ? { ...candidate, roster } : candidate;
+}
+
 export async function searchScoutAgentsForMcp(input: {
   query?: string;
   currentDirectory: string;
@@ -2866,11 +2897,19 @@ export async function searchScoutAgentsForMcp(input: {
     console.error(`searchScoutAgentsForMcp ${label} ${Math.round(performance.now() - mark)}ms`);
     mark = performance.now();
   };
-  const entries = await loadScoutAgentDirectory(input.currentDirectory);
+  const [entries, rosterTags] = await Promise.all([
+    loadScoutAgentDirectory(input.currentDirectory),
+    loadRosterTagsForMcp(),
+  ]);
   lap("load");
   const directory = buildAgentCandidateDirectory(entries);
   const candidates = directory.candidates;
   lap("candidates");
+  const rosterAgentId = rosterAgentIdFor(input.query, rosterTags);
+  if (rosterAgentId) {
+    const match = candidates.find((candidate) => candidate.agentId === rosterAgentId);
+    return match ? [withRosterTag(withMinimalLabel(match, directory), rosterTags)] : [];
+  }
   const normalizedQuery = normalizeSearchValue(input.query);
   const currentProjectRoot =
     await findNearestProjectRoot(input.currentDirectory) ?? input.currentDirectory;
@@ -2899,7 +2938,7 @@ export async function searchScoutAgentsForMcp(input: {
       );
     })
     .slice(0, limit)
-    .map((entry) => withMinimalLabel(entry.candidate, directory));
+    .map((entry) => withRosterTag(withMinimalLabel(entry.candidate, directory), rosterTags));
   lap("score+sort+decorate");
   return result;
 }
@@ -2913,9 +2952,23 @@ export async function resolveScoutAgentForMcp(input: {
     return { kind: "unresolved", candidate: null, candidates: [] };
   }
 
-  const entries = await loadScoutAgentDirectory(input.currentDirectory);
+  const [entries, rosterTags] = await Promise.all([
+    loadScoutAgentDirectory(input.currentDirectory),
+    parseRosterAddress(rawLabel) ? loadRosterTagsForMcp() : Promise.resolve(new Map<string, AgentRosterTag>()),
+  ]);
   const directory = buildAgentCandidateDirectory(entries);
   const candidates = directory.candidates;
+  const rosterAgentId = rosterAgentIdFor(rawLabel, rosterTags);
+  const rosterMatch = rosterAgentId
+    ? candidates.find((candidate) => candidate.agentId === rosterAgentId)
+    : undefined;
+  if (rosterMatch) {
+    return {
+      kind: "resolved",
+      candidate: withRosterTag(withMinimalLabel(rosterMatch, directory), rosterTags),
+      candidates: [],
+    };
+  }
   const exactMatches = candidates.filter((candidate) =>
     exactCandidateMatches(candidate, rawLabel),
   );
