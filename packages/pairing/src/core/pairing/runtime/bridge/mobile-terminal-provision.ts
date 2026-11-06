@@ -1,3 +1,4 @@
+import { requireCredentialIdentity } from "./credential-binding.ts";
 // Mobile terminal provisioning — the I/O shell around the pure
 // `provisionSshTerminalAccess` grant logic.
 //
@@ -73,12 +74,15 @@ export interface MobileTerminalStatusResult {
 export async function readMobileTerminalStatus(
   requestedSessionName: string | undefined,
   deviceId: string,
+  credentialBinding: unknown,
 ): Promise<MobileTerminalStatusResult> {
+  const binding = requireCredentialIdentity(credentialBinding);
   const authorizedKeysPath = join(homedir(), ".ssh", "authorized_keys");
   const authorizedKeys = existsSync(authorizedKeysPath)
     ? readFileSync(authorizedKeysPath, "utf8")
     : "";
-  const provisionedSessionName = findSshTerminalSessionForDevice(authorizedKeys, deviceId);
+  const provisionedSessionName = findSshTerminalSessionForDevice(authorizedKeys, binding.publicKey);
+  if (!provisionedSessionName) throw new Error("No SSH terminal session is established for this full-key owner");
   const sessionName = authorizedMobileTerminalSessionName(
     requestedSessionName,
     provisionedSessionName,
@@ -102,12 +106,15 @@ export async function readMobileTerminalStatus(
       maxStdoutBytes: 4 * 1024,
       maxStderrBytes: 4 * 1024,
     });
+    binding.admit();
     tmuxPath = resolved.stdout.trim();
     if (!tmuxPath) return base;
   } catch {
+    binding.admit();
     return base;
   }
 
+  binding.admit();
   const installed = { ...base, wrapperInstalled: true };
   try {
     await execSystemFile(tmuxPath, ["has-session", "-t", sessionName], {
@@ -116,9 +123,11 @@ export async function readMobileTerminalStatus(
       maxStderrBytes: 4 * 1024,
     });
   } catch {
+    binding.admit();
     return installed;
   }
 
+  binding.admit();
   const [clients, panes] = await Promise.all([
     execSystemFile(tmuxPath, ["list-clients", "-t", sessionName, "-F", "#{client_name}"], {
       timeoutMs: 2_000,
@@ -135,6 +144,7 @@ export async function readMobileTerminalStatus(
     }).catch(() => ({ stdout: "", stderr: "", exitCode: 0 })),
   ]);
 
+  binding.admit();
   const attachedClients = clients.stdout.split("\n").filter((line) => line.trim()).length;
   const [columnsRaw, rowsRaw, commandRaw] = panes.stdout.trim().split("\t");
   const paneColumns = Number.parseInt(columnsRaw ?? "", 10);
@@ -154,7 +164,9 @@ export async function provisionMobileTerminalAccess(
   sshPublicKey: string,
   deviceId: string | undefined,
   deviceClass: string | undefined = undefined,
+  credentialBinding?: object,
 ): Promise<MobileTerminalProvisionResult> {
+  const binding = requireCredentialIdentity(credentialBinding);
   const id = deviceId?.trim() || "scout-ios-device";
   const sessionName = provisionedMobileTerminalSessionName(sshPublicKey, deviceClass);
   const sshDir = join(homedir(), ".ssh");
@@ -162,6 +174,7 @@ export async function provisionMobileTerminalAccess(
   const hostKeyFingerprint = readRequiredHostKeyFingerprint();
 
   const result = withAuthorizedKeysLock(sshDir, () => {
+    binding.admit();
     if (!existsSync(sshDir)) {
       mkdirSync(sshDir, { recursive: true, mode: 0o700 });
     }
@@ -178,11 +191,13 @@ export async function provisionMobileTerminalAccess(
     const result = provisionSshTerminalAccess({
       authorizedKeys: existing,
       deviceId: id,
+      pairingNoisePublicKey: binding.publicKey,
       sshPublicKey,
       terminalSessionName: sessionName,
     });
 
     if (result.changed) {
+      binding.admit();
       writeAuthorizedKeysAtomically(authorizedKeysPath, result.authorizedKeys);
       log.info(
         "terminal",
@@ -208,7 +223,9 @@ export async function provisionMobileTerminalAccess(
   // unlocked (GUI session) but a PASSWORD PROMPT over a bare SSH session. By
   // ensuring the session exists before the phone connects, every iOS connect
   // becomes a clean ATTACH (no new shell, no .zshrc, no keychain prompt).
+  binding.admit();
   await ensureMobileTmuxSession(sessionName);
+  binding.admit();
 
   return {
     host: resolveReachableHost(),
