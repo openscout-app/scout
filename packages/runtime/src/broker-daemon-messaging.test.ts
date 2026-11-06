@@ -441,6 +441,48 @@ describe("broker daemon messaging routes", () => {
     )).toBe(true);
   }, 15_000);
 
+  // History rotation moves old messages out of the runtime into SQLite.
+  // Opening a room whose messages are all that old named one of them as the
+  // read position, and the runtime answered "not found".
+  test("a message rotated out of the live window can still be marked read", async () => {
+    const first = await broker.startBroker();
+    await broker.seedBasicConversation(first);
+    const createdAt = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    await broker.postJson(first.baseUrl, "/v1/messages", {
+      id: "m-client-rotated-read", conversationId: "channel.shared", actorId: "operator",
+      originNodeId: first.nodeId, class: "agent", body: "An old room message",
+      audience: { delivery: "none" }, visibility: "workspace", policy: "durable", createdAt,
+    });
+    first.child.kill();
+    await first.child.exited;
+    broker.harnesses.delete(first);
+
+    // Startup maintenance rotates the message out once SQLite holds it.
+    const second = await broker.startBroker({ controlHome: first.controlHome });
+    const live = await broker.waitFor(
+      () => broker.getJson<{ messages?: Record<string, unknown> }>(second.baseUrl, "/v1/snapshot"),
+      (snapshot) => !snapshot.messages?.["m-client-rotated-read"],
+      { attempts: 100 },
+    );
+    expect(live.messages?.["m-client-rotated-read"]).toBeUndefined();
+    // The message is still durable: point reads fall back to SQLite.
+    expect((await broker.requestJson(second.baseUrl, "/v1/messages/m-client-rotated-read")).status).toBe(200);
+
+    const marked = await broker.postJsonStatus(second.baseUrl, "/v1/conversations/channel.shared/read-cursors", {
+      actorId: "operator", lastReadMessageId: "m-client-rotated-read", metadata: { source: "scout-chat" },
+    });
+    expect(marked.status).toBe(200);
+    expect((marked.body as { cursor: unknown }).cursor).toEqual(expect.objectContaining({
+      actorId: "operator",
+      lastReadMessageId: "m-client-rotated-read",
+      metadata: expect.objectContaining({ scoutReadBoundary: { id: "m-client-rotated-read", createdAt } }),
+    }));
+    const cursors = await broker.getJson<Array<{ actorId: string; lastReadMessageId?: string }>>(
+      second.baseUrl, "/v1/conversations/channel.shared/read-cursors",
+    );
+    expect(cursors).toContainEqual(expect.objectContaining({ actorId: "operator", lastReadMessageId: "m-client-rotated-read" }));
+  }, 30_000);
+
   test("rejects inbox nack when the caller does not own the active lease", async () => {
     const harness = await broker.startBroker();
     await broker.seedBasicConversation(harness);

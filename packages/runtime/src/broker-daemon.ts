@@ -596,6 +596,12 @@ const sharedControlPlaneStore = sqliteDisabled
   ? null
   : new LazyControlPlaneStore(() => new SQLiteControlPlaneStore(dbPath));
 const projection = new WorkerSQLiteProjection(dbPath, journalPath, journal, { disabled: sqliteDisabled, historyDirectory });
+/**
+ * Any durable message by id. History rotation keeps only the live window in
+ * the runtime; SQLite (or the history archive without SQLite) holds the rest.
+ */
+const readDurableMessage = async (id: string): Promise<MessageRecord | undefined> => await runtime.readMessage(id)
+  ?? (sqliteDisabled ? historicalReader.read<MessageRecord>("message", id) : (await projection.readMessages([id])).get(id));
 let observedSessionReducer: ObservedSessionReducer | null = null;
 let unsubscribeObservedSessionReducer: (() => void) | null = null;
 let projectionWarmStarted = false;
@@ -956,6 +962,7 @@ const readCursorStore = new BrokerReadCursorStore({
   operatorActorId,
   nodeId,
   ensureActor: ensureBrokerActorForDelivery,
+  readMessage: readDurableMessage,
   journal,
   updateDeliveryStatusIf: deliveryStore.updateDeliveryStatusIf,
 });
@@ -2109,7 +2116,7 @@ if (process.env.OPENSCOUT_ATTACHMENTS_DISABLED !== "1" && !sqliteDisabled) {
         if (endpoints.length) return endpoints.some(e => e.nodeId === principal.nodeId && e.state !== "stopped");
         return principal.nodeId === nodeId && Boolean(runtime.peek().actors[principal.actorId]);
       },
-      message: async id => await runtime.readMessage(id) ?? (sqliteDisabled ? historicalReader.read<MessageRecord>("message", id) : (await projection.readMessages([id])).get(id)),
+      message: readDurableMessage,
       post: message => postConversationMessage(message),
     });
   } catch {
@@ -3331,8 +3338,7 @@ const routeRequest = createBrokerHttpRouter({
   deliveryReceiptsOwnedByService: true,
   readFlight: async id => runtime.flight(id)
     ?? (sqliteDisabled ? historicalReader.read<FlightRecord>("flight", id) : (await projection.readFlights([id])).get(id)),
-  readMessage: async id => await runtime.readMessage(id)
-    ?? (sqliteDisabled ? historicalReader.read<MessageRecord>("message", id) : (await projection.readMessages([id])).get(id)),
+  readMessage: readDurableMessage,
   readHistoricalInvocationSnapshot: id => projection.readInvocationSnapshot(id),
   historyQueries: { read: (kind, ids) => projection.readHistoricalRecords(kind, ids),
     page: options => projection.pageHistoricalRecords(options) },

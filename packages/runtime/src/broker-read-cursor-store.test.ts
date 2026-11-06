@@ -57,8 +57,11 @@ function testDelivery(input: Partial<DeliveryIntent> = {}): DeliveryIntent {
 function createStore(input: {
   latestThreadSeq?: number;
   deliveries?: DeliveryIntent[];
+  /** Messages that history rotation moved out of the runtime's live window. */
+  durableHistory?: MessageRecord[];
 } = {}) {
   const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+  const durableHistory = new Map((input.durableHistory ?? []).map((message) => [message.id, message]));
   const appended: BrokerJournalEntry[][] = [];
   const ensuredActors: string[] = [];
   const deliveryUpdates: unknown[] = [];
@@ -92,6 +95,7 @@ function createStore(input: {
     ensureActor: async (actorId) => {
       ensuredActors.push(actorId);
     },
+    readMessage: async (messageId) => await runtime.readMessage(messageId) ?? durableHistory.get(messageId),
     journal: {
       async visitDeliveries(visitor) {
         for (const delivery of input.deliveries ?? []) await visitor(delivery);
@@ -252,6 +256,56 @@ describe("BrokerReadCursorStore", () => {
     await store.record(earlier);
     expect(runtime.readCursor("conversation-1", "agent-1")?.lastReadMessageId).toBe("b");
     expect((await store.resolve("conversation-1", { actorId: "agent-1", lastReadMessageId: "a" })).lastReadMessageId).toBe("b");
+  });
+
+  // A room whose messages all predate the rotation cutoff has none of them in
+  // the runtime. Its first read named a message SQLite still held, and the
+  // runtime answered "not found".
+  test("a message rotated out of the runtime window is still a valid read position", async () => {
+    const rotated = testMessage({ id: "m-client-rotated", createdAt: 100 });
+    const deliveries = [testDelivery({ id: "delivery-before", messageId: "m-protected", targetId: "operator", status: "pending" })];
+    const { runtime, store, deliveryUpdates } = createStore({ durableHistory: [rotated], deliveries });
+    await runtime.upsertConversation(testConversation());
+    // An active delivery keeps its own message in the live window.
+    await runtime.commitMessage(testMessage({ id: "m-protected", createdAt: 50 }), []);
+    expect(await runtime.readMessage("m-client-rotated")).toBeUndefined();
+
+    const cursor = await store.resolve("conversation-1", { actorId: "operator", lastReadMessageId: "m-client-rotated" });
+    expect(cursor.lastReadMessageId).toBe("m-client-rotated");
+    expect(cursor.metadata?.scoutReadBoundary).toEqual({ id: "m-client-rotated", createdAt: 100 });
+    await store.record(cursor);
+    expect(runtime.readCursor("conversation-1", "operator")?.lastReadMessageId).toBe("m-client-rotated");
+    expect(await store.acknowledgeDeliveries(cursor)).toBe(1);
+    expect(deliveryUpdates).toEqual([expect.objectContaining({ deliveryId: "delivery-before", status: "acknowledged" })]);
+  });
+
+  test("rotated read positions still order against the live window and never regress", async () => {
+    const { runtime, store } = createStore({ durableHistory: [
+      testMessage({ id: "rotated-older", createdAt: 50 }),
+      testMessage({ id: "rotated", createdAt: 100 }),
+    ] });
+    await runtime.upsertConversation(testConversation());
+    await runtime.commitMessage(testMessage({ id: "live", createdAt: 200 }), []);
+    await store.record(await store.resolve("conversation-1", { actorId: "operator", lastReadMessageId: "rotated" }));
+
+    const older = await store.resolve("conversation-1", { actorId: "operator", lastReadMessageId: "rotated-older" });
+    expect(older.lastReadMessageId).toBe("rotated");
+    await store.record(older);
+    expect(runtime.readCursor("conversation-1", "operator")?.lastReadMessageId).toBe("rotated");
+
+    await store.record(await store.resolve("conversation-1", { actorId: "operator", lastReadMessageId: "live" }));
+    expect(runtime.readCursor("conversation-1", "operator")?.lastReadMessageId).toBe("live");
+  });
+
+  test("durable history does not widen what a read position may name", async () => {
+    const { runtime, store } = createStore({ durableHistory: [
+      testMessage({ id: "rotated-elsewhere", conversationId: "conversation-2", createdAt: 100 }),
+    ] });
+    await runtime.upsertConversation(testConversation());
+    await expect(store.resolve("conversation-1", { actorId: "operator", lastReadMessageId: "rotated-elsewhere" }))
+      .rejects.toThrow("message rotated-elsewhere does not belong to conversation-1");
+    await expect(store.resolve("conversation-1", { actorId: "operator", lastReadMessageId: "missing" }))
+      .rejects.toThrow("message missing not found");
   });
 });
 
