@@ -240,14 +240,20 @@ function dialogLine(line: string): string {
  */
 export function permissionDialogView(text: string): AgentNotificationView {
   const lines = stripTerminalControls(text).split("\n").map(dialogLine);
-  const workspace = lines.findIndex((line) => /^Accessing workspace:/i.test(line));
-  if (workspace >= 0) {
-    const path = lines[workspace]!.replace(/^Accessing workspace:\s*/i, "").trim() || lines.slice(workspace + 1).find(Boolean) || "";
+  const proceed = lastIndex(lines, (line) => /\bDo you want to\b/i.test(line));
+  const workspace = lastIndex(lines, (line) => /^Accessing workspace:/i.test(line));
+  const trustChoice = lastIndex(lines, (line) => /^(?:❯\s*)?(?:\d+[.)]\s*)?Yes,\s*I trust this folder$/i.test(line));
+  const trustEnd = lastIndex(lines, (line) => /Enter to confirm.*Esc to cancel/i.test(line));
+  // A workspace mention in scrollback is not a folder-trust dialog. Require
+  // its actual choices and footer, newer than any tool-permission question.
+  if (workspace >= 0 && workspace > proceed && trustChoice > workspace && trustEnd > trustChoice
+    && lines.slice(trustChoice + 1, trustEnd).some((line) => /^(?:❯\s*)?(?:\d+[.)]\s*)?No, exit$/i.test(line))) {
+    const path = lines[workspace]!.replace(/^Accessing workspace:\s*/i, "").trim()
+      || lines.slice(workspace + 1, trustChoice).find(Boolean) || "";
     return { view: "turn.approve.tool", tool: "this folder", ...(path ? { summary: path } : {}) };
   }
 
   const dialog = parseContinuationDialog(text);
-  const proceed = lastIndex(lines, (line) => /\bDo you want to\b/i.test(line));
   const header = lastIndex(lines, (line, index) => (proceed < 0 || index < proceed) && DIALOG_HEADER.test(line));
   const detail: string[] = [];
   if (header >= 0 && (proceed < 0 || proceed - header <= 16)) {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { parseTmuxPermission } from "./tmux-permission.js";
 
 import type { Block, SessionState } from "@openscout/agent-sessions";
 
@@ -166,6 +167,20 @@ describe("permission request notifications", () => {
   test("an MCP call names the server and tool", () => {
     const text = dialog([" Tool use", "", "   scout - ask(to: \"pike\") (MCP)"]);
     expect(permissionDialogView(text)).toMatchObject({ view: "turn.approve.tool", tool: "scout ask" });
+  });
+
+  test("workspace scrollback cannot replace the live tool permission", () => {
+    const text = dialog(["Accessing workspace:", "/work/previous-project", "", " Tool use", "   scout - ask(to: pike) (MCP)"]);
+    const prompt = parseTmuxPermission(text);
+    expect(prompt).not.toBeNull();
+    const view = permissionDialogView(prompt!.text);
+    expect(view).toMatchObject({ view: "turn.approve.tool", tool: "scout ask", summary: "scout - ask(to: pike) (MCP)" });
+    expect(JSON.stringify(view)).not.toContain("previous-project");
+  });
+
+  test("workspace scrollback without a live trust choice stays out of unknown permissions", () => {
+    const view = permissionDialogView(dialog(["Accessing workspace:", "/work/previous-project", "", " Some new dialog header"]));
+    expect(view).toEqual({ view: "turn.approve.tool", tool: "a tool" });
   });
 
   test("the trust dialog names the folder", () => {
