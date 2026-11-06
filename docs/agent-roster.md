@@ -42,8 +42,11 @@ display name or session:
   a new number, as a new agent does.
 - **Activity is kept.** The roster stores the latest activity it has seen
   for each agent, so an agent does not look idle when its endpoint is
-  removed. The stored time moves forward only, never past the present, and
-  the runtime writes it when it has moved by an hour or more.
+  removed. The stored time moves forward only, never past the present. The
+  runtime writes it when it has moved by an hour or more, and at once when
+  the registry stops showing it. An activity time more than five minutes
+  ahead of the runtime's clock is ignored, so a bad timestamp cannot keep an
+  agent active.
 - **Reuse.** A freed number goes to the next new agent only when every lower
   number is held.
 - **Capacity.** The roster holds 999 numbers. When all of them are held, a
@@ -96,7 +99,9 @@ scout ask --to 003 "status?"
 ```
 
 A roster code resolves before any agent name, a bare alias included. An
-explicit `alias:` target still resolves as an alias. If no agent holds the
+explicit `alias:` target still resolves as an alias. A gone agent keeps its
+code until its number frees, so in that time the code fails with
+`roster_agent_gone` and no alias or name takes it. If no agent holds the
 code, an alias or an agent whose name looks like a code (for example
 `box100`) still resolves. Otherwise the target fails with a diagnostic. The
 runtime never guesses another agent:
@@ -106,7 +111,7 @@ runtime never guesses another agent:
 | `unknown_project_code` | No project holds the code (`XQ-003`). |
 | `unknown_roster_number` | No agent holds the number (`004`). |
 | `roster_code_mismatch` | The number belongs to an agent in another project (`PB-003` when 003 is `OS-003`). |
-| `roster_agent_gone` | The agent was deleted or retired, and its number frees soon. |
+| `roster_agent_gone` | The agent was deleted or retired, and its number frees soon. A code from another project is a mismatch instead. |
 
 ## Import from the apps
 

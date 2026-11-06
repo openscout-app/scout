@@ -381,9 +381,10 @@ export class BrokerDeliveryRouter {
       }
     }
     // A roster code names one agent, so it resolves before any name does,
-    // a bare alias included. When no agent holds it, an alias or a name that
-    // happens to look like a code still resolves; otherwise the roster's
-    // diagnostic is the answer.
+    // a bare alias included. A gone agent keeps its code until the number
+    // frees, so that code answers with the roster's diagnostic and nothing
+    // else. When no agent holds the code, an alias or a name that happens to
+    // look like a code still resolves; otherwise the diagnostic is the answer.
     const rosterAddress = rosterAddressText(input);
     let rosterMiss: InvocationResolution | null = null;
     if (rosterAddress && this.options.rosterService) {
@@ -398,6 +399,7 @@ export class BrokerDeliveryRouter {
         detail: roster.diagnostic?.detail ?? `no agent holds roster code ${rosterAddress}`,
         ...(roster.diagnostic ? { diagnosticCode: roster.diagnostic.code } : {}),
       };
+      if (roster.diagnostic?.code === "roster_agent_gone") return rosterMiss;
     }
     if (target?.kind === "target_handle" && this.options.routeAliasService) {
       try {

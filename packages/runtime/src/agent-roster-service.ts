@@ -61,9 +61,17 @@ export const ROSTER_IDLE_FREE_MS = 30 * 24 * 60 * 60_000;
  * How far the latest activity must move before the roster writes it down.
  * The stored activity outlives the endpoints it came from, so an agent whose
  * endpoint is pruned does not look idle; writing it at most hourly keeps
- * reconcile from writing a row on every registry change.
+ * reconcile from writing a row on every registry change. The service keeps
+ * the unwritten part in memory and writes it at once when the registry stops
+ * showing it.
  */
 export const ROSTER_ACTIVITY_WRITE_STEP_MS = 60 * 60_000;
+/**
+ * How far ahead of the runtime's clock an activity time may be and still
+ * count, as clock skew. A time further ahead is ignored rather than read as
+ * now, so a bad timestamp cannot keep an agent active.
+ */
+export const ROSTER_CLOCK_SKEW_MS = 5 * 60_000;
 
 /** The registry fields the roster reads. */
 export type AgentRosterRegistryView = {
@@ -134,34 +142,43 @@ function timestampMs(value: unknown): number {
   return numeric < 1_000_000_000_000 ? Math.round(numeric * 1000) : numeric;
 }
 
-function latestMetadataTimestamp(metadata: Record<string, unknown> | undefined, keys: readonly string[]): number {
+/** An activity time no later than now; 0 when it is past the clock skew allowance. */
+function activityAt(at: number, now: number): number {
+  return at > now + ROSTER_CLOCK_SKEW_MS ? 0 : Math.min(at, now);
+}
+
+function latestMetadataTimestamp(metadata: Record<string, unknown> | undefined, keys: readonly string[], now: number): number {
   let latest = 0;
-  for (const key of keys) latest = Math.max(latest, timestampMs(metadata?.[key]));
+  for (const key of keys) latest = Math.max(latest, activityAt(timestampMs(metadata?.[key]), now));
   return latest;
 }
 
 /** Each agent's latest endpoint activity. */
-function endpointActivityByAgent(registry: AgentRosterRegistryView): Map<string, number> {
+function endpointActivityByAgent(registry: AgentRosterRegistryView, now: number): Map<string, number> {
   const activity = new Map<string, number>();
   for (const endpoint of Object.values(registry.endpoints ?? {})) {
-    const at = latestMetadataTimestamp(endpoint.metadata, ENDPOINT_ACTIVITY_KEYS);
+    const at = latestMetadataTimestamp(endpoint.metadata, ENDPOINT_ACTIVITY_KEYS, now);
     if (at > (activity.get(endpoint.agentId) ?? 0)) activity.set(endpoint.agentId, at);
   }
   return activity;
 }
 
-/** When the runtime first saw an agent, and when the agent or one of its endpoints was last active. */
+/**
+ * When the runtime first saw an agent, and when the agent or one of its
+ * endpoints was last active. The activity is never later than now.
+ */
 function agentActivityAt(
   registry: AgentRosterRegistryView,
   agentId: string,
   agent: AgentDefinition,
   endpointActivity: ReadonlyMap<string, number>,
+  now: number,
 ): { firstSeenAt: number; activeAt: number } {
   const firstSeenAt = timestampMs(registry.actors?.[agentId]?.createdAt)
     || timestampMs(agent.metadata?.["registeredAt"]);
   const activeAt = Math.max(
-    firstSeenAt,
-    latestMetadataTimestamp(agent.metadata, AGENT_ACTIVITY_KEYS),
+    activityAt(firstSeenAt, now),
+    latestMetadataTimestamp(agent.metadata, AGENT_ACTIVITY_KEYS, now),
     endpointActivity.get(agentId) ?? 0,
   );
   return { firstSeenAt, activeAt };
@@ -227,6 +244,8 @@ export class AgentRosterService {
   private readonly goneGraceMs: number;
   private readonly activeWindowMs: number;
   private readonly idleFreeMs: number;
+  /** The latest activity reconcile has seen per agent, which can be ahead of the store by less than ROSTER_ACTIVITY_WRITE_STEP_MS. */
+  private readonly seenActivity = new Map<string, number>();
   private fullWarned = false;
 
   constructor(private readonly options: AgentRosterServiceOptions) {
@@ -240,7 +259,7 @@ export class AgentRosterService {
   reconcile(): AgentRosterReconcileResult {
     const registry = this.options.registry();
     const now = this.now();
-    const endpointActivity = endpointActivityByAgent(registry);
+    const endpointActivity = endpointActivityByAgent(registry, now);
     return this.options.store.transaction(() => {
       const state = this.load();
       const result: AgentRosterReconcileResult = { assigned: [], freed: [], unnumbered: 0 };
@@ -248,13 +267,15 @@ export class AgentRosterService {
       for (const row of [...state.agents.values()]) {
         const agent = registry.agents[row.agentId];
         if (agent && !isRosterRetiredAgent(agent)) {
-          const seenAt = Math.min(agentActivityAt(registry, row.agentId, agent, endpointActivity).activeAt, now);
-          const activeAt = Math.max(row.activeAt, seenAt);
+          const seenAt = agentActivityAt(registry, row.agentId, agent, endpointActivity, now).activeAt;
+          const activeAt = this.latestActivity(row, seenAt);
           if (now - Math.max(activeAt, row.assignedAt) >= this.idleFreeMs) {
             this.removeAgent(state, row.agentId);
+            this.seenActivity.delete(row.agentId);
             result.freed.push({ agentId: row.agentId, number: row.number, reason: "idle" });
             continue;
           }
+          this.seenActivity.set(row.agentId, activeAt);
           const project = rosterProjectNameForAgent(agent);
           const projectKey = project ? rosterProjectKey(project) : null;
           if (project) this.ensureProject(state, project, now);
@@ -263,6 +284,9 @@ export class AgentRosterService {
             || row.projectKey !== projectKey
             || row.project !== project
             || activeAt - row.activeAt >= ROSTER_ACTIVITY_WRITE_STEP_MS
+            // The registry no longer shows the latest activity (its endpoint
+            // was pruned), so only the store can keep it now.
+            || (activeAt > row.activeAt && seenAt < activeAt)
           ) {
             this.writeAgent(state, { ...row, project, projectKey, activeAt, goneAt: null, updatedAt: now });
           }
@@ -274,6 +298,7 @@ export class AgentRosterService {
         }
         if (now - row.goneAt >= this.goneGraceMs) {
           this.removeAgent(state, row.agentId);
+          this.seenActivity.delete(row.agentId);
           result.freed.push({ agentId: row.agentId, number: row.number, reason: "gone" });
         }
       }
@@ -389,7 +414,7 @@ export class AgentRosterService {
     const dryRun = request.dryRun === true;
     const registry = this.options.registry();
     const now = this.now();
-    const endpointActivity = endpointActivityByAgent(registry);
+    const endpointActivity = endpointActivityByAgent(registry, now);
     const run = (): AgentRosterImportResult => {
       const state = this.load();
       const result: AgentRosterImportResult = { dryRun, imported: [], renumbered: [], projectCodes: [], conflicts: [] };
@@ -452,7 +477,10 @@ export class AgentRosterService {
           number,
           project: rosterProjectNameForAgent(agent),
           projectCode: raw.projectCode,
-          activeAt: Math.max(current?.activeAt ?? 0, Math.min(agentActivityAt(registry, agentId, agent, endpointActivity).activeAt, now)),
+          activeAt: Math.max(
+            current ? this.latestActivity(current, 0) : 0,
+            agentActivityAt(registry, agentId, agent, endpointActivity, now).activeAt,
+          ),
           unchanged: current?.source === "import" && current.number === number,
         });
       }
@@ -483,7 +511,7 @@ export class AgentRosterService {
       }
       for (const row of displaced) {
         const to = this.lowestFreeNumber(state);
-        if (to !== null) this.writeAgent(state, { ...row, number: to, assignedAt: now, updatedAt: now });
+        if (to !== null) this.writeAgent(state, { ...row, number: to, assignedAt: now, activeAt: this.latestActivity(row, 0), updatedAt: now });
         result.renumbered.push({ agentId: row.agentId, from: row.number, to });
       }
 
@@ -583,15 +611,16 @@ export class AgentRosterService {
       return this.unresolved(text, "unknown_roster_number", `no agent holds roster number ${number}`);
     }
     const entry = this.entryFrom(state, row);
-    const agent = this.options.registry().agents[row.agentId];
-    if (row.goneAt !== null || !agent || isRosterRetiredAgent(agent)) {
-      return { ...this.unresolved(text, "roster_agent_gone", `${entry.code} belonged to ${row.agentId}, which the runtime no longer lists`), entry };
-    }
     if (parsed.projectCode && parsed.projectCode !== entry.projectCode) {
       return {
         ...this.unresolved(text, "roster_code_mismatch", `${parsed.projectCode}-${number} names no agent: ${number} is ${entry.code} (${row.agentId})`),
         entry,
       };
+    }
+    // The code still belongs to a gone agent until its number frees.
+    const agent = this.options.registry().agents[row.agentId];
+    if (row.goneAt !== null || !agent || isRosterRetiredAgent(agent)) {
+      return { ...this.unresolved(text, "roster_agent_gone", `${entry.code} belonged to ${row.agentId}, which the runtime no longer lists`), entry };
     }
     return { address: text, resolved: true, entry };
   }
@@ -624,6 +653,11 @@ export class AgentRosterService {
     this.options.store.upsertAgent(row);
     state.agents.set(row.agentId, row);
     state.byNumber.set(row.number, row);
+  }
+
+  /** The latest activity known for a row: stored, seen by an earlier reconcile, or seen now. */
+  private latestActivity(row: RosterAgentRow, seenAt: number): number {
+    return Math.max(row.activeAt, this.seenActivity.get(row.agentId) ?? 0, seenAt);
   }
 
   private removeAgent(state: RosterState, agentId: string): void {
@@ -684,7 +718,7 @@ export class AgentRosterService {
     const newcomers: Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number; activeAt: number }> = [];
     for (const [agentId, agent] of Object.entries(registry.agents)) {
       if (state.agents.has(agentId) || isRosterRetiredAgent(agent)) continue;
-      const { firstSeenAt, activeAt } = agentActivityAt(registry, agentId, agent, endpointActivity);
+      const { firstSeenAt, activeAt } = agentActivityAt(registry, agentId, agent, endpointActivity, now);
       if (activeAt < cutoff) continue;
       newcomers.push({ agentId, agent, firstSeenAt: firstSeenAt || activeAt, activeAt });
     }

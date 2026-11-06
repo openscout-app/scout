@@ -6,6 +6,7 @@ import {
   AgentRosterError,
   AgentRosterService,
   ROSTER_ACTIVITY_WRITE_STEP_MS,
+  ROSTER_CLOCK_SKEW_MS,
   ROSTER_IDLE_FREE_MS,
   withRosterTags,
   type AgentRosterRegistryView,
@@ -279,7 +280,7 @@ describe("AgentRosterService assignment", () => {
     expect(service.reconcile().freed).toEqual([{ agentId: "agent.a", number: 1, reason: "idle" }]);
   });
 
-  test("writes the activity it sees at most once an hour, and never a time in the future", () => {
+  test("writes the activity it sees at most once an hour, and ignores a time in the future", () => {
     const { database, registry, clock, service, add } = setup();
     add("agent.a", "a", "openscout");
     service.reconcile();
@@ -300,10 +301,60 @@ describe("AgentRosterService assignment", () => {
     service.reconcile();
     expect(stored()).toEqual({ active_at: clock.now, updated_at: clock.now });
 
+    const written = clock.now;
     clock.now += ROSTER_ACTIVITY_WRITE_STEP_MS;
     touch(clock.now + 365 * DAY);
     service.reconcile();
+    expect(stored()?.active_at).toBe(written);
+
+    // A small clock skew still counts, as the present.
+    clock.now += ROSTER_ACTIVITY_WRITE_STEP_MS;
+    touch(clock.now + ROSTER_CLOCK_SKEW_MS);
+    service.reconcile();
     expect(stored()?.active_at).toBe(clock.now);
+  });
+
+  test("a time stuck in the future does not keep an agent active", () => {
+    const { registry, clock, service, add } = setup();
+    add("agent.a", "a", "openscout");
+    registry.endpoints["ep.a"] = endpoint("ep.a", "agent.a", { lastSeenAt: START + 365 * DAY });
+    service.reconcile();
+    for (let day = 1; day < 30; day++) {
+      clock.now = START + day * DAY;
+      expect(service.reconcile().freed).toEqual([]);
+    }
+    clock.now = START + ROSTER_IDLE_FREE_MS;
+    expect(service.reconcile().freed).toEqual([{ agentId: "agent.a", number: 1, reason: "idle" }]);
+  });
+
+  test("keeps activity the roster had not yet written when its endpoint is pruned, across a restart", () => {
+    const { database, registry, clock, service, add } = setup();
+    add("agent.a", "a", "openscout");
+    service.reconcile();
+    clock.now = START + 29 * DAY;
+    registry.endpoints["ep.a"] = endpoint("ep.a", "agent.a", { lastCompletedAt: clock.now });
+    service.reconcile();
+    // Seen again 59 minutes later: under the write step, so held in memory only.
+    clock.now += ROSTER_ACTIVITY_WRITE_STEP_MS - 60_000;
+    const lastActive = clock.now;
+    registry.endpoints["ep.a"] = endpoint("ep.a", "agent.a", { lastCompletedAt: lastActive });
+    service.reconcile();
+    delete registry.endpoints["ep.a"];
+    clock.now += 60_000;
+    service.reconcile();
+    expect(database.query<{ active_at: number }>("SELECT active_at FROM roster_agents WHERE agent_id = 'agent.a'").get())
+      .toEqual({ active_at: lastActive });
+
+    const restarted = new AgentRosterService({
+      store: new AgentRosterStore(database),
+      registry: () => registry as AgentRosterRegistryView,
+      now: () => clock.now,
+    });
+    clock.now = lastActive + ROSTER_IDLE_FREE_MS - 1;
+    add("agent.b", "b", "openscout");
+    expect(restarted.reconcile()).toMatchObject({ freed: [], assigned: [{ agentId: "agent.b", number: 2 }] });
+    clock.now += 1;
+    expect(restarted.reconcile().freed).toEqual([{ agentId: "agent.a", number: 1, reason: "idle" }]);
   });
 
   test("stops at 999 and says the roster is full", () => {
@@ -575,6 +626,15 @@ describe("AgentRosterService addresses", () => {
     expect(service.resolve("03")).toMatchObject({ resolved: false, diagnostic: { code: "invalid_roster_address" } });
     expect(service.resolve("000")).toMatchObject({ resolved: false, diagnostic: { code: "invalid_roster_address" } });
   });
+
+  test("a code from another project is a mismatch even while the number's agent is gone", () => {
+    const { registry, service } = seeded();
+    delete registry.agents["agent.c"];
+    service.reconcile();
+    expect(service.resolve("OS-003")).toMatchObject({ resolved: false, diagnostic: { code: "roster_agent_gone" } });
+    expect(service.resolve("003")).toMatchObject({ resolved: false, diagnostic: { code: "roster_agent_gone" } });
+    expect(service.resolve("PB-003")).toMatchObject({ resolved: false, diagnostic: { code: "roster_code_mismatch" } });
+  });
 });
 
 describe("withRosterTags", () => {
@@ -658,7 +718,7 @@ describe("BrokerDeliveryRouter roster codes", () => {
   });
 
   test("a bare alias spelled like a held code does not take the code from its holder", async () => {
-    const { database, registry, service, add } = setup();
+    const { database, registry, clock, service, add } = setup();
     add("agent.a", "a", "openscout", START + 1, { projectRoot: "/work/project" });
     add("agent.b", "b", "openscout", START + 2, { projectRoot: "/work/project" });
     service.reconcile();
@@ -703,6 +763,14 @@ describe("BrokerDeliveryRouter roster codes", () => {
     expect(await resolve("os001")).toMatchObject({ kind: "resolved", agent: { id: "agent.a" } });
     // No agent holds 042, so the alias still answers.
     expect(await resolve("os042")).toMatchObject({ kind: "resolved", agent: { id: "agent.b" }, aliasResolution: { requestedAlias: "os042" } });
+
+    // A gone agent keeps its code until the number frees: the alias does not take it in the meantime.
+    delete registry.agents["agent.a"];
+    service.reconcile();
+    expect(await resolve("os001")).toMatchObject({ kind: "unknown", diagnosticCode: "roster_agent_gone" });
+    clock.now += 10 * 60_000;
+    expect(service.reconcile().freed).toEqual([{ agentId: "agent.a", number: 1, reason: "gone" }]);
+    expect(await resolve("os001")).toMatchObject({ kind: "resolved", agent: { id: "agent.b" }, aliasResolution: { requestedAlias: "os001" } });
   });
 
   test("a name that only looks like a code still resolves natively when no agent holds the code", async () => {
