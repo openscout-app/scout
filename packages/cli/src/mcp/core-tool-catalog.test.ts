@@ -83,7 +83,7 @@ test("harness tool allowlist and reply prompts only name registered tools", asyn
     for (const name of allowed) expect({ name, registered: registered.has(name) }).toEqual({ name, registered: true });
     for (const metadata of [{}, { completion: { mode: "explicit" } }, { completion: { mode: "explicit" }, completionFlightId: "flight-contract" }]) {
       const prompt = buildAttachedSessionInvocationPrompt({
-        id: "inv-contract", requesterId: "operator", requesterNodeId: "node", targetAgentId: "worker",
+        origin: { source: "unknown" }, id: "inv-contract", requesterId: "operator", requesterNodeId: "node", targetAgentId: "worker",
         action: "consult", task: "Review", conversationId: "conversation", messageId: "request",
         ensureAwake: true, stream: false, createdAt: 1, metadata,
       }, "worker");
