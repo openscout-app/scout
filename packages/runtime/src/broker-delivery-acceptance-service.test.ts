@@ -777,7 +777,7 @@ describe("BrokerDeliveryAcceptanceService", () => {
       requesterId: "agent-1",
       requesterNodeId: "node-1",
       body: "I found the root cause and am continuing with the fix.",
-      requesterName: "agent-one",
+      requesterName: "Agent One",
       createdAt: 11000,
     }]);
   });

@@ -6,7 +6,11 @@ import type {
 
 import { basename } from "node:path";
 
-import { agentNotificationForOperatorSignal } from "./agent-notification-builders.js";
+import {
+  agentNotificationForOperatorSignal,
+  agentNotificationForPermissionRequest,
+  pushDeliveryForLevel,
+} from "./agent-notification-builders.js";
 import type {
   MobilePushAlert,
   MobilePushBroadcastResult,
@@ -38,6 +42,25 @@ export type OperatorSignalInput = {
   createdAt?: number;
 };
 
+/** A harness permission dialog the operator must answer before a flight goes on. */
+export type PermissionRequestInput = {
+  /** The open question record that holds the request. */
+  requestId: string;
+  /** The dialog as the harness shows it. Only ever travels sealed. */
+  text: string;
+  /** The agent whose session shows the dialog. */
+  agentId: string;
+  requesterNodeId: string;
+  projectRoot?: string;
+  conversationId?: string;
+  /** The message that started the flight. */
+  messageId?: string;
+  sessionId?: string;
+  flightId?: string;
+  invocationId?: string;
+  createdAt?: number;
+};
+
 export type BrokerOperatorAttentionServiceOptions = {
   nodeId: string;
   systemActorId: string;
@@ -55,6 +78,8 @@ export type BrokerOperatorAttentionServiceOptions = {
   broadcastApnsAlertToActiveMobileDevices: (
     alert: MobilePushAlert,
   ) => Promise<MobilePushBroadcastResult>;
+  /** The name the operator knows an agent by. A push never names an agent by its raw id. */
+  agentDisplayName?: (actorId: string) => string | undefined;
   warn?: (message: string) => void;
   now?: () => number;
 };
@@ -88,6 +113,53 @@ export class BrokerOperatorAttentionService {
     });
   }
 
+  queuePermissionRequest(input: PermissionRequestInput): void {
+    void this.sendPermissionRequestAlert(input).catch((error) => {
+      this.options.warn?.(
+        `[openscout-runtime] failed to notify operator about permission request: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  async sendPermissionRequestAlert(input: PermissionRequestInput): Promise<void> {
+    const notification = agentNotificationForPermissionRequest({
+      requestId: input.requestId,
+      text: input.text,
+      agentName: this.agentName(input.agentId),
+      agentId: input.agentId,
+      project: input.projectRoot ? basename(input.projectRoot) : null,
+      createdAt: input.createdAt ?? this.now(),
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      sessionId: input.sessionId,
+    });
+    const result = await this.options.broadcastApnsAlertToActiveMobileDevices({
+      // Generic on purpose: the dialog rides sealed to each paired phone.
+      title: "An agent needs your permission",
+      body: "Open Scout for details.",
+      ...pushDeliveryForLevel(notification.level),
+      threadId: "scout.agent-signal",
+      payload: {
+        destination: "inbox",
+        itemId: input.requestId,
+        kind: "permission_request",
+        requestId: input.requestId,
+        requesterId: input.agentId,
+        requesterNodeId: input.requesterNodeId,
+        ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+        ...(input.messageId ? { messageId: input.messageId } : {}),
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        ...(input.flightId ? { flightId: input.flightId } : {}),
+        ...(input.invocationId ? { invocationId: input.invocationId } : {}),
+      },
+      notification,
+    });
+
+    this.warnForBroadcastResult(result);
+  }
+
   async sendOperatorSignalAlert(input: OperatorSignalInput): Promise<void> {
     const signal = input.signal;
     if (signal.notificationPolicy?.requested === false) return;
@@ -100,7 +172,7 @@ export class BrokerOperatorAttentionService {
         messageId: input.messageId,
         conversationId: input.conversationId,
         signal,
-        agentName: input.requesterName ?? input.requesterId,
+        agentName: input.requesterName?.trim() || this.agentName(input.requesterId),
         agentId: input.requesterId,
         body: input.body,
         project: input.projectRoot ? basename(input.projectRoot) : null,
@@ -252,6 +324,10 @@ export class BrokerOperatorAttentionService {
         `[openscout-runtime] failed to send operator delivery issue push to ${failure.deviceId} (${failure.tokenSuffix}): ${failure.reason ?? failure.status ?? "unknown"}`,
       );
     }
+  }
+
+  private agentName(actorId: string): string {
+    return this.options.agentDisplayName?.(actorId)?.trim() || actorId;
   }
 
   private now(): number {

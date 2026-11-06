@@ -1,10 +1,15 @@
 /**
- * Builders that turn what the Mac already knows into an AgentNotification:
+ * Builders that turn what the host already knows into an AgentNotification:
  * a session attention item (read against the session snapshot, where the
- * command, diff, and question options live) and an operator signal.
+ * command, diff, and question options live), a harness permission request,
+ * and an operator signal.
  *
- * Only declared asks are urgent. Inferred attention (`native_attention`) goes
- * out as quiet text, never as a Priority notification.
+ * Levels (see AgentNotificationLevel):
+ *   - time-sensitive: only a `need`, where an agent asked the operator and
+ *     cannot go on without the answer.
+ *   - active: approvals, permission requests, and mid-turn questions. The
+ *     operator must act, but nobody addressed the operator.
+ *   - passive: failures, consults, updates, and inferred attention.
  */
 
 import { hostname as osHostname } from "node:os";
@@ -20,10 +25,22 @@ import {
   AGENT_NOTIFICATION_VERSION,
   type AgentNotification,
   type AgentNotificationFileChange,
+  type AgentNotificationLevel,
   type AgentNotificationRisk,
   type AgentNotificationView,
   type ScoutOperatorSignal,
 } from "@openscout/protocol";
+
+import { parseContinuationDialog, stripTerminalControls } from "./continuation/dialog.js";
+
+/**
+ * How a level travels in the plain push: whether it rings, and the urgency
+ * the relay maps to APNs priority. The phone's extension sets the iOS
+ * interruption level from the sealed record.
+ */
+export function pushDeliveryForLevel(level: AgentNotificationLevel): { sound: string | null; urgency: "interrupt" | "silent" } {
+  return level === "passive" ? { sound: null, urgency: "silent" } : { sound: "default", urgency: "interrupt" };
+}
 
 /** The fields every attention item carries (the mobile inbox item shape). */
 export type AttentionNotificationItem = {
@@ -136,14 +153,14 @@ function failedView(
 function viewForAttention(
   item: AttentionNotificationItem,
   snapshot: SessionState | null | undefined,
-): { view: AgentNotificationView; urgent: boolean } {
+): { view: AgentNotificationView; level: AgentNotificationLevel } {
   const turn = findTurn(snapshot, item.turnId);
   const block = findBlock(turn, item.blockId);
 
   switch (item.kind) {
     case "approval":
       if (block?.type === "action") {
-        return { view: approvalView(block, item, snapshot), urgent: true };
+        return { view: approvalView(block, item, snapshot), level: "active" };
       }
       break;
     case "question":
@@ -154,14 +171,14 @@ function viewForAttention(
           view: options.length > 0
             ? { view: "turn.question.choice", question: block.question, options, multiSelect: block.multiSelect, ...(context ? { context } : {}) }
             : { view: "turn.question.open", question: block.question, ...(context ? { context } : {}) },
-          urgent: true,
+          level: "active",
         };
       }
-      return { view: { view: "turn.question.open", question: item.description || item.title }, urgent: true };
+      return { view: { view: "turn.question.open", question: item.description || item.title }, level: "active" };
     case "failed_action":
     case "failed_turn":
     case "session_error":
-      return { view: failedView(item, turn, block), urgent: false };
+      return { view: failedView(item, turn, block), level: "passive" };
     default:
       break;
   }
@@ -169,8 +186,8 @@ function viewForAttention(
   const body = item.description && item.description !== item.title ? item.description : item.detail ?? undefined;
   return {
     view: { view: "text", title: item.title, ...(body ? { body } : {}) },
-    // An approval we couldn't read is still a declared ask; inferred attention never is.
-    urgent: item.kind === "approval",
+    // An approval we couldn't read still blocks the turn; inferred attention never rings.
+    level: item.kind === "approval" ? "active" : "passive",
   };
 }
 
@@ -180,7 +197,7 @@ export function agentNotificationForSessionAttention(input: {
   host?: string;
 }): AgentNotification {
   const { item, snapshot } = input;
-  const { view, urgent } = viewForAttention(item, snapshot);
+  const { view, level } = viewForAttention(item, snapshot);
   const cwd = snapshot?.session.cwd;
   return {
     ...view,
@@ -189,9 +206,11 @@ export function agentNotificationForSessionAttention(input: {
     sender: { name: item.sessionName || snapshot?.session.name || "Agent" },
     ...(cwd ? { project: basename(cwd) } : {}),
     host: input.host ?? notificationHostName(),
-    urgent,
+    level,
     createdAt: item.createdAt,
+    // The inbox row for this item holds its approve, deny, and reply actions.
     route: {
+      open: "inbox",
       sessionId: item.sessionId,
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...(item.blockId ? { blockId: item.blockId } : {}),
@@ -199,9 +218,114 @@ export function agentNotificationForSessionAttention(input: {
   };
 }
 
+const DIALOG_HEADER = /^(Bash command|Edit file|Write file|Create file|Read file|Fetch|Web ?search|Tool use|MCP tool)$/i;
+const DIALOG_BODY_END = /\bPermission rule\b|\bThis command requires approval\b|\bDo you want to\b/i;
+
+function lastIndex(values: readonly string[], predicate: (value: string, index: number) => boolean): number {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (predicate(values[index] ?? "", index)) return index;
+  }
+  return -1;
+}
+
+/** A dialog line without its box border. */
+function dialogLine(line: string): string {
+  return line.replace(/^\s*[│┃|]\s?/u, "").replace(/\s?[│┃|]\s*$/u, "").trim();
+}
+
+/**
+ * The view for a harness permission dialog, read from its text. Only the live
+ * dialog counts: its header and the lines under it. Anything above the header
+ * is the session's scrollback and never reaches the notification.
+ */
+export function permissionDialogView(text: string): AgentNotificationView {
+  const lines = stripTerminalControls(text).split("\n").map(dialogLine);
+  const proceed = lastIndex(lines, (line) => /\bDo you want to\b/i.test(line));
+  const workspace = lastIndex(lines, (line) => /^Accessing workspace:/i.test(line));
+  const trustChoice = lastIndex(lines, (line) => /^(?:❯\s*)?(?:\d+[.)]\s*)?Yes,\s*I trust this folder$/i.test(line));
+  const trustEnd = lastIndex(lines, (line) => /Enter to confirm.*Esc to cancel/i.test(line));
+  // A workspace mention in scrollback is not a folder-trust dialog. Require
+  // its actual choices and footer, newer than any tool-permission question.
+  if (workspace >= 0 && workspace > proceed && trustChoice > workspace && trustEnd > trustChoice
+    && lines.slice(trustChoice + 1, trustEnd).some((line) => /^(?:❯\s*)?(?:\d+[.)]\s*)?No, exit$/i.test(line))) {
+    const path = lines[workspace]!.replace(/^Accessing workspace:\s*/i, "").trim()
+      || lines.slice(workspace + 1, trustChoice).find(Boolean) || "";
+    return { view: "turn.approve.tool", tool: "this folder", ...(path ? { summary: path } : {}) };
+  }
+
+  const dialog = parseContinuationDialog(text);
+  const header = lastIndex(lines, (line, index) => (proceed < 0 || index < proceed) && DIALOG_HEADER.test(line));
+  const detail: string[] = [];
+  if (header >= 0 && (proceed < 0 || proceed - header <= 16)) {
+    for (const line of lines.slice(header + 1)) {
+      if (DIALOG_BODY_END.test(line)) break;
+      if (line && !/^\/permissions\b/i.test(line)) detail.push(line);
+    }
+  }
+  const name = header >= 0 ? lines[header]!.toLowerCase() : "";
+
+  if (name.startsWith("bash") && detail.length > 0) {
+    // Claude puts the command first and its description on the last line.
+    const why = detail.length > 1 ? detail.at(-1) : undefined;
+    return { view: "turn.approve.command", command: detail[0]!, ...(why ? { why } : {}) };
+  }
+  if (/^(edit|write|create) file$/.test(name) && detail[0]) {
+    return { view: "turn.approve.edit", files: [{ path: detail[0], added: 0, removed: 0 }] };
+  }
+  if (name === "read file") return { view: "turn.approve.tool", tool: "Read", ...(detail[0] ? { summary: detail[0] } : {}) };
+  if (name === "fetch") return { view: "turn.approve.tool", tool: "WebFetch", ...(detail[0] ? { summary: detail[0] } : {}) };
+  if (name.startsWith("web")) return { view: "turn.approve.tool", tool: "WebSearch", ...(detail[0] ? { summary: detail[0] } : {}) };
+  if (header >= 0 && detail[0]) {
+    // An MCP call reads "server - tool(args) (MCP)".
+    const mcp = detail[0].match(/^(.+?)\s+-\s+([\w.-]+)\(/);
+    return { view: "turn.approve.tool", tool: mcp ? `${mcp[1]!.trim()} ${mcp[2]}` : "a tool", summary: detail[0] };
+  }
+  // No header to read: say what is known and nothing from the screen.
+  return { view: "turn.approve.tool", tool: dialog.permissionRule ?? "a tool" };
+}
+
+/**
+ * A harness permission dialog in a session the runtime dispatched to. The
+ * operator must answer it before the flight goes on, but nobody addressed the
+ * operator, so it is `active`, not time-sensitive. A tap opens the request in
+ * the inbox.
+ */
+export function agentNotificationForPermissionRequest(input: {
+  requestId: string;
+  text: string;
+  agentName: string;
+  agentId: string;
+  project?: string | null;
+  host?: string;
+  createdAt: number;
+  conversationId?: string | null;
+  messageId?: string | null;
+  sessionId?: string | null;
+}): AgentNotification {
+  return {
+    ...permissionDialogView(input.text),
+    v: AGENT_NOTIFICATION_VERSION,
+    itemId: input.requestId,
+    sender: { name: input.agentName, agentId: input.agentId },
+    ...(input.project ? { project: input.project } : {}),
+    host: input.host ?? notificationHostName(),
+    level: "active",
+    createdAt: input.createdAt,
+    route: {
+      open: "inbox",
+      requestId: input.requestId,
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      ...(input.messageId ? { messageId: input.messageId } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    },
+  };
+}
+
 /**
  * An operator signal an agent sent on its own, outside any turn. `need` and
- * `consult` are asks (only a need is urgent); `notify` goes out as quiet text.
+ * `consult` are asks. Only a need is time-sensitive: the agent addressed the
+ * operator and waits on the answer. `notify` goes out as passive text. A tap
+ * opens the message in its chat.
  */
 export function agentNotificationForOperatorSignal(input: {
   messageId: string;
@@ -219,9 +343,15 @@ export function agentNotificationForOperatorSignal(input: {
   let view: AgentNotificationView;
   if (signal.kind === "need") {
     const options = (signal.options ?? []).map((option) => option.trim()).filter(Boolean);
-    view = { view: "ask", note: signal.question.trim() || body, ...(options.length > 0 ? { options } : {}) };
+    view = {
+      view: "ask",
+      note: signal.question.trim() || body,
+      reply: "required",
+      ...(signal.requestKind === "permission" ? { permission: true } : {}),
+      ...(options.length > 0 ? { options } : {}),
+    };
   } else if (signal.kind === "consult") {
-    view = { view: "ask", note: body };
+    view = { view: "ask", note: body, reply: "optional" };
   } else {
     view = { view: "text", title: "Shared an update", ...(body ? { body } : {}) };
   }
@@ -232,9 +362,10 @@ export function agentNotificationForOperatorSignal(input: {
     sender: { name: input.agentName, ...(input.agentId ? { agentId: input.agentId } : {}) },
     ...(input.project ? { project: input.project } : {}),
     host: input.host ?? notificationHostName(),
-    urgent: signal.kind === "need",
+    level: signal.kind === "need" ? "time-sensitive" : "passive",
     createdAt: input.createdAt,
     route: {
+      open: "chat",
       messageId: input.messageId,
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     },

@@ -70,7 +70,7 @@ describe("sealed push content", () => {
     const dir = mkdtempSync(join(tmpdir(), "scout-push-seal-"));
     const phoneHex = Buffer.from(phone.publicKey).toString("hex");
     writeFileSync(join(dir, "trusted-peers.json"), JSON.stringify([{ publicKey: phoneHex, pairedAt: "2026-09-24" }]));
-    const base = { v: 1 as const, itemId: "item-9", sender: { name: "fab" }, urgent: true, createdAt: 1 };
+    const base = { v: 1 as const, itemId: "item-9", sender: { name: "fab" }, level: "time-sensitive" as const, createdAt: 1 };
     const open = (sealed: string) => JSON.parse(openPushContent({
       sealed, itemId: "item-9", phonePrivateKey: phone.privateKey, phonePublicKey: phone.publicKey,
     }));
@@ -79,7 +79,8 @@ describe("sealed push content", () => {
     expect(open(small!)).toMatchObject({
       view: "ask",
       note: "I need you",
-      lockScreen: { title: "fab", body: "Asked for you\nI need you", category: "scout.question", threadId: "scout.agent.fab" },
+      urgent: true,
+      lockScreen: { title: "fab is waiting on your answer", body: "I need you", category: "scout.question", threadId: "scout.agent.fab", level: "time-sensitive" },
     });
 
     const big = sealAgentNotificationForDevice({
