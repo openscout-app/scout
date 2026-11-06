@@ -56,6 +56,7 @@ function createHarness(input: {
   broadcastResult?: MobilePushBroadcastResult;
   conversation?: ConversationDefinition;
   originConversation?: ConversationDefinition;
+  agentDisplayName?: (actorId: string) => string | undefined;
 } = {}) {
   const ensuredActors: string[] = [];
   const conversationRequests: Array<{ requesterId: string; targetAgentId?: string; channel?: string }> = [];
@@ -87,6 +88,7 @@ function createHarness(input: {
       alerts.push(alert);
       return input.broadcastResult ?? broadcastResult();
     },
+    ...(input.agentDisplayName ? { agentDisplayName: input.agentDisplayName } : {}),
     warn: (message) => warnings.push(message),
     now: () => 10_000,
   });
@@ -243,10 +245,52 @@ describe("BrokerOperatorAttentionService", () => {
     });
     const { notification, ...alert } = harness.alerts[0]!;
     expect(notification).toMatchObject({
-      view: "ask", note: "Should I use /private/customer-data?", urgent: true,
+      view: "ask", note: "Should I use /private/customer-data?", level: "time-sensitive",
       sender: { name: "cajun", agentId: "agent" }, project: "fab", itemId: "msg-need",
     });
     expect(JSON.stringify(alert)).not.toContain("customer-data");
+  });
+
+  test("a permission dialog pushes as an active permission request named for the agent, opened in the inbox", async () => {
+    const harness = createHarness({
+      agentDisplayName: (actorId) => actorId === "session-abc123" ? "web-schumann-15" : undefined,
+    });
+    await harness.service.sendPermissionRequestAlert({
+      requestId: "permission-1",
+      text: " Bash command\n   cat /private/customer-data.csv\n   Read the export\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel",
+      agentId: "session-abc123",
+      requesterNodeId: "node-1",
+      projectRoot: "/work/openscout/web",
+      conversationId: "dm",
+      messageId: "msg-ask",
+      sessionId: "session-abc123",
+      flightId: "flt-1",
+    });
+    const { notification, ...alert } = harness.alerts[0]!;
+    expect(notification).toMatchObject({
+      view: "turn.approve.command",
+      command: "cat /private/customer-data.csv",
+      why: "Read the export",
+      level: "active",
+      sender: { name: "web-schumann-15", agentId: "session-abc123" },
+      project: "web",
+      route: { open: "inbox", requestId: "permission-1", conversationId: "dm", messageId: "msg-ask" },
+    });
+    expect(alert).toMatchObject({
+      urgency: "interrupt",
+      sound: "default",
+      payload: { kind: "permission_request", itemId: "permission-1", requestId: "permission-1", conversationId: "dm", messageId: "msg-ask", flightId: "flt-1" },
+    });
+    expect(JSON.stringify(alert)).not.toContain("customer-data");
+  });
+
+  test("an operator signal without a given name uses the agent's display name, never its raw id", async () => {
+    const harness = createHarness({ agentDisplayName: () => "pike" });
+    await harness.service.sendOperatorSignalAlert({
+      signal: { kind: "need", blocking: true, replyExpectation: "required", question: "Deploy?" },
+      messageId: "msg-need", conversationId: "dm", requesterId: "session-abc", requesterNodeId: "node", body: "Deploy?",
+    });
+    expect(harness.alerts[0]?.notification?.sender).toEqual({ name: "pike", agentId: "session-abc" });
   });
 
   test("pushes a generic non-blocking alert for an agent-authored operator signal", async () => {

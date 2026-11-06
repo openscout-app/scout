@@ -784,10 +784,11 @@ export class BrokerDeliveryAcceptanceService {
           requesterId,
           requesterNodeId,
           body: message.body,
-          requesterName: requesterAgent?.handle
+          // The name the operator sees in the app first: a handle may be a raw session id.
+          requesterName: [this.options.brokerActorDisplayName(snapshot, requesterId)]
+            .find((name) => name && name !== requesterId)
+            ?? requesterAgent?.handle
             ?? requesterActor?.handle
-            ?? requesterAgent?.displayName
-            ?? requesterActor?.displayName
             ?? requesterId,
           ...(requesterProjectRoot ? { projectRoot: requesterProjectRoot } : {}),
           createdAt,

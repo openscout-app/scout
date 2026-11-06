@@ -203,14 +203,14 @@ export function sealAgentNotificationForDevice(
     phonePublicKey,
   });
   const collapsed = collapseAgentNotification(notification);
-  const { v, itemId, sender, project, host, urgent, createdAt, route } = notification;
+  const { v, itemId, sender, project, host, level, createdAt, route } = notification;
   const asText = (body?: string): AgentNotification => ({
-    v, itemId, sender, project, host, urgent, createdAt, route,
+    v, itemId, sender, project, host, level, createdAt, route,
     view: "text",
     title: collapsed.headline,
     ...(body ? { body } : {}),
   });
-  const detail = collapsed.body.split("\n").slice(1).join(" ").slice(0, 200);
+  const detail = collapsed.body.replace(/\n/g, " ").slice(0, 200);
 
   // Richest first; each rung drops detail until the envelope fits one push.
   for (const record of [notification, asText(detail), asText()]) {
