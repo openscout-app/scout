@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS `roster_agents` (
 	`project` text,
 	`source` text NOT NULL,
 	`assigned_at` integer NOT NULL,
+	`active_at` integer NOT NULL,
 	`updated_at` integer NOT NULL,
 	`gone_at` integer,
 	CONSTRAINT "roster_agents_number_check" CHECK("roster_agents"."number" BETWEEN 1 AND 999),

@@ -380,22 +380,10 @@ export class BrokerDeliveryRouter {
         };
       }
     }
-    if (target?.kind === "target_handle" && this.options.routeAliasService) {
-      try {
-        const alias = this.options.routeAliasService.resolveBareForDispatch(target.handle, caller);
-        if (alias) return { ...alias.resolution, aliasResolution: alias.proof };
-      } catch (error) {
-        return {
-          kind: "unknown",
-          label: target.value ?? `target:${target.handle}`,
-          detail: `${target.value ?? `target:${target.handle}`} alias lookup failed: ${error instanceof Error ? error.message : String(error)}`,
-          ...(error instanceof BrokerRouteAliasError ? { diagnosticCode: error.code } : {}),
-        };
-      }
-    }
-    // A roster code names one agent, so it resolves before any name does.
-    // When no agent holds it, a name that happens to look like a code still
-    // resolves natively; otherwise the roster's diagnostic is the answer.
+    // A roster code names one agent, so it resolves before any name does,
+    // a bare alias included. When no agent holds it, an alias or a name that
+    // happens to look like a code still resolves; otherwise the roster's
+    // diagnostic is the answer.
     const rosterAddress = rosterAddressText(input);
     let rosterMiss: InvocationResolution | null = null;
     if (rosterAddress && this.options.rosterService) {
@@ -410,6 +398,19 @@ export class BrokerDeliveryRouter {
         detail: roster.diagnostic?.detail ?? `no agent holds roster code ${rosterAddress}`,
         ...(roster.diagnostic ? { diagnosticCode: roster.diagnostic.code } : {}),
       };
+    }
+    if (target?.kind === "target_handle" && this.options.routeAliasService) {
+      try {
+        const alias = this.options.routeAliasService.resolveBareForDispatch(target.handle, caller);
+        if (alias) return { ...alias.resolution, aliasResolution: alias.proof };
+      } catch (error) {
+        return {
+          kind: "unknown",
+          label: target.value ?? `target:${target.handle}`,
+          detail: `${target.value ?? `target:${target.handle}`} alias lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+          ...(error instanceof BrokerRouteAliasError ? { diagnosticCode: error.code } : {}),
+        };
+      }
     }
     const native = this.resolveTarget(input);
     if (rosterMiss && native.kind !== "resolved" && native.kind !== "resolved_session") return rosterMiss;

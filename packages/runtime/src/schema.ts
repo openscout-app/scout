@@ -130,7 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_route_alias_revisions_binding_created
   ON route_alias_revisions (binding_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS roster_projects (
-  project_key TEXT PRIMARY KEY,
+  project_key TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
   code TEXT,
   code_source TEXT NOT NULL,
@@ -144,12 +144,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_projects_code
   WHERE code IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS roster_agents (
-  agent_id TEXT PRIMARY KEY,
+  agent_id TEXT PRIMARY KEY NOT NULL,
   number INTEGER NOT NULL,
   project_key TEXT,
   project TEXT,
   source TEXT NOT NULL,
   assigned_at INTEGER NOT NULL,
+  active_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   gone_at INTEGER,
   CONSTRAINT roster_agents_number_check CHECK (number BETWEEN 1 AND 999),

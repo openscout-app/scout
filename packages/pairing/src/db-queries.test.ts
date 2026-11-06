@@ -2141,8 +2141,8 @@ describe("web db query agents", () => {
       try {
         write(`INSERT INTO roster_projects (project_key, name, code, code_source, created_at, updated_at)
                VALUES ('openscout', 'openscout', 'OS', 'default', 1, 1)`);
-        write(`INSERT INTO roster_agents (agent_id, number, project_key, project, source, assigned_at, updated_at, gone_at)
-               VALUES ('agent-1', 3, 'openscout', 'openscout', 'auto', 1, 1, NULL)`);
+        write(`INSERT INTO roster_agents (agent_id, number, project_key, project, source, assigned_at, active_at, updated_at, gone_at)
+               VALUES ('agent-1', 3, 'openscout', 'openscout', 'auto', 1, 1, 1, NULL)`);
         const tag = { number: 3, numberText: "003", projectCode: "OS", code: "OS-003", label: "OS 003" };
         expect(queryAgentById("agent-1")?.roster).toEqual(tag);
         expect(queryAgents(10).find((agent) => agent.id === "agent-1")?.roster).toEqual(tag);

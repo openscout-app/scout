@@ -310,7 +310,8 @@ export const rosterProjectsTable = sqliteTable("roster_projects", {
 // -- roster_agents ----------------------------------------------------------
 // Runtime-owned roster numbers (001–999), one roster across projects, keyed
 // by the Scout agent id. No foreign key: a number outlives its agent row by
-// the grace period before it is freed.
+// the grace period before it is freed. `active_at` keeps the latest activity
+// the roster has seen, so pruning an endpoint cannot make an agent look idle.
 export const rosterAgentsTable = sqliteTable("roster_agents", {
   agentId: text("agent_id").primaryKey(),
   number: integer("number").notNull(),
@@ -318,6 +319,7 @@ export const rosterAgentsTable = sqliteTable("roster_agents", {
   project: text("project"),
   source: text("source").notNull(),
   assignedAt: integer("assigned_at").notNull(),
+  activeAt: integer("active_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
   goneAt: integer("gone_at"),
 }, (table) => [

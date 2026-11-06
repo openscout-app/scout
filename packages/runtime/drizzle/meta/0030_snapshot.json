@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "92d0b8ab-44f7-4a97-88f5-b7fd210327c9",
+  "id": "0762522b-9f87-410e-99ca-a7c646983181",
   "prevId": "ac79708c-a672-43bf-a512-eb14c731951f",
   "tables": {
     "activity_items": {
@@ -6031,6 +6031,13 @@
         },
         "assigned_at": {
           "name": "assigned_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "active_at": {
+          "name": "active_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,

@@ -57,6 +57,13 @@ export const ROSTER_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60_000;
  * when it took its number if that is later.
  */
 export const ROSTER_IDLE_FREE_MS = 30 * 24 * 60 * 60_000;
+/**
+ * How far the latest activity must move before the roster writes it down.
+ * The stored activity outlives the endpoints it came from, so an agent whose
+ * endpoint is pruned does not look idle; writing it at most hourly keeps
+ * reconcile from writing a row on every registry change.
+ */
+export const ROSTER_ACTIVITY_WRITE_STEP_MS = 60 * 60_000;
 
 /** The registry fields the roster reads. */
 export type AgentRosterRegistryView = {
@@ -241,8 +248,9 @@ export class AgentRosterService {
       for (const row of [...state.agents.values()]) {
         const agent = registry.agents[row.agentId];
         if (agent && !isRosterRetiredAgent(agent)) {
-          const idleSince = Math.max(agentActivityAt(registry, row.agentId, agent, endpointActivity).activeAt, row.assignedAt);
-          if (now - idleSince >= this.idleFreeMs) {
+          const seenAt = Math.min(agentActivityAt(registry, row.agentId, agent, endpointActivity).activeAt, now);
+          const activeAt = Math.max(row.activeAt, seenAt);
+          if (now - Math.max(activeAt, row.assignedAt) >= this.idleFreeMs) {
             this.removeAgent(state, row.agentId);
             result.freed.push({ agentId: row.agentId, number: row.number, reason: "idle" });
             continue;
@@ -250,8 +258,13 @@ export class AgentRosterService {
           const project = rosterProjectNameForAgent(agent);
           const projectKey = project ? rosterProjectKey(project) : null;
           if (project) this.ensureProject(state, project, now);
-          if (row.goneAt !== null || row.projectKey !== projectKey || row.project !== project) {
-            this.writeAgent(state, { ...row, project, projectKey, goneAt: null, updatedAt: now });
+          if (
+            row.goneAt !== null
+            || row.projectKey !== projectKey
+            || row.project !== project
+            || activeAt - row.activeAt >= ROSTER_ACTIVITY_WRITE_STEP_MS
+          ) {
+            this.writeAgent(state, { ...row, project, projectKey, activeAt, goneAt: null, updatedAt: now });
           }
           continue;
         }
@@ -266,7 +279,7 @@ export class AgentRosterService {
       }
 
       const newcomers = this.activeNewcomers(registry, state, now, endpointActivity);
-      for (const { agentId, agent } of newcomers) {
+      for (const { agentId, agent, activeAt } of newcomers) {
         const number = this.lowestFreeNumber(state);
         if (number === null) {
           result.unnumbered = newcomers.length - result.assigned.length;
@@ -285,6 +298,7 @@ export class AgentRosterService {
           projectKey: project ? rosterProjectKey(project) : null,
           source: "auto",
           assignedAt: now,
+          activeAt: Math.min(activeAt, now),
           updatedAt: now,
           goneAt: null,
         });
@@ -375,13 +389,22 @@ export class AgentRosterService {
     const dryRun = request.dryRun === true;
     const registry = this.options.registry();
     const now = this.now();
+    const endpointActivity = endpointActivityByAgent(registry);
     const run = (): AgentRosterImportResult => {
       const state = this.load();
       const result: AgentRosterImportResult = { dryRun, imported: [], renumbered: [], projectCodes: [], conflicts: [] };
       const conflict = (entry: AgentRosterImportConflict) => result.conflicts.push(entry);
       const claimedNumbers = new Map<number, string>();
       const claimedAgents = new Set<string>();
-      const accepted: Array<{ agentId: string; number: number; project: string | null; projectCode: string | null | undefined }> = [];
+      const accepted: Array<{
+        agentId: string;
+        number: number;
+        project: string | null;
+        projectCode: string | null | undefined;
+        activeAt: number;
+        /** Already imported on this number: a re-run leaves the row as it is, idle time included. */
+        unchanged: boolean;
+      }> = [];
 
       for (const raw of Array.isArray(request.entries) ? request.entries : []) {
         const agentId = typeof raw?.agentId === "string" ? raw.agentId.trim() : "";
@@ -424,7 +447,14 @@ export class AgentRosterService {
         }
         claimedAgents.add(agentId);
         claimedNumbers.set(number, agentId);
-        accepted.push({ agentId, number, project: rosterProjectNameForAgent(agent), projectCode: raw.projectCode });
+        accepted.push({
+          agentId,
+          number,
+          project: rosterProjectNameForAgent(agent),
+          projectCode: raw.projectCode,
+          activeAt: Math.max(current?.activeAt ?? 0, Math.min(agentActivityAt(registry, agentId, agent, endpointActivity).activeAt, now)),
+          unchanged: current?.source === "import" && current.number === number,
+        });
       }
 
       // Move every accepted agent onto its number. Rows leave the unique
@@ -435,9 +465,10 @@ export class AgentRosterService {
         const holder = state.byNumber.get(entry.number);
         if (holder && !importedAgentIds.has(holder.agentId)) displaced.push(holder);
       }
-      for (const entry of accepted) this.removeAgent(state, entry.agentId);
+      const moving = accepted.filter((entry) => !entry.unchanged);
+      for (const entry of moving) this.removeAgent(state, entry.agentId);
       for (const row of displaced) this.removeAgent(state, row.agentId);
-      for (const entry of accepted) {
+      for (const entry of moving) {
         this.writeAgent(state, {
           agentId: entry.agentId,
           number: entry.number,
@@ -445,6 +476,7 @@ export class AgentRosterService {
           projectKey: entry.project ? rosterProjectKey(entry.project) : null,
           source: "import",
           assignedAt: now,
+          activeAt: entry.activeAt,
           updatedAt: now,
           goneAt: null,
         });
@@ -487,6 +519,12 @@ export class AgentRosterService {
           continue;
         }
         if (project.code === code) {
+          // The import names the default the project already has. The code
+          // does not change, but the import now owns it, so a later import
+          // cannot rename the project.
+          if (project.codeSource === "default") {
+            this.writeProject(state, { ...project, codeSource: "import", updatedAt: now });
+          }
           decided.set(key, code);
           continue;
         }
@@ -641,14 +679,14 @@ export class AgentRosterService {
     state: RosterState,
     now: number,
     endpointActivity: ReadonlyMap<string, number>,
-  ): Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number }> {
+  ): Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number; activeAt: number }> {
     const cutoff = now - this.activeWindowMs;
-    const newcomers: Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number }> = [];
+    const newcomers: Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number; activeAt: number }> = [];
     for (const [agentId, agent] of Object.entries(registry.agents)) {
       if (state.agents.has(agentId) || isRosterRetiredAgent(agent)) continue;
       const { firstSeenAt, activeAt } = agentActivityAt(registry, agentId, agent, endpointActivity);
       if (activeAt < cutoff) continue;
-      newcomers.push({ agentId, agent, firstSeenAt: firstSeenAt || activeAt });
+      newcomers.push({ agentId, agent, firstSeenAt: firstSeenAt || activeAt, activeAt });
     }
     newcomers.sort((a, b) => a.firstSeenAt - b.firstSeenAt || (a.agentId < b.agentId ? -1 : a.agentId > b.agentId ? 1 : 0));
     return newcomers;

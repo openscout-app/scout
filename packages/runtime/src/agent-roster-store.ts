@@ -13,6 +13,8 @@ export type RosterAgentRow = {
   project: string | null;
   source: AgentRosterNumberSource;
   assignedAt: number;
+  /** The latest activity the roster has seen for the agent; never moves back. */
+  activeAt: number;
   updatedAt: number;
   goneAt: number | null;
 };
@@ -34,6 +36,7 @@ type AgentSqlRow = {
   project: string | null;
   source: AgentRosterNumberSource;
   assigned_at: number;
+  active_at: number;
   updated_at: number;
   gone_at: number | null;
 };
@@ -55,6 +58,7 @@ function agentFromRow(row: AgentSqlRow): RosterAgentRow {
     project: row.project,
     source: row.source,
     assignedAt: row.assigned_at,
+    activeAt: row.active_at,
     updatedAt: row.updated_at,
     goneAt: row.gone_at,
   };
@@ -98,14 +102,15 @@ export class AgentRosterStore {
   upsertAgent(row: RosterAgentRow): void {
     this.database.query(`
       INSERT INTO roster_agents (
-        agent_id, number, project_key, project, source, assigned_at, updated_at, gone_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        agent_id, number, project_key, project, source, assigned_at, active_at, updated_at, gone_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
       ON CONFLICT(agent_id) DO UPDATE SET
         number = excluded.number,
         project_key = excluded.project_key,
         project = excluded.project,
         source = excluded.source,
         assigned_at = excluded.assigned_at,
+        active_at = excluded.active_at,
         updated_at = excluded.updated_at,
         gone_at = excluded.gone_at
     `).run(
@@ -115,6 +120,7 @@ export class AgentRosterStore {
       row.project,
       row.source,
       row.assignedAt,
+      row.activeAt,
       row.updatedAt,
       row.goneAt,
     );

@@ -875,6 +875,13 @@ export function createBrokerHttpRouter(
   }
 
   if (url.pathname === "/v1/roster" || url.pathname.startsWith("/v1/roster/")) {
+    // Local tier. Refused here too, so verify-warn ingress cannot let a peer
+    // read or rename the roster (same rule as the other machine-local routes).
+    const context = request.transportContext;
+    if (context && (context.transport === "remote" || context.guest || context.scoped)) {
+      json(response, 403, { error: "local_only", detail: "the agent roster is machine-local" });
+      return;
+    }
     if (!agentRosterService) {
       json(response, 503, { error: "roster_unavailable", detail: "the agent roster requires broker SQLite persistence" });
       return;
@@ -1488,11 +1495,12 @@ export function createBrokerHttpRouter(
         : undefined;
     // Local agent records carry their roster tag (OS-003). The mesh twin
     // leaves it out: a roster number names an agent only on this runtime.
-    let rosterTags: ReturnType<AgentRosterService["tags"]> | undefined;
+    // Both strip a `roster` field a record carries without a current tag.
+    let rosterTags: ReturnType<AgentRosterService["tags"]> = new Map();
     if (url.pathname === "/v1/snapshot" && agentRosterService) {
-      try { rosterTags = agentRosterService.tags(); } catch { rosterTags = undefined; }
+      try { rosterTags = agentRosterService.tags(); } catch { rosterTags = new Map(); }
     }
-    const tagged=<T extends Parameters<typeof writeBrokerSnapshot>[1]>(snapshot:T):T=>rosterTags?withRosterTags(snapshot,rosterTags):snapshot;
+    const tagged=<T extends Parameters<typeof writeBrokerSnapshot>[1]>(snapshot:T):T=>withRosterTags(snapshot,rosterTags);
     const controller=new AbortController();const abort=()=>controller.abort(new Error('Snapshot request closed'));
     response.on('close',abort);response.on('error',abort);request.on('aborted',abort);
     try{

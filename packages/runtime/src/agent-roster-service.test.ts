@@ -5,12 +5,15 @@ import { agentRosterTag, type AgentDefinition, type AgentEndpoint } from "@opens
 import {
   AgentRosterError,
   AgentRosterService,
+  ROSTER_ACTIVITY_WRITE_STEP_MS,
   ROSTER_IDLE_FREE_MS,
   withRosterTags,
   type AgentRosterRegistryView,
 } from "./agent-roster-service.js";
 import { AgentRosterStore } from "./agent-roster-store.js";
 import { BrokerDeliveryRouter } from "./broker-delivery-routing.js";
+import { BrokerRouteAliasService } from "./broker-route-alias-service.js";
+import { BrokerRouteAliasStore } from "./broker-route-alias-store.js";
 import { configureControlPlaneDatabase, migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
 import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteTransactionalDatabase } from "./sqlite-adapter.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
@@ -257,6 +260,52 @@ describe("AgentRosterService assignment", () => {
     expect(service.reconcile().freed).toEqual([{ agentId: "agent.old", number: 7, reason: "idle" }]);
   });
 
+  test("an agent keeps the activity the roster saw after its endpoint is pruned", () => {
+    const { registry, clock, service, add } = setup();
+    add("agent.a", "a", "openscout");
+    service.reconcile();
+    clock.now = START + 29 * DAY;
+    registry.endpoints["ep.a"] = endpoint("ep.a", "agent.a", { lastCompletedAt: clock.now });
+    service.reconcile();
+    delete registry.endpoints["ep.a"];
+
+    clock.now = START + 30 * DAY;
+    add("agent.b", "b", "openscout");
+    expect(service.reconcile()).toMatchObject({ freed: [], assigned: [{ agentId: "agent.b", number: 2 }] });
+    expect(service.entry("agent.a")?.code).toBe("OS-001");
+
+    // The idle time counts from that activity: 30 days later the number is freed.
+    clock.now = START + 29 * DAY + ROSTER_IDLE_FREE_MS;
+    expect(service.reconcile().freed).toEqual([{ agentId: "agent.a", number: 1, reason: "idle" }]);
+  });
+
+  test("writes the activity it sees at most once an hour, and never a time in the future", () => {
+    const { database, registry, clock, service, add } = setup();
+    add("agent.a", "a", "openscout");
+    service.reconcile();
+    const stored = () => database.query<{ active_at: number; updated_at: number }>(
+      "SELECT active_at, updated_at FROM roster_agents WHERE agent_id = 'agent.a'",
+    ).get();
+    const touch = (at = clock.now) => {
+      registry.endpoints["ep.a"] = endpoint("ep.a", "agent.a", { lastSeenAt: at });
+    };
+
+    clock.now += ROSTER_ACTIVITY_WRITE_STEP_MS - 1;
+    touch();
+    service.reconcile();
+    expect(stored()).toEqual({ active_at: START, updated_at: START });
+
+    clock.now += 1;
+    touch();
+    service.reconcile();
+    expect(stored()).toEqual({ active_at: clock.now, updated_at: clock.now });
+
+    clock.now += ROSTER_ACTIVITY_WRITE_STEP_MS;
+    touch(clock.now + 365 * DAY);
+    service.reconcile();
+    expect(stored()?.active_at).toBe(clock.now);
+  });
+
   test("stops at 999 and says the roster is full", () => {
     const { service, add, logs } = setup();
     for (let index = 0; index < 1001; index++) add(`agent.${index}`, `a${index}`, null, START + index);
@@ -384,6 +433,38 @@ describe("AgentRosterService import", () => {
       ["agent.a", "agent_already_imported", "agent.a"],
     ]);
     expect(numbers(service)).toEqual({ "agent.a": "OS-005", "agent.b": "OS-002" });
+  });
+
+  test("re-running an import leaves the row as it was, so it does not reset the idle time", () => {
+    const { clock, service, add } = setup();
+    add("agent.a", "a", "openscout");
+    const entries = [{ agentId: "agent.a", number: 5 }];
+    service.importEntries({ entries });
+    const before = service.entry("agent.a");
+
+    clock.now += ROSTER_IDLE_FREE_MS - DAY;
+    expect(service.importEntries({ entries }).imported).toEqual([{ agentId: "agent.a", number: 5, code: "OS-005" }]);
+    expect(service.entry("agent.a")).toEqual(before);
+
+    clock.now += DAY;
+    expect(service.reconcile().freed).toEqual([{ agentId: "agent.a", number: 5, reason: "idle" }]);
+  });
+
+  test("an imported code that equals the default becomes the import's, so a later import cannot rename the project", () => {
+    const { service, add } = setup();
+    add("agent.a", "a", "openscout", START + 1);
+    add("agent.b", "b", "openscout", START + 2);
+    service.reconcile();
+
+    // The code does not change, so it is not listed as set; the import owns it now.
+    const first = service.importEntries({ entries: [{ agentId: "agent.a", number: 1, projectCode: "OS" }] });
+    expect(first.projectCodes).toEqual([]);
+    expect(service.list().projects).toMatchObject([{ projectKey: "openscout", code: "OS", codeSource: "import" }]);
+
+    const second = service.importEntries({ entries: [{ agentId: "agent.b", number: 2, projectCode: "OX" }] });
+    expect(second.conflicts).toMatchObject([{ agentId: "agent.b", reason: "project_code_differs", heldBy: "openscout" }]);
+    expect(second.projectCodes).toEqual([]);
+    expect(numbers(service)).toEqual({ "agent.a": "OS-001", "agent.b": "OS-002" });
   });
 
   test("reports project codes it cannot set and still keeps the numbers", () => {
@@ -574,6 +655,54 @@ describe("BrokerDeliveryRouter roster codes", () => {
       kind: "unknown",
       diagnosticCode: "unknown_project_code",
     });
+  });
+
+  test("a bare alias spelled like a held code does not take the code from its holder", async () => {
+    const { database, registry, service, add } = setup();
+    add("agent.a", "a", "openscout", START + 1, { projectRoot: "/work/project" });
+    add("agent.b", "b", "openscout", START + 2, { projectRoot: "/work/project" });
+    service.reconcile();
+    const snapshot = {
+      ...registry,
+      nodes: { [NODE]: { id: NODE, meshId: "mesh", name: "local", advertiseScope: "local", registeredAt: 1 } },
+      conversations: {},
+      messages: {},
+      invocations: {},
+      flights: {},
+      bindings: {},
+      deliveries: {},
+      collaborationRecords: {},
+      collaborationEvents: {},
+    } as unknown as RuntimeSnapshot;
+    let sequence = 0;
+    const aliases = new BrokerRouteAliasService({
+      store: new BrokerRouteAliasStore(database),
+      ownerRealmId: "mesh",
+      nodeId: NODE,
+      operatorActorId: "operator",
+      runtimeSnapshot: () => snapshot,
+      createId: (prefix) => `${prefix}-${++sequence}`,
+      now: () => START,
+    });
+    const caller = { actorId: "operator", currentDirectory: "/work/project" };
+    for (const alias of ["os001", "os042"]) {
+      aliases.set({ alias, target: { kind: "agent_id", agentId: "agent.b" }, scope: { projectRoot: "/work/project" }, caller });
+    }
+    const router = new BrokerDeliveryRouter({
+      runtimeSnapshot: () => snapshot,
+      nodeId: NODE,
+      isInactiveLocalAgent: () => false,
+      rosterService: service,
+      routeAliasService: aliases,
+    });
+    const resolve = (handle: string) => router.resolveWithImplicitProjectAgent(
+      { target: { kind: "target_handle", handle, value: `@${handle}` } },
+      { requesterId: "operator", currentDirectory: "/work/project", reason: "roster test" },
+    );
+
+    expect(await resolve("os001")).toMatchObject({ kind: "resolved", agent: { id: "agent.a" } });
+    // No agent holds 042, so the alias still answers.
+    expect(await resolve("os042")).toMatchObject({ kind: "resolved", agent: { id: "agent.b" }, aliasResolution: { requestedAlias: "os042" } });
   });
 
   test("a name that only looks like a code still resolves natively when no agent holds the code", async () => {

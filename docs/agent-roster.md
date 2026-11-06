@@ -40,6 +40,10 @@ display name or session:
   activity, or from when it took its number if that is later, so an imported
   number is kept for 30 days. An agent that is active again after that takes
   a new number, as a new agent does.
+- **Activity is kept.** The roster stores the latest activity it has seen
+  for each agent, so an agent does not look idle when its endpoint is
+  removed. The stored time moves forward only, never past the present, and
+  the runtime writes it when it has moved by an hour or more.
 - **Reuse.** A freed number goes to the next new agent only when every lower
   number is held.
 - **Capacity.** The roster holds 999 numbers. When all of them are held, a
@@ -72,6 +76,11 @@ apps show. The project's key is its name, trimmed and in lower case.
   so that it does not rename. An import can give the project that same code,
   but no other code with a digit.
 
+- **Imported default.** An import that gives a project the code it already
+  has by default does not change the code, and does not list it under
+  `projectCodes`. The import now owns the code, so a later import cannot
+  rename the project.
+
 - **Reset.** `scout roster project <name> --reset` gives the project its
   default code again.
 
@@ -86,10 +95,11 @@ scout ask --to OS-003 "status?"
 scout ask --to 003 "status?"
 ```
 
-A roster code resolves before any agent name. If no agent holds the code,
-an agent whose name looks like a code (for example `box100`) still resolves
-by name. Otherwise the target fails with a diagnostic. The runtime never
-guesses another agent:
+A roster code resolves before any agent name, a bare alias included. An
+explicit `alias:` target still resolves as an alias. If no agent holds the
+code, an alias or an agent whose name looks like a code (for example
+`box100`) still resolves. Otherwise the target fails with a diagnostic. The
+runtime never guesses another agent:
 
 | Diagnostic | Meaning |
 | --- | --- |
@@ -135,7 +145,7 @@ The import keeps every number that does not conflict:
   `project_code_held` or `project_code_differs`.
 
 You can run the import again. When you do, the entries that it already
-imported do not change.
+imported do not change, and their idle time does not restart.
 
 ## Interfaces
 
@@ -163,7 +173,9 @@ response and never stores it on the agent record. A record that carries a
 stale `roster` field loses it in the response. A deleted or retired agent
 whose number has not freed yet has no tag.
 
-The roster routes are local-tier: mesh peers cannot reach them. A roster
-number names an agent only on its own runtime, so the mesh snapshot carries
-no tags. The types are in `@openscout/protocol` (`agent-roster.ts`:
+The roster routes are local-tier: mesh peers cannot reach them. The routes
+also refuse remote and guest callers themselves, so an ingress gate that
+only warns does not open them. A roster number names an agent only on its
+own runtime, so the mesh snapshot carries no tags, and it drops a stale
+`roster` field as the local snapshot does. The types are in `@openscout/protocol` (`agent-roster.ts`:
 `AgentRosterTag`, `AgentRecordWithRoster`).
