@@ -54,6 +54,8 @@ test("MCP origin claims and trace context survive creation and HTTP mesh forward
   } finally { globalThis.fetch = originalFetch; }
   expect(captured).toBeDefined();
   const { traceparent: _correlation, ...command } = captured!;
+  const acceptedSnapshot = await broker.getJson<RuntimeSnapshot>(source.baseUrl, "/v1/snapshot");
+  const originalFlight = Object.values(acceptedSnapshot.flights).find(flight => flight.invocationId === claimed.id)!;
   for (const header of [`00-${"c".repeat(32)}-${"d".repeat(16)}-01`, undefined, `00-${"e".repeat(32)}-${"f".repeat(16)}-01`]) {
     const response = await originalFetch(`${source.baseUrl}/v1/deliver`, {
       method: "POST", headers: { "content-type": "application/json", ...(header ? { traceparent: header } : {}) },
@@ -62,6 +64,7 @@ test("MCP origin claims and trace context survive creation and HTTP mesh forward
     expect(response.status).toBe(202);
     const receipt = await response.json() as { flight?: { id: string; invocationId: string } };
     expect(receipt.flight?.invocationId).toBe(claimed.id);
+    expect(receipt.flight?.id).toBe(originalFlight.id);
     const snapshot = await broker.getJson<RuntimeSnapshot>(source.baseUrl, "/v1/snapshot");
     expect(snapshot.invocations[claimed.id]).toEqual(claimed);
   }

@@ -218,11 +218,11 @@ export const brokerDeliverRequestSchema: z.ZodType<ScoutDeliverRequest> = z.obje
 
 export function brokerInvocationRequestSchemaFor(
   runtimeCatalog?: ScoutOwnedRuntimeCatalog,
-): z.ZodType<InvocationRequest & BrokerRouteTargetInput> {
+): z.ZodType<Omit<InvocationRequest, "origin"> & { origin?: InvocationRequest["origin"] } & BrokerRouteTargetInput> {
   return z.object({
   id: nonEmptyString,
   origin: z.object({ sessionAddress: z.string().optional(), source: z.enum(["unknown", "claimed", "verified"]),
-    runningFlightId: z.string().optional() }).default({ source: "unknown" }),
+    runningFlightId: z.string().optional() }).optional(),
   traceparent: z.string().optional(),
   requestId: nonEmptyString.max(256).optional(),
   requesterId: nonEmptyString,
