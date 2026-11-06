@@ -1,3 +1,4 @@
+import { createCredentialBinding } from "./credential-binding.ts";
 import { timingSafeEqual } from "node:crypto";
 import { localConfigHome, resolveWebAuthToken } from "@openscout/runtime/local-config";
 import { mountPairingRoutes } from "../../../../routes/pairing.ts";
@@ -67,6 +68,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface BridgeContext {
+  credentialBinding?: object;
   bridge: Bridge;
   deviceId: string | undefined;
   cwd: string;
@@ -80,6 +82,7 @@ export interface BridgeContext {
 
 /** Per-socket state, same role as in server.ts but extended for tRPC. */
 interface SocketState {
+  credentialBinding?: object;
   lifetimeTimer?: ReturnType<typeof setTimeout>;
   /** Unsubscribe from bridge event stream. */
   unsub?: () => void;
@@ -609,7 +612,7 @@ export function startBridgeServerTRPC(options: {
       return;
     }
 
-    const res = await handleRPC(bridge, req, state.deviceId);
+    const res = await handleRPC(bridge, req, { deviceId: state.deviceId, secureTransport: state.secureTransport, trustedPeer: state.trustedPeer, credentialBinding: state.credentialBinding });
     sendRaw(JSON.stringify(res));
   }
 
@@ -785,10 +788,19 @@ export function startBridgeServerTRPC(options: {
                   return;
                 }
 
+                if (!state.localService) {
+                  try {
+                    state.credentialBinding = createCredentialBinding(bridge, pubHex,
+                      () => ws.readyState === WebSocket.OPEN && !state.abortController.signal.aborted
+                        && state.transport === transport && transport.isReady());
+                  } catch { ws.close(4003, "Credential authority unavailable; reconnect"); return; }
+                }
+
                 // Build tRPC context now that we know the peer.
                 state.ctx = {
                   bridge,
                   deviceId: state.deviceId,
+                  credentialBinding: state.credentialBinding,
                   cwd: resolveCurrentDirectory(),
                   secureTransport: true,
                   trustedPeer: trusted,

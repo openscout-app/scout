@@ -1,3 +1,4 @@
+import { createCredentialBinding } from "./credential-binding.ts";
 import { pairingTrustOwner } from "@openscout/runtime/pairing-security/trust-owner";
 import type { AdmitAccountDevice } from "../account-admission.ts";
 import { isTrustedPeer } from "@openscout/runtime/pairing-security/identity";
@@ -89,6 +90,7 @@ interface RelayEnvelope {
 }
 
 interface RelayPeerState {
+  credentialBinding?: object;
   subscriptions: Map<string | number, AbortController>;
   clientId: string;
   transport: SecureTransport;
@@ -344,6 +346,15 @@ export function connectToRelay(
 
   function publishAdmittedPeer(peer: RelayPeerState, remotePublicKey: Uint8Array): void {
     const pubHex = bytesToHex(remotePublicKey), clientId = peer.clientId;
+    const carrier = ws;
+    try {
+      peer.credentialBinding = createCredentialBinding(bridge, pubHex,
+        () => !stopped && ws === carrier && carrier?.readyState === WebSocket.OPEN
+          && peer.admitted === true && securePeers.get(clientId) === peer && peer.transport.isReady());
+    } catch {
+      sendRelayClose(clientId, 4003, "Credential authority unavailable; reconnect");
+      teardownSecurePeer(clientId); return;
+    }
     if (kind === "pairing") options.onPeerAdmitted?.();
     replaceOlderPeerForSameDevice(peer);
     ensureBridgeEventSubscription();
@@ -530,7 +541,7 @@ export function connectToRelay(
   async function dispatchTRPC(
     req: any,
     send: (json: string) => void,
-    context: { deviceId?: string; secureTransport?: boolean; trustedPeer?: boolean; reconnectRoom?: string; relayUrls?: string[] } = {},
+    context: { credentialBinding?: object; deviceId?: string; secureTransport?: boolean; trustedPeer?: boolean; reconnectRoom?: string; relayUrls?: string[] } = {},
     subscriptions?: Map<string | number, AbortController>,
   ): Promise<void> {
     const { id, method, params } = req;
@@ -702,6 +713,7 @@ export function connectToRelay(
     if (isTRPCMessage(req)) {
       void dispatchTRPC(req, send, {
         deviceId: peer.deviceId,
+        credentialBinding: peer.credentialBinding,
         secureTransport: true,
         trustedPeer: peer.trustedPeer,
         reconnectRoom: options.reconnectRoom,
@@ -710,6 +722,7 @@ export function connectToRelay(
     } else {
       void handleRPC(bridge, req, {
         deviceId: peer.deviceId,
+        credentialBinding: peer.credentialBinding,
         secureTransport: true,
         trustedPeer: peer.trustedPeer,
       }).then((res) => send(JSON.stringify(res)));
