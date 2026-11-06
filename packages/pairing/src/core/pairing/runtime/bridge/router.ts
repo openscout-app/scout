@@ -46,6 +46,8 @@ import { getTailFanout } from "./tail-fanout.ts";
 import type { TailEvent } from "@openscout/runtime/tail";
 
 import { log } from "./log.ts";
+import { bridgeWebRequest } from "./web-request.ts";
+import { BRIDGE_WEB_STREAMS, bridgeEventStream, bridgeRuntimeStream } from "./web-stream.ts";
 import { resolveConfig } from "./config.ts";
 import { readPairingRuntimeSnapshot } from "../runtime-state.ts";
 import type { Bridge } from "./bridge.ts";
@@ -125,6 +127,7 @@ export interface BridgeContext {
   bridge: Bridge;
   cwd: string;
   deviceId?: string;
+  credentialBinding?: object;
   secureTransport?: boolean;
   trustedPeer?: boolean;
   reconnectRoom?: string;
@@ -1624,7 +1627,7 @@ const mobileRouter = t.router({
           message: "Terminal provisioning requires a trusted paired device over the encrypted bridge.",
         });
       }
-      return await provisionMobileTerminalAccess(input.sshPublicKey, ctx.deviceId, input.deviceClass);
+      return await provisionMobileTerminalAccess(input.sshPublicKey, ctx.deviceId, input.deviceClass, ctx.credentialBinding);
     }),
 
   terminalStatus: procedure
@@ -1637,7 +1640,7 @@ const mobileRouter = t.router({
         });
       }
       try {
-        return await readMobileTerminalStatus(input?.sessionName, ctx.deviceId);
+        return await readMobileTerminalStatus(input?.sessionName, ctx.deviceId, ctx.credentialBinding);
       } catch (error) {
         if (error instanceof InvalidMobileTerminalSessionError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: error.message, cause: error });
@@ -2153,6 +2156,34 @@ export const bridgeRouter = t.router({
   prompt: promptRouter,
   codexDeck: codexDeckRouter,
   sync: syncRouter,
+
+  // A paired browser reads this host's web API (GET only) and its live feeds,
+  // so a browser away from the host shows the same views as the local web app.
+  // web.admission is answered by the relay client, not here (see the note at
+  // the top of this file).
+  web: t.router({
+    request: protectedMobileProcedure
+      .input(z.object({ path: z.string().min(1).max(4096), method: z.string().default("GET") }))
+      .query(({ input }) => bridgeWebRequest(input)),
+    subscribe: protectedMobileProcedure
+      .input(z.object({
+        stream: z.enum(BRIDGE_WEB_STREAMS),
+        input: z.record(z.string(), z.unknown()).optional(),
+        lastEventId: z.string().max(512).optional(),
+      }))
+      .subscription(async function* ({ input, signal }) {
+        // A resumed subscription picks up after the last event the browser saw.
+        const streamInput = input.lastEventId ? { ...input.input, since: input.lastEventId } : input.input;
+        for await (const item of bridgeRuntimeStream(input.stream, streamInput, signal)) {
+          yield item.id ? tracked(item.id, item.data) : item.data;
+        }
+      }),
+    stream: protectedMobileProcedure
+      .input(z.object({ path: z.string().min(1).max(4096) }))
+      .subscription(async function* ({ input, signal }) {
+        yield* bridgeEventStream(input.path, signal);
+      }),
+  }),
 
   // -- Top-level procedures (no sub-router grouping) -----------------------
 

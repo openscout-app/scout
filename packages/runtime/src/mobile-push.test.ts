@@ -262,7 +262,7 @@ describe("mobile push relay", () => {
         itemId: "item-1",
         sender: { name: "machiavelli" },
         project: "openscout",
-        urgent: true,
+        level: "active",
         createdAt: 1,
         view: "turn.approve.command",
         command: "bash apps/ios/scripts/release.sh",

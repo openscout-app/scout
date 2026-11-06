@@ -1831,3 +1831,22 @@ test("exact message reads do not snapshot and preserve durable bytes, absence an
   h.deps.readMessage = async () => { throw Error("storage unavailable"); };
   expect((await requestRouter(h, "GET", "/v1/messages/unavailable")).response.status).toBe(503);
 });
+
+test("pre-origin invocation receipts replay unchanged after upgrade and changing HTTP trace headers", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "broker-legacy-origin-receipt-"));
+  try {
+    const command = { id: "legacy-inv", requestId: "legacy-retry", requesterId: "operator", requesterNodeId: "node-1",
+      targetAgentId: "agent-1", action: "consult", task: "same task", ensureAwake: true, stream: false, createdAt: 100 };
+    const original = { id: "flight-before-upgrade", invocationId: "legacy-inv", state: "running" };
+    await new BrokerRequestReceipts(directory).run("operator", "legacy-retry", "invoke", command, async () => original);
+    const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory) });
+    for (const traceparent of [undefined, `00-${"a".repeat(32)}-${"b".repeat(16)}-01`, undefined]) {
+      const response = await requestRouter(harness, "POST", "/v1/invocations", {
+        body: command, headers: traceparent ? { traceparent } : {},
+      });
+      expect(response.response.status).toBe(202);
+      expect(response.body).toEqual(original);
+    }
+    expect(harness.invocationCalls).toHaveLength(0);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

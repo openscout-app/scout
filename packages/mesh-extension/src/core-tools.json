@@ -160,7 +160,7 @@
   {
     "name": "feedback_send",
     "title": "Send Scout Feedback",
-    "description": "File feedback about Scout itself with the OpenScout team: a bug, a rough edge, a missing capability. The note is redacted, saved locally, then uploaded; the report names the sender (agent, harness, project, host). Set diagnostics only when the note is about Scout misbehaving on this machine — it attaches bounded, redacted service logs. This is not a message to another agent; use ask for that.",
+    "description": "File feedback about Scout itself with the OpenScout team: a bug, a rough edge, a missing capability. The note is redacted, saved locally, then uploaded; the report names the sender (agent, harness, project, host). Set diagnostics only when the note is about Scout misbehaving on this machine \u2014 it attaches bounded, redacted service logs. This is not a message to another agent; use ask for that.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -650,7 +650,7 @@
           "maxLength": 256
         },
         "to": {
-          "description": "Agent id, label, sibling, specialist, recent collaborator, target:<name>, or ⌖name.",
+          "description": "Agent id, label, sibling, specialist, recent collaborator, target:<name>, or \u2316name.",
           "type": "string",
           "minLength": 1
         },
@@ -839,6 +839,10 @@
         "wait": {
           "description": "Compatibility alias for replyMode='inline'.",
           "type": "boolean"
+        },
+        "traceparent": {
+          "type": "string",
+          "description": "Optional W3C traceparent for creation-time trace correlation; does not assert caller identity."
         }
       },
       "required": [

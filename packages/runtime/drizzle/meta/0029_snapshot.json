@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "de9a2ec8-356e-480f-bc36-bc4711afed9f",
+  "id": "ac79708c-a672-43bf-a512-eb14c731951f",
   "prevId": "b497756f-343d-4279-a3ff-b0843daa0680",
   "tables": {
     "activity_items": {
@@ -4646,6 +4646,20 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
+        },
+        "origin_json": {
+          "name": "origin_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "trace_json": {
+          "name": "trace_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {
@@ -5976,162 +5990,6 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
-    },
-    "roster_agents": {
-      "name": "roster_agents",
-      "columns": {
-        "agent_id": {
-          "name": "agent_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "number": {
-          "name": "number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "project_key": {
-          "name": "project_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "project": {
-          "name": "project",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "assigned_at": {
-          "name": "assigned_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "gone_at": {
-          "name": "gone_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "idx_roster_agents_number": {
-          "name": "idx_roster_agents_number",
-          "columns": [
-            "number"
-          ],
-          "isUnique": true
-        },
-        "idx_roster_agents_project_key": {
-          "name": "idx_roster_agents_project_key",
-          "columns": [
-            "project_key"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "roster_agents_number_check": {
-          "name": "roster_agents_number_check",
-          "value": "\"roster_agents\".\"number\" BETWEEN 1 AND 999"
-        },
-        "roster_agents_source_check": {
-          "name": "roster_agents_source_check",
-          "value": "\"roster_agents\".\"source\" IN ('auto', 'import')"
-        }
-      }
-    },
-    "roster_projects": {
-      "name": "roster_projects",
-      "columns": {
-        "project_key": {
-          "name": "project_key",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "code": {
-          "name": "code",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "code_source": {
-          "name": "code_source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "idx_roster_projects_code": {
-          "name": "idx_roster_projects_code",
-          "columns": [
-            "code"
-          ],
-          "isUnique": true,
-          "where": "code IS NOT NULL"
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {
-        "roster_projects_code_source_check": {
-          "name": "roster_projects_code_source_check",
-          "value": "\"roster_projects\".\"code_source\" IN ('default', 'operator', 'import')"
-        }
-      }
     },
     "route_alias_bindings": {
       "name": "route_alias_bindings",

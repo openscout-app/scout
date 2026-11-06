@@ -1,3 +1,4 @@
+import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
 import { parseRosterAddress, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
@@ -34,6 +35,7 @@ import {
   validateScoutAgentNameForWrite,
   type AgentIdentityCandidate,
   type AgentState,
+  type AgentHarness,
   type ScoutAgentCard,
   type ScoutDeliverRequest,
   type ScoutReplyContext,
@@ -567,6 +569,8 @@ type ScoutMcpDependencies = {
     shouldSpeak?: boolean;
     labels?: string[];
     replyToSessionId?: string;
+    replyToSessionHarness?: AgentHarness;
+    traceparent?: string;
     replyMode?: ScoutAskReplyMode;
     currentDirectory: string;
     source?: string;
@@ -581,6 +585,8 @@ type ScoutMcpDependencies = {
     shouldSpeak?: boolean;
     labels?: string[];
     replyToSessionId?: string;
+    replyToSessionHarness?: AgentHarness;
+    traceparent?: string;
     replyMode?: ScoutAskReplyMode;
     currentDirectory: string;
     source?: string;
@@ -594,6 +600,8 @@ type ScoutMcpDependencies = {
     shouldSpeak?: boolean;
     labels?: string[];
     replyToSessionId?: string;
+    replyToSessionHarness?: AgentHarness;
+    traceparent?: string;
     replyMode?: ScoutAskReplyMode;
     currentDirectory: string;
     source?: string;
@@ -1732,7 +1740,7 @@ function resolveMcpReplyToSessionId(
   explicitSessionId: string | undefined,
   env: NodeJS.ProcessEnv,
 ): string | undefined {
-  return explicitSessionId?.trim() || env.CODEX_THREAD_ID?.trim() || undefined;
+  return explicitSessionId?.trim() || claimedSessionId(env);
 }
 
 function workUrlFor(
@@ -3216,6 +3224,8 @@ function defaultScoutMcpDependencies(
       shouldSpeak,
       labels,
       replyToSessionId,
+      replyToSessionHarness,
+      traceparent,
       replyMode,
       currentDirectory,
       source,
@@ -3230,6 +3240,8 @@ function defaultScoutMcpDependencies(
         shouldSpeak,
         labels,
         replyToSessionId,
+        replyToSessionHarness,
+        traceparent,
         replyMode,
         currentDirectory,
         source,
@@ -3244,6 +3256,8 @@ function defaultScoutMcpDependencies(
       shouldSpeak,
       labels,
       replyToSessionId,
+      replyToSessionHarness,
+      traceparent,
       replyMode,
       currentDirectory,
       source,
@@ -3257,6 +3271,8 @@ function defaultScoutMcpDependencies(
         shouldSpeak,
         labels,
         replyToSessionId,
+        replyToSessionHarness,
+        traceparent,
         replyMode,
         currentDirectory,
         source,
@@ -3270,6 +3286,8 @@ function defaultScoutMcpDependencies(
       shouldSpeak,
       labels,
       replyToSessionId,
+      replyToSessionHarness,
+      traceparent,
       replyMode,
       currentDirectory,
       source,
@@ -3283,6 +3301,8 @@ function defaultScoutMcpDependencies(
         shouldSpeak,
         labels,
         replyToSessionId,
+        replyToSessionHarness,
+        traceparent,
         replyMode,
         currentDirectory,
         source,
@@ -4472,11 +4492,12 @@ export function createScoutMcpServer(options: {
         body: z.string().min(1),
         currentDirectory: z.string().optional(),
         senderId: z.string().optional(),
+        traceparent: z.string().optional().describe("W3C traceparent for correlation only."),
         replyToSessionId: z
           .string()
           .optional()
           .describe(
-            "Optional requester session that should receive the eventual reply. When omitted, Codex MCP uses the current CODEX_THREAD_ID when available.",
+            "Optional requester session that should receive the eventual reply. When omitted, uses the current native Codex or Claude session id when available.",
           ),
         labels: z.array(z.string()).optional(),
         workItem: workItemInputSchema.optional(),
@@ -4550,6 +4571,7 @@ export function createScoutMcpServer(options: {
       currentDirectory,
       senderId,
       replyToSessionId,
+      traceparent,
       labels,
       workItem,
       channel,
@@ -4693,6 +4715,8 @@ export function createScoutMcpServer(options: {
             ...(labels ? { labels } : {}),
             ...(channel ? { channel } : {}),
             ...(resolvedReplyToSessionId ? { replyToSessionId: resolvedReplyToSessionId } : {}),
+            ...(claimedSessionHarness(resolvedReplyToSessionId, env) ? { replyToSessionHarness: claimedSessionHarness(resolvedReplyToSessionId, env) } : {}),
+            ...((traceparent ?? env.TRACEPARENT) ? { traceparent: traceparent ?? env.TRACEPARENT } : {}),
             replyMode: resolvedReplyMode,
             currentDirectory: resolvedCurrentDirectory,
             source: "scout-mcp",
@@ -4841,7 +4865,7 @@ export function createScoutMcpServer(options: {
           replyToSessionId: z
             .string()
             .describe(
-              "Optional requester session that should receive the eventual reply. When omitted, Codex MCP uses the current CODEX_THREAD_ID when available.",
+              "Optional requester session that should receive the eventual reply. When omitted, uses the current native Codex or Claude session id when available.",
             )
             .optional(),
           labels: z.array(z.string()).optional(),
@@ -4941,6 +4965,8 @@ export function createScoutMcpServer(options: {
           shouldSpeak,
           labels,
           replyToSessionId: resolvedReplyToSessionId,
+          ...(claimedSessionHarness(resolvedReplyToSessionId, env) ? { replyToSessionHarness: claimedSessionHarness(resolvedReplyToSessionId, env) } : {}),
+          ...(env.TRACEPARENT ? { traceparent: env.TRACEPARENT } : {}),
           replyMode: resolvedReplyMode,
           currentDirectory: resolvedCurrentDirectory,
           source: "scout-mcp",
@@ -5054,6 +5080,8 @@ export function createScoutMcpServer(options: {
           shouldSpeak,
           labels,
           replyToSessionId: resolvedReplyToSessionId,
+          ...(claimedSessionHarness(resolvedReplyToSessionId, env) ? { replyToSessionHarness: claimedSessionHarness(resolvedReplyToSessionId, env) } : {}),
+          ...(env.TRACEPARENT ? { traceparent: env.TRACEPARENT } : {}),
           replyMode: resolvedReplyMode,
           currentDirectory: resolvedCurrentDirectory,
           source: "scout-mcp",
@@ -5205,6 +5233,8 @@ export function createScoutMcpServer(options: {
         shouldSpeak,
         labels,
         replyToSessionId: resolvedReplyToSessionId,
+        ...(claimedSessionHarness(resolvedReplyToSessionId, env) ? { replyToSessionHarness: claimedSessionHarness(resolvedReplyToSessionId, env) } : {}),
+        ...(env.TRACEPARENT ? { traceparent: env.TRACEPARENT } : {}),
         replyMode: resolvedReplyMode,
         currentDirectory: resolvedCurrentDirectory,
         source: "scout-mcp",

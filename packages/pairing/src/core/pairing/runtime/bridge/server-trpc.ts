@@ -1,3 +1,4 @@
+import { createCredentialBinding } from "./credential-binding.ts";
 import { timingSafeEqual } from "node:crypto";
 import { localConfigHome, resolveWebAuthToken } from "@openscout/runtime/local-config";
 import { mountPairingRoutes } from "../../../../routes/pairing.ts";
@@ -41,7 +42,7 @@ import type { ServerWebSocket } from "bun";
 import { realpathSync } from "fs";
 import { homedir } from "os";
 import type { SessionState } from "@openscout/agent-sessions";
-import { agentNotificationForSessionAttention } from "@openscout/runtime/agent-notification-builders";
+import { agentNotificationForSessionAttention, pushDeliveryForLevel } from "@openscout/runtime/agent-notification-builders";
 import { broadcastApnsAlertToActiveMobileDevices } from "@openscout/runtime/mobile-push";
 
 import { log } from "./log.ts";
@@ -67,6 +68,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface BridgeContext {
+  credentialBinding?: object;
   bridge: Bridge;
   deviceId: string | undefined;
   cwd: string;
@@ -80,6 +82,7 @@ export interface BridgeContext {
 
 /** Per-socket state, same role as in server.ts but extended for tRPC. */
 interface SocketState {
+  credentialBinding?: object;
   lifetimeTimer?: ReturnType<typeof setTimeout>;
   /** Unsubscribe from bridge event stream. */
   unsub?: () => void;
@@ -157,10 +160,12 @@ function mobileConversationLifecycleEvent(lifecycle: ScoutBrokerConversationLife
 }
 
 async function sendMobileInboxPushNotification(item: MobileInboxItem, snapshot: SessionState | null) {
+  // The command, diff, or question itself, sealed to each paired phone.
+  const notification = agentNotificationForSessionAttention({ item, snapshot });
   const result = await broadcastApnsAlertToActiveMobileDevices({
     title: "Scout",
     body: genericMobileInboxAlertBody(item.kind),
-    sound: "default",
+    ...pushDeliveryForLevel(notification.level),
     threadId: "scout.inbox",
     payload: {
       destination: "inbox",
@@ -170,8 +175,7 @@ async function sendMobileInboxPushNotification(item: MobileInboxItem, snapshot: 
       turnId: item.turnId,
       blockId: item.blockId,
     },
-    // The command, diff, or question itself, sealed to each paired phone.
-    notification: agentNotificationForSessionAttention({ item, snapshot }),
+    notification,
   });
 
   if (result.attemptedCount === 0) {
@@ -608,7 +612,7 @@ export function startBridgeServerTRPC(options: {
       return;
     }
 
-    const res = await handleRPC(bridge, req, state.deviceId);
+    const res = await handleRPC(bridge, req, { deviceId: state.deviceId, secureTransport: state.secureTransport, trustedPeer: state.trustedPeer, credentialBinding: state.credentialBinding });
     sendRaw(JSON.stringify(res));
   }
 
@@ -784,10 +788,19 @@ export function startBridgeServerTRPC(options: {
                   return;
                 }
 
+                if (!state.localService) {
+                  try {
+                    state.credentialBinding = createCredentialBinding(bridge, pubHex,
+                      () => ws.readyState === WebSocket.OPEN && !state.abortController.signal.aborted
+                        && state.transport === transport && transport.isReady());
+                  } catch { ws.close(4003, "Credential authority unavailable; reconnect"); return; }
+                }
+
                 // Build tRPC context now that we know the peer.
                 state.ctx = {
                   bridge,
                   deviceId: state.deviceId,
+                  credentialBinding: state.credentialBinding,
                   cwd: resolveCurrentDirectory(),
                   secureTransport: true,
                   trustedPeer: trusted,

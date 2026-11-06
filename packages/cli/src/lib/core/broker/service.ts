@@ -4133,6 +4133,8 @@ export async function askScoutAgentById(input: {
   senderContext?: ScoutAskSenderContext;
   labels?: string[];
   replyToSessionId?: string;
+  replyToSessionHarness?: AgentHarness;
+  traceparent?: string;
   replyMode?: ScoutAskReplyMode;
   currentDirectory?: string;
   source?: string;
@@ -4159,6 +4161,8 @@ export async function askScoutAgentById(input: {
     senderContext: input.senderContext,
     labels: input.labels,
     replyToSessionId: input.replyToSessionId,
+    replyToSessionHarness: input.replyToSessionHarness,
+    traceparent: input.traceparent,
     replyMode: input.replyMode,
     currentDirectory: input.currentDirectory,
     source: input.source ?? "scout-mcp",
@@ -4187,6 +4191,8 @@ export async function askScoutSessionById(input: {
   senderContext?: ScoutAskSenderContext;
   labels?: string[];
   replyToSessionId?: string;
+  replyToSessionHarness?: AgentHarness;
+  traceparent?: string;
   replyMode?: ScoutAskReplyMode;
   currentDirectory?: string;
   source?: string;
@@ -4211,6 +4217,8 @@ export async function askScoutSessionById(input: {
     senderContext: input.senderContext,
     labels: input.labels,
     replyToSessionId: input.replyToSessionId,
+    replyToSessionHarness: input.replyToSessionHarness,
+    traceparent: input.traceparent,
     replyMode: input.replyMode,
     currentDirectory: input.currentDirectory,
     source: input.source ?? "scout-mcp",
@@ -4297,6 +4305,8 @@ export async function deliverScoutAsk(input: {
   projectAgent?: ScoutProjectAgentSpec;
   targetSessionId?: string;
   replyToSessionId?: string;
+  replyToSessionHarness?: AgentHarness;
+  traceparent?: string;
   replyMode?: ScoutAskReplyMode;
   currentDirectory?: string;
   source?: string;
@@ -4367,6 +4377,7 @@ export async function deliverScoutAsk(input: {
     ...askMetadata,
     ...(targetSessionId ? { targetSessionId } : {}),
     ...(replyToSessionId ? { replyToSessionId } : {}),
+    ...(input.replyToSessionHarness ? { replyToSessionHarness: input.replyToSessionHarness } : {}),
     ...(input.replyMode ? { replyMode: input.replyMode } : {}),
   };
   const delivery = await brokerPostDeliver(brokerBaseUrl, {
@@ -4382,6 +4393,7 @@ export async function deliverScoutAsk(input: {
     ...(targetSessionId ? { targetSessionId } : {}),
     targetLabel: renderedTarget,
     ...(replyToSessionId ? { replyToSessionId } : {}),
+    ...(input.traceparent ? { traceparent: input.traceparent } : {}),
     body: input.body.trim(),
     intent: input.task ? "task_ask" : input.completion || input.relation ? "explicit_consult" : "consult",
     ...(input.task ? { task: input.task } : {}),
@@ -4470,6 +4482,8 @@ export async function askScoutQuestion(input: {
   projectAgent?: ScoutProjectAgentSpec;
   targetSessionId?: string;
   replyToSessionId?: string;
+  replyToSessionHarness?: AgentHarness;
+  traceparent?: string;
   replyMode?: ScoutAskReplyMode;
   currentDirectory?: string;
   source?: string;
@@ -4496,6 +4510,8 @@ export async function askScoutQuestion(input: {
     projectAgent: input.projectAgent,
     targetSessionId: input.targetSessionId,
     replyToSessionId: input.replyToSessionId,
+    replyToSessionHarness: input.replyToSessionHarness,
+    traceparent: input.traceparent,
     replyMode: input.replyMode,
     currentDirectory: input.currentDirectory,
     source: input.source ?? "scout-cli",

@@ -428,6 +428,7 @@ function buildInvocationRequest(input: {
   };
 
   return {
+    origin: { source: "unknown" },
     id: invocationId,
     requesterId: input.requesterId,
     requesterNodeId: input.requesterNodeId,

@@ -598,6 +598,12 @@ const sharedControlPlaneStore = sqliteDisabled
   ? null
   : new LazyControlPlaneStore(() => new SQLiteControlPlaneStore(dbPath));
 const projection = new WorkerSQLiteProjection(dbPath, journalPath, journal, { disabled: sqliteDisabled, historyDirectory });
+/**
+ * Any durable message by id. History rotation keeps only the live window in
+ * the runtime; SQLite (or the history archive without SQLite) holds the rest.
+ */
+const readDurableMessage = async (id: string): Promise<MessageRecord | undefined> => await runtime.readMessage(id)
+  ?? (sqliteDisabled ? historicalReader.read<MessageRecord>("message", id) : (await projection.readMessages([id])).get(id));
 let observedSessionReducer: ObservedSessionReducer | null = null;
 let unsubscribeObservedSessionReducer: (() => void) | null = null;
 let projectionWarmStarted = false;
@@ -966,6 +972,7 @@ const readCursorStore = new BrokerReadCursorStore({
   operatorActorId,
   nodeId,
   ensureActor: ensureBrokerActorForDelivery,
+  readMessage: readDurableMessage,
   journal,
   updateDeliveryStatusIf: deliveryStore.updateDeliveryStatusIf,
 });
@@ -2149,7 +2156,7 @@ if (process.env.OPENSCOUT_ATTACHMENTS_DISABLED !== "1" && !sqliteDisabled) {
         if (endpoints.length) return endpoints.some(e => e.nodeId === principal.nodeId && e.state !== "stopped");
         return principal.nodeId === nodeId && Boolean(runtime.peek().actors[principal.actorId]);
       },
-      message: async id => await runtime.readMessage(id) ?? (sqliteDisabled ? historicalReader.read<MessageRecord>("message", id) : (await projection.readMessages([id])).get(id)),
+      message: readDurableMessage,
       post: message => postConversationMessage(message),
     });
   } catch {
@@ -3026,6 +3033,11 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
   messageVisibilityForConversation,
   postConversationMessage,
   broadcastApnsAlertToActiveMobileDevices,
+  agentDisplayName: (actorId) => {
+    const snapshot = runtime.snapshot();
+    const name = brokerActorDisplayName(snapshot, actorId);
+    return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
+  },
   warn: (message) => console.warn(message),
 });
 
@@ -3047,12 +3059,19 @@ const permissionService = new BrokerPermissionService({
     state, summary: requestId ? "Waiting on permission" : "Permission wait resolved; continuing live session.",
     metadata: { permissionRequestId: requestId, waitingOnPermission: Boolean(requestId), nextMoveOwnerId: requestId ? operatorActorId : null },
   }),
-  notify: (invocation, record, prompt) => operatorAttentionService.queueOperatorSignal({
-    signal: { kind: "need", blocking: true, replyExpectation: "required", question: prompt.text, requestKind: "permission" },
-    messageId: record.id, conversationId: invocation.conversationId!,
-    requesterId: invocation.targetAgentId, requesterNodeId: nodeId,
-    body: prompt.text, projectRoot: prompt.projectRoot, createdAt: record.createdAt,
-  }),
+  // A harness dialog, not a question an agent put to the operator: it reads
+  // and rings as a permission request, and a tap opens the request.
+  notify: (invocation, record, prompt) => {
+    const flightId = runtime.flightForInvocation(invocation.id)?.id;
+    operatorAttentionService.queuePermissionRequest({
+      requestId: record.id, text: prompt.text, agentId: invocation.targetAgentId, requesterNodeId: nodeId,
+      projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: record.createdAt,
+      ...(invocation.conversationId ? { conversationId: invocation.conversationId } : {}),
+      ...(invocation.messageId ? { messageId: invocation.messageId } : {}),
+      ...(flightId ? { flightId } : {}),
+      invocationId: invocation.id,
+    });
+  },
 });
 configureManagedPermissionHandler((invocation, prompt) => permissionService.wait(invocation, prompt));
 
@@ -3359,8 +3378,7 @@ const routeRequest = createBrokerHttpRouter({
   deliveryReceiptsOwnedByService: true,
   readFlight: async id => runtime.flight(id)
     ?? (sqliteDisabled ? historicalReader.read<FlightRecord>("flight", id) : (await projection.readFlights([id])).get(id)),
-  readMessage: async id => await runtime.readMessage(id)
-    ?? (sqliteDisabled ? historicalReader.read<MessageRecord>("message", id) : (await projection.readMessages([id])).get(id)),
+  readMessage: readDurableMessage,
   readHistoricalInvocationSnapshot: id => projection.readInvocationSnapshot(id),
   historyQueries: { read: (kind, ids) => projection.readHistoricalRecords(kind, ids),
     page: options => projection.pageHistoricalRecords(options) },

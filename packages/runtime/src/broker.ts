@@ -1,3 +1,4 @@
+import { stampAskContext, assertAskTrace } from "./ask-context.js";
 import type {
   ActorIdentity,
   AgentDefinition,
@@ -14,6 +15,7 @@ import type {
   DeliveryTransport,
   FlightRecord,
   InvocationRequest,
+  TracedInvocationRequest,
   MessageRecord,
   NodeDefinition,
   ScoutId,
@@ -780,13 +782,15 @@ export class InMemoryControlRuntime implements ControlRuntime {
     });
   }
 
-  async invokeAgent(invocation: InvocationRequest): Promise<FlightRecord> {
+  async invokeAgent(invocation: InvocationRequest, context: { observedEndpointId?: string } = {}): Promise<FlightRecord> {
+    stampAskContext(invocation, this.registry, this.localNodeId, context.observedEndpointId);
     const flight = this.planInvocation(invocation);
     await this.commitInvocation(invocation, flight);
     return flight;
   }
 
-  planInvocation(invocation: InvocationRequest): FlightRecord {
+  planInvocation(invocation: TracedInvocationRequest): FlightRecord {
+    assertAskTrace(invocation.trace);
     const targetAgent = this.registry.agents[invocation.targetAgentId];
     const targetActor = this.registry.actors[invocation.targetAgentId] ?? targetAgent;
     if (!targetActor) {

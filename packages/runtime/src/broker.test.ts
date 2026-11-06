@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { stampAskContext } from "./ask-context.js";
 import { createInMemoryControlRuntime } from "./broker.ts";
 
 describe("InMemoryControlRuntime", () => {
@@ -288,6 +289,7 @@ describe("InMemoryControlRuntime", () => {
     });
 
     const invocation = {
+      origin: { source: "unknown" as const },
       id: "inv-1",
       requesterId: "operator",
       requesterNodeId: "node-1",
@@ -299,6 +301,7 @@ describe("InMemoryControlRuntime", () => {
       labels: ["release:0.2.66"],
       createdAt: Date.now(),
     };
+    stampAskContext(invocation, runtime.peek(), "node-1");
     const flight = runtime.planInvocation(invocation);
 
     expect(runtime.flightForInvocation("inv-1")).toBeUndefined();

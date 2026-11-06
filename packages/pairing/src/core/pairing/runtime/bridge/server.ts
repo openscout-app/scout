@@ -1,3 +1,4 @@
+import { createCredentialBinding } from "./credential-binding.ts";
 // Bridge WebSocket server.
 //
 // Exposes the bridge over a local WebSocket so the relay (or a direct LAN
@@ -94,12 +95,14 @@ interface SocketState {
   unsub?: () => void;
   transport?: SecureTransport;
   deviceId?: string;
+  credentialBinding?: object;
   secureTransport?: boolean;
   trustedPeer?: boolean;
 }
 
 export interface BridgeRpcContext {
   deviceId?: string;
+  credentialBinding?: object;
   secureTransport?: boolean;
   trustedPeer?: boolean;
 }
@@ -209,6 +212,12 @@ export function startBridgeServer(
                 state.deviceId = pubHex.slice(0, 16);
                 state.secureTransport = true;
                 state.trustedPeer = trusted;
+                if (trusted) {
+                  try {
+                    state.credentialBinding = createCredentialBinding(bridge, pubHex,
+                      () => ws.readyState === WebSocket.OPEN && state.transport === transport && transport.isReady());
+                  } catch { ws.close(4003, "Credential authority unavailable; reconnect"); return; }
+                }
                 console.log(
                   `[bridge] secure handshake complete (peer: ${pubHex.slice(0, 12)}..., trusted: ${trusted}, device: ${state.deviceId})`,
                 );
@@ -971,7 +980,7 @@ async function handleRPCInner(
         }
         return {
           id: req.id,
-          result: await provisionMobileTerminalAccess(p.sshPublicKey, rpcContext.deviceId, p.deviceClass),
+          result: await provisionMobileTerminalAccess(p.sshPublicKey, rpcContext.deviceId, p.deviceClass, rpcContext.credentialBinding),
         };
       }
 
@@ -989,7 +998,7 @@ async function handleRPCInner(
         try {
           return {
             id: req.id,
-            result: await readMobileTerminalStatus(p?.sessionName, rpcContext.deviceId),
+            result: await readMobileTerminalStatus(p?.sessionName, rpcContext.deviceId, rpcContext.credentialBinding),
           };
         } catch (error) {
           if (error instanceof InvalidMobileTerminalSessionError) {

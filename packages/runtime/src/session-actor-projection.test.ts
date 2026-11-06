@@ -63,7 +63,9 @@ for (const ledger of [true, false]) {
       for (const table of tables) expect(before[table]).toHaveLength(1);
       migrateControlPlaneDatabaseSchema(db);
       for (const table of tables) {
-        expect(db.query(`SELECT * FROM ${table}`).all()).toEqual(before[table]);
+        const expected = table === "invocations"
+          ? before[table].map(row => ({ ...(row as Record<string, unknown>), origin_json: null, trace_json: null })) : before[table];
+        expect(db.query(`SELECT * FROM ${table}`).all()).toEqual(expected);
         expect((db.query(`PRAGMA foreign_key_list(${table})`).all() as Array<{ table: string }>).some((fk) => fk.table === "agents")).toBe(false);
       }
       expect(db.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });

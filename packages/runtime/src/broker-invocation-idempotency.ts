@@ -12,5 +12,6 @@ export function isIdempotentInvocationRetry(existing: InvocationRequest, incomin
     && isDeepStrictEqual(existing.execution ?? null, incoming.execution ?? null)
     && isDeepStrictEqual(existing.metadata?.completion ?? null, incoming.metadata?.completion ?? null)
     && isDeepStrictEqual(existing.metadata?.completionRelation ?? null, incoming.metadata?.completionRelation ?? null)
+    && isDeepStrictEqual(existing.metadata?.replyToSessionId ?? null, incoming.metadata?.replyToSessionId ?? null)
     && existing.ensureAwake === incoming.ensureAwake && existing.stream === incoming.stream;
 }

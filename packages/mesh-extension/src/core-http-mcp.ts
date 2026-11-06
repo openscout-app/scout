@@ -190,7 +190,7 @@ export class CoreHttpAdapter {
         ...(a.labels ? { labels: a.labels } : {}), ...(a.replyToSessionId ? { replyToSessionId: a.replyToSessionId } : {}),
         replyMode: a.wait ? 'inline' : a.replyMode ?? 'notify', senderContext: { agentId: senderId, cwd: currentDirectory } };
       const result = await request('/v1/deliver', { caller: { actorId: senderId, currentDirectory, metadata: { source: 'scout-mesh-http' } }, target, body, intent, task,
-        ...pick(a,['requestId','completion','relation','targetSessionId','replyToSessionId','labels','channel']),
+        ...pick(a,['requestId','completion','relation','targetSessionId','replyToSessionId','traceparent','labels','channel']),
         ...(isAsk && !a.ref && !operator ? { execution: { ...execution, session: a.targetSessionId ? 'existing' : 'new' } } : {}), ...(operator ? {} : { ensureAwake: isAsk || a.wake === true }), ...(a.shouldSpeak ? { speechText: body } : {}),
         ...(a.workItem ? { collaborationRecordId: workRecordId, workItem: { id: workRecordId, ...a.workItem } } : {}),
         messageMetadata: isAsk ? metadata : { source: 'scout-mesh-http' }, ...(isAsk ? { invocationMetadata: metadata } : {}),

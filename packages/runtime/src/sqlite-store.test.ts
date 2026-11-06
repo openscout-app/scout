@@ -3151,3 +3151,24 @@ test("retained question history is channel scoped and creation-order paginated",
     expect(store.listCollaborationRecords({ ...query, orderByCreatedAt: false }).map(row => row.id)).toEqual(["b", "c"]);
   } finally { store.close(); }
 });
+
+test("ask origin and trace survive SQLite restart; legacy rows stay unknown and untraced", () => {
+  const { store, dbPath } = createStoreWithPath();
+  seedAgent(store);
+  store.upsertActor({ id: "operator", kind: "human", displayName: "Operator" });
+  const ask = { id: "ask-context", requesterId: "operator", requesterNodeId: "node-1", targetAgentId: "agent-1",
+    action: "consult" as const, task: "context persistence", ensureAwake: false, stream: false, createdAt: 1,
+    origin: { source: "claimed" as const, sessionAddress: "sess.caller@source", runningFlightId: "parent" },
+    trace: { traceId: "a".repeat(32), spanId: "b".repeat(16), parentSpanId: "c".repeat(16) } };
+  store.recordInvocation(ask);
+  store.close();
+  const reopened = new SQLiteControlPlaneStore(dbPath);
+  try {
+    expect(reopened.readInvocations([ask.id]).get(ask.id)).toMatchObject({ origin: ask.origin, trace: ask.trace });
+    const db = getWritableDb(reopened);
+    db.query("UPDATE invocations SET origin_json=NULL,trace_json=NULL WHERE id=?1").run(ask.id);
+    expect(reopened.readInvocations([ask.id]).get(ask.id)?.origin).toEqual({ source: "unknown" });
+    expect(reopened.readInvocations([ask.id]).get(ask.id)?.trace).toBeUndefined();
+    expect(db.query("SELECT origin_json,trace_json FROM invocations WHERE id=?1").get(ask.id)).toEqual({ origin_json: null, trace_json: null });
+  } finally { reopened.close(); }
+});

@@ -191,3 +191,17 @@ export async function resolveScoutMatchParticipantId(
   }
   return parsed.value;
 }
+
+/** Only a native identity actually supplied by the harness determines this claim. */
+export function claimedSessionHarness(sessionId: string | undefined, env: NodeJS.ProcessEnv): "codex" | "claude" | undefined {
+  if (!sessionId) return undefined;
+  if ([env.CODEX_THREAD_ID, env.OPENSCOUT_CODEX_THREAD_ID].some(id => id?.trim() === sessionId)) return "codex";
+  if ([env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_SESSION_ID, env.CLAUDE_CODE_REMOTE_SESSION_ID].some(id => id?.trim() === sessionId)) return "claude";
+  return undefined;
+}
+
+export function claimedSessionId(env: NodeJS.ProcessEnv): string | undefined {
+  return env.CODEX_THREAD_ID?.trim() || env.OPENSCOUT_CODEX_THREAD_ID?.trim()
+    || env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim()
+    || env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim() || env.OPENSCOUT_SESSION_ID?.trim() || undefined;
+}

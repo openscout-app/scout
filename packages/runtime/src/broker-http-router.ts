@@ -2858,6 +2858,7 @@ export function createBrokerHttpRouter(
     const signal = requestAbortSignal(request, response);
     try {
       const payload = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      payload.traceparent ??= typeof request.headers.traceparent === "string" ? request.headers.traceparent : undefined;
       const execute = async () => {
         if ((payload.completion || payload.relation) && payload.target
           && payload.target.kind !== "agent_id" && payload.target.kind !== "session_id") {
@@ -2920,6 +2921,7 @@ export function createBrokerHttpRouter(
         request,
         brokerInvocationRequestSchemaFor(runtimeCatalogSnapshot?.catalog),
       );
+      payload.traceparent ??= typeof request.headers.traceparent === "string" ? request.headers.traceparent : undefined;
       const execute = async () => {
         if (
           !payload.requestId && payload.target?.kind === "route_alias"
@@ -2933,7 +2935,10 @@ export function createBrokerHttpRouter(
               return forwarded.body as Awaited<ReturnType<typeof handleInvocationRequest>>;
             }
           }
-          return brokerService.invokeAgent ? brokerService.invokeAgent(payload) : handleInvocationRequest(payload);
+          // Default persistent provenance only in the execution copy. Receipt
+          // identity must retain the legacy wire shape across an upgrade.
+          const invocation: InvocationRequest = { ...payload, origin: payload.origin ?? { source: "unknown" } };
+          return brokerService.invokeAgent ? brokerService.invokeAgent(invocation) : handleInvocationRequest(invocation);
         };
         const result = payload.requestId
           ? await requestReceipts.run(payload.requesterId, payload.requestId, "invoke", payload, invoke)
@@ -2941,7 +2946,7 @@ export function createBrokerHttpRouter(
         json(response, 202, result);
       };
       const claims = brokerService.assistantClaims;
-      if (claims) await claims.admit(claims.invocationAgent(payload), execute);
+      if (claims) await claims.admit(claims.invocationAgent({ ...payload, origin: payload.origin ?? { source: "unknown" } }), execute);
       else await execute();
     } catch (error) {
       badRequest(response, error);

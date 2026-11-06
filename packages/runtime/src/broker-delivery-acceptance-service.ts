@@ -757,6 +757,8 @@ export class BrokerDeliveryAcceptanceService {
         const work = await (this.options.prepareDeliveryWorkItemIfNeeded ?? this.options.recordDeliveryWorkItemIfNeeded)({
           payload, requestId, requesterId, targetAgentId: this.options.operatorActorId, conversationId: conversation.id, createdAt });
         const invocation: InvocationRequest = {
+          origin: { source: "unknown" },
+          traceparent: payload.traceparent,
           id: deliveryRequestInvocationId(requesterId, requestId), requestId, requesterId, requesterNodeId,
           targetAgentId: this.options.operatorActorId, targetNodeId: this.options.nodeId, action: "consult", task: payload.body,
           conversationId: conversation.id, messageId, ensureAwake: false, stream: false, createdAt,
@@ -784,10 +786,11 @@ export class BrokerDeliveryAcceptanceService {
           requesterId,
           requesterNodeId,
           body: message.body,
-          requesterName: requesterAgent?.handle
+          // The name the operator sees in the app first: a handle may be a raw session id.
+          requesterName: [this.options.brokerActorDisplayName(snapshot, requesterId)]
+            .find((name) => name && name !== requesterId)
+            ?? requesterAgent?.handle
             ?? requesterActor?.handle
-            ?? requesterAgent?.displayName
-            ?? requesterActor?.displayName
             ?? requesterId,
           ...(requesterProjectRoot ? { projectRoot: requesterProjectRoot } : {}),
           createdAt,
@@ -1310,6 +1313,8 @@ export class BrokerDeliveryAcceptanceService {
         : { session: "new" as const }),
     };
     const invocation: InvocationRequest = {
+      origin: { source: "unknown" },
+      traceparent: payload.traceparent,
       id: payload.requestId ? deliveryRequestInvocationId(requesterId, payload.requestId) : this.options.createId("inv"),
       ...(payload.requestId ? { requestId: payload.requestId } : {}),
       requesterId,
@@ -1330,6 +1335,7 @@ export class BrokerDeliveryAcceptanceService {
       metadata: {
         ...invocationMetadata,
         ...(payload.task ? { taskVersion: 1, taskHomeNodeId: this.options.nodeId } : {}),
+        ...(replyToSessionId ? { replyToSessionId } : {}),
         completion: payload.completion,
         completionRelation: payload.relation,
         completionLocalNodeId: payload.completion || payload.relation ? this.options.nodeId : undefined,

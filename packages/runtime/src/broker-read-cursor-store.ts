@@ -1,5 +1,4 @@
 import { applyChatAttentionPreferenceChange, type ChatAttentionPreferences } from "@openscout/protocol";
-import { readRuntimeMessage } from "./broker-message-records.js";
 import { selectMessageRecordsAsync } from "./broker-message-records.js";
 import type {
   ConversationDefinition,
@@ -26,8 +25,6 @@ type ReadCursorRuntime = {
     readCursors: Record<string, ConversationReadCursor>;
   };
   conversation(conversationId: string): ConversationDefinition | undefined;
-  message(messageId: string): MessageRecord | undefined;
-  readMessage?(messageId:string):Promise<MessageRecord|undefined>;
   readCursor(conversationId: string, actorId: string): ConversationReadCursor | undefined;
   upsertReadCursor(cursor: ConversationReadCursor): Promise<void>;
 };
@@ -53,6 +50,12 @@ export type BrokerReadCursorStoreOptions = {
   operatorActorId: string;
   nodeId: string;
   ensureActor: (actorId: string) => Promise<void>;
+  /**
+   * Point read of any durable message. History rotation leaves only the live
+   * window in the runtime; an older message lives in SQLite or the history
+   * archive and is still a valid read position.
+   */
+  readMessage: (messageId: string) => Promise<MessageRecord | undefined>;
   journal: { visitDeliveries(visitor: (delivery: DeliveryIntent) => void | Promise<void>, options?: { activeOnly?: boolean }): Promise<void> };
   updateDeliveryStatusIf: (
     input: DeliveryStatusUpdateInput,
@@ -104,7 +107,7 @@ export class BrokerReadCursorStore {
 
     const explicitMessageId = input.lastReadMessageId?.trim();
     const lastReadMessage = explicitMessageId
-      ? await readRuntimeMessage(this.options.runtime,explicitMessageId)
+      ? await this.options.readMessage(explicitMessageId)
       : await this.latestMessageForConversation(conversationId);
 
     if (explicitMessageId && !lastReadMessage) {
@@ -132,7 +135,7 @@ export class BrokerReadCursorStore {
 
     const boundary = lastReadMessageId === lastReadMessage?.id
       ? lastReadMessage
-      : lastReadMessageId ? await readRuntimeMessage(this.options.runtime, lastReadMessageId) : undefined;
+      : lastReadMessageId ? await this.options.readMessage(lastReadMessageId) : undefined;
     return {
       conversationId,
       actorId,
@@ -194,7 +197,7 @@ export class BrokerReadCursorStore {
 
   readonly acknowledgeDeliveries = async (cursor: ConversationReadCursor): Promise<number> => {
     const boundaryMessage = cursor.lastReadMessageId
-      ? await readRuntimeMessage(this.options.runtime,cursor.lastReadMessageId)
+      ? await this.options.readMessage(cursor.lastReadMessageId)
       : await this.latestMessageForConversation(cursor.conversationId);
     if (!boundaryMessage) {
       return 0;
@@ -205,7 +208,7 @@ export class BrokerReadCursorStore {
     const eligible = async (delivery: DeliveryIntent): Promise<boolean> => {
       if (delivery.targetId !== cursor.actorId || !delivery.messageId) return false;
       if (!readableDeliveryStatuses.has(delivery.status) || !readDeliveryReasons.has(delivery.reason)) return false;
-      const message = await readRuntimeMessage(this.options.runtime,delivery.messageId);
+      const message = await this.options.readMessage(delivery.messageId);
       return Boolean(message && message.conversationId === cursor.conversationId
         && message.createdAt <= boundaryMessage.createdAt);
     };
@@ -236,7 +239,7 @@ export class BrokerReadCursorStore {
   }
 
   private async messageCreatedAt(messageId: string | undefined): Promise<number | undefined> {
-    return messageId ? (await readRuntimeMessage(this.options.runtime,messageId))?.createdAt : undefined;
+    return messageId ? (await this.options.readMessage(messageId))?.createdAt : undefined;
   }
 
   private async cursorProgressRank(cursor: {
@@ -255,8 +258,8 @@ export class BrokerReadCursorStore {
     }
     if (next.lastReadMessageId && current.lastReadMessageId) {
       const [nextMessage, currentMessage] = await Promise.all([
-        readRuntimeMessage(this.options.runtime, next.lastReadMessageId),
-        readRuntimeMessage(this.options.runtime, current.lastReadMessageId),
+        this.options.readMessage(next.lastReadMessageId),
+        this.options.readMessage(current.lastReadMessageId),
       ]);
       if (nextMessage && currentMessage) {
         return nextMessage.createdAt < currentMessage.createdAt

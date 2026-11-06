@@ -1,3 +1,4 @@
+import { claimedSessionHarness, claimedSessionId } from "../../lib/core/broker/sender.js";
 import { flightSessionTrace } from "@openscout/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { buildFlightLinks } from "./flight.ts";
@@ -370,6 +371,7 @@ export async function runAskWithOptions(
   const replyMode = options.replyMode ?? "notify";
   const requestId = options.requestId ?? `ask-${randomUUID()}`;
   context.stderr(`request ${requestId} (reuse with --request-id after an uncertain receipt)`);
+  const callerSessionId = claimedSessionId(context.env);
   const receipt = await scoutAskHandler({
     requestId,
     task: options.task ?? { version: 1 },
@@ -391,13 +393,9 @@ export async function runAskWithOptions(
     labels: options.labels,
     // The project agent's home endpoint can belong to a different harness.
     // Preserve the calling session instead of letting that endpoint answer for it.
-    replyToSessionId: context.env.OPENSCOUT_SESSION_ID?.trim()
-      || context.env.CODEX_THREAD_ID?.trim()
-      || context.env.OPENSCOUT_CODEX_THREAD_ID?.trim()
-      || context.env.CLAUDE_CODE_SESSION_ID?.trim()
-      || context.env.CLAUDE_SESSION_ID?.trim()
-      || context.env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim()
-      || undefined,
+    replyToSessionId: callerSessionId,
+    ...(claimedSessionHarness(callerSessionId, context.env) ? { replyToSessionHarness: claimedSessionHarness(callerSessionId, context.env) } : {}),
+    ...(context.env.TRACEPARENT ? { traceparent: context.env.TRACEPARENT } : {}),
     replyMode,
     currentDirectory,
     source: "scout-cli",

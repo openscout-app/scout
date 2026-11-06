@@ -18,11 +18,22 @@ import { startRelay } from "../packages/runtime/src/relay-transport.ts";
 
 const flavor = process.argv[2] ?? "web", scenario = process.argv[3] ?? "revoked";
 const base = resolve("packages/pairing/src/core/pairing/runtime");
+const { requireCredentialIdentity } = await import(resolve(base, "bridge/credential-binding.ts"));
+mock.module(resolve(base, "bridge/mobile-terminal-provision.ts"), () => ({
+  provisionMobileTerminalAccess: async (_ssh: string, _device: string, _class: string, binding: unknown) =>
+    ({ publicKey: requireCredentialIdentity(binding).publicKey }),
+  readMobileTerminalStatus: async (_session: string, _device: string, binding: unknown) =>
+    ({ publicKey: requireCredentialIdentity(binding).publicKey }),
+}));
+const realLegacyServer = await import(resolve(base, "bridge/server.ts"));
 const { initTRPC, tracked } = await import(Bun.resolveSync("@trpc/server", base));
 let dispatches = 0, subscriptions = 0, streamStops = 0;
 const t = initTRPC.create();
 mock.module(resolve(base, "bridge/router.ts"), () => ({lookupMobileInboxItemForEvent: () => null, bridgeRouter: t.router({
-  probe: t.procedure.query(() => {dispatches++; return "rpc-secret";}),
+  probe: t.procedure.query(({ctx}: any) => {
+    assert.equal(requireCredentialIdentity(ctx.credentialBinding).publicKey, key);
+    dispatches++; return "rpc-secret";
+  }),
   stream: t.procedure.subscription(async function* ({signal}) {
     try {
       yield tracked("event-1", { summary: "relay-stream" });
@@ -30,7 +41,10 @@ mock.module(resolve(base, "bridge/router.ts"), () => ({lookupMobileInboxItemForE
     } finally { streamStops++; }
   }),
 })}));
-mock.module(resolve(base, "bridge/server.ts"), () => ({handleRPC: async () => {dispatches++; return {id: "probe", result: "rpc-secret"};}}));
+mock.module(resolve(base, "bridge/server.ts"), () => ({...realLegacyServer, handleRPC: async (_bridge: unknown, req: any, ctx: any) => {
+  assert.equal(requireCredentialIdentity(ctx?.credentialBinding).publicKey, key);
+  dispatches++; return {id: req.id, result: "rpc-secret"};
+}}));
 mock.module(resolve(base, "bridge/broker-message-fanout.ts"), () => ({watchSharedScoutMessages: async () => {subscriptions++;}}));
 const OriginalWebSocket = globalThis.WebSocket;
 const carriers: WebSocket[] = [];
@@ -128,8 +142,8 @@ async function until(check: () => boolean, label: string) {
   const end = Date.now() + 3000;
   while (!check()) {if (Date.now() > end) throw Error(`timeout ${label}`); await Bun.sleep(5);}
 }
-async function connect(pattern: "XX" | "IK", keys: KeyPair = phone, direct = false) {
-  const ws = new WebSocket(direct ? `ws://127.0.0.1:${bridgePort}?events=0` : `${url}?room=${(workflowRoom ?? connection.qrPayload.room)}&role=client`);
+async function connect(pattern: "XX" | "IK", keys: KeyPair = phone, direct: boolean | number = false) {
+  const ws = new WebSocket(direct ? `ws://127.0.0.1:${typeof direct === "number" ? direct : bridgePort}?events=0` : `${url}?room=${(workflowRoom ?? connection.qrPayload.room)}&role=client`);
   sockets.push(ws);
   const data: string[] = [], state = {ready: false, closed: 0, reason: ""}; let transport: SecureTransport;
   ws.addEventListener("message", e => transport.receive(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer)));
@@ -291,11 +305,24 @@ try {
     assert.notEqual(fresh.payload.room, opened.payload.room);
     await requestLocalPairingOpportunity(bridgePort, "cancel", opened.windowId); // stale cancel cannot cancel a newer view
     workflowRoom = fresh.payload.room;
-    await accepted(); await denied("XX", other);
+    const relayPeer = await accepted();
+    relayPeer.transport.send(JSON.stringify({id: "credential-relay-trpc", jsonrpc: "2.0", method: "query", params: {path: "probe"}}));
+    await until(() => relayPeer.data.some(x => x.includes("credential-relay-trpc") && x.includes("rpc-secret")), "relay tRPC credential context");
+    await denied("XX", other);
     const direct = await connect("XX", phone, true);
+    direct.transport.send(JSON.stringify({id: "credential-trpc", jsonrpc: "2.0", method: "query", params: {path: "probe"}}));
+    await until(() => direct.data.some(x => x.includes("credential-trpc") && x.includes("rpc-secret")), "direct tRPC credential context");
     direct.transport.send(JSON.stringify({id: "forged-control", method: "pairing/opportunity", params: {action: "open"}}));
     await until(() => direct.data.some(x => x.includes("forged-control")), "remote control refusal");
     assert(direct.data.find(x => x.includes("forged-control"))!.includes("-32001"));
+    const legacyPort = await freePort();
+    const legacy = realLegacyServer.startBridgeServer(bridge as any, legacyPort, { secure: true, identity: host });
+    try {
+      const legacyPeer = await connect("XX", phone, legacyPort);
+      legacyPeer.transport.send(JSON.stringify({id: "credential-direct-legacy", method: "mobile/terminal/status", params: { credentialBinding: { publicKey: bytesToHex(other.publicKey) } }}));
+      await until(() => legacyPeer.data.some(x => x.includes("credential-direct-legacy") && x.includes("rpc-secret")), "direct legacy credential context");
+      legacyPeer.ws.close();
+    } finally { legacy.stop(); }
     await denied("XX", other);
   } else throw Error("unknown scenario");
   console.log(JSON.stringify({ok: true, flavor, scenario, revision: owner.read().revision, dispatches, subscriptions}));

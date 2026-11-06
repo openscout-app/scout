@@ -632,20 +632,25 @@ describe("runtime scenario suite", () => {
         title: "Lattices <> Vox",
       });
 
+      // This scenario asserts chronological turns, not same-millisecond tie order.
+      const postedAt = Date.now();
       await scenario.postMessage(broker, {
         id: "msg-dm-1",
+        createdAt: postedAt,
         conversationId: conversation.id,
         actorId: "lattices.main.codex",
         body: "Can you sanity-check the handoff before I merge?",
       });
       await scenario.postMessage(broker, {
         id: "msg-dm-2",
+        createdAt: postedAt + 1,
         conversationId: conversation.id,
         actorId: "vox.feature-qa.claude",
         body: "Yes. I want one more follow-up on the timeout path.",
       });
       await scenario.postMessage(broker, {
         id: "msg-dm-3",
+        createdAt: postedAt + 2,
         conversationId: conversation.id,
         actorId: "lattices.main.codex",
         body: "Done. I tightened the timeout handling and reran the scenario.",
@@ -744,19 +749,23 @@ describe("runtime scenario suite", () => {
         participantIds: ["vox.review", "lattices.review", "newell.review"],
       });
 
+      const postedAt = Date.now();
       await scenario.postMessage(broker, {
+        createdAt: postedAt,
         id: "msg-group-1",
         conversationId: conversation.id,
         actorId: "vox.review",
         body: "I am checking the timeout semantics.",
       });
       await scenario.postMessage(broker, {
+        createdAt: postedAt + 1,
         id: "msg-group-2",
         conversationId: conversation.id,
         actorId: "lattices.review",
         body: "I am taking the branch and worktree path.",
       });
       await scenario.postMessage(broker, {
+        createdAt: postedAt + 2,
         id: "msg-group-3",
         conversationId: conversation.id,
         actorId: "newell.review",
