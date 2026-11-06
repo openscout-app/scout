@@ -534,6 +534,7 @@ describe("BrokerMeshHttpService", () => {
     ]) {
       const harness = createHarness();
       await harness.service.receiveInvocationBundle(invocationBundle({ message: message() }));
+      const accepted = structuredClone(harness.invocations["invocation-1"]);
       const altered = invocation(patch);
       const bundle = invocationBundle({
         invocation: altered,
@@ -541,7 +542,7 @@ describe("BrokerMeshHttpService", () => {
         message: message({ id: altered.messageId, conversationId: altered.conversationId, actorId: altered.requesterId }),
       });
       await expect(harness.service.receiveInvocationBundle(bundle)).rejects.toThrow("persisted request anchor");
-      expect(harness.invocations[altered.id]).toEqual(invocation());
+      expect(harness.invocations[altered.id]).toEqual(accepted);
       expect(Object.keys(harness.messages)).toEqual(["msg-1"]);
       expect(harness.applyBundleCalls).toHaveLength(1);
       expect(harness.committedEntries).toHaveLength(2);
@@ -806,4 +807,16 @@ test("canonical mesh admission cannot overwrite an existing blob message with a 
   expect(messages[existing.id]).toEqual(existing);
   expect(h.committedEntries).toHaveLength(0);
   expect(h.completedReplies).toHaveLength(0);
+});
+
+test("mesh receive preserves the originating ask's trace and parent edge", async () => {
+  const harness = createHarness();
+  const trace = { traceId: "a".repeat(32), spanId: "b".repeat(16), parentSpanId: "c".repeat(16) };
+  const origin = { source: "claimed" as const, sessionAddress: "sess.caller@source", runningFlightId: "source-parent" };
+  const incoming = invocation({ trace, origin });
+  await harness.service.receiveInvocationBundle(invocationBundle({ invocation: incoming }));
+  expect(harness.rememberedInvocations[0]?.trace).toEqual(trace);
+  expect(harness.rememberedInvocations[0]?.origin).toEqual(origin);
+  const saved = harness.committedEntries.flat().find(entry => entry.kind === "invocation.record");
+  expect(saved?.kind === "invocation.record" && saved.invocation.trace).toEqual(trace);
 });

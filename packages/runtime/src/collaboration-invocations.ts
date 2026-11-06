@@ -184,6 +184,7 @@ export function buildCollaborationInvocation(
   const context = buildCollaborationInvocationContext(record, wakeReason, targetAgentId);
 
   return {
+    origin: { source: "unknown" },
     id: `inv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     requesterId: options.requesterId,
     requesterNodeId: options.requesterNodeId,

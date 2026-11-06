@@ -72,7 +72,9 @@ export interface RuntimeRegistrySnapshotQuery {
 }
 
 export function createRuntimeRegistrySnapshot(
-  value: Partial<RuntimeRegistrySnapshot> = {},
+  value: Omit<Partial<RuntimeRegistrySnapshot>, "invocations"> & {
+    invocations?: Record<string, Omit<InvocationRequest, "origin"> & { origin?: InvocationRequest["origin"] }>;
+  } = {},
 ): RuntimeRegistrySnapshot {
   return {
     nodes: value.nodes ?? {},
@@ -83,7 +85,8 @@ export function createRuntimeRegistrySnapshot(
     bindings: value.bindings ?? {},
     messages: value.messages ?? {},
     readCursors: value.readCursors ?? {},
-    invocations: value.invocations ?? {},
+    invocations: Object.fromEntries(Object.entries(value.invocations ?? {}).map(([id, invocation]) =>
+      [id, invocation.origin ? invocation as InvocationRequest : { ...invocation, origin: { source: "unknown" as const } }])),
     flights: value.flights ?? {},
     collaborationRecords: value.collaborationRecords ?? {},
   };

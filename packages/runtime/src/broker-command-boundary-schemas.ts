@@ -221,6 +221,9 @@ export function brokerInvocationRequestSchemaFor(
 ): z.ZodType<InvocationRequest & BrokerRouteTargetInput> {
   return z.object({
   id: nonEmptyString,
+  origin: z.object({ sessionAddress: z.string().optional(), source: z.enum(["unknown", "claimed", "verified"]),
+    runningFlightId: z.string().optional() }).default({ source: "unknown" }),
+  traceparent: z.string().optional(),
   requestId: nonEmptyString.max(256).optional(),
   requesterId: nonEmptyString,
   requesterNodeId: nonEmptyString,

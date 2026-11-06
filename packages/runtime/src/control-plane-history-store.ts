@@ -83,7 +83,9 @@ export class ControlPlaneHistoryReader {
   readLocation<T = unknown>(found: HistoricalRecordLocation): T {
     const row = this.partition(found.partition).query<StoredRow>("SELECT * FROM records WHERE kind=?1 AND id=?2").get(found.kind, found.id);
     if (!row || row.digest !== found.digest || digest(row.payload_json) !== found.digest) throw new Error("history_record_missing_or_corrupt");
-    return JSON.parse(row.payload_json) as T;
+    const record = JSON.parse(row.payload_json);
+    if (found.kind === "invocation") record.origin ??= { source: "unknown" };
+    return record as T;
   }
 
   page(options: { kind: string; conversationId?: string; invocationId?: string; order?: "asc" | "desc"; after?: { timestamp: number; id: string }; limit?: number }): HistoricalRecordLocation[] {

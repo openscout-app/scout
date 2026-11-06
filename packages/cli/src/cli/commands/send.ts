@@ -1,3 +1,4 @@
+import { claimedSessionHarness, claimedSessionId } from "../../lib/core/broker/sender.js";
 import { classifySendInteraction } from "../../lib/core/broker/send-interaction.ts";
 
 import type { ScoutCommandContext } from "../context.ts";
@@ -295,6 +296,7 @@ async function runTrackedSend(
       ? "none"
       : "notify";
 
+  const callerSessionId = claimedSessionId(context.env);
   const receipt = await scoutAskHandler({
     senderId,
     to: options.targetLabel ?? "",
@@ -303,13 +305,9 @@ async function runTrackedSend(
     shouldSpeak: options.shouldSpeak,
     // Preserve the calling session so the completion notification comes back
     // to it rather than to the project's home endpoint.
-    replyToSessionId: context.env.OPENSCOUT_SESSION_ID?.trim()
-      || context.env.CODEX_THREAD_ID?.trim()
-      || context.env.OPENSCOUT_CODEX_THREAD_ID?.trim()
-      || context.env.CLAUDE_CODE_SESSION_ID?.trim()
-      || context.env.CLAUDE_SESSION_ID?.trim()
-      || context.env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim()
-      || undefined,
+    replyToSessionId: callerSessionId,
+    ...(claimedSessionHarness(callerSessionId, context.env) ? { replyToSessionHarness: claimedSessionHarness(callerSessionId, context.env) } : {}),
+    ...(context.env.TRACEPARENT ? { traceparent: context.env.TRACEPARENT } : {}),
     replyMode,
     currentDirectory,
     source: "scout-send",

@@ -228,6 +228,8 @@ export function canonicalRecord<T>(
         context: jsonCanonical(r.context),
         execution: jsonCanonical(r.execution),
         executionResolution: jsonCanonical(r.executionResolution),
+        origin: jsonCanonical(r.origin ?? { source: "unknown" }),
+        trace: jsonCanonical(r.trace),
         ensureAwake: r.ensureAwake === true,
         stream: r.stream === true,
         timeoutMs: r.timeoutMs ?? undefined,
@@ -1088,6 +1090,8 @@ interface InvocationRow {
   context_json: string | null;
   execution_json: string | null;
   execution_resolution_json: string | null;
+  origin_json: string | null;
+  trace_json: string | null;
   ensure_awake: number;
   stream: number;
   timeout_ms: number | null;
@@ -1384,6 +1388,8 @@ function invocationRequestFromRow(row: InvocationRow): InvocationRequest {
       row.execution_resolution_json,
       undefined,
     ),
+    origin: parseJson<InvocationRequest["origin"]>(row.origin_json, { source: "unknown" }),
+    trace: parseJson<InvocationRequest["trace"]>(row.trace_json, undefined),
     ensureAwake: row.ensure_awake === 1,
     stream: row.stream === 1,
     timeoutMs: row.timeout_ms ?? undefined,
@@ -3649,8 +3655,9 @@ export class SQLiteControlPlaneStore {
       `INSERT INTO invocations (
         id, requester_id, requester_node_id, target_agent_id, target_node_id, action, task,
         collaboration_record_id, conversation_id, message_id, context_json, execution_json,
-        execution_resolution_json, ensure_awake, stream, timeout_ms, labels_json, metadata_json, created_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        execution_resolution_json, ensure_awake, stream, timeout_ms, labels_json, metadata_json, created_at,
+        origin_json, trace_json
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
       ON CONFLICT(id) DO UPDATE SET
         requester_id = excluded.requester_id,
         requester_node_id = excluded.requester_node_id,
@@ -3669,7 +3676,9 @@ export class SQLiteControlPlaneStore {
         timeout_ms = excluded.timeout_ms,
         labels_json = excluded.labels_json,
         metadata_json = excluded.metadata_json,
-        created_at = excluded.created_at`,
+        created_at = excluded.created_at,
+        origin_json = excluded.origin_json,
+        trace_json = excluded.trace_json`,
     ).run(
       invocation.id,
       invocation.requesterId,
@@ -3690,6 +3699,8 @@ export class SQLiteControlPlaneStore {
       stringify(invocation.labels),
       stringify(invocation.metadata),
       invocation.createdAt,
+      stringify(invocation.origin ?? { source: "unknown" }),
+      stringify(invocation.trace),
     );
     this.db.query("DELETE FROM broker_history_anchors WHERE kind='invocation' AND id=?1").run(invocation.id);
     this.recordActivityItem(this.projectInvocationActivity({ ...invocation, messageId: messageId ?? undefined }));
