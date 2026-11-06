@@ -12,7 +12,8 @@ const originalExitCode = process.exitCode;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  process.exitCode = originalExitCode;
+  // Bun ignores `process.exitCode = undefined`, so restore 0 explicitly.
+  process.exitCode = originalExitCode ?? 0;
   if (originalBrokerUrl === undefined) delete process.env.OPENSCOUT_BROKER_URL;
   else process.env.OPENSCOUT_BROKER_URL = originalBrokerUrl;
 });
