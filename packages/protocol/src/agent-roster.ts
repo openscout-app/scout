@@ -1,10 +1,11 @@
+import type { AgentDefinition } from "./actors.js";
 import type { ScoutId } from "./common.js";
 
 /*
  * The agent roster: a short code that names an agent everywhere. Each agent
  * the runtime lists holds a three-digit roster number (001–999), one roster
  * across projects, so the number alone names the agent. Each project holds a
- * code of two or three capitals, so an agent reads as `OS-003` (drawn as
+ * code of two or three letters, so an agent reads as `OS-003` (drawn as
  * "OS 003").
  *
  * The runtime is the only writer. It keys a number by the agent's Scout
@@ -59,7 +60,11 @@ export interface RosterProjectRecord {
   updatedAt: number;
 }
 
-/** A compact copy of an agent's roster place, for agent records in CLI and MCP output. */
+/**
+ * A compact copy of an agent's roster place. It is on agent records in
+ * `/v1/snapshot`, `scout who --json`, the MCP agent tools and the pairing
+ * web agents.
+ */
 export interface AgentRosterTag {
   number: number;
   numberText: string;
@@ -67,6 +72,14 @@ export interface AgentRosterTag {
   code: string;
   label: string;
 }
+
+/**
+ * An agent record as `/v1/snapshot` serves it. `roster` is present while the
+ * agent holds a number. The runtime adds it to the response and never stores
+ * it on the record. `/v1/mesh/snapshot` leaves it out, because a number names
+ * an agent only on its own runtime.
+ */
+export type AgentRecordWithRoster<T extends AgentDefinition = AgentDefinition> = T & { roster?: AgentRosterTag };
 
 export interface AgentRosterListResult {
   agents: AgentRosterEntry[];
@@ -180,14 +193,31 @@ export function isRosterNumber(value: unknown): value is number {
 }
 
 /**
- * A project code as it is kept: two or three capitals or digits with at
- * least one letter; null when the value is not one. Digits are accepted
- * because the apps' code field accepts them and a name such as `3d-tools`
- * defaults to `3T`; the letter keeps a code apart from a roster number.
+ * A project code that the operator or an import sets: two or three letters,
+ * in capitals. Null when the value is not one.
  */
 export function cleanProjectCode(value: string | null | undefined): string | null {
   const code = value?.trim().toUpperCase() ?? "";
+  return /^[A-Z]{2,3}$/u.test(code) ? code : null;
+}
+
+/**
+ * A project code as a project can hold it: two or three capitals or digits,
+ * with at least one letter. Only a default can have a digit, because the
+ * apps' rule spells the default from the name (`app-2` → `A2`, `3d-tools` →
+ * `3T`) and the runtime keeps that default so that no code renames. The
+ * letter keeps a code apart from a roster number.
+ */
+export function cleanHeldProjectCode(value: string | null | undefined): string | null {
+  const code = value?.trim().toUpperCase() ?? "";
   return /^[A-Z0-9]{2,3}$/u.test(code) && /[A-Z]/u.test(code) ? code : null;
+}
+
+/** Why an operator code is refused, as one sentence. */
+export function projectCodeRefusal(value: string): string {
+  return /\d/u.test(value)
+    ? `"${value}" is not a project code: project codes are letters only, two or three of them`
+    : `"${value}" is not a project code: use two or three letters`;
 }
 
 /**
@@ -223,12 +253,12 @@ export function rosterIdentityMonogram(name: string): string {
 /**
  * Every code a project's name can take, in the order the runtime tries them
  * when an earlier one is held by another project: the default, the other
- * letter pairs, then three-letter codes spelled from the name.
+ * letter pairs, then three-letter codes spelled from the name. The default is
+ * the apps' rule and can have a digit; every later candidate is letters only.
  */
 export function rosterProjectCodeCandidates(name: string): string[] {
   const clean = splitCamelCase(name) || "Agent";
-  const pairs = [rosterIdentityMonogram(name), ...rosterBoardCandidates(clean)];
-  const flat = clean.toUpperCase().replace(/[^A-Z0-9]+/g, "");
+  const flat = clean.toUpperCase().replace(/[^A-Z]+/g, "");
   const triples: string[] = [];
   const first = flat[0];
   if (first) {
@@ -237,10 +267,11 @@ export function rosterProjectCodeCandidates(name: string): string[] {
     }
   }
   const out: string[] = [];
-  for (const candidate of [...pairs, ...triples]) {
-    const code = cleanProjectCode(candidate);
+  const keep = (code: string | null) => {
     if (code && !out.includes(code)) out.push(code);
-  }
+  };
+  keep(cleanHeldProjectCode(rosterIdentityMonogram(name)));
+  for (const candidate of [...rosterBoardCandidates(clean), ...triples]) keep(cleanProjectCode(candidate));
   return out;
 }
 
@@ -256,7 +287,7 @@ export function parseRosterAddress(input: string | null | undefined): RosterAddr
   const number = Number.parseInt(match[2]!, 10);
   if (!isRosterNumber(number)) return null;
   if (match[1] === undefined) return { projectCode: null, number };
-  const projectCode = cleanProjectCode(match[1]);
+  const projectCode = cleanHeldProjectCode(match[1]);
   return projectCode ? { projectCode, number } : null;
 }
 

@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import type { AgentDefinition, AgentEndpoint } from "@openscout/protocol";
+import { agentRosterTag, type AgentDefinition, type AgentEndpoint } from "@openscout/protocol";
 
-import { AgentRosterError, AgentRosterService, type AgentRosterRegistryView } from "./agent-roster-service.js";
+import {
+  AgentRosterError,
+  AgentRosterService,
+  ROSTER_IDLE_FREE_MS,
+  withRosterTags,
+  type AgentRosterRegistryView,
+} from "./agent-roster-service.js";
 import { AgentRosterStore } from "./agent-roster-store.js";
 import { BrokerDeliveryRouter } from "./broker-delivery-routing.js";
 import { configureControlPlaneDatabase, migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
@@ -203,6 +209,54 @@ describe("AgentRosterService assignment", () => {
     expect(service.entry("agent.mesh")?.goneAt).toBeUndefined();
   });
 
+  test("frees a number after 30 days with no activity, and an agent that comes back after that takes a new number", () => {
+    const { registry, clock, service, add } = setup();
+    add("agent.idle", "idle", "openscout", START + 1);
+    add("agent.busy", "busy", "openscout", START + 2);
+    service.reconcile();
+    expect(numbers(service)).toEqual({ "agent.idle": "OS-001", "agent.busy": "OS-002" });
+    const touch = (agentId: string) => {
+      registry.endpoints[`ep.${agentId}`] = endpoint(`ep.${agentId}`, agentId, { lastSeenAt: clock.now });
+    };
+
+    clock.now = START + 1 + ROSTER_IDLE_FREE_MS - 1;
+    touch("agent.busy");
+    expect(service.reconcile().freed).toEqual([]);
+    expect(service.entry("agent.idle")?.code).toBe("OS-001");
+
+    clock.now = START + 1 + ROSTER_IDLE_FREE_MS;
+    touch("agent.busy");
+    expect(service.reconcile().freed).toEqual([{ agentId: "agent.idle", number: 1, reason: "idle" }]);
+    expect(service.entry("agent.idle")).toBeNull();
+    expect(service.entry("agent.busy")?.code).toBe("OS-002");
+    expect(service.resolve("001")).toMatchObject({ resolved: false, diagnostic: { code: "unknown_roster_number" } });
+
+    // The freed number goes to the next newcomer, lowest first.
+    add("agent.new", "new", "openscout", clock.now);
+    service.reconcile();
+    expect(service.entry("agent.new")?.code).toBe("OS-001");
+
+    // Active again, the idle agent takes a new number.
+    touch("agent.idle");
+    service.reconcile();
+    expect(service.entry("agent.idle")?.code).toBe("OS-003");
+  });
+
+  test("the idle time counts from the import when the agent's last activity is older", () => {
+    const { clock, service, add } = setup();
+    add("agent.old", "old", "openscout", START - 60 * DAY);
+    service.reconcile();
+    expect(service.entry("agent.old")).toBeNull();
+
+    service.importEntries({ entries: [{ agentId: "agent.old", number: 7 }] });
+    clock.now += ROSTER_IDLE_FREE_MS - 1;
+    expect(service.reconcile().freed).toEqual([]);
+    expect(service.entry("agent.old")?.code).toBe("OS-007");
+
+    clock.now += 1;
+    expect(service.reconcile().freed).toEqual([{ agentId: "agent.old", number: 7, reason: "idle" }]);
+  });
+
   test("stops at 999 and says the roster is full", () => {
     const { service, add, logs } = setup();
     for (let index = 0; index < 1001; index++) add(`agent.${index}`, `a${index}`, null, START + index);
@@ -243,8 +297,10 @@ describe("AgentRosterService project codes", () => {
     expect(set).toMatchObject({ projectKey: "peal-bach", code: "PBX", codeSource: "operator", defaultCode: "PB" });
     expect(service.entry("agent.a")?.code).toBe("PBX-001");
 
-    expect(() => service.setProjectCode({ project: "peal-bach", code: "P" })).toThrow(/not a project code/);
-    expect(() => service.setProjectCode({ project: "peal-bach", code: "123" })).toThrow(/at least one letter/);
+    expect(() => service.setProjectCode({ project: "peal-bach", code: "P" })).toThrow('"P" is not a project code: use two or three letters');
+    expect(() => service.setProjectCode({ project: "peal-bach", code: "P8" }))
+      .toThrow('"P8" is not a project code: project codes are letters only, two or three of them');
+    expect(() => service.setProjectCode({ project: "peal-bach", code: "123" })).toThrow(/letters only/);
     expect(() => service.setProjectCode({ project: "nowhere", code: "NW" })).toThrow(/no agent lists project "nowhere"/);
 
     const reset = service.setProjectCode({ project: "peal-bach", code: null });
@@ -360,6 +416,30 @@ describe("AgentRosterService import", () => {
     expect(result.imported.map((entry) => entry.code)).toEqual(["OS-001", "PE-002", "FO-003", "004", "FO-005"]);
   });
 
+  test("an imported code with a digit is refused unless it is the project's own default", () => {
+    const { service, add } = setup();
+    add("agent.a", "a", "app-2", START + 1);
+    add("agent.b", "b", "peal-bach", START + 2);
+    service.reconcile();
+    expect(service.entry("agent.a")?.projectCode).toBe("A2");
+
+    const result = service.importEntries({
+      entries: [
+        { agentId: "agent.a", number: 4, projectCode: "a2" },
+        { agentId: "agent.b", number: 5, projectCode: "P8" },
+      ],
+    });
+    expect(result.imported.map((entry) => entry.code)).toEqual(["A2-004", "PB-005"]);
+    expect(result.projectCodes).toEqual([]);
+    expect(result.conflicts).toEqual([
+      expect.objectContaining({
+        agentId: "agent.b",
+        reason: "invalid_project_code",
+        detail: '"P8" is not a project code: project codes are letters only, two or three of them',
+      }),
+    ]);
+  });
+
   test("a dry run reports the same result and writes nothing", () => {
     const { service, add } = setup();
     add("agent.a", "a", "openscout", START + 1);
@@ -413,6 +493,25 @@ describe("AgentRosterService addresses", () => {
     });
     expect(service.resolve("03")).toMatchObject({ resolved: false, diagnostic: { code: "invalid_roster_address" } });
     expect(service.resolve("000")).toMatchObject({ resolved: false, diagnostic: { code: "invalid_roster_address" } });
+  });
+});
+
+describe("withRosterTags", () => {
+  test("copies tagged agent records, drops a stale tag, and returns an unchanged snapshot as is", () => {
+    const tag = agentRosterTag({ number: 3, projectCode: "OS" });
+    const a = agent("agent.a", "a", "openscout");
+    const b = { ...agent("agent.b", "b", "openscout"), roster: agentRosterTag({ number: 9, projectCode: "OS" }) };
+    const snapshot = { nodes: {}, agents: { "agent.a": a, "agent.b": b } };
+
+    const tagged = withRosterTags(snapshot, new Map([["agent.a", tag]]));
+    expect(tagged.agents["agent.a"]).toEqual({ ...a, roster: tag });
+    expect(tagged.agents["agent.b"]).not.toHaveProperty("roster");
+    expect(tagged.nodes).toBe(snapshot.nodes);
+    expect(a).not.toHaveProperty("roster");
+    expect(snapshot.agents["agent.b"]).toHaveProperty("roster");
+
+    const plain = { agents: { "agent.a": a } };
+    expect(withRosterTags(plain, new Map())).toBe(plain);
   });
 });
 

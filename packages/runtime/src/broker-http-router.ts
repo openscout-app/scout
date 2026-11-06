@@ -153,7 +153,7 @@ import {
   BrokerRouteAliasError,
   type BrokerRouteAliasService,
 } from "./broker-route-alias-service.js";
-import { AgentRosterError, type AgentRosterService } from "./agent-roster-service.js";
+import { AgentRosterError, withRosterTags, type AgentRosterService } from "./agent-roster-service.js";
 import type { AgentRosterImportRequest, RosterProjectCodeSetRequest } from "@openscout/protocol";
 import type { SignedNodeCard } from "./node-identity.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
@@ -1486,12 +1486,19 @@ export function createBrokerHttpRouter(
       : requestedScope === "conversations" || requestedScope === "agents" || requestedScope === "identity"
         ? requestedScope
         : undefined;
+    // Local agent records carry their roster tag (OS-003). The mesh twin
+    // leaves it out: a roster number names an agent only on this runtime.
+    let rosterTags: ReturnType<AgentRosterService["tags"]> | undefined;
+    if (url.pathname === "/v1/snapshot" && agentRosterService) {
+      try { rosterTags = agentRosterService.tags(); } catch { rosterTags = undefined; }
+    }
+    const tagged=<T extends Parameters<typeof writeBrokerSnapshot>[1]>(snapshot:T):T=>rosterTags?withRosterTags(snapshot,rosterTags):snapshot;
     const controller=new AbortController();const abort=()=>controller.abort(new Error('Snapshot request closed'));
     response.on('close',abort);response.on('error',abort);request.on('aborted',abort);
     try{
       const query={since:parseSince(url),scope:scope as "agents"|"conversations"|"identity"|undefined};
-      if(brokerService.withSnapshot)await brokerService.withSnapshot(query,snapshot=>writeBrokerSnapshot(response,snapshot,{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes,signal:controller.signal}),{signal:controller.signal});
-      else await writeBrokerSnapshot(response,await brokerService.readSnapshot(query),{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes});
+      if(brokerService.withSnapshot)await brokerService.withSnapshot(query,snapshot=>writeBrokerSnapshot(response,tagged(snapshot),{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes,signal:controller.signal}),{signal:controller.signal});
+      else await writeBrokerSnapshot(response,tagged(await brokerService.readSnapshot(query)),{encodedBodies:deps.encodedSnapshotBodies,onFlushedBytes:deps.onSnapshotFlushedBytes});
     }finally{response.off?.('close',abort);response.off?.('error',abort);}
     return;
   }

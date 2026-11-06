@@ -2130,6 +2130,36 @@ describe("web db query agents", () => {
     }
   });
 
+  test("web agents carry their roster code, and none once gone or before the roster migration", () => {
+    const store = createSeededStore();
+
+    try {
+      const rawDb = new Database(join(process.env.OPENSCOUT_CONTROL_HOME!, "control-plane.sqlite"));
+      const write = (sql: string) => {
+        rawDb.exec(sql);
+      };
+      try {
+        write(`INSERT INTO roster_projects (project_key, name, code, code_source, created_at, updated_at)
+               VALUES ('openscout', 'openscout', 'OS', 'default', 1, 1)`);
+        write(`INSERT INTO roster_agents (agent_id, number, project_key, project, source, assigned_at, updated_at, gone_at)
+               VALUES ('agent-1', 3, 'openscout', 'openscout', 'auto', 1, 1, NULL)`);
+        const tag = { number: 3, numberText: "003", projectCode: "OS", code: "OS-003", label: "OS 003" };
+        expect(queryAgentById("agent-1")?.roster).toEqual(tag);
+        expect(queryAgents(10).find((agent) => agent.id === "agent-1")?.roster).toEqual(tag);
+
+        write("UPDATE roster_agents SET gone_at = 2 WHERE agent_id = 'agent-1'");
+        expect(queryAgentById("agent-1")?.roster).toBeNull();
+
+        write("DROP TABLE roster_agents");
+        expect(queryAgents(10).find((agent) => agent.id === "agent-1")?.roster).toBeNull();
+      } finally {
+        rawDb.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
   test("does not synthesize a direct session for an agent before a chat exists", () => {
     const store = createSeededStore();
 

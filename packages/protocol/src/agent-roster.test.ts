@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import {
   agentRosterTag,
+  cleanHeldProjectCode,
   cleanProjectCode,
   parseRosterAddress,
   parseRosterNumber,
+  projectCodeRefusal,
   rosterBoardCandidates,
   rosterCode,
   rosterIdentityMonogram,
@@ -31,14 +33,28 @@ describe("roster project codes", () => {
     expect(candidates.some((code) => code.length === 3)).toBe(true);
   });
 
-  test("a code is two or three letters or digits with at least one letter", () => {
+  test("a code the operator or an import sets is two or three letters only", () => {
     expect(cleanProjectCode(" os ")).toBe("OS");
     expect(cleanProjectCode("pbx")).toBe("PBX");
-    expect(cleanProjectCode("3t")).toBe("3T");
+    expect(cleanProjectCode("3t")).toBeNull();
+    expect(cleanProjectCode("O5")).toBeNull();
     expect(cleanProjectCode("123")).toBeNull();
     expect(cleanProjectCode("O")).toBeNull();
     expect(cleanProjectCode("ABCD")).toBeNull();
     expect(cleanProjectCode("O-S")).toBeNull();
+    expect(projectCodeRefusal("O5")).toBe('"O5" is not a project code: project codes are letters only, two or three of them');
+    expect(projectCodeRefusal("P")).toBe('"P" is not a project code: use two or three letters');
+  });
+
+  test("only the apps' default can have a digit, and later candidates are letters only", () => {
+    expect(rosterIdentityMonogram("app-2")).toBe("A2");
+    expect(rosterIdentityMonogram("3d-tools")).toBe("3T");
+    expect(parseRosterAddress("A2-003")).toEqual({ projectCode: "A2", number: 3 });
+    const candidates = rosterProjectCodeCandidates("app-2");
+    expect(candidates[0]).toBe("A2");
+    expect(candidates.slice(1).every((code) => /^[A-Z]{2,3}$/u.test(code))).toBe(true);
+    expect(cleanHeldProjectCode("a2")).toBe("A2");
+    expect(cleanHeldProjectCode("12")).toBeNull();
   });
 });
 

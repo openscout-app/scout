@@ -1,9 +1,11 @@
 import {
   ROSTER_NUMBER_MAX,
   agentRosterTag,
+  cleanHeldProjectCode,
   cleanProjectCode,
   parseRosterAddress,
   parseRosterNumber,
+  projectCodeRefusal,
   rosterCode,
   rosterIdentityMonogram,
   rosterLabel,
@@ -18,6 +20,7 @@ import {
   type AgentRosterImportRequest,
   type AgentRosterImportResult,
   type AgentRosterListResult,
+  type AgentRecordWithRoster,
   type AgentRosterResolveResult,
   type AgentRosterTag,
   type RosterProjectCodeSetRequest,
@@ -39,13 +42,21 @@ import type { AgentRosterStore, RosterAgentRow, RosterProjectRow } from "./agent
  * active (registered, or its endpoint touched, within `activeWindowMs`).
  * It keeps that number across restarts and sessions. It gives the number up
  * once it is deleted or retired (no longer listed) for `goneGraceMs`, so a
- * re-registration inside that window keeps it.
+ * re-registration inside that window keeps it. It also gives the number up
+ * after `idleFreeMs` with no activity; if it comes back after that, it takes
+ * a new number like any newcomer.
  */
 
 /** How long an agent stays deleted or retired before its number is freed: the apps' ROSTER_GONE_MS. */
 export const ROSTER_GONE_GRACE_MS = 10 * 60_000;
 /** How recently an agent must have been active for the runtime to number it. */
 export const ROSTER_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+/**
+ * How long a listed agent can go with no activity before its number is
+ * freed. The idle time counts from the agent's latest activity, or from
+ * when it took its number if that is later.
+ */
+export const ROSTER_IDLE_FREE_MS = 30 * 24 * 60 * 60_000;
 
 /** The registry fields the roster reads. */
 export type AgentRosterRegistryView = {
@@ -60,12 +71,14 @@ export type AgentRosterServiceOptions = {
   now?: () => number;
   goneGraceMs?: number;
   activeWindowMs?: number;
+  idleFreeMs?: number;
   log?: (message: string) => void;
 };
 
 export type AgentRosterReconcileResult = {
   assigned: Array<{ agentId: string; number: number }>;
-  freed: Array<{ agentId: string; number: number }>;
+  /** `gone`: deleted or retired past the grace. `idle`: no activity for `idleFreeMs`. */
+  freed: Array<{ agentId: string; number: number; reason: "gone" | "idle" }>;
   /** Agents seen active that found no free number. */
   unnumbered: number;
 };
@@ -120,6 +133,33 @@ function latestMetadataTimestamp(metadata: Record<string, unknown> | undefined, 
   return latest;
 }
 
+/** Each agent's latest endpoint activity. */
+function endpointActivityByAgent(registry: AgentRosterRegistryView): Map<string, number> {
+  const activity = new Map<string, number>();
+  for (const endpoint of Object.values(registry.endpoints ?? {})) {
+    const at = latestMetadataTimestamp(endpoint.metadata, ENDPOINT_ACTIVITY_KEYS);
+    if (at > (activity.get(endpoint.agentId) ?? 0)) activity.set(endpoint.agentId, at);
+  }
+  return activity;
+}
+
+/** When the runtime first saw an agent, and when the agent or one of its endpoints was last active. */
+function agentActivityAt(
+  registry: AgentRosterRegistryView,
+  agentId: string,
+  agent: AgentDefinition,
+  endpointActivity: ReadonlyMap<string, number>,
+): { firstSeenAt: number; activeAt: number } {
+  const firstSeenAt = timestampMs(registry.actors?.[agentId]?.createdAt)
+    || timestampMs(agent.metadata?.["registeredAt"]);
+  const activeAt = Math.max(
+    firstSeenAt,
+    latestMetadataTimestamp(agent.metadata, AGENT_ACTIVITY_KEYS),
+    endpointActivity.get(agentId) ?? 0,
+  );
+  return { firstSeenAt, activeAt };
+}
+
 /** The agent's project name as its record carries it (the apps read the same field). */
 export function rosterProjectNameForAgent(agent: AgentDefinition | undefined): string | null {
   const value = agent?.metadata?.["project"];
@@ -138,6 +178,36 @@ export function isRosterRetiredAgent(agent: AgentDefinition | undefined): boolea
   return metadata["staleLocalRegistration"] === true && metadata["staleMeshRegistration"] !== true;
 }
 
+/**
+ * A snapshot whose agent records carry their roster tags, for `/v1/snapshot`.
+ * The records are copied, never changed. A `roster` field that a record
+ * carries without holding a number is dropped. Returns the snapshot itself
+ * when there is nothing to add or drop.
+ */
+export function withRosterTags<T extends { agents?: Record<string, AgentDefinition> }>(
+  snapshot: T,
+  tags: ReadonlyMap<string, AgentRosterTag>,
+): T {
+  const agents = snapshot.agents;
+  if (!agents) return snapshot;
+  let changed = false;
+  const tagged: Record<string, AgentRecordWithRoster> = {};
+  for (const [agentId, record] of Object.entries(agents)) {
+    const tag = tags.get(agentId);
+    if (tag) {
+      tagged[agentId] = { ...record, roster: tag };
+      changed = true;
+    } else if (record && "roster" in record) {
+      const { roster: _stale, ...rest } = record as AgentRecordWithRoster;
+      tagged[agentId] = rest;
+      changed = true;
+    } else {
+      tagged[agentId] = record;
+    }
+  }
+  return changed ? { ...snapshot, agents: tagged } : snapshot;
+}
+
 type RosterState = {
   agents: Map<string, RosterAgentRow>;
   byNumber: Map<number, RosterAgentRow>;
@@ -149,18 +219,21 @@ export class AgentRosterService {
   private readonly now: () => number;
   private readonly goneGraceMs: number;
   private readonly activeWindowMs: number;
+  private readonly idleFreeMs: number;
   private fullWarned = false;
 
   constructor(private readonly options: AgentRosterServiceOptions) {
     this.now = options.now ?? Date.now;
     this.goneGraceMs = options.goneGraceMs ?? ROSTER_GONE_GRACE_MS;
     this.activeWindowMs = options.activeWindowMs ?? ROSTER_ACTIVE_WINDOW_MS;
+    this.idleFreeMs = options.idleFreeMs ?? ROSTER_IDLE_FREE_MS;
   }
 
-  /** Number newly active agents, mark deleted and retired ones, and free numbers past their grace. */
+  /** Number newly active agents, mark deleted and retired ones, and free numbers past their grace or idle too long. */
   reconcile(): AgentRosterReconcileResult {
     const registry = this.options.registry();
     const now = this.now();
+    const endpointActivity = endpointActivityByAgent(registry);
     return this.options.store.transaction(() => {
       const state = this.load();
       const result: AgentRosterReconcileResult = { assigned: [], freed: [], unnumbered: 0 };
@@ -168,6 +241,12 @@ export class AgentRosterService {
       for (const row of [...state.agents.values()]) {
         const agent = registry.agents[row.agentId];
         if (agent && !isRosterRetiredAgent(agent)) {
+          const idleSince = Math.max(agentActivityAt(registry, row.agentId, agent, endpointActivity).activeAt, row.assignedAt);
+          if (now - idleSince >= this.idleFreeMs) {
+            this.removeAgent(state, row.agentId);
+            result.freed.push({ agentId: row.agentId, number: row.number, reason: "idle" });
+            continue;
+          }
           const project = rosterProjectNameForAgent(agent);
           const projectKey = project ? rosterProjectKey(project) : null;
           if (project) this.ensureProject(state, project, now);
@@ -182,11 +261,11 @@ export class AgentRosterService {
         }
         if (now - row.goneAt >= this.goneGraceMs) {
           this.removeAgent(state, row.agentId);
-          result.freed.push({ agentId: row.agentId, number: row.number });
+          result.freed.push({ agentId: row.agentId, number: row.number, reason: "gone" });
         }
       }
 
-      const newcomers = this.activeNewcomers(registry, state, now);
+      const newcomers = this.activeNewcomers(registry, state, now, endpointActivity);
       for (const { agentId, agent } of newcomers) {
         const number = this.lowestFreeNumber(state);
         if (number === null) {
@@ -270,11 +349,7 @@ export class AgentRosterService {
 
       const code = cleanProjectCode(request.code);
       if (!code) {
-        throw new AgentRosterError(
-          "invalid_project_code",
-          `"${request.code}" is not a project code: use two or three letters or digits, with at least one letter`,
-          { code: request.code },
-        );
+        throw new AgentRosterError("invalid_project_code", projectCodeRefusal(String(request.code)), { code: request.code });
       }
       const holder = state.codes.get(code);
       if (holder && holder !== key) {
@@ -388,9 +463,14 @@ export class AgentRosterService {
           if (entry.project) this.ensureProject(state, entry.project, now);
           continue;
         }
-        const code = cleanProjectCode(requested);
+        let code = cleanProjectCode(requested);
+        if (!code && entry.project) {
+          // A digit passes only as the project's own default (app-2 → A2), which the apps show too.
+          const held = cleanHeldProjectCode(requested);
+          if (held && held === this.ensureProject(state, entry.project, now).code) code = held;
+        }
         if (!code) {
-          conflict({ agentId: entry.agentId, number: entry.number, projectCode: requested, reason: "invalid_project_code", detail: `"${requested}" is not a project code` });
+          conflict({ agentId: entry.agentId, number: entry.number, projectCode: requested, reason: "invalid_project_code", detail: projectCodeRefusal(String(requested)) });
           continue;
         }
         if (!entry.project) {
@@ -560,23 +640,13 @@ export class AgentRosterService {
     registry: AgentRosterRegistryView,
     state: RosterState,
     now: number,
+    endpointActivity: ReadonlyMap<string, number>,
   ): Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number }> {
-    const endpointActivity = new Map<string, number>();
-    for (const endpoint of Object.values(registry.endpoints ?? {})) {
-      const at = latestMetadataTimestamp(endpoint.metadata, ENDPOINT_ACTIVITY_KEYS);
-      if (at > (endpointActivity.get(endpoint.agentId) ?? 0)) endpointActivity.set(endpoint.agentId, at);
-    }
     const cutoff = now - this.activeWindowMs;
     const newcomers: Array<{ agentId: string; agent: AgentDefinition; firstSeenAt: number }> = [];
     for (const [agentId, agent] of Object.entries(registry.agents)) {
       if (state.agents.has(agentId) || isRosterRetiredAgent(agent)) continue;
-      const firstSeenAt = timestampMs(registry.actors?.[agentId]?.createdAt)
-        || timestampMs(agent.metadata?.["registeredAt"]);
-      const activeAt = Math.max(
-        firstSeenAt,
-        latestMetadataTimestamp(agent.metadata, AGENT_ACTIVITY_KEYS),
-        endpointActivity.get(agentId) ?? 0,
-      );
+      const { firstSeenAt, activeAt } = agentActivityAt(registry, agentId, agent, endpointActivity);
       if (activeAt < cutoff) continue;
       newcomers.push({ agentId, agent, firstSeenAt: firstSeenAt || activeAt });
     }

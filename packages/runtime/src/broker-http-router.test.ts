@@ -15,7 +15,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-import type { ConversationDefinition, TrustedPeerRecord } from "@openscout/protocol";
+import { agentRosterTag, type ConversationDefinition, type TrustedPeerRecord } from "@openscout/protocol";
 
 import {
   createBrokerHttpRouter,
@@ -502,6 +502,29 @@ describe("createBrokerHttpRouter", () => {
       { since: null, scope: "agents" },
       { since: null, scope: "agents" },
     ]);
+  });
+
+  test("local snapshot agents carry their roster tags; the mesh snapshot leaves them out", async () => {
+    const tag = agentRosterTag({ number: 3, projectCode: "OS" });
+    const brokerService = {
+      ...createHarness().deps.brokerService,
+      readSnapshot: async () => ({ agents: { "agent-a": { id: "agent-a" }, "agent-b": { id: "agent-b" } } }) as never,
+    };
+    const harness = createHarness({ brokerService, agentRosterService: { tags: () => new Map([["agent-a", tag]]) } as never });
+
+    const local = await requestRouter(harness, "GET", "/v1/snapshot?scope=agents");
+    expect(local.body).toEqual({ agents: { "agent-a": { id: "agent-a", roster: tag }, "agent-b": { id: "agent-b" } } });
+    const mesh = await requestRouter(harness, "GET", "/v1/mesh/snapshot");
+    expect(mesh.body).toEqual({ agents: { "agent-a": { id: "agent-a" }, "agent-b": { id: "agent-b" } } });
+
+    // A roster that cannot be read leaves the snapshot untagged, never unserved.
+    const failing = createHarness({
+      brokerService,
+      agentRosterService: { tags: () => { throw new Error("database is locked"); } } as never,
+    });
+    const untagged = await requestRouter(failing, "GET", "/v1/snapshot");
+    expect(untagged.response.status).toBe(200);
+    expect(untagged.body).toEqual({ agents: { "agent-a": { id: "agent-a" }, "agent-b": { id: "agent-b" } } });
   });
 
   test("notification routing is metadata-only, machine-local, and absent on older services", async () => {

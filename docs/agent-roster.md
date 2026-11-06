@@ -2,7 +2,7 @@
 
 Each agent has a short code, such as `OS-003`. The code has two parts:
 
-- A **project code** of two or three capitals (`OS`). Each project holds one
+- A **project code** of two or three letters (`OS`). Each project holds one
   code, and no two projects hold the same code.
 - A **roster number** of three digits (`003`). One roster covers all
   projects, so the number alone names one agent.
@@ -31,10 +31,15 @@ display name or session:
   (registered and not retired) and the agent or one of its endpoints was
   active in the last seven days. When two agents are new at the same time,
   the agent the runtime registered first gets the lower number.
-- **Freeing.** A number frees when the runtime has not listed its agent for
-  ten minutes, because the agent was deleted or retired. If the agent comes
-  back inside the ten minutes, it keeps its number. A mesh agent whose peer is
-  offline is still listed, so it keeps its number.
+- **Freeing when gone.** A number frees when the runtime has not listed its
+  agent for ten minutes, because the agent was deleted or retired. If the
+  agent comes back inside the ten minutes, it keeps its number. A mesh agent
+  whose peer is offline is still listed, so it keeps its number.
+- **Freeing when idle.** A number also frees after 30 days with no activity
+  (`ROSTER_IDLE_FREE_MS`). The 30 days count from the agent's latest
+  activity, or from when it took its number if that is later, so an imported
+  number is kept for 30 days. An agent that is active again after that takes
+  a new number, as a new agent does.
 - **Reuse.** A freed number goes to the next new agent only when every lower
   number is held.
 - **Capacity.** The roster holds 999 numbers. When all of them are held, a
@@ -49,15 +54,23 @@ apps show. The project's key is its name, trimmed and in lower case.
   ident rule (`openscout` → `OS`, `peal-bach` → `PB`), so the codes that the
   apps show today do not change. If another project already holds the
   default, the runtime takes the next candidate spelled from the name: the
-  other letter pairs, then three-letter codes.
-- **Operator code.** The operator can set a code of two or three letters or
-  digits, with at least one letter. The runtime refuses a code that another
-  project holds and names that project:
+  other letter pairs, then three-letter codes. These candidates are letters
+  only.
+- **Operator code.** The operator can set a code of two or three letters.
+  The runtime refuses a code with a digit, and a code that another project
+  holds, and names that project:
 
   ```text
+  $ scout roster project peal-bach P8
+  "P8" is not a project code: project codes are letters only, two or three of them
   $ scout roster project openscout-labs OS
   OS is held by project "openscout"
   ```
+
+- **Digits.** Only a default can have a digit. The apps' rule spells a digit
+  when the name gives one (`app-2` → `A2`), and the runtime keeps that default
+  so that it does not rename. An import can give the project that same code,
+  but no other code with a digit.
 
 - **Reset.** `scout roster project <name> --reset` gives the project its
   default code again.
@@ -133,8 +146,24 @@ imported do not change.
 | `POST /v1/roster/import` | `{ entries, dryRun? }` → `{ dryRun, imported, renumbered, projectCodes, conflicts }` |
 | `POST /v1/roster/resolve` | `{ address }` → `{ address, resolved, entry?, diagnostic? }` |
 | `scout roster` | `list`, `project <name> <code>\|--reset`, `import <file\|-> [--dry-run]`, `resolve <code>`; `--json` for the broker's JSON |
+| `GET /v1/snapshot` | Each agent record whose agent holds a number has `roster`: the same tag. `/v1/mesh/snapshot` leaves it out. |
+| Pairing `WebAgent` | `roster`: the same tag, or `null` while the agent holds no number |
 | `scout who --json` | Each agent that holds a number has `roster: { number, numberText, projectCode, code, label }` |
 | MCP `agents_search` | Candidates carry the same `roster` tag. A roster-code query returns the agent that holds the code. |
 
-The roster routes are local-tier: mesh peers cannot reach them. The types are
-in `@openscout/protocol` (`agent-roster.ts`).
+The tag is:
+
+```json
+{ "number": 3, "numberText": "003", "projectCode": "OS", "code": "OS-003", "label": "OS 003" }
+```
+
+`projectCode` is `null` for an agent with no project. Its `code` and `label`
+are then the number alone (`003`). The runtime adds the tag to the snapshot
+response and never stores it on the agent record. A record that carries a
+stale `roster` field loses it in the response. A deleted or retired agent
+whose number has not freed yet has no tag.
+
+The roster routes are local-tier: mesh peers cannot reach them. A roster
+number names an agent only on its own runtime, so the mesh snapshot carries
+no tags. The types are in `@openscout/protocol` (`agent-roster.ts`:
+`AgentRosterTag`, `AgentRecordWithRoster`).

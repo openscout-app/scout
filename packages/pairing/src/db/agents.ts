@@ -6,7 +6,7 @@
  * synthesize chat ids; chat creation goes through the broker.
  */
 
-import { directChannelNaturalKey } from "@openscout/protocol";
+import { agentRosterTag, directChannelNaturalKey, type AgentRosterTag } from "@openscout/protocol";
 
 import { db } from "./internal/db.ts";
 import { metadataString } from "./internal/parse.ts";
@@ -290,6 +290,7 @@ function mapAgentRows(
   flightPhases: Map<string, AgentFlightPhase>,
   conversationIdByAgentId: ReadonlyMap<string, string>,
 ): WebAgent[] {
+  const rosterTags = rosterTagsForAgents(rows.map((row) => row.id));
   return rows.map((r) => {
     let capabilities: string[] = [];
     try { capabilities = r.capabilities_json ? JSON.parse(r.capabilities_json) : []; } catch {}
@@ -345,6 +346,34 @@ function mapAgentRows(
       staleLocalRegistration: meta.staleLocalRegistration === true,
       retiredFromFleet: meta.retiredFromFleet === true,
       replacedByAgentId: metadataString(meta, "replacedByAgentId") ?? null,
+      roster: rosterTags.get(r.id) ?? null,
     };
   });
+}
+
+/**
+ * The roster tags (OS-003) of the agents that hold a number, read from the
+ * runtime's roster tables. An agent that was deleted or retired, and whose
+ * number has not been freed yet, has no tag.
+ */
+function rosterTagsForAgents(agentIds: string[]): Map<string, AgentRosterTag> {
+  const tags = new Map<string, AgentRosterTag>();
+  if (agentIds.length === 0) return tags;
+  let rows: Array<{ agent_id: string; number: number; code: string | null }>;
+  try {
+    rows = db().prepare(
+      `SELECT ra.agent_id, ra.number, rp.code
+       FROM roster_agents ra
+       LEFT JOIN roster_projects rp ON rp.project_key = ra.project_key
+       WHERE ra.gone_at IS NULL
+         AND ra.agent_id IN (SELECT value FROM json_each(?))`,
+    ).all(JSON.stringify(agentIds)) as typeof rows;
+  } catch (error) {
+    // The web server can read a control-plane database that the runtime has
+    // not migrated to the roster yet. Until it does, no agent has a code.
+    if (error instanceof Error && error.message.includes("no such table")) return tags;
+    throw error;
+  }
+  for (const row of rows) tags.set(row.agent_id, agentRosterTag({ number: row.number, projectCode: row.code }));
+  return tags;
 }

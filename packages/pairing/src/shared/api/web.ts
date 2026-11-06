@@ -7,7 +7,7 @@
  * `server/db/types/mobile.ts`.
  */
 
-import type { AgentRun, FlightSessionTraceEntry, MessageAttachment } from "@openscout/protocol";
+import type { AgentRosterTag, AgentRun, FlightSessionTraceEntry, MessageAttachment } from "@openscout/protocol";
 
 import type { AgentSummaryState, WorkAttention } from "./common.ts";
 import type { WorkMaterialsInventory } from "./work-materials.ts";
@@ -92,6 +92,8 @@ export type WebAgent = {
   brokerActivity?: WebAgentBrokerActivity[];
   authorityProfile?: WebAgentAuthorityProfile | null;
   runtimePolicy?: WebAgentRuntimePolicy | null;
+  /** The agent's roster code (`OS-003`); null while it holds no number. */
+  roster?: AgentRosterTag | null;
 };
 
 export type WebActivityItem = {
