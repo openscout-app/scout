@@ -1,6 +1,16 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import {
+// These unit fixtures must not read the operator's account gauges or terminals.
+mock.module("../../service-budgets.ts", () => ({ loadServiceBudgets: async () => ({ gauges: [] }) }));
+mock.module("../../db/terminal-sessions.ts", () => ({ queryTerminalSessions: () => [] }));
+mock.module("../attention/build-agent-attention-index.ts", () => ({
+  createAgentAttentionIndexReader: () => async () => new Map(),
+}));
+
+const {
   getScoutMobileAgents,
   getScoutMobileRuntimeCapabilities,
   getScoutMobileActivity,
@@ -9,32 +19,44 @@ import {
   getScoutMobileSessionSnapshot,
   getScoutMobileTerminals,
   rehomeScoutMobileWorkspacePath,
-} from "./service.ts";
+} = await import("./service.ts");
 
 import { invalidateScoutBrokerContextCache } from "../broker/service.ts";
 
 let broker: ReturnType<typeof Bun.serve> | undefined;
+let snapshotRequests = 0;
 const originalBrokerUrl = process.env.OPENSCOUT_BROKER_INTERNAL_URL;
+const originalSocketPath = process.env.OPENSCOUT_BROKER_SOCKET_PATH;
+let fixtureRoot = "";
+beforeEach(() => {
+  fixtureRoot = mkdtempSync(join(tmpdir(), "scout-mobile-snapshot-"));
+  // INTERNAL_URL alone still selects the configured Unix socket first. Force
+  // that attempt to an absent fixture socket, then HTTP may reach only our stub.
+  process.env.OPENSCOUT_BROKER_SOCKET_PATH = join(fixtureRoot, "absent.sock");
+});
 afterEach(() => {
-  if (originalBrokerUrl === undefined) {
-    delete process.env.OPENSCOUT_BROKER_INTERNAL_URL;
-  } else {
-    process.env.OPENSCOUT_BROKER_INTERNAL_URL = originalBrokerUrl;
-  }
+  const usedBroker = Boolean(broker);
   if (broker) {
+    // Evict while the injected endpoint/socket still select this fixture key.
     invalidateScoutBrokerContextCache(broker.url.origin);
     broker.stop(true);
     broker = undefined;
   }
+  if (originalBrokerUrl === undefined) delete process.env.OPENSCOUT_BROKER_INTERNAL_URL;
+  else process.env.OPENSCOUT_BROKER_INTERNAL_URL = originalBrokerUrl;
+  if (originalSocketPath === undefined) delete process.env.OPENSCOUT_BROKER_SOCKET_PATH;
+  else process.env.OPENSCOUT_BROKER_SOCKET_PATH = originalSocketPath;
+  if (fixtureRoot) rmSync(fixtureRoot, { recursive: true, force: true });
+  if (usedBroker) expect(snapshotRequests).toBeGreaterThan(0);
 });
 
-test("transitional mobile gauges keep stable empty compatibility shapes", async () => {
+test("empty provider and terminal registry fixtures retain empty mobile shapes", async () => {
   expect(await getScoutMobileServiceBudgets()).toEqual({ budgets: [] });
   expect(await getScoutMobileTerminals()).toEqual({ terminals: [] });
 });
 
 test("mobile runtime capabilities hide the duplicate Grok harness", async () => {
-  const catalog = await getScoutMobileRuntimeCapabilities();
+  const catalog = await getScoutMobileRuntimeCapabilities(undefined, async () => null);
   expect(catalog.harnesses.map((harness) => harness.id)).not.toContain("grok");
   expect(catalog.harnesses.map((harness) => harness.id)).toContain("grok-acp");
 });
@@ -331,8 +353,9 @@ function brokerSnapshotWithFlight(flight: {
 }
 
 function installBrokerSnapshot(snapshot: unknown) {
+  snapshotRequests = 0;
   // The core client uses the HTTP broker wire, not the legacy in-process registry.
-  // INTERNAL_URL selects the control endpoint; BROKER_URL is advertisement only.
+  // Pair the control endpoint with the isolated absent Unix socket above.
   const service = {
     readHealth: async () => ({
       ok: true,
@@ -350,7 +373,7 @@ function installBrokerSnapshot(snapshot: unknown) {
       switch (new URL(request.url).pathname) {
         case "/health": return Response.json(await service.readHealth());
         case "/v1/node": return Response.json(await service.readNode());
-        case "/v1/snapshot": return Response.json(await service.readSnapshot());
+        case "/v1/snapshot": snapshotRequests++; return Response.json(await service.readSnapshot());
         default: return new Response("unexpected broker route", { status: 404 });
       }
     },
