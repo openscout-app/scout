@@ -127,6 +127,7 @@ export interface BridgeContext {
   bridge: Bridge;
   cwd: string;
   deviceId?: string;
+  credentialBinding?: object;
   secureTransport?: boolean;
   trustedPeer?: boolean;
   reconnectRoom?: string;
@@ -1626,7 +1627,7 @@ const mobileRouter = t.router({
           message: "Terminal provisioning requires a trusted paired device over the encrypted bridge.",
         });
       }
-      return await provisionMobileTerminalAccess(input.sshPublicKey, ctx.deviceId, input.deviceClass);
+      return await provisionMobileTerminalAccess(input.sshPublicKey, ctx.deviceId, input.deviceClass, ctx.credentialBinding);
     }),
 
   terminalStatus: procedure
@@ -1639,7 +1640,7 @@ const mobileRouter = t.router({
         });
       }
       try {
-        return await readMobileTerminalStatus(input?.sessionName, ctx.deviceId);
+        return await readMobileTerminalStatus(input?.sessionName, ctx.deviceId, ctx.credentialBinding);
       } catch (error) {
         if (error instanceof InvalidMobileTerminalSessionError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: error.message, cause: error });

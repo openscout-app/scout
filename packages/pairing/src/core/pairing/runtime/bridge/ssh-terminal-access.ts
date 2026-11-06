@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 
-const SCOUT_AUTHORIZED_KEY_MARKER = "scout:terminal-access:v0";
+const SCOUT_AUTHORIZED_KEY_MARKER = "scout:terminal-access:v1";
+const LEGACY_SCOUT_AUTHORIZED_KEY_MARKER = "scout:terminal-access:v0";
 const SCOUT_AUTHORIZED_KEY_OPTIONS = "restrict,pty";
 
 const SUPPORTED_IOS_PUBLIC_KEY_ALGORITHMS = new Set([
@@ -46,10 +47,10 @@ export interface SshTerminalAccessProvisionInput {
   terminalSessionName?: string;
   /**
    * Pairing Noise key that authorized this provisioning request. It is recorded
-   * only as a fingerprint so SSH credentials remain separate from pairing
-   * transport identity and no Noise secret/key material is persisted here.
+   * as an exact full-key-derived owner ID. Pairing revocation does not revoke
+   * already-issued SSH credentials or terminate SSH/PTY sessions.
    */
-  pairingNoisePublicKey?: string;
+  pairingNoisePublicKey: string;
 }
 
 export interface SshTerminalAccessProvisionResult {
@@ -60,7 +61,9 @@ export interface SshTerminalAccessProvisionResult {
 
 export interface SshTerminalAccessRevokeInput {
   authorizedKeys: string;
-  deviceId: string;
+  /** Display metadata, never an owner selector. */
+  deviceId?: string;
+  pairingNoisePublicKey: string;
 }
 
 export interface SshTerminalAccessRevokeResult {
@@ -120,11 +123,9 @@ export function createSshHostKeyPin(publicKey: string): SshHostKeyPin {
 export function provisionSshTerminalAccess(
   input: SshTerminalAccessProvisionInput,
 ): SshTerminalAccessProvisionResult {
-  const deviceId = normalizeDeviceId(input.deviceId);
+  const deviceId = fullNoiseKey(input.pairingNoisePublicKey);
   const sshPublicKey = validateIosGeneratedSshPublicKey(input.sshPublicKey);
-  const pairingNoiseFingerprintSha256 = input.pairingNoisePublicKey
-    ? fingerprintUtf8(input.pairingNoisePublicKey.trim())
-    : undefined;
+  const pairingNoiseFingerprintSha256 = credentialOwnerId(deviceId);
   const grant: SshTerminalAccessGrant = {
     deviceId,
     sshPublicKey,
@@ -156,7 +157,7 @@ export function provisionSshTerminalAccess(
 export function revokeSshTerminalAccess(
   input: SshTerminalAccessRevokeInput,
 ): SshTerminalAccessRevokeResult {
-  const deviceId = normalizeDeviceId(input.deviceId);
+  const deviceId = fullNoiseKey(input.pairingNoisePublicKey);
   const removal = removeScoutAuthorizedKeysForDevice(
     splitAuthorizedKeys(input.authorizedKeys),
     deviceId,
@@ -169,28 +170,37 @@ export function revokeSshTerminalAccess(
   };
 }
 
-export function isScoutManagedAuthorizedKeyForDevice(
-  line: string,
-  deviceId: string,
-): boolean {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("#")) return false;
-  const marker = parseScoutAuthorizedKeyMarker(trimmed);
-  return marker?.device === encodeMarkerValue(normalizeDeviceId(deviceId));
+/** A full authenticated Noise key is required; a display prefix is never authority. */
+export function credentialOwnerId(publicKey: string): string {
+  return fingerprintUtf8(fullNoiseKey(publicKey));
 }
 
-/** Read the tmux workspace persisted with this paired device's SSH grant. */
-export function findSshTerminalSessionForDevice(
-  authorizedKeys: string,
-  deviceId: string,
-): string | undefined {
-  const encodedDeviceId = encodeMarkerValue(normalizeDeviceId(deviceId));
-  for (const line of splitAuthorizedKeys(authorizedKeys)) {
-    const marker = parseScoutAuthorizedKeyMarker(line);
-    if (marker?.device !== encodedDeviceId || !marker.session) continue;
-    return decodeMarkerValue(marker.session);
+export class SshCredentialOwnershipReviewRequired extends Error {
+  constructor() {
+    super("SSH credential ownership requires local review of the existing grant before re-provisioning; re-pairing alone is insufficient");
+    this.name = "SshCredentialOwnershipReviewRequired";
   }
-  return undefined;
+}
+
+export function isScoutManagedAuthorizedKeyForDevice(line: string, publicKey: string): boolean {
+  return ownsRecord(line, fullNoiseKey(publicKey));
+}
+
+/** No implicit `scout` fallback: missing session provenance remains unknown. */
+export function findSshTerminalSessionForDevice(authorizedKeys: string, publicKey: string): string | undefined {
+  const key = fullNoiseKey(publicKey), sessions = new Set<string>();
+  for (const line of splitAuthorizedKeys(authorizedKeys)) {
+    if (!ownsRecord(line, key)) continue;
+    const marker = parseScoutAuthorizedKeyMarker(line)!;
+    const session = marker.fields.get("session")?.[0];
+    if (session) {
+      const decoded = decodeMarkerValue(session);
+      if (!decoded) throw new SshCredentialOwnershipReviewRequired();
+      sessions.add(decoded);
+    }
+  }
+  if (sessions.size > 1) throw new SshCredentialOwnershipReviewRequired();
+  return sessions.values().next().value;
 }
 
 function createScoutAuthorizedKeyLine(input: {
@@ -201,56 +211,74 @@ function createScoutAuthorizedKeyLine(input: {
 }): string {
   const markerFields = [
     SCOUT_AUTHORIZED_KEY_MARKER,
-    `device=${encodeMarkerValue(input.deviceId)}`,
+    `owner=${credentialOwnerId(input.deviceId)}`,
     `ssh=${input.sshPublicKey.fingerprintSha256}`,
-    `pairing=${input.pairingNoiseFingerprintSha256 ?? "unbound"}`,
   ];
-  if (input.terminalSessionName) {
-    markerFields.push(`session=${encodeMarkerValue(input.terminalSessionName)}`);
-  }
-  const marker = markerFields.join(" ");
-  return `${SCOUT_AUTHORIZED_KEY_OPTIONS} ${input.sshPublicKey.normalizedPublicKey} ${marker}`;
+  if (input.terminalSessionName) markerFields.push(`session=${encodeMarkerValue(input.terminalSessionName)}`);
+  return `${SCOUT_AUTHORIZED_KEY_OPTIONS} ${input.sshPublicKey.normalizedPublicKey} ${markerFields.join(" ")}`;
 }
 
-function removeScoutAuthorizedKeysForDevice(
-  lines: string[],
-  deviceId: string,
-): { lines: string[]; removed: number } {
-  const retained: string[] = [];
-  let removed = 0;
+function removeScoutAuthorizedKeysForDevice(lines: string[], publicKey: string): {lines: string[]; removed: number} {
+  const retained: string[] = []; let removed = 0;
   for (const line of lines) {
-    if (isScoutManagedAuthorizedKeyForDevice(line, deviceId)) {
-      removed += 1;
-    } else {
-      retained.push(line);
-    }
+    if (ownsRecord(line, fullNoiseKey(publicKey))) removed++;
+    else retained.push(line);
   }
-  return { lines: retained, removed };
+  return {lines: retained, removed};
 }
 
-function parseScoutAuthorizedKeyMarker(line: string): { device?: string; session?: string } | null {
+type Marker = {version: "v0" | "v1"; fields: Map<string, string[]>};
+function parseScoutAuthorizedKeyMarker(line: string): Marker | null {
   const fields = line.trim().split(/\s+/);
-  const markerIndex = fields.indexOf(SCOUT_AUTHORIZED_KEY_MARKER);
-  if (markerIndex === -1) return null;
-
-  const marker: { device?: string; session?: string } = {};
-  for (const field of fields.slice(markerIndex + 1)) {
-    const [key, value] = field.split("=", 2);
-    if (key === "device") {
-      marker.device = value;
-    } else if (key === "session") {
-      marker.session = value;
-    }
+  // A marker in an unrelated comment is not a managed SSH grant.
+  if (fields[0] !== SCOUT_AUTHORIZED_KEY_OPTIONS || fields.length < 4) return null;
+  const version = fields[3] === SCOUT_AUTHORIZED_KEY_MARKER ? "v1"
+    : fields[3] === LEGACY_SCOUT_AUTHORIZED_KEY_MARKER ? "v0" : null;
+  if (!version) return null;
+  try { validateIosGeneratedSshPublicKey(`${fields[1]} ${fields[2]}`); } catch { return null; }
+  const values = new Map<string, string[]>();
+  for (const field of fields.slice(4)) {
+    const separator = field.indexOf("=");
+    if (separator < 1) continue;
+    const name = field.slice(0, separator), value = field.slice(separator + 1);
+    values.set(name, [...(values.get(name) ?? []), value]);
   }
-  return marker;
+  return {version, fields: values};
 }
 
-function normalizeDeviceId(deviceId: string): string {
-  const normalized = deviceId.trim();
-  if (!normalized) {
-    throw new Error("Device id is required for SSH terminal access provisioning");
+function ownsRecord(line: string, publicKey: string): boolean {
+  const marker = parseScoutAuthorizedKeyMarker(line);
+  if (!marker) return false;
+  const owner = credentialOwnerId(publicKey), fields = marker.fields;
+  const devices = (fields.get("device") ?? []).map(decodeMarkerValue);
+  const candidate = devices.some(device => device && /^[a-f0-9]{1,64}$/.test(device) && publicKey.startsWith(device));
+  const claims = [...(fields.get("owner") ?? []), ...(fields.get("pairing") ?? [])];
+  if ([...fields.values()].some(values => values.length !== 1)) {
+    if (candidate || claims.includes(owner)) throw new SshCredentialOwnershipReviewRequired();
+    return false;
   }
-  return normalized;
+  if (marker.version === "v1") return fields.get("owner")?.[0] === owner;
+  const device = devices[0], pairing = fields.get("pairing")?.[0];
+  if (device && /^[a-f0-9]{64}$/.test(device)) {
+    if (pairing && pairing !== "unbound" && pairing !== credentialOwnerId(device)) {
+      if (candidate || pairing === owner) throw new SshCredentialOwnershipReviewRequired();
+      return false;
+    }
+    return device === publicKey;
+  }
+  if (pairing === owner) {
+    if (device && /^[a-f0-9]{1,63}$/.test(device) && !candidate) throw new SshCredentialOwnershipReviewRequired();
+    return true; // Established by the full authenticated key's exact fingerprint.
+  }
+  if (candidate && (!pairing || pairing === "unbound" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(pairing))) {
+    throw new SshCredentialOwnershipReviewRequired();
+  }
+  return false; // Never migrate/remove a foreign or unestablished owner.
+}
+
+function fullNoiseKey(value: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw new Error("Full Noise key required for credential ownership");
+  return value;
 }
 
 function splitAuthorizedKeys(authorizedKeys: string): string[] {
