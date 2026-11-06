@@ -1,7 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+
+// This router fixture projects its supplied sessions, not the operator's live
+// native attention or installed-broker inbox.
+const brokerService = await import("../../../broker/service.ts");
+mock.module("../../../broker/service.ts", () => ({ ...brokerService, loadScoutBrokerContext: async () => null }));
+const hostAttention = await import("../../../attention/herdr-host-attention.ts");
+mock.module("../../../attention/herdr-host-attention.ts", () => ({ ...hostAttention, collectHerdrHostAttention: async () => [] }));
 
 import type { Bridge } from "./bridge.ts";
-import { bridgeRouter, lookupMobileInboxItemForEvent } from "./router.ts";
+const { bridgeRouter, lookupMobileInboxItemForEvent } = await import("./router.ts");
 import type { SessionState } from "@openscout/agent-sessions";
 
 function createBridgeStub() {
