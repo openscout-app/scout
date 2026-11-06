@@ -253,3 +253,25 @@ test("proven failure is terminal and replays evidence, never invoking reconcilia
     expect(executions).toBe(1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+for (const operation of ["deliver", "invoke"]) {
+  test(`${operation} receipts exclude only top-level trace correlation across retries and restart`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-trace-receipts-"));
+    try {
+      let calls = 0;
+      const accepted = { invocationId: "inv-first", flightId: "flt-first", origin: { source: "claimed" },
+        trace: { traceId: "a".repeat(32), spanId: "b".repeat(16) } };
+      const body = { body: "work", nested: { traceparent: "business-data" } };
+      const execute = async () => { calls++; return accepted; };
+      const ledger = new BrokerRequestReceipts(dir);
+      await ledger.run("caller", "retry", operation, { ...body, traceparent: "first" }, execute);
+      for (const traceparent of ["new-span", undefined, "added-again"]) {
+        expect(await ledger.run("caller", "retry", operation, { ...body, traceparent }, execute)).toEqual(accepted);
+        expect(await new BrokerRequestReceipts(dir).run("caller", "retry", operation, { ...body, traceparent }, execute)).toEqual(accepted);
+      }
+      await expect(ledger.run("caller", "retry", operation, { ...body, nested: { traceparent: "changed-business-data" } }, execute))
+        .rejects.toThrow("different content");
+      expect(calls).toBe(1);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}

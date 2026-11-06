@@ -25,14 +25,14 @@ test("MCP origin claims and trace context survive creation and HTTP mesh forward
   // A shared transport on the requester must not become the asking session.
   await broker.postJson(source.baseUrl, "/v1/endpoints", { id: "shared-transport", agentId: "operator", nodeId: source.nodeId,
     harness: "bridge", transport: "http", sessionId: "shared-mcp-transport", state: "idle", metadata: {} });
-  async function ask(env: NodeJS.ProcessEnv, body: string) {
+  async function ask(env: NodeJS.ProcessEnv, body: string, extra: Record<string, unknown> = {}) {
     const server = createScoutMcpServer({ env, defaultCurrentDirectory: source.controlHome,
       dependencies: { resolveSenderId: async () => "operator", loadMeshOverview: async () => { throw new Error("not needed"); } } });
     const client = new Client({ name: "origin-test", version: "1" }, { capabilities: {} });
     const [ct, st] = InMemoryTransport.createLinkedPair();
     try {
       await Promise.all([server.connect(st), client.connect(ct)]);
-      const receipt = await client.callTool({ name: "ask", arguments: { targetSessionId: mailbox.sessionId, body, replyMode: "none" } });
+      const receipt = await client.callTool({ name: "ask", arguments: { targetSessionId: mailbox.sessionId, body, replyMode: "none", ...extra } });
       expect(receipt.isError).toBeFalsy();
       const data = receipt.structuredContent as { ok: boolean; ids: { invocationId: string } };
       expect(data.ok).toBe(true);
@@ -40,7 +40,31 @@ test("MCP origin claims and trace context survive creation and HTTP mesh forward
       return state.invocations[data.ids.invocationId]!;
     } finally { await client.close(); await server.close(); }
   }
-  const claimed = await ask({ CODEX_THREAD_ID: "origin-native-thread" }, "claimed caller");
+  let captured: Record<string, unknown> | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).endsWith("/v1/deliver") && typeof init?.body === "string") captured = JSON.parse(init.body);
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  let claimed: RuntimeSnapshot["invocations"][string];
+  try {
+    claimed = await ask({ CODEX_THREAD_ID: "origin-native-thread" }, "claimed caller", {
+      requestId: "origin-http-trace-retry", traceparent: `00-${"a".repeat(32)}-${"b".repeat(16)}-01`,
+    });
+  } finally { globalThis.fetch = originalFetch; }
+  expect(captured).toBeDefined();
+  const { traceparent: _correlation, ...command } = captured!;
+  for (const header of [`00-${"c".repeat(32)}-${"d".repeat(16)}-01`, undefined, `00-${"e".repeat(32)}-${"f".repeat(16)}-01`]) {
+    const response = await originalFetch(`${source.baseUrl}/v1/deliver`, {
+      method: "POST", headers: { "content-type": "application/json", ...(header ? { traceparent: header } : {}) },
+      body: JSON.stringify(command),
+    });
+    expect(response.status).toBe(202);
+    const receipt = await response.json() as { flight?: { id: string; invocationId: string } };
+    expect(receipt.flight?.invocationId).toBe(claimed.id);
+    const snapshot = await broker.getJson<RuntimeSnapshot>(source.baseUrl, "/v1/snapshot");
+    expect(snapshot.invocations[claimed.id]).toEqual(claimed);
+  }
   expect(claimed.origin.source).toBe("claimed");
   expect(claimed.origin.sessionAddress).toMatch(/^sess\.[0-9a-f]{20}@/);
   expect(claimed.trace?.traceId).toMatch(/^[0-9a-f]{32}$/);

@@ -193,7 +193,13 @@ export class BrokerRequestReceipts {
     const lease = active ? null : this.reserve(0);
     let fingerprint: string;
     try {
-      const encoded = canonicalRequest(payload);
+      // Transport correlation is fixed on first acceptance, not command content.
+      // Do not strip nested payload fields or fields of unrelated operations.
+      const command = (operation === "deliver" || operation === "invoke") && payload
+        && typeof payload === "object" && !Array.isArray(payload)
+        ? Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "traceparent"))
+        : payload;
+      const encoded = canonicalRequest(command);
       lease?.resize(Buffer.byteLength(encoded));
       fingerprint = createHash("sha256").update(encoded).digest("hex");
     } catch (error) { lease?.release(); throw error; }
