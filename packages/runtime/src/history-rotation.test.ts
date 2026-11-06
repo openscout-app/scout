@@ -636,10 +636,11 @@ describe("history.rotate journal dependency closure", () => {
     const cursorStore = new BrokerReadCursorStore({
       runtime: {
         snapshot: () => snap,
-        message: (id: string) => snap.messages[id],
         conversation: () => ({ id: "conv-1" }),
         readCursor: () => Object.values(snap.readCursors)[0],
       },
+      // Live window only: the anchor must have survived in the snapshot itself.
+      readMessage: async (id: string) => snap.messages[id],
       ensureActor: async () => {},
       projection: { latestThreadSeq: async () => 1 },
       operatorActorId: "operator",
