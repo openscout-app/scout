@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import type { Bridge } from "./bridge.ts";
 import { bridgeRouter } from "./router.ts";
-import { bridgeWebRequest, isAllowedBridgeWebPath } from "./web-request.ts";
+import { BRIDGE_WEB_REQUEST_MAX_BYTES, bridgeWebRequest, isAllowedBridgeWebPath } from "./web-request.ts";
 
 type Call = { url: string; init: RequestInit };
 
@@ -87,6 +87,29 @@ describe("bridgeWebRequest", () => {
     expect(calls.length).toBe(0);
     expect((await bridgeWebRequest({ path: "/api/broadcast/stream", method: "GET" }, deps(impl))).status).toBe(406);
   });
+
+  for (const declared of [undefined, "1"]) {
+    test(`cancels an oversized stream before buffering it (length ${declared ?? "absent"})`, async () => {
+      let pulls = 0;
+      let cancelled = false;
+      const chunk = new Uint8Array(1024 * 1024);
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(chunk);
+          if (pulls === 32) controller.close();
+        },
+        cancel() { cancelled = true; },
+      }, { highWaterMark: 0 });
+      const { impl } = stubFetch(() => new Response(body, {
+        headers: declared ? { "content-length": declared } : {},
+      }));
+      const result = await bridgeWebRequest({ path: "/api/blobs/large", method: "GET" }, deps(impl));
+      expect(result.status).toBe(413);
+      expect(cancelled).toBe(true);
+      expect(pulls).toBe(BRIDGE_WEB_REQUEST_MAX_BYTES / chunk.byteLength + 1);
+    });
+  }
 
   test("refuses oversized bodies and reports an unreachable web service", async () => {
     const big = stubFetch(() => new Response("x", { headers: { "content-length": String(64 * 1024 * 1024) } }));

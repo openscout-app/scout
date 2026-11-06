@@ -96,9 +96,32 @@ export async function bridgeWebRequest(
       await response.body?.cancel();
       return errorResponse(413, "Response is too large to carry");
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > BRIDGE_WEB_REQUEST_MAX_BYTES) {
-      return errorResponse(413, "Response is too large to carry");
+    // Content-Length is only a hint: cap bytes while reading chunked or
+    // incorrectly declared responses, before buffering the rest of the body.
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    const reader = response.body?.getReader();
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value.byteLength > BRIDGE_WEB_REQUEST_MAX_BYTES - size) {
+            await reader.cancel();
+            return errorResponse(413, "Response is too large to carry");
+          }
+          chunks.push(value);
+          size += value.byteLength;
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
     }
     return isTextual(contentType)
       ? { status: response.status, contentType, body: new TextDecoder().decode(bytes) }
