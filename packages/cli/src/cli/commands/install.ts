@@ -208,12 +208,17 @@ export function parseInstallArgs(args: string[]): ScoutInstallOptions {
   return options;
 }
 
+/** The private native source repository. Its builds still write the former
+ * name, arach/openscout, which released CLIs require; both names are accepted
+ * so the builds can switch to the current one. */
+export const NATIVE_CANDIDATE_SOURCE_REPOSITORIES: readonly string[] = ["openscout-app/scout-apps", "arach/openscout"];
+
 /** A local candidate remains unpublished. Receipt integrity supplements, never
  * replaces, the installer's pinned Apple identity and Gatekeeper checks. */
 export function loadInstallCandidate(receiptPath: string, dmgPath: string): GithubRelease {
   const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
   if (receipt.schema !== "openscout-native-candidate-v1"
-    || receipt.source?.repository !== "arach/openscout"
+    || !NATIVE_CANDIDATE_SOURCE_REPOSITORIES.includes(receipt.source?.repository)
     || !/^[a-f0-9]{40}$/.test(receipt.source?.commit ?? "")
     || receipt.verification?.release !== true
     || receipt.verification?.team !== OPENSCOUT_SIGNING_TEAM_ID
