@@ -545,7 +545,9 @@ CREATE TABLE IF NOT EXISTS invocations (
   started_at INTEGER,
   completed_at INTEGER,
   flight_metadata_json TEXT,
-  execution_resolution_json TEXT
+  execution_resolution_json TEXT,
+  origin_json TEXT,
+  trace_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS flights (

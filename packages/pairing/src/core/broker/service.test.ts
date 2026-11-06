@@ -1477,7 +1477,7 @@ describe("sendScoutConversationSteer", () => {
         seed.exec(`CREATE TABLE invocations (
           id TEXT PRIMARY KEY, requester_id TEXT, requester_node_id TEXT, target_agent_id TEXT,
           target_node_id TEXT, action TEXT, task TEXT, collaboration_record_id TEXT, conversation_id TEXT,
-          message_id TEXT, context_json TEXT, execution_json TEXT, execution_resolution_json TEXT,
+          message_id TEXT, context_json TEXT, execution_json TEXT, execution_resolution_json TEXT, origin_json TEXT, trace_json TEXT,
           ensure_awake INTEGER, stream INTEGER, timeout_ms INTEGER, labels_json TEXT, metadata_json TEXT,
           created_at INTEGER, flight_id TEXT, state TEXT, summary TEXT, output TEXT, error TEXT,
           started_at INTEGER, completed_at INTEGER, flight_metadata_json TEXT
@@ -2394,6 +2394,8 @@ describe("waitForScoutFlight", () => {
       context_json TEXT,
       execution_json TEXT,
       execution_resolution_json TEXT,
+      origin_json TEXT,
+      trace_json TEXT,
       ensure_awake INTEGER NOT NULL DEFAULT 1,
       stream INTEGER NOT NULL DEFAULT 1,
       timeout_ms INTEGER,
@@ -2495,6 +2497,8 @@ describe("watchScoutMessages", () => {
       context_json TEXT,
       execution_json TEXT,
       execution_resolution_json TEXT,
+      origin_json TEXT,
+      trace_json TEXT,
       ensure_awake INTEGER NOT NULL DEFAULT 1,
       stream INTEGER NOT NULL DEFAULT 1,
       timeout_ms INTEGER,

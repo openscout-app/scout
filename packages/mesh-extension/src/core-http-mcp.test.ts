@@ -131,3 +131,13 @@ test('untyped task-closed errors keep their raw details redacted', async () => {
     Response.json({ error: 'task_closed', detail: 'private-transport-detail' }, { status: 409 })) as typeof fetch });
   await expect(client.request('/v1/messages/reply', {})).rejects.toThrow('runtime request refused (409)');
 });
+
+test('HTTP ask preserves the caller traceparent without asserting origin authority', async () => {
+  const f = fixture();
+  const traceparent = '00-11111111111111111111111111111111-2222222222222222-01';
+  await f.adapter.call('ask', { to: 'id:target', body: 'work', traceparent });
+  const request = f.calls.at(-1)!.body;
+  expect(request.traceparent).toBe(traceparent);
+  expect(request.origin).toBeUndefined();
+  expect(request.invocationMetadata.completionRelation).toBeUndefined();
+});

@@ -1287,3 +1287,37 @@ describe("registry liveness is durable state, not event history", () => {
     } finally { projection.close(); }
   });
 });
+
+describe("durable ask context", () => {
+  test("creation stamps before the journal frame, and retry preserves it", async () => {
+    const h = createTestRecordStore();
+    await h.runtime.upsertNode(testNode()); await h.runtime.upsertAgent(testAgent());
+    const incoming = testInvocation({ metadata: { source: "scout-mcp", replyToSessionId: "codex-caller", replyToSessionHarness: "codex" } });
+    const accepted = await h.records.recordInvocation(incoming);
+    const saved = h.appended.flat().find(entry => entry.kind === "invocation.record");
+    expect(structuredClone(saved?.kind === "invocation.record" && saved.invocation.origin)).toMatchObject({ source: "claimed", sessionAddress: expect.stringMatching(/^sess\.[0-9a-f]+@/) });
+    expect(structuredClone(saved?.kind === "invocation.record" && saved.invocation.trace)).toMatchObject({ traceId: expect.stringMatching(/^[0-9a-f]{32}$/), spanId: expect.stringMatching(/^[0-9a-f]{16}$/) });
+    const firstTrace = { ...incoming.trace };
+    const retry = testInvocation({ metadata: incoming.metadata });
+    expect((await h.records.recordInvocation(retry)).flight.id).toBe(accepted.flight.id);
+    expect(h.runtime.snapshot().invocations[incoming.id]?.trace).toEqual(firstTrace);
+    expect(h.appended.flat().filter(entry => entry.kind === "invocation.record")).toHaveLength(1);
+  });
+  test("planning refuses an unstamped new ask", () => {
+    const h = createTestRecordStore();
+    expect(() => h.runtime.planInvocation(testInvocation() as never)).toThrow("invalid_ask_trace");
+  });
+});
+
+test("only runtime-held endpoint context can write a verified ask origin", async () => {
+  const h = createTestRecordStore();
+  await h.runtime.upsertNode(testNode()); await h.runtime.upsertAgent(testAgent());
+  await h.runtime.upsertEndpoint(testEndpoint({ metadata: { nativeSessionId: "session-1" } }));
+  const unknown = testInvocation({ id: "unobserved", origin: { source: "verified" }, metadata: { observedEndpointId: "endpoint-1" } });
+  await h.records.recordInvocation(unknown);
+  expect(unknown.origin).toEqual({ source: "unknown" });
+  const observed = testInvocation({ id: "observed" });
+  await h.records.recordInvocation(observed, { observedEndpointId: "endpoint-1" });
+  expect(observed.origin.source).toBe("verified");
+  expect(observed.origin.sessionAddress).toMatch(/^sess\.[0-9a-f]{20}@/);
+});

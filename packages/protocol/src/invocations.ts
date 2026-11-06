@@ -89,7 +89,26 @@ export interface InvocationExecutionPreference {
   turnBudgetMs?: number;
 }
 
+/** Correlation only; neither origin nor trace creates a completion dependency. */
+export interface AskOrigin {
+  sessionAddress?: string;
+  runningFlightId?: ScoutId;
+  source: "verified" | "claimed" | "unknown";
+}
+
+/** Nonzero lowercase W3C trace and span identifiers. */
+export interface AskTrace {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+}
+
 export interface InvocationRequest {
+  origin: AskOrigin;
+  /** Absent only on asks recorded before trace context was introduced. */
+  trace?: AskTrace;
+  /** Input carrier only. The runtime consumes it at creation, never on replay. */
+  traceparent?: string;
   /** Caller-supplied, requester-scoped idempotency key. */
   requestId?: string;
   id: ScoutId;
@@ -111,6 +130,11 @@ export interface InvocationRequest {
   labels?: string[];
   createdAt: number;
   metadata?: MetadataMap;
+}
+
+/** A new flight cannot be planned without its creation-time trace. */
+export interface TracedInvocationRequest extends InvocationRequest {
+  trace: AskTrace;
 }
 
 export interface FlightRecord {

@@ -183,6 +183,14 @@ export const CONTROL_PLANE_SCHEMA_MIGRATIONS: ControlPlaneSchemaMigration[] = [
     },
   },
   {
+    id: "invocation-origin-and-trace",
+    description: "Adds ask origin and creation-time trace context without guessing historical values.",
+    apply(database) {
+      if (!hasColumn(database, "invocations", "origin_json")) database.exec("ALTER TABLE invocations ADD COLUMN origin_json TEXT");
+      if (!hasColumn(database, "invocations", "trace_json")) database.exec("ALTER TABLE invocations ADD COLUMN trace_json TEXT");
+    },
+  },
+  {
     id: "terminal-session-registry",
     description: "Creates the Scout-owned terminal session registry (harness session + surfaces).",
     apply(database) {
@@ -755,6 +763,9 @@ export function applyControlPlaneDrizzleMigrations(database: ControlPlaneSqliteD
   for (const migration of migrations) {
     if (lastAppliedMillis === null || lastAppliedMillis < migration.folderMillis) {
       for (const statement of migration.sql) {
+        // The additive repair layer may already have installed these columns.
+        const askColumn = /^ALTER TABLE `invocations` ADD `(origin_json|trace_json)` text;?$/i.exec(statement.trim());
+        if (askColumn && hasColumn(database, "invocations", askColumn[1]!)) continue;
         database.exec(statement);
       }
       database

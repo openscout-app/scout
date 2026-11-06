@@ -89,6 +89,8 @@ type RunQueryRow = {
   context_json: string | null;
   execution_json: string | null;
   execution_resolution_json: string | null;
+  origin_json: string | null;
+  trace_json: string | null;
   ensure_awake: number | string;
   stream: number | string;
   timeout_ms: number | string | null;
@@ -133,6 +135,8 @@ function sqlBoolean(value: number | string): boolean {
 
 function projectInvocationFromRunRow(row: RunQueryRow): InvocationRequest {
   const invocation: InvocationRequest = {
+    origin: parseJson<InvocationRequest["origin"]>(row.origin_json, { source: "unknown" }),
+    trace: parseJson<InvocationRequest["trace"]>(row.trace_json, undefined),
     id: row.invocation_id,
     requesterId: row.invocation_requester_id,
     requesterNodeId: row.requester_node_id,
@@ -354,6 +358,8 @@ export function queryRuns(opts?: {
        inv.context_json,
        inv.execution_json,
        inv.execution_resolution_json,
+       inv.origin_json,
+       inv.trace_json,
        inv.ensure_awake,
        inv.stream,
        inv.timeout_ms,
@@ -577,6 +583,8 @@ const DURABLE_INVOCATION_SELECT_SQL = `SELECT
     inv.context_json,
     inv.execution_json,
     inv.execution_resolution_json,
+    inv.origin_json,
+    inv.trace_json,
     inv.ensure_awake,
     inv.stream,
     inv.timeout_ms,

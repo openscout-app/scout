@@ -435,6 +435,7 @@ async function acceptGuestAsk(
       },
     });
     const invocation: InvocationRequest = {
+      origin: { source: "unknown" },
       id: invocationId,
       requesterId: grant.actorId,
       requesterNodeId: deps.nodeId,

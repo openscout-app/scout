@@ -219,7 +219,7 @@ export async function handleBrokerAccessRoute(request: RuntimeHttpRequestLike, r
         metadata: { source: ACCESS_PROTOCOL, clientMessageId: id, wake: operation === "message" ? "never" : "permitted", networkId: proof.networkId, principalId: proof.principalId, scopedRequestId: body.requestId } });
       if (operation === "request") {
         if (!resourceFor(deps, proof, body.target) || !store.allowed(proof, "request", resourceFor(deps, proof, body.target)!)) notFound();
-        await deps.invoke({ id, requesterId: actorId, requesterNodeId: deps.nodeId, targetAgentId: body.target, action: "consult", task: body.body,
+        await deps.invoke({ origin: { source: "unknown" }, id, requesterId: actorId, requesterNodeId: deps.nodeId, targetAgentId: body.target, action: "consult", task: body.body,
           conversationId: conversation.id, messageId: `msg-${id}`, ensureAwake: true, stream: false, createdAt: deps.now?.() ?? Date.now(),
           metadata: { source: ACCESS_PROTOCOL, networkId: proof.networkId, principalId: proof.principalId } });
         if (!deps.existingInvocation(id)) throw new MeshAccessError("target_unavailable", "target did not accept work", 409);

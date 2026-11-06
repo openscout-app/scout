@@ -402,6 +402,7 @@ export class BrokerA2AService {
       ?? recordString(messageMetadata, "a2aContextId")
       ?? undefined;
     const invocation: InvocationRequest = {
+      origin: { source: "unknown" },
       id: this.options.createId("a2a-inv"),
       requesterId: recordString(messageMetadata, "scoutRequesterId") ?? "a2a-client",
       requesterNodeId: this.options.nodeId,

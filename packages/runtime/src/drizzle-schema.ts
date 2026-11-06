@@ -587,6 +587,8 @@ export const invocationsTable = sqliteTable("invocations", {
   completedAt: integer("completed_at"),
   flightMetadataJson: text("flight_metadata_json"),
   executionResolutionJson: text("execution_resolution_json"),
+  originJson: text("origin_json"),
+  traceJson: text("trace_json"),
 }, (table) => [
   index("idx_invocations_state").on(table.state),
   index("idx_invocations_requester_recency").on(table.requesterId, sql`COALESCE(completed_at, started_at, created_at) DESC`),
