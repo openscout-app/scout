@@ -84,7 +84,7 @@ export class BrokerTaskService {
       const target = overrides?.host || overrides?.projectPath
         ? { kind: "project_path" as const, projectPath: projectPath!, ...(overrides.host ? { host: overrides.host } : {}) }
         : { kind: "agent_id" as const, agentId: invocation.targetAgentId };
-      return this.options.accept({ ...payload, task: { version: 1 },
+      return this.options.accept({ ...payload, task: { version: 1, ...(request.whenDone ? { whenDone: request.whenDone } : {}) },
         target, targetAgentId: target.kind === "agent_id" ? invocation.targetAgentId : undefined,
         body: `${context}\n\nSuccessor task:\n${payload.body}`, execution: { ...payload.execution, session: "new" },
         invocationMetadata: { ...payload.invocationMetadata, predecessorTaskId: invocation.id, predecessorState: flight.state } });

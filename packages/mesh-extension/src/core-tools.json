@@ -604,6 +604,12 @@
           "type": "number",
           "exclusiveMinimum": 0
         },
+        "whenDone": {
+          "description": "The requester's closing step, done by the worker before its final reply, e.g. \"open the finished page in the operator's browser\". New tasks only.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
         "image": {
           "description": "Local image path.",
           "type": "string"

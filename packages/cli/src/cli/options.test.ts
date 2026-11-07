@@ -832,6 +832,28 @@ describe("explicit completion ask options", () => {
   });
 });
 
+describe("ask --when-done", () => {
+  test("keeps the closing step on the task, out of the message", () => {
+    expect(parseAskCommandOptions([
+      "--to", "researcher", "--when-done", " open the study in my browser ", "Write the study",
+    ], "/tmp")).toMatchObject({
+      task: { version: 1, whenDone: "open the study in my browser" }, targetLabel: "researcher", message: "Write the study",
+    });
+    expect(parseAskCommandOptions(["--project", ".", "--when-done=ping me", "Run the suite"], "/tmp"))
+      .toMatchObject({ task: { whenDone: "ping me" }, message: "Run the suite" });
+  });
+
+  test("refuses an empty, repeated or misplaced step", () => {
+    expect(() => parseAskCommandOptions(["--to", "a", "--when-done", "", "hi"], "/tmp")).toThrow();
+    expect(() => parseAskCommandOptions(["--to", "a", "--when-done", "x", "--when-done", "y", "hi"], "/tmp"))
+      .toThrow("only once");
+    expect(() => parseAskCommandOptions(["--ref", "task-1", "--when-done", "open it", "hi"], "/tmp"))
+      .toThrow("--when-done belongs");
+    expect(() => parseAskCommandOptions(["--operator", "--when-done", "open it", "hi"], "/tmp"))
+      .toThrow("--when-done belongs");
+  });
+});
+
 
 test("positional route rewrites preserve flags and shell-quote literal payload", () => {
   expect(() => parseAskCommandOptions(["--as", "sender", "@worker", "--fyi", "--image", "shot.png", "news $HOME"], "/repo"))

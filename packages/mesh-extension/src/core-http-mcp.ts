@@ -157,7 +157,8 @@ export class CoreHttpAdapter {
     }
     if (name === 'ask') {
       const isAsk = !a.fyi, operator = a.operator === true;
-      const task = { version: 1, ...pick(a, ['operator','ref','continue','cancel','fyi','notify','defaultAction','options','permission','because','window']) } as import('@openscout/protocol').ScoutTaskAsk;
+      const task = { version: 1, ...pick(a, ['operator','ref','continue','cancel','fyi','notify','defaultAction','options','permission','because','window','whenDone']) } as import('@openscout/protocol').ScoutTaskAsk;
+      if (typeof task.whenDone === 'string') task.whenDone = task.whenDone.trim();
       validateTaskAsk(task, { to: a.to ?? a.targetSessionId, channel: a.channel, capability: !a.continue && Boolean(a.projectPath || a.profile),
         execution: Boolean(a.harness || a.model || a.reasoningEffort || a.on || a.runtime || a.placement || a.projectPath), relation: Boolean(a.relation) });
       const node = await request('/v1/node');

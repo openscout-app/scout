@@ -927,7 +927,7 @@ export function parseAskCommandOptions(
     if (current === "--") { messageParts.push(...parsed.args.slice(index + 1)); break; }
     const taskBoolean = ({ "--operator": "operator", "--fyi": "fyi", "--notify": "notify", "--cancel": "cancel", "--permission": "permission" } as const)[current as "--operator"];
     if (taskBoolean) { task[taskBoolean] = true; continue; }
-    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--image"].find(flag => current === flag || current.startsWith(`${flag}=`));
+    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--when-done", "--image"].find(flag => current === flag || current.startsWith(`${flag}=`));
     if (taskValue) {
       const value = parseAskFlagValue(parsed.args, index, taskValue);
       if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(taskValue);
@@ -936,6 +936,7 @@ export function parseAskCommandOptions(
       if (taskValue === "--window") task.window = Number(value.value);
       if (taskValue === "--option") (task.options ??= []).push(value.value);
       if (taskValue === "--because") task.because = value.value;
+      if (taskValue === "--when-done") { if (task.whenDone !== undefined) throw new ScoutCliError("--when-done may appear only once"); task.whenDone = value.value.trim(); }
       if (taskValue === "--image") image = resolveInputFilePath(parsed.currentDirectory, value.value);
       index = value.nextIndex; continue;
     }
