@@ -375,21 +375,10 @@ export function staleWorkingFlightReason(
 
   const startedEndpointAt = endpointStartedAt(endpoint);
   const endpointInvocationId = endpointLastInvocationId(endpoint);
-  if (
-    endpoint.state === "active"
-    && endpointInvocationId === flight.invocationId
-    && !options.isInvocationActive(flight.invocationId)
-    && startedEndpointAt >= startedAt
-  ) {
-    // A requester timeout ends the broker task on purpose while the agent keeps
-    // working. Its reply still completes the flight when it arrives, so an
-    // active endpoint is not evidence of a lost task. Offline, stale and
-    // superseded endpoints are still caught by the checks around this one.
-    if (flight.metadata?.requesterTimedOut === true) {
-      return null;
-    }
-    return `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task`;
-  }
+  // A broker task is process-local; its absence after restart says nothing
+  // about an agent's execution. Leave active work open for its durable reply.
+  // Do not redispatch it: submission may already have happened. Positive
+  // offline, stale or superseded endpoint evidence still reconciles normally.
   if (
     endpoint.state === "active"
     && startedEndpointAt > startedAt

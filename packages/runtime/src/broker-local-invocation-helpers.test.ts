@@ -495,7 +495,7 @@ describe("broker local invocation helpers", () => {
     })).toBe("target agent retired was retired from the fleet");
     expect(staleWorkingFlightReason(snapshot, snapshot.flights.working!, {
       isInvocationActive: () => false,
-    })).toBe("endpoint replayed was replayed active for invocation invocation-1 without a live broker task");
+    })).toBeNull();
     const timedOut = { ...snapshot.flights.working!, metadata: { ...snapshot.flights.working!.metadata, requesterTimedOut: true } };
     expect(staleWorkingFlightReason(snapshot, timedOut, {
       isInvocationActive: () => false,
