@@ -14,7 +14,7 @@ export function shouldEnsureBrokerUptodateForCommand(command: string | null, arg
   // download commands only restart the web server, never the broker. Signing
   // in only talks to the download host.
   if (command === "web" || command === "auth") return false;
-  return command !== "chat" && command !== "status" && command !== "report" && command !== "feedback" && command !== "mcp" && command !== "statusline" && command !== "search";
+  return command !== "chat" && command !== "status" && command !== "report" && command !== "feedback" && command !== "mcp" && command !== "statusline" && command !== "permission-hook" && command !== "search";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -18,7 +18,8 @@ import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
-import { deliverInPlace } from "./in-place/deliver.js";
+import { deliverInPlace, isScoutBackgroundCopy } from "./in-place/deliver.js";
+import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
@@ -3054,7 +3055,8 @@ const permissionService = new BrokerPermissionService({
     const invocation = knownInvocations.get(id);
     return Boolean(invocation) && (invocation?.targetNodeId ?? nodeId) === nodeId;
   },
-  reattach: reattachTmuxPermission,
+  // A native session's request has no tmux pane to rebind: its hook went with the old runtime.
+  reattach: request => request.native ? Promise.resolve({ sessionOpen: false }) : reattachTmuxPermission(request),
   transition: (id, state, requestId) => transitionInvocation(id, {
     state, summary: requestId ? "Waiting on permission" : "Permission wait resolved; continuing live session.",
     metadata: { permissionRequestId: requestId, waitingOnPermission: Boolean(requestId), nextMoveOwnerId: requestId ? operatorActorId : null },
@@ -3074,6 +3076,19 @@ const permissionService = new BrokerPermissionService({
   },
 });
 configureManagedPermissionHandler((invocation, prompt) => permissionService.wait(invocation, prompt));
+
+/** Permission dialogs of Claude Code sessions the operator started, raised by their PermissionRequest hook. */
+const nativePermissions = new NativePermissionRequests({
+  permissions: permissionService,
+  launchedByScout: async (record) => isScoutBackgroundCopy(record)
+    || Boolean(record.tmux?.session && (await listScoutLaunchedTmuxSessions()).has(record.tmux.session)),
+  notify: ({ requestId, prompt, actorId }) => {
+    operatorAttentionService.queuePermissionRequest({
+      requestId, text: prompt.text, agentId: actorId, requesterNodeId: nodeId,
+      projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: Date.now(),
+    });
+  },
+});
 
 /** A restart loses every live permission waiter. Rebind each request to its session, or settle it. */
 function reconcilePermissionRequests(reason: "startup" | "periodic"): void {
@@ -3400,6 +3415,7 @@ const routeRequest = createBrokerHttpRouter({
     },
   }),
   permissionService,
+  nativePermissions,
   meshBridge: new MeshBridgeManagement({
     supportDirectory,
     lifecycle: async (action, phase) => {
@@ -4148,6 +4164,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   storageMaintenance.stop();
   meshApprovalWatch.stop();
   meshApprovalShare.stop();
+  await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");

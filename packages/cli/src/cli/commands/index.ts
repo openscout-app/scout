@@ -4,7 +4,8 @@ import type { ScoutCommandContext } from "../context.ts";
 export type ScoutCommandHandler = (context: ScoutCommandContext, args: string[]) => Promise<void>;
 
 export type ScoutCommandName =
-  | "app"
+    | "permission-hook"
+| "app"
   | "status"
   | "quarantine"
   | "notify"
@@ -167,6 +168,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./voice.ts")).runVoiceCommand;
     case "statusline":
       return (await import("./statusline.ts")).runStatuslineCommand;
+    case "permission-hook":
+      return (await import("./permission-hook.ts")).runPermissionHookCommand;
     case "web":
       return (await import("./web.ts")).runWebCommand;
     case "auth":
