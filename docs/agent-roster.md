@@ -2,8 +2,9 @@
 
 Each agent has a short code, such as `OS-003`. The code has two parts:
 
-- A **project code** of two or three letters (`OS`). Each project holds one
-  code, and no two projects hold the same code.
+- A **project code** (`OS`). By default it is two or three letters spelled
+  from the project's name. The operator can set any code instead, such as
+  `HAWK`. Each project holds one code, and no two projects hold the same code.
 - A **roster number** of three digits (`003`). One roster covers all
   projects, so the number alone names one agent.
 
@@ -63,21 +64,32 @@ apps show. The project's key is its name, trimmed and in lower case.
   default, the runtime takes the next candidate spelled from the name: the
   other letter pairs, then three-letter codes. These candidates are letters
   only.
-- **Operator code.** The operator can set a code of two or three letters.
-  The runtime refuses a code with a digit, and a code that another project
-  holds, and names that project:
+- **Operator code.** The operator chooses the code: two letters, a longer
+  name such as `HAWK` or `NIGHTOWL`, or a mix of letters and digits such as
+  `R2D2`. The runtime stores it in capitals. It refuses only a code that
+  breaks addressing or is taken:
+
+  - A code is 1 to 12 letters or digits, with at least one letter, so it does
+    not read as a roster number.
+  - A code has no spaces or dashes, because they separate the code from the
+    number (`HAWK-012`).
+  - A code that another project holds is refused, and the refusal names that
+    project.
 
   ```text
-  $ scout roster project peal-bach P8
-  "P8" is not a project code: project codes are letters only, two or three of them
+  $ scout roster project peal-bach HAWK
+  $ scout roster project peal-bach 123
+  "123" is not a project code: a code needs a letter, so it does not read as an agent's number
+  $ scout roster project peal-bach night-owl
+  "night-owl" is not a project code: a code has no spaces or dashes, which separate it from the agent's number
   $ scout roster project openscout-labs OS
   OS is held by project "openscout"
   ```
 
-- **Digits.** Only a default can have a digit. The apps' rule spells a digit
-  when the name gives one (`app-2` → `A2`), and the runtime keeps that default
-  so that it does not rename. An import can give the project that same code,
-  but no other code with a digit.
+- **Defaults stay short.** A default is spelled from the name by the apps'
+  rule and can have a digit when the name gives one (`app-2` → `A2`). When
+  another project holds it, the next candidates are letters only. An import
+  can set any code that an operator can.
 
 - **Imported default.** An import that gives a project the code it already
   has by default does not change the code, and does not list it under
@@ -95,8 +107,13 @@ argument, and broker route resolution.
 
 ```sh
 scout ask --to OS-003 "status?"
+scout ask --to HAWK-012 "status?"
 scout ask --to 003 "status?"
 ```
+
+A code of any length resolves with a dash or a space before the number
+(`HAWK-012`, `hawk 012`). Run together with the number, only a code of two or
+three resolves (`os003`), so a name such as `agent007` stays a name.
 
 A roster code resolves before any agent name, a bare alias included. An
 explicit `alias:` target still resolves as an alias. A gone agent keeps its
