@@ -218,6 +218,7 @@ import {
 } from "./mesh-rendezvous.js";
 import { clearGitBranchCache, readRelayAgentOverrides, writeRelayAgentOverrides } from "./setup.js";
 import { broadcastApnsAlertToActiveMobileDevices } from "./mobile-push.js";
+import { describeTaskCallbackRun, runTaskCallback } from "./task-callback.js";
 import {
   getHarnessTopologySnapshot,
   nudgeHarnessTopologyScan,
@@ -1548,6 +1549,10 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
       .catch(error => console.error("[openscout-runtime] T3 cancellation unconfirmed", error));
     if (invocation) void externalSessionService.forwardResult(invocation, flight)
       .catch((error) => console.error("[openscout-runtime] external result delivery failed", error));
+    // `ask --callback`: runs only on the worker's runtime, once per terminal transition.
+    if (invocation) void runTaskCallback({ flight, invocation, nodeId })
+      .then((run) => { if (run) console.log(describeTaskCallbackRun(invocation.id, run)); })
+      .catch((error) => console.error("[openscout-runtime] task callback failed", error));
     // Role lifecycle (orchestrator post_ask_summary, etc.). Best-effort; never
     // fail the flight record path. Uses a short-lived SQLite connection so we
     // don't hold the projection store lock.

@@ -142,10 +142,10 @@ test('HTTP ask preserves the caller traceparent without asserting origin authori
   expect(request.invocationMetadata.completionRelation).toBeUndefined();
 });
 
-test('HTTP ask carries the closing step to the runtime and refuses a misplaced one', async () => {
+test('HTTP ask carries the callback to the runtime and refuses a misplaced one', async () => {
   const f = fixture();
-  await f.adapter.call('ask', { to: 'id:target', body: 'write the study', whenDone: '  open the page in my browser ' });
-  expect(f.calls.at(-1)!.body.task).toMatchObject({ version: 1, whenDone: 'open the page in my browser' });
-  await expect(f.adapter.call('ask', { to: 'id:target', body: 'news', fyi: true, whenDone: 'open it' })).rejects.toThrow('--when-done');
-  await expect(f.adapter.call('ask', { to: 'id:target', body: 'work', whenDone: '   ' })).rejects.toThrow('--when-done');
+  await f.adapter.call('ask', { to: 'id:target', body: 'write the study', callback: 'open' });
+  expect(f.calls.at(-1)!.body.task).toMatchObject({ version: 1, callback: 'open' });
+  await expect(f.adapter.call('ask', { to: 'id:target', body: 'news', fyi: true, callback: 'open' })).rejects.toThrow('--callback');
+  await expect(f.adapter.call('ask', { to: 'id:target', body: 'work', callback: 'open "$SCOUT_LINK"' })).rejects.toThrow();
 });

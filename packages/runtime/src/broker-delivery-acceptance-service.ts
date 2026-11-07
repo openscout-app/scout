@@ -1335,7 +1335,7 @@ export class BrokerDeliveryAcceptanceService {
       metadata: {
         ...invocationMetadata,
         ...(payload.task ? { taskVersion: 1, taskHomeNodeId: this.options.nodeId } : {}),
-        ...(payload.task?.whenDone ? { whenDone: payload.task.whenDone } : {}),
+        ...(payload.task?.callback ? { callback: payload.task.callback } : {}),
         ...(replyToSessionId ? { replyToSessionId } : {}),
         completion: payload.completion,
         completionRelation: payload.relation,

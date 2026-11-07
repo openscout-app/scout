@@ -1,6 +1,6 @@
 import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
-import { parseRosterAddress, SCOUT_TASK_WHEN_DONE_MAX_LENGTH, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
+import { parseRosterAddress, SCOUT_TASK_CALLBACKS, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
@@ -4469,7 +4469,7 @@ export function createScoutMcpServer(options: {
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),
         defaultAction: z.string().min(1).optional(), options: z.array(z.string().min(1)).optional(),
         permission: z.boolean().optional(), because: z.string().min(1).optional(), window: z.number().positive().optional(),
-        whenDone: z.string().min(1).max(SCOUT_TASK_WHEN_DONE_MAX_LENGTH).optional().describe("The requester's closing step, done by the worker before its final reply, e.g. \"open the finished page in the operator's browser\". New tasks only."),
+        callback: z.enum(SCOUT_TASK_CALLBACKS).optional().describe("A function the runtime on the worker's host runs when the task completes. open: opens the first existing html, pdf or image file that the final reply names by absolute path or file:// URL. New tasks only."),
         image: z.string().optional().describe("Local image path."),
         completion: completionRequestSchema.optional().describe("Require an explicit final reply; exact local id or session targets only, with a stable requestId."),
         relation: completionRelationSchema.optional().describe("Join child work or continue a parent flight; requires a stable requestId."),
@@ -4559,7 +4559,7 @@ export function createScoutMcpServer(options: {
     },
     async ({
       requestId,
-      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, whenDone, image,
+      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image,
       completion,
       relation,
       to,
@@ -4635,7 +4635,7 @@ export function createScoutMcpServer(options: {
         : !operator && !ref && !predecessor && !channel && !targetTo && !profile && (runtime || resolvedHarness || resolvedModel || resolvedReasoningEffort)
           ? resolvedCurrentDirectory
         : undefined;
-      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, ...(whenDone?.trim() ? { whenDone: whenDone.trim() } : {}) };
+      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, ...(callback ? { callback } : {}) };
       validateTaskAsk(task, { to: targetTo, channel, capability: !predecessor && Boolean(targetProjectPath || profile),
         execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation) });
       const taskImage = image ? await readTaskImage(resolve(resolvedCurrentDirectory, image)) : undefined;

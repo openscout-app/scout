@@ -6,7 +6,7 @@ import { endpointMatchesTargetSession } from "./broker-endpoint-selection.js";
 import { runtimeSessionHandleForEndpoint } from "./runtime-session-handle.js";
 import { invocationTargetSessionId } from "./broker-local-invocation-helpers.js";
 import { isExternalSessionEndpoint, type ExternalSessionConnection, type ExternalSessionTransport, ExternalSessionTransportError } from "./external-session-transport.js";
-import { whenDoneLine } from "./task-when-done.js";
+import { callbackLine } from "./task-callback.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export interface ExternalSessionServiceOptions {
@@ -132,8 +132,8 @@ export class BrokerExternalSessionService {
         }
         const token = randomBytes(32).toString("base64url");
         const sessionId = runtimeSessionHandleForEndpoint(endpoint)!;
-        const closingStep = whenDoneLine(invocation);
-        const body = `${invocation.task}\n\n${closingStep ? `${closingStep}\n\n` : ""}Scout reply address (coordination metadata):\n${JSON.stringify({ tool: "reply", ref: invocation.id, sessionId, deliveryId: id, ...(endpoint.transport === "mcp_poll" ? {} : { replyToken: token }) })}\nWhen finished, call reply with that task ref and your final body. This completes the original Scout flight. Do not start another session.`;
+        const callbackNote = callbackLine(invocation);
+        const body = `${invocation.task}\n\n${callbackNote ? `${callbackNote}\n\n` : ""}Scout reply address (coordination metadata):\n${JSON.stringify({ tool: "reply", ref: invocation.id, sessionId, deliveryId: id, ...(endpoint.transport === "mcp_poll" ? {} : { replyToken: token }) })}\nWhen finished, call reply with that task ref and your final body. This completes the original Scout flight. Do not start another session.`;
         await this.deliver(endpoint, id, body, { invocationId: invocation.id, messageId: invocation.messageId,
           metadata: { ...(endpoint.transport === "mcp_poll" ? {} : { replyTokenHash: digest(token) }), sessionId } });
       }

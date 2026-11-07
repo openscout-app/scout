@@ -23,13 +23,13 @@ test.each([
   [{ operator: true, window: 10 }, {}, "--default-action"],
   [{ operator: true, window: 0 }, {}, "--window"],
   [{ operator: true, window: NaN }, {}, "--window"],
-  [{ whenDone: "  " }, { to: "worker" }, "--when-done needs"],
-  [{ whenDone: "x".repeat(501) }, { to: "worker" }, "--when-done needs"],
-  [{ whenDone: "open it", fyi: true }, { to: "worker" }, "--when-done belongs"],
-  [{ whenDone: "open it", ref: "task" }, {}, "--when-done belongs"],
-  [{ whenDone: "open it", ref: "task", cancel: true }, {}, "--when-done belongs"],
-  [{ whenDone: "open it", operator: true }, {}, "--when-done belongs"],
-  [{ whenDone: "open it", fyi: true }, { channel: "shared" }, "--when-done belongs"],
+  [{ callback: "  " as never }, { to: "worker" }, "--callback takes one of: open"],
+  [{ callback: "notify" as never }, { to: "worker" }, "--callback takes one of: open"],
+  [{ callback: "open", fyi: true }, { to: "worker" }, "--callback belongs"],
+  [{ callback: "open", ref: "task" }, {}, "--callback belongs"],
+  [{ callback: "open", ref: "task", cancel: true }, {}, "--callback belongs"],
+  [{ callback: "open", operator: true }, {}, "--callback belongs"],
+  [{ callback: "open", fyi: true }, { channel: "shared" }, "--callback belongs"],
 ] as const)("invalid ask %# fails before effects", (patch, route, error) => {
   expect(() => validateTaskAsk(task(patch), route)).toThrow(error);
 });
@@ -43,9 +43,9 @@ test.each([
   [{ operator: true, defaultAction: "yes", options: ["yes", "no"] }, {}],
   [{ operator: true, fyi: true, notify: true }, {}],
   [{ fyi: true }, { channel: "shared" }],
-  [{ whenDone: "open the finished page in my browser" }, { to: "worker" }],
-  [{ whenDone: "x".repeat(500) }, { capability: true }],
-  [{ whenDone: "open it", continue: "task" }, { execution: true }],
+  [{ callback: "open" }, { to: "worker" }],
+  [{ callback: "open" }, { capability: true }],
+  [{ callback: "open", continue: "task" }, { execution: true }],
 ] as const)("valid ask %#", (patch, route) => {
   expect(() => validateTaskAsk(task(patch), route)).not.toThrow();
 });

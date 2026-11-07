@@ -162,7 +162,7 @@ import {
 } from "./permission-policy.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 import { locateHarnessSession } from "./session-locator.js";
-import { buildWhenDonePromptLines, invocationWhenDone, whenDoneLine } from "./task-when-done.js";
+import { buildCallbackPromptLines, callbackLine, invocationCallback } from "./task-callback.js";
 import { resolveOperatorHandle, resolveOperatorName } from "./user-config.js";
 import {
   describeAttachedLiveTerminal,
@@ -3348,7 +3348,7 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
     return null;
   }
 
-  const whenDone = invocationWhenDone(invocation);
+  const callback = invocationCallback(invocation);
   return {
     mode: "broker_reply",
     fromAgentId: invocation.requesterId,
@@ -3360,7 +3360,7 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
     ...(hasExplicitCompletion(invocation) && typeof invocation.metadata?.completionFlightId === "string" ? {
       completion: { invocationId: invocation.id, flightId: invocation.metadata.completionFlightId, revision: 0 },
     } : {}),
-    ...(whenDone ? { whenDone } : {}),
+    ...(callback ? { callback } : {}),
     action: invocation.action,
   };
 }
@@ -3576,7 +3576,7 @@ function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string
     context?.completion
       ? "> Use Scout replies for progress and final completion, and `ask` for delegated work."
       : "> Only use Scout tools if you need to ask or delegate to another agent.",
-    ...buildWhenDonePromptLines(context?.whenDone),
+    ...buildCallbackPromptLines(context?.callback),
     "",
     "<!-- SCOUT SESSION SEARCH -->",
     "> For past harness work (what Codex/Claude/Kimi sessions said or ran), prefer `scout search` over grepping `~/.codex`, `~/.claude`, or `~/.kimi-code` by hand.",
@@ -3693,7 +3693,7 @@ export function buildLocalAgentNudge(agentName: string, invocation: InvocationRe
     `New broker ask from ${invocation.requesterId}.`,
     `Task: ${invocation.task}`,
     attachmentsContext,
-    whenDoneLine(invocation),
+    callbackLine(invocation),
     "Follow the OpenScout collaboration contract: answer directly if you can, otherwise make the next owner explicit and avoid broad wakeups.",
   ].filter((part): part is string => Boolean(part));
 

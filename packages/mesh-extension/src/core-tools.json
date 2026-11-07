@@ -604,11 +604,12 @@
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "whenDone": {
-          "description": "The requester's closing step, done by the worker before its final reply, e.g. \"open the finished page in the operator's browser\". New tasks only.",
+        "callback": {
+          "description": "A function the runtime on the worker's host runs when the task completes. open: opens the first existing html, pdf or image file that the final reply names by absolute path or file:// URL. New tasks only.",
           "type": "string",
-          "minLength": 1,
-          "maxLength": 500
+          "enum": [
+            "open"
+          ]
         },
         "image": {
           "description": "Local image path.",

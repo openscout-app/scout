@@ -17,13 +17,15 @@ export type ScoutTaskAsk = {
   permission?: boolean;
   because?: string;
   /**
-   * The requester's closing step for the worker, such as "open the finished
-   * page in my browser". The worker does it before its final reply.
+   * A named function the runtime on the worker's host runs when the task
+   * completes. `open` opens the html, pdf or image file that the final reply
+   * names by absolute path. The worker's agent does not run it.
    */
-  whenDone?: string;
+  callback?: ScoutTaskCallback;
 };
-/** Longest closing step a requester can attach with `--when-done`. */
-export const SCOUT_TASK_WHEN_DONE_MAX_LENGTH = 500;
+/** The functions `ask --callback` can name. */
+export const SCOUT_TASK_CALLBACKS = ["open"] as const;
+export type ScoutTaskCallback = typeof SCOUT_TASK_CALLBACKS[number];
 export type ScoutTaskReply = {
   requestId: string;
   senderId: string;
@@ -58,8 +60,8 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   if ((task.permission || task.because) && !task.operator) throw new Error("--permission and --because require --operator");
   if (route.channel && !task.fyi) throw new Error("--channel requires --fyi until task ownership for channels is defined");
   if (task.window !== undefined && (!task.defaultAction || !task.operator || task.fyi || !Number.isFinite(task.window) || task.window <= 0)) throw new Error("--window requires --default-action and a positive number of seconds");
-  if (task.whenDone !== undefined && (!task.whenDone.trim() || task.whenDone.length > SCOUT_TASK_WHEN_DONE_MAX_LENGTH)) throw new Error(`--when-done needs 1 to ${SCOUT_TASK_WHEN_DONE_MAX_LENGTH} characters`);
-  if (task.whenDone !== undefined && (task.fyi || task.ref || task.cancel || task.operator || route.channel)) throw new Error("--when-done belongs to a new task an agent carries out; it cannot be combined with --fyi, --ref, --cancel, --operator or --channel");
+  if (task.callback !== undefined && !(SCOUT_TASK_CALLBACKS as readonly string[]).includes(task.callback)) throw new Error(`--callback takes one of: ${SCOUT_TASK_CALLBACKS.join(", ")}`);
+  if (task.callback !== undefined && (task.fyi || task.ref || task.cancel || task.operator || route.channel)) throw new Error("--callback belongs to a new task an agent carries out; it cannot be combined with --fyi, --ref, --cancel, --operator or --channel");
 }
 export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed">): void {
   if (Number(Boolean(reply.ref)) + Number(Boolean(reply.to)) !== 1) throw new Error("reply requires exactly one of --ref <task> or --to <message>");

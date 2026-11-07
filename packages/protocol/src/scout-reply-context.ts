@@ -1,5 +1,6 @@
 import type { ScoutId } from "./common.js";
 import type { InvocationAction } from "./invocations.js";
+import type { ScoutTaskCallback } from "./tasks.js";
 
 export type ScoutReplyPath = "final_response" | "mcp_reply";
 
@@ -14,8 +15,8 @@ export interface ScoutReplyContext {
   action?: InvocationAction;
   completion?: { invocationId: string; flightId: string; revision: number };
   /**
-   * The requester's closing step (`ask --when-done`). `requesterNodeId` is set
-   * only when the requester is on another host, where the worker cannot act.
+   * The requester's callback (`ask --callback`): a named function the runtime
+   * on the worker's host runs when the task completes.
    */
-  whenDone?: { step: string; requesterNodeId?: ScoutId };
+  callback?: ScoutTaskCallback;
 }

@@ -832,25 +832,27 @@ describe("explicit completion ask options", () => {
   });
 });
 
-describe("ask --when-done", () => {
-  test("keeps the closing step on the task, out of the message", () => {
+describe("ask --callback", () => {
+  test("keeps the command on the task, out of the message", () => {
     expect(parseAskCommandOptions([
-      "--to", "researcher", "--when-done", " open the study in my browser ", "Write the study",
+      "--to", "researcher", "--callback", "open", "Write the study",
     ], "/tmp")).toMatchObject({
-      task: { version: 1, whenDone: "open the study in my browser" }, targetLabel: "researcher", message: "Write the study",
+      task: { version: 1, callback: "open" }, targetLabel: "researcher", message: "Write the study",
     });
-    expect(parseAskCommandOptions(["--project", ".", "--when-done=ping me", "Run the suite"], "/tmp"))
-      .toMatchObject({ task: { whenDone: "ping me" }, message: "Run the suite" });
+    expect(parseAskCommandOptions(["--project", ".", "--callback=open", "Run the suite"], "/tmp"))
+      .toMatchObject({ task: { callback: "open" }, message: "Run the suite" });
   });
 
-  test("refuses an empty, repeated or misplaced step", () => {
-    expect(() => parseAskCommandOptions(["--to", "a", "--when-done", "", "hi"], "/tmp")).toThrow();
-    expect(() => parseAskCommandOptions(["--to", "a", "--when-done", "x", "--when-done", "y", "hi"], "/tmp"))
+  test("refuses an empty, unknown, repeated or misplaced callback", () => {
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", 'open "$SCOUT_LINK"', "hi"], "/tmp"))
+      .toThrow("--callback takes one of: open");
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "", "hi"], "/tmp")).toThrow();
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "open", "--callback", "open", "hi"], "/tmp"))
       .toThrow("only once");
-    expect(() => parseAskCommandOptions(["--ref", "task-1", "--when-done", "open it", "hi"], "/tmp"))
-      .toThrow("--when-done belongs");
-    expect(() => parseAskCommandOptions(["--operator", "--when-done", "open it", "hi"], "/tmp"))
-      .toThrow("--when-done belongs");
+    expect(() => parseAskCommandOptions(["--ref", "task-1", "--callback", "open", "hi"], "/tmp"))
+      .toThrow("--callback belongs");
+    expect(() => parseAskCommandOptions(["--operator", "--callback", "open", "hi"], "/tmp"))
+      .toThrow("--callback belongs");
   });
 });
 
