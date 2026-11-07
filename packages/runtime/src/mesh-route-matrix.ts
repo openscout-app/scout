@@ -238,6 +238,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/pairing/detach": "local",
   // Operator authorization; the handler also refuses remote transport.
   "POST /v1/permissions/decide": "local",
+  "POST /v1/permissions/native": "local",
+  "POST /v1/permissions/native/wait": "local",
   "POST /v1/rendezvous/match": "local",
   "POST /v1/repo-watch/warm": "local",
   "POST /v1/roles/assignments": "local",

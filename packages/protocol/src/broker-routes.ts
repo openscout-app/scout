@@ -43,6 +43,8 @@ export const scoutBrokerPaths = {
     rosterProjectCode: "/v1/roster/projects/code",
     rosterImport: "/v1/roster/import",
     rosterResolve: "/v1/roster/resolve",
+    permissionsNative: "/v1/permissions/native",
+    permissionsNativeWait: "/v1/permissions/native/wait",
     activity: "/v1/activity",
     collaborationRecords: "/v1/collaboration/records",
     collaborationEvents: "/v1/collaboration/events",

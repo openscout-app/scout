@@ -1,6 +1,7 @@
 import { BrokerAssistantClaims, protectAssistantService, ASSISTANT_CLAIM_HEADER } from "./broker-assistant-claims.js";
 import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsConfig } from "./mesh-approvals.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
+import { NativePermissionAskError } from "./native-permission.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1906,4 +1907,36 @@ test("pre-origin invocation receipts replay unchanged after upgrade and changing
     }
     expect(harness.invocationCalls).toHaveLength(0);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("native permission requests are opened and waited on only from this machine", async () => {
+  const calls: unknown[][] = [];
+  const nativePermissions = {
+    open: async (ask: { sessionId?: string }) => {
+      calls.push(["open", ask]);
+      if (!ask.sessionId) throw new NativePermissionAskError("sessionId is required");
+      return { requestId: "permission-1" };
+    },
+    wait: async (requestId: string, waitMs: number) => { calls.push(["wait", requestId, waitMs]); return { state: "decided" as const, decision: "allow" as const }; },
+  } as unknown as NonNullable<BrokerHttpRouterDeps["nativePermissions"]>;
+  const harness = createHarness({ nativePermissions });
+  const ask = { harness: "claude", sessionId: "s", cwd: "/tmp/project", toolName: "Bash", toolInput: { command: "ls" } };
+  const opened = await requestRouter(harness, "POST", "/v1/permissions/native", { body: ask });
+  expect(opened.response.status).toBe(200); expect(opened.body).toEqual({ requestId: "permission-1" });
+  const waited = await requestRouter(harness, "POST", "/v1/permissions/native/wait", { body: { requestId: "permission-1", waitMs: 8000 } });
+  expect(waited.body).toEqual({ state: "decided", decision: "allow" });
+  expect(calls).toEqual([["open", ask], ["wait", "permission-1", 8000]]);
+  const invalid = await requestRouter(harness, "POST", "/v1/permissions/native", { body: { ...ask, sessionId: "" } });
+  expect(invalid.response.status).toBe(400);
+  for (const options of [
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { transport: "loopback" as const, guest: true } },
+    { headers: { origin: "http://localhost:43120" } },
+    { headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    for (const path of ["/v1/permissions/native", "/v1/permissions/native/wait"]) {
+      expect((await requestRouter(harness, "POST", path, { ...options, body: ask })).response.status).toBe(403);
+    }
+  }
+  expect(calls).toHaveLength(3);
 });

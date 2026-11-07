@@ -12,6 +12,7 @@ import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
 import { TaskClosedError, completionReply } from "@openscout/protocol";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
+import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
 import { handleBrokerQuarantineRoute, type BrokerQuarantineQueries } from "./broker-quarantine-http-service.js";
@@ -239,6 +240,8 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
+  nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
   journal: BrokerHttpJournal;
   knownInvocations: Map<string, InvocationRequest>;
   brokerService: ActiveScoutBrokerService;
@@ -604,6 +607,29 @@ export function createBrokerHttpRouter(
       const message = error instanceof Error ? error.message : String(error);
       if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended", sessionOpen: error.sessionOpen });
       else json(response, error instanceof PermissionDeliveryUnconfirmedError ? 502 : 409, { error: message, outcome: error instanceof PermissionDeliveryUnconfirmedError ? "unconfirmed" : "refused" });
+    }
+    return;
+  }
+  if (method === "POST" && (url.pathname === "/v1/permissions/native" || url.pathname === "/v1/permissions/native/wait")) {
+    // Only a hook on this machine opens or waits on a native session's request.
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest || request.headers.origin || request.headers["x-openscout-forwarded-node-id"]) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    const native = deps.nativePermissions;
+    if (!native) { json(response, 404, { error: "native_permissions_unsupported" }); return; }
+    try {
+      if (url.pathname.endsWith("/wait")) {
+        const body = await readRequestBody<{ requestId?: unknown; waitMs?: unknown }>(request, { maxBytes: 1024 });
+        if (typeof body.requestId !== "string" || !body.requestId) throw new NativePermissionAskError("requestId is required");
+        const waitMs = typeof body.waitMs === "number" && Number.isFinite(body.waitMs) ? body.waitMs : 0;
+        json(response, 200, await native.wait(body.requestId, waitMs));
+      } else {
+        const body = await readRequestBody<NativePermissionAsk>(request, { maxBytes: 64 * 1024 });
+        json(response, 200, await native.open(body));
+      }
+    } catch (error) {
+      if (error instanceof NativePermissionAskError) badRequest(response, error);
+      else json(response, 500, { error: error instanceof Error ? error.message : String(error) });
     }
     return;
   }
