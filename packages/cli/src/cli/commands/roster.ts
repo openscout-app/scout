@@ -21,7 +21,7 @@ export function renderRosterCommandHelp(): string {
   return [
     "Usage:",
     "  scout roster [list]                      Every numbered agent and every project code",
-    "  scout roster project <name> <code>       Set a project's code (two or three letters)",
+    "  scout roster project <name> <code>       Set a project's code (any letters and digits, up to 12)",
     "  scout roster project <name> --reset      Give a project back its default code",
     "  scout roster import <file|-> [--dry-run] Take the numbers the apps handed out locally",
     "  scout roster resolve <code>              Show which agent OS-003, os003 or 003 names",
@@ -30,6 +30,8 @@ export function renderRosterCommandHelp(): string {
     "across projects, kept by its agent id: agents that share a handle hold one each.",
     "Its project holds a code, so the agent reads as OS 003 and is addressed as OS-003,",
     "os003 or 003 wherever an agent target is accepted (scout ask --to OS-003).",
+    "A project's code is two or three letters from its name until you set one; set any",
+    "code you like, such as HAWK, and its agents read as HAWK 012 (scout ask --to HAWK-012).",
     "",
     "The import file is JSON: a list of { \"agentId\", \"number\", \"projectCode\" },",
     "or { \"entries\": [...] }. Numbers may be 3 or \"003\". Conflicts are reported, never guessed.",

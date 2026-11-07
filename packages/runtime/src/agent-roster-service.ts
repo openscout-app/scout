@@ -1,7 +1,6 @@
 import {
   ROSTER_NUMBER_MAX,
   agentRosterTag,
-  cleanHeldProjectCode,
   cleanProjectCode,
   parseRosterAddress,
   parseRosterNumber,
@@ -523,12 +522,7 @@ export class AgentRosterService {
           if (entry.project) this.ensureProject(state, entry.project, now);
           continue;
         }
-        let code = cleanProjectCode(requested);
-        if (!code && entry.project) {
-          // A digit passes only as the project's own default (app-2 → A2), which the apps show too.
-          const held = cleanHeldProjectCode(requested);
-          if (held && held === this.ensureProject(state, entry.project, now).code) code = held;
-        }
+        const code = cleanProjectCode(requested);
         if (!code) {
           conflict({ agentId: entry.agentId, number: entry.number, projectCode: requested, reason: "invalid_project_code", detail: projectCodeRefusal(String(requested)) });
           continue;

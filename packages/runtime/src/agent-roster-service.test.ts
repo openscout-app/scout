@@ -397,10 +397,9 @@ describe("AgentRosterService project codes", () => {
     expect(set).toMatchObject({ projectKey: "peal-bach", code: "PBX", codeSource: "operator", defaultCode: "PB" });
     expect(service.entry("agent.a")?.code).toBe("PBX-001");
 
-    expect(() => service.setProjectCode({ project: "peal-bach", code: "P" })).toThrow('"P" is not a project code: use two or three letters');
-    expect(() => service.setProjectCode({ project: "peal-bach", code: "P8" }))
-      .toThrow('"P8" is not a project code: project codes are letters only, two or three of them');
-    expect(() => service.setProjectCode({ project: "peal-bach", code: "123" })).toThrow(/letters only/);
+    expect(() => service.setProjectCode({ project: "peal-bach", code: "P-B" }))
+      .toThrow('"P-B" is not a project code: a code has no spaces or dashes, which separate it from the agent\'s number');
+    expect(() => service.setProjectCode({ project: "peal-bach", code: "123" })).toThrow(/needs a letter/);
     expect(() => service.setProjectCode({ project: "nowhere", code: "NW" })).toThrow(/no agent lists project "nowhere"/);
 
     const reset = service.setProjectCode({ project: "peal-bach", code: null });
@@ -548,28 +547,40 @@ describe("AgentRosterService import", () => {
     expect(result.imported.map((entry) => entry.code)).toEqual(["OS-001", "PE-002", "FO-003", "004", "FO-005"]);
   });
 
-  test("an imported code with a digit is refused unless it is the project's own default", () => {
+  test("an import sets any code the operator could, a name or a digit, and refuses only a code that breaks an address", () => {
     const { service, add } = setup();
     add("agent.a", "a", "app-2", START + 1);
     add("agent.b", "b", "peal-bach", START + 2);
+    add("agent.c", "c", "fabric-ops", START + 3);
     service.reconcile();
     expect(service.entry("agent.a")?.projectCode).toBe("A2");
 
     const result = service.importEntries({
       entries: [
         { agentId: "agent.a", number: 4, projectCode: "a2" },
-        { agentId: "agent.b", number: 5, projectCode: "P8" },
+        { agentId: "agent.b", number: 5, projectCode: "hawk" },
+        { agentId: "agent.c", number: 6, projectCode: "night-owl" },
       ],
     });
-    expect(result.imported.map((entry) => entry.code)).toEqual(["A2-004", "PB-005"]);
-    expect(result.projectCodes).toEqual([]);
+    expect(result.imported.map((entry) => entry.code)).toEqual(["A2-004", "HAWK-005", "FO-006"]);
+    expect(result.projectCodes).toEqual([{ projectKey: "peal-bach", code: "HAWK" }]);
     expect(result.conflicts).toEqual([
       expect.objectContaining({
-        agentId: "agent.b",
+        agentId: "agent.c",
         reason: "invalid_project_code",
-        detail: '"P8" is not a project code: project codes are letters only, two or three of them',
+        detail: '"night-owl" is not a project code: a code has no spaces or dashes, which separate it from the agent\'s number',
       }),
     ]);
+  });
+
+  test("the operator can set a longer code, and its agents resolve by it", () => {
+    const { service, add } = setup();
+    add("agent.a", "a", "peal-bach", START + 1);
+    service.reconcile();
+    service.setProjectCode({ project: "peal-bach", code: "nightowl" });
+    expect(service.entry("agent.a")?.code).toBe("NIGHTOWL-001");
+    expect(service.resolve("nightowl-001")).toMatchObject({ resolved: true });
+    expect(service.resolve("NIGHTOWL 001")).toMatchObject({ resolved: true });
   });
 
   test("a dry run reports the same result and writes nothing", () => {

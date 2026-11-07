@@ -5,8 +5,10 @@ import type { ScoutId } from "./common.js";
  * The agent roster: a short code that names an agent everywhere. Each agent
  * the runtime lists holds a three-digit roster number (001–999), one roster
  * across projects, so the number alone names the agent. Each project holds a
- * code of two or three letters, so an agent reads as `OS-003` (drawn as
- * "OS 003").
+ * code, so an agent reads as `OS-003` (drawn as "OS 003"). The default code
+ * is two or three letters spelled from the project's name
+ * (rosterProjectCodeCandidates); the operator can give a project any code
+ * they like instead, a longer name such as `HAWK` included (cleanProjectCode).
  *
  * The runtime is the only writer. It keys a number by the agent's Scout
  * agent id, never its handle: two agents that share a handle such as
@@ -192,32 +194,38 @@ export function isRosterNumber(value: unknown): value is number {
     && value >= ROSTER_NUMBER_MIN && value <= ROSTER_NUMBER_MAX;
 }
 
+/** The longest project code: room for a call sign such as `PHOENIX` or `NIGHTOWL`. */
+export const PROJECT_CODE_MAX = 12;
+
 /**
- * A project code that the operator or an import sets: two or three letters,
- * in capitals. Null when the value is not one.
+ * A project code that the operator or an import sets, in capitals: what the
+ * operator chooses, short (`OS`) or a name (`HAWK`, `R2D2`). It is 1 to
+ * PROJECT_CODE_MAX letters or digits with at least one letter. The letter
+ * keeps a code apart from a roster number, and a code has no space or dash,
+ * which separate it from the number in an address (`HAWK-012`). Null when the
+ * value is not one.
  */
 export function cleanProjectCode(value: string | null | undefined): string | null {
   const code = value?.trim().toUpperCase() ?? "";
-  return /^[A-Z]{2,3}$/u.test(code) ? code : null;
+  return code.length <= PROJECT_CODE_MAX && /^[A-Z0-9]+$/u.test(code) && /[A-Z]/u.test(code) ? code : null;
 }
 
 /**
- * A project code as a project can hold it: two or three capitals or digits,
- * with at least one letter. Only a default can have a digit, because the
- * apps' rule spells the default from the name (`app-2` → `A2`, `3d-tools` →
- * `3T`) and the runtime keeps that default so that no code renames. The
- * letter keeps a code apart from a roster number.
+ * A project code as a project can hold it. The same rule as an operator's
+ * code: a default spelled from the name (`app-2` → `A2`) meets it too.
  */
 export function cleanHeldProjectCode(value: string | null | undefined): string | null {
-  const code = value?.trim().toUpperCase() ?? "";
-  return /^[A-Z0-9]{2,3}$/u.test(code) && /[A-Z]/u.test(code) ? code : null;
+  return cleanProjectCode(value);
 }
 
 /** Why an operator code is refused, as one sentence. */
 export function projectCodeRefusal(value: string): string {
-  return /\d/u.test(value)
-    ? `"${value}" is not a project code: project codes are letters only, two or three of them`
-    : `"${value}" is not a project code: use two or three letters`;
+  const code = value.trim();
+  if (!code) return `"${value}" is not a project code: give at least one letter`;
+  if (/[\s-]/u.test(code)) return `"${value}" is not a project code: a code has no spaces or dashes, which separate it from the agent's number`;
+  if (code.length > PROJECT_CODE_MAX) return `"${value}" is not a project code: use at most ${PROJECT_CODE_MAX} letters or digits`;
+  if (!/[A-Za-z]/u.test(code)) return `"${value}" is not a project code: a code needs a letter, so it does not read as an agent's number`;
+  return `"${value}" is not a project code: use letters and digits only`;
 }
 
 /**
@@ -271,23 +279,31 @@ export function rosterProjectCodeCandidates(name: string): string[] {
     if (code && !out.includes(code)) out.push(code);
   };
   keep(cleanHeldProjectCode(rosterIdentityMonogram(name)));
-  for (const candidate of [...rosterBoardCandidates(clean), ...triples]) keep(cleanProjectCode(candidate));
+  // later candidates are letters only, as they always were, so no default changes
+  for (const candidate of [...rosterBoardCandidates(clean), ...triples]) keep(/^[A-Z]+$/u.test(candidate) ? cleanProjectCode(candidate) : null);
   return out;
 }
 
-const ROSTER_ADDRESS_PATTERN = /^@?(?:([A-Za-z0-9]{2,3})[-\s]?)?(\d{3})$/u;
+/*
+ * With a space or dash, any project code; run together with the number, only
+ * a code of two or three, as before, so a name such as `agent007` or
+ * `release2026` stays a name.
+ */
+const ROSTER_ADDRESS_PATTERN = new RegExp(`^@?(?:([A-Za-z0-9]{1,${PROJECT_CODE_MAX}})[-\\s]|([A-Za-z0-9]{2,3}))?(\\d{3})$`, "u");
 
 /**
- * A roster address: `OS-003`, `os003`, `OS 003` or a bare `003`. Null when the
- * text is not in that form (it is then an ordinary agent name).
+ * A roster address: `OS-003`, `os003`, `OS 003`, `HAWK-012`, `hawk 012` or a
+ * bare `003`. Null when the text is not in that form (it is then an ordinary
+ * agent name).
  */
 export function parseRosterAddress(input: string | null | undefined): RosterAddress | null {
   const match = input?.trim().match(ROSTER_ADDRESS_PATTERN);
   if (!match) return null;
-  const number = Number.parseInt(match[2]!, 10);
+  const number = Number.parseInt(match[3]!, 10);
   if (!isRosterNumber(number)) return null;
-  if (match[1] === undefined) return { projectCode: null, number };
-  const projectCode = cleanHeldProjectCode(match[1]);
+  const given = match[1] ?? match[2];
+  if (given === undefined) return { projectCode: null, number };
+  const projectCode = cleanHeldProjectCode(given);
   return projectCode ? { projectCode, number } : null;
 }
 
