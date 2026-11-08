@@ -4077,10 +4077,11 @@ export async function readScoutChatQuestionHistory(baseUrl: string, channelId: s
   return pages.flat();
 }
 
-export async function decideScoutPermission(input: { requestId: string; version: string; decision: "once" | "project" | "deny" }): Promise<void> {
-  const broker = await loadScoutBrokerContext();
-  if (!broker) throw new Error("Local broker is unavailable");
-  const result = await brokerPostJson<{ ok?: boolean; error?: string; outcome?: string; sessionOpen?: boolean }>(broker.baseUrl, "/v1/permissions/decide", input, {
+export async function decideScoutPermission(input: { requestId: string; version: string; decision: "once" | "project" | "deny"; baseUrl?: string }): Promise<void> {
+  const { baseUrl: givenBaseUrl, ...body } = input;
+  const baseUrl = givenBaseUrl ?? (await loadScoutBrokerContext())?.baseUrl;
+  if (!baseUrl) throw new Error("Local broker is unavailable");
+  const result = await brokerPostJson<{ ok?: boolean; error?: string; outcome?: string; sessionOpen?: boolean }>(baseUrl, "/v1/permissions/decide", body, {
     acceptErrorJson: (value): value is { error: string; outcome: string } => Boolean(value && typeof value === "object" && typeof (value as { error?: unknown }).error === "string" && ["refused", "unconfirmed", "ended"].includes(String((value as { outcome?: unknown }).outcome))),
   });
   // "ended": nothing can answer the request any more, and the runtime has settled it.

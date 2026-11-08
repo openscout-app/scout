@@ -28,6 +28,7 @@ import {
 } from "@openscout/agent-sessions";
 import {
   projectSessionAttention,
+  type NativePermissionDisplay,
   type SessionAttentionItem,
 } from "@openscout/runtime";
 import {
@@ -78,6 +79,10 @@ import { toSessionUpdate } from "../../../../models/screens/agents/agents-feed-a
 import { pendingOperatorNeeds } from "../../../attention/operator-needs.ts";
 import { collectHerdrHostAttention } from "../../../attention/herdr-host-attention.ts";
 import { answerHerdrPermission } from "../../../attention/herdr-permission-answer.ts";
+import {
+  decideMobilePermission,
+  queryPermissionInboxItems,
+} from "../../../attention/runtime-permissions.ts";
 import { resolveOperatorName } from "@openscout/runtime/user-config";
 import {
   provisionMobileTerminalAccess,
@@ -661,7 +666,11 @@ export type MobileInboxItemKind =
   | "native_attention"
   // A declared `scout need`: answered by replying in its conversation, so
   // sessionId carries the conversation id and the phone offers "Open chat".
-  | "ask";
+  | "ask"
+  // A permission request the runtime holds (native Claude Code, managed
+  // tmux/Codex). `id` is the request id, as the push names it; the phone
+  // answers it with `mobile.decidePermission`.
+  | "permission";
 
 export type MobileInboxItem = {
   id: string;
@@ -681,6 +690,8 @@ export type MobileInboxItem = {
   actionStatus?: ActionBlock["action"]["status"];
   /** Discrete answers a declared ask offers; the phone sends one as a reply. */
   options?: string[];
+  /** A runtime permission request: what it asks, laid out, and the answers it takes. */
+  permission?: { display?: NativePermissionDisplay; decisions: Array<"approve" | "deny"> };
 };
 
 function approvalInboxItemId(
@@ -1069,13 +1080,24 @@ const mobileRouter = t.router({
     .query(({ input }) => getMobileMeshNodes(undefined, input)),
 
   inbox: procedure
-    .query(async ({ ctx }) => ({
-      items: [
-        ...(await queryOperatorNeedInboxItems()),
-        ...(await queryHerdrInboxItems()),
-        ...queryMobileInboxItems(ctx.bridge),
-      ],
-    })),
+    .query(async ({ ctx }) => {
+      const [needs, permissions, herdr] = await Promise.all([
+        queryOperatorNeedInboxItems(),
+        queryPermissionInboxItems(),
+        queryHerdrInboxItems(),
+      ]);
+      // A session the runtime holds a permission request for is answered
+      // there; its Herdr pane would only repeat the same prompt.
+      const permissionSessions = new Set(permissions.map((item) => item.sessionId));
+      return {
+        items: [
+          ...needs,
+          ...permissions,
+          ...herdr.filter((item) => !permissionSessions.has(item.sessionId)),
+          ...queryMobileInboxItems(ctx.bridge),
+        ],
+      };
+    }),
 
   pushSync: procedure
     .input(z.object({
@@ -1486,6 +1508,18 @@ const mobileRouter = t.router({
     }))
     .mutation(async ({ input }) => {
       return answerHerdrPermission(input);
+    }),
+
+  // Approve / Deny a permission request the runtime holds (an inbox item of
+  // kind "permission"). Approve is allow-once. Expected refusals return
+  // { ok: false, code }, not errors.
+  decidePermission: procedure
+    .input(z.object({
+      requestId: z.string(),
+      decision: z.enum(["approve", "deny"]),
+    }))
+    .mutation(async ({ input }) => {
+      return decideMobilePermission(input);
     }),
 
   agentDetail: procedure
