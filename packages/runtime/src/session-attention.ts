@@ -334,7 +334,8 @@ function nativeAttentionItem(
     }`,
     kind: "native_attention",
     title: candidate.title ?? nativeAttentionTitle(candidate.status),
-    summary: candidate.summary ?? "Native session reports that it needs operator attention.",
+    // The title says it; a stock line under it only repeated the title.
+    summary: candidate.summary ?? "",
     detail: candidate.detail,
     sessionId: snapshot.session.id,
     sessionName: sessionLabel(snapshot),
@@ -413,12 +414,12 @@ function sessionErrorSummary(snapshot: SessionState): string {
 function nativeAttentionTitle(status: string): string {
   const normalized = status.replace(/[-_]+/g, " ").trim().toLowerCase();
   if (normalized.includes("approval")) {
-    return "Native session awaits approval";
+    return "Waiting on your approval";
   }
   if (normalized.includes("input") || normalized.includes("answer")) {
-    return "Native session needs input";
+    return "Waiting on your answer";
   }
-  return "Native session needs attention";
+  return "Waiting on you";
 }
 
 function nativeAttentionCandidate(

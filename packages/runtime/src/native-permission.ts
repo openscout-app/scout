@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { watch } from "node:fs";
 import { basename, join } from "node:path";
 
+import type { AgentNotificationView } from "@openscout/protocol";
+
 import type { BrokerPermissionService } from "./broker-permission-service.js";
 import {
   parseClaudeSessionRecord,
@@ -87,7 +89,7 @@ export type NativePermissionDeps = {
   watch?: (directory: string, onChange: (file: string) => void) => () => void;
   /** Whether Scout launched this session itself; those already raise requests of their own. */
   launchedByScout?: (record: ClaudeSessionRecord) => Promise<boolean>;
-  notify?: (input: { requestId: string; prompt: ManagedPermissionPrompt; actorId: string }) => void;
+  notify?: (input: { requestId: string; prompt: ManagedPermissionPrompt; actorId: string; view: AgentNotificationView }) => void;
   leaseMs?: number;
   deliveryTimeoutMs?: number;
   now?: () => number;
@@ -144,7 +146,7 @@ export class NativePermissionRequests {
     this.live.set(live.id, live);
     this.renew(live);
     this.watchRegistry();
-    this.deps.notify?.({ requestId: live.id, prompt, actorId });
+    this.deps.notify?.({ requestId: live.id, prompt, actorId, view: nativePermissionView(ask) });
     return { requestId: live.id };
   }
 
@@ -387,6 +389,31 @@ export function nativePermissionDisplay(ask: Pick<NativePermissionAsk, "toolName
   }
   const fields = fieldsOf(input);
   return { action: `Use ${clip(toolLabel(ask.toolName), 120)}`, ...(fields.length ? { fields } : {}) };
+}
+
+/**
+ * What the lock screen says about a native permission, from its display: a
+ * command, a file edit, a choice, or a tool with what it is for. Never parsed
+ * back from the text.
+ */
+export function nativePermissionView(ask: Pick<NativePermissionAsk, "toolName" | "toolInput">): AgentNotificationView {
+  const display = nativePermissionDisplay(ask);
+  if (display.command !== undefined) {
+    return { view: "turn.approve.command", command: display.command, ...(display.note ? { why: display.note } : {}) };
+  }
+  if ((display.action === "Edit a file" || display.action === "Write a file" || display.action === "Edit a notebook") && display.target) {
+    return { view: "turn.approve.edit", files: [{ path: display.target, added: 0, removed: 0 }] };
+  }
+  const first = display.questions?.[0];
+  if (first) {
+    const options = first.options.map((option) => option.label);
+    return options.length
+      ? { view: "turn.question.choice", question: first.question, options, ...(first.header ? { context: first.header } : {}) }
+      : { view: "turn.question.open", question: first.question, ...(first.header ? { context: first.header } : {}) };
+  }
+  const field = display.fields?.[0];
+  const summary = display.target ?? display.note ?? (field ? `${field.key}: ${field.value}` : undefined);
+  return { view: "turn.approve.tool", tool: toolLabel(ask.toolName), ...(summary ? { summary } : {}) };
 }
 
 /** What the board shows as text: what the session wants to do, as Claude Code's dialog says it. */

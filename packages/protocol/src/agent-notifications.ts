@@ -232,12 +232,33 @@ export function agentNotificationCategory(n: AgentNotification): string {
   }
 }
 
+const HARNESS_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", grok: "Grok", kimi: "Kimi", opencode: "OpenCode", pi: "Pi" };
+
+/**
+ * A session the operator started outside Scout has no agent card, only the
+ * actor id `native:<harness>:<session id>`. It reads as its harness, "Claude".
+ * Null for any other id.
+ */
+export function nativeActorName(actorId: string): string | null {
+  const match = /^native:([^:]+):/u.exec(actorId.trim());
+  if (!match) return null;
+  const harness = match[1]!.toLowerCase();
+  return HARNESS_NAMES[harness] ?? `${harness.charAt(0).toUpperCase()}${harness.slice(1)}`;
+}
+
+/** Where it happened, as one phrase: "scout-apps on mini". */
+function whereLine(n: AgentNotification): string {
+  const project = n.project?.trim();
+  const host = n.host?.trim();
+  return project && host ? `${project} on ${host}` : project || host || "";
+}
+
 export function collapseAgentNotification(n: AgentNotification): AgentNotificationCollapse {
-  const who = n.sender.name.trim() || "An agent";
+  const who = nativeActorName(n.sender.name) ?? (n.sender.name.trim() || "An agent");
   const want = wantPhrase(n);
   return {
     title: want ? `${who} ${want}` : who,
-    subtitle: n.project?.trim() ?? "",
+    subtitle: whereLine(n),
     body: aboutText(n),
     headline: agentNotificationHeadline(n),
     category: agentNotificationCategory(n),

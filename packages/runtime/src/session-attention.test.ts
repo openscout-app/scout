@@ -278,7 +278,7 @@ describe("session attention projection", () => {
       expect.objectContaining({
         id: "session-native:session-1:confirm-1",
         kind: "native_attention",
-        title: "Native session needs input",
+        title: "Waiting on your answer",
         summary: "Codex needs a decision before continuing.",
         turnId: "native-turn",
         updatedAt: 1_700_000_009_000,

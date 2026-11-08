@@ -205,7 +205,7 @@ describe("permission request notifications", () => {
       project: "web", host: "host-a", createdAt: 1, conversationId: "dm", messageId: "msg-ask", sessionId: "session-abc123",
     });
     const collapsed = collapseAgentNotification(n);
-    expect(collapsed).toMatchObject({ title: "web-schumann-15 wants to use a tool", subtitle: "web", body: "" });
+    expect(collapsed).toMatchObject({ title: "web-schumann-15 wants to use a tool", subtitle: "web on host-a", body: "" });
     expect(JSON.stringify(n)).not.toContain("observed evidence");
     expect(n).toMatchObject({
       level: "active",
@@ -217,6 +217,6 @@ describe("permission request notifications", () => {
   test("a Bash permission reads like the Claude app's: who wants what, then what it is for", () => {
     const text = dialog([" Bash command", "", "   gh pr list --state open", "   List open pull requests", "", " Permission rule Bash requires confirmation for this command."]);
     const n = agentNotificationForPermissionRequest({ requestId: "p", text, agentName: "pike", agentId: "agent.pike", project: "scout", createdAt: 1 });
-    expect(collapseAgentNotification(n)).toMatchObject({ title: "pike wants to run a command", subtitle: "scout", body: "List open pull requests", level: "active" });
+    expect(collapseAgentNotification(n)).toMatchObject({ title: "pike wants to run a command", subtitle: "scout on arts-mini", body: "List open pull requests", level: "active" });
   });
 });
