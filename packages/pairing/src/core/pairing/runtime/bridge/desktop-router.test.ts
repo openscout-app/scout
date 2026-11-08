@@ -276,3 +276,20 @@ describe("bridgeRouter terminal permission compatibility", () => {
     )).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 });
+
+describe("bridgeRouter runtime permission decisions", () => {
+  test("returns unreachable as a value when the runtime cannot be read", async () => {
+    const caller = createCaller(createBridgeStub().bridge);
+
+    expect(await caller.mobile.decidePermission({ requestId: "perm-1", decision: "approve" }))
+      .toEqual({ ok: false, code: "unreachable", message: "Couldn't reach the runtime." });
+  });
+
+  test("rejects a decision outside approve and deny", async () => {
+    const caller = createCaller(createBridgeStub().bridge);
+
+    await expect(caller.mobile.decidePermission(
+      { requestId: "perm-1", decision: "once" } as unknown as Parameters<typeof caller.mobile.decidePermission>[0],
+    )).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
