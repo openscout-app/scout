@@ -1,3 +1,4 @@
+import { mobileReadWorker } from "../../../../db/mobile-read.ts";
 import { resolveLegacyWebEntry } from "@openscout/runtime/web-full-client";
 // tRPC v11 router for the Bridge server.
 // Reserved transport path: web.admission is answered by the account relay
@@ -93,10 +94,6 @@ import {
 } from "./mobile-terminal-provision.ts";
 import { InvalidMobileTerminalSessionError } from "./mobile-terminal-session.ts";
 import { syncMobilePushRegistrationWithRelay } from "@openscout/runtime/mobile-push";
-import {
-  queryHeartrate,
-  queryMobileAgentDetail,
-} from "../../../../db-queries.ts";
 import {
   connectCodexDeckThread,
   getCodexDeckThreadSnapshot,
@@ -1458,7 +1455,7 @@ const mobileRouter = t.router({
   // Mac Home draw from /api/heartrate. The phone draws it small in its feed.
   heartrate: procedure
     .input(z.object({}).optional())
-    .query(() => queryHeartrate()),
+    .query(() => mobileReadWorker.read("heartrate")),
 
   // Recent terminal sessions. No params; the phone just asks for the recent
   // sessions and gets one flat row per registry record (most recent first).
@@ -1547,7 +1544,7 @@ const mobileRouter = t.router({
   agentDetail: procedure
     .input(z.object({ agentId: z.string() }))
     .query(async ({ input }) => {
-      return queryMobileAgentDetail(input.agentId);
+      return mobileReadWorker.read("agentDetail", input.agentId);
     }),
 
   agentRestart: procedure
