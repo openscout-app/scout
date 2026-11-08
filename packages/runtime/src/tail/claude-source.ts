@@ -535,9 +535,11 @@ function parseClaudeLine(line: string, ctx: TailContext): TailEvent | null {
     return null;
   }
 
-  // Learn authoritative metadata even from records without an event timestamp.
-  // The watcher and discovery share this descriptor until the next refresh.
-  if (typeof obj.cwd === "string" && obj.cwd.trim()) {
+  // A transcript discovered from its header records alone has no cwd yet: take
+  // the first one recorded, even from a record without a timestamp. Later
+  // records follow each `cd`, so they never move it. The watcher and discovery
+  // share this descriptor until the next refresh.
+  if (!ctx.transcript.cwd && typeof obj.cwd === "string" && obj.cwd.trim()) {
     ctx.transcript.cwd = obj.cwd;
     ctx.transcript.project = basename(obj.cwd);
   }
@@ -606,7 +608,8 @@ export const ClaudeSource: TranscriptSource = {
 
 function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscript {
   const meta = readClaudeMetadata(file);
-  const cwd = meta.cwd ?? file.cwd ?? fallbackCwdForPath(file.path);
+  // A child agent's file.cwd is its parent's; it keeps that folder.
+  const cwd = file.cwd ?? meta.cwd ?? fallbackCwdForPath(file.path);
   const sessionId = file.subagentId
     ?? meta.sessionId
     ?? basename(file.path).replace(/\.jsonl$/, "");

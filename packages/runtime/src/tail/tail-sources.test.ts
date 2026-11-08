@@ -124,6 +124,43 @@ describe("tail transcript sources", () => {
   });
 
 
+  test("a Claude session keeps its first recorded folder after the agent changes directory", () => {
+    const cwd = "/example/repo";
+    const projectDir = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-example-repo");
+    mkdirSync(projectDir, { recursive: true });
+    const path = join(projectDir, "moves.jsonl");
+    const record = (dir: string, at: string) =>
+      JSON.stringify({ type: "user", cwd: dir, sessionId: "moves", timestamp: at, message: { content: "hello" } });
+    writeFileSync(path, record(cwd, "2026-04-27T15:00:00Z") + "\n");
+    const transcript = ClaudeSource.discoverTranscripts([])[0]!;
+    expect(transcript.cwd).toBe(cwd);
+
+    const later = record(`${cwd}/packages/web`, "2026-04-27T15:00:01Z");
+    appendFileSync(path, later + "\n");
+    const event = ClaudeSource.parseLine(later, makeContext("claude", transcript));
+    expect([event?.cwd, event?.project]).toEqual([cwd, "repo"]);
+    expect([transcript.cwd, transcript.project]).toEqual([cwd, "repo"]);
+  });
+
+  test("a Claude child agent working in a subfolder keeps its parent session's folder", () => {
+    const projectDir = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-example-app");
+    const subagentsDir = join(projectDir, "parent-session", "subagents");
+    mkdirSync(subagentsDir, { recursive: true });
+    writeFileSync(join(projectDir, "parent-session.jsonl"), JSON.stringify({
+      type: "user", cwd: "/example/app", sessionId: "parent-session",
+      timestamp: "2026-04-27T15:00:00Z", message: { content: "hello" },
+    }) + "\n");
+    const own = JSON.stringify({
+      type: "assistant", cwd: "/example/app/apps/macos", agentId: "child1",
+      timestamp: "2026-04-27T15:00:02Z", message: { content: [{ type: "text", text: "working" }] },
+    });
+    writeFileSync(join(subagentsDir, "agent-child1.jsonl"), own + "\n");
+
+    const child = ClaudeSource.discoverTranscripts([]).find((entry) => entry.subagentId === "child1")!;
+    expect([child.parentSessionId, child.cwd, child.project]).toEqual(["parent-session", "/example/app", "app"]);
+    expect(ClaudeSource.parseLine(own, makeContext("claude", child))?.cwd).toBe("/example/app");
+  });
+
   test("discovers and parses Claude transcript files without process discovery", () => {
     const projectDir = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-Users-arach-dev-openscout");
     mkdirSync(projectDir, { recursive: true });

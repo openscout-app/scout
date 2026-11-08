@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   createHistorySessionSnapshot,
@@ -37,6 +40,42 @@ describe("history snapshot replay", () => {
     ]);
     expect(withCwd.session.cwd).toBe("/example/worktrees/my-project");
     expect(withCwd.session.name).toBe("my-project");
+
+    // A folder the caller already knows names a session whose records carry none yet.
+    const known = createHistorySessionSnapshot({
+      path, content: header.join("\n"), adapterType: "claude-code", baseTimestampMs: 0, cwd: "/example/worktrees/my-project",
+    }).snapshot.session;
+    expect([known.cwd, known.name]).toEqual(["/example/worktrees/my-project", "my-project"]);
+  });
+
+  test("a recorded folder beats a decoded project folder name that happens to exist", () => {
+    const root = mkdtempSync(join(tmpdir(), "historycwd"));
+    try {
+      // Both root/my/project and root/my-project exist; the transcript recorded the second.
+      mkdirSync(join(root, "my", "project"), { recursive: true });
+      const recorded = join(root, "my-project");
+      const path = join(root, ".claude", "projects", recorded.replace(/[/.]/g, "-"), "session-both.jsonl");
+      const content = JSON.stringify({
+        type: "user", sessionId: "session-both", cwd: recorded,
+        timestamp: "2026-04-22T12:00:01.000Z", message: { role: "user", content: "hello" },
+      });
+      const session = createHistorySessionSnapshot({ path, content, adapterType: "claude-code", baseTimestampMs: 0 }).snapshot.session;
+      expect([session.cwd, session.name]).toEqual([recorded, "my-project"]);
+
+      // With no record of its own, an existing decoded folder is the last resort.
+      const header = JSON.stringify({ type: "mode", mode: "normal", sessionId: "session-both" });
+      expect(createHistorySessionSnapshot({ path, content: header, adapterType: "claude-code", baseTimestampMs: 0 }).snapshot.session.cwd)
+        .toBe(join(root, "my", "project"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("names a pi session after the folder its session record holds", () => {
+    const path = "/example/home/.pi/agent/sessions/--example-dev-my-tool--/2026-04-22_session.jsonl";
+    const content = JSON.stringify({ type: "session", id: "pi-1", cwd: "/example/dev/my-tool", timestamp: "2026-04-22T12:00:00.000Z" });
+    const session = createHistorySessionSnapshot({ path, content, adapterType: "pi", baseTimestampMs: 0 }).snapshot.session;
+    expect([session.cwd, session.name]).toEqual(["/example/dev/my-tool", "my-tool"]);
   });
 
   test("reconstructs a unified Claude Code snapshot from external jsonl history", () => {
