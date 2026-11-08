@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { basename, dirname } from "node:path";
 
 import { StateTracker, type SessionState } from "./state.js";
@@ -78,15 +79,39 @@ function decodeClaudeProjectsSlug(name: string): string | null {
   return `/${tail.replace(/-/g, "/")}`;
 }
 
-function inferClaudeHistoryCwd(path: string): string | null {
-  const parent = basename(dirname(path));
-  return decodeClaudeProjectsSlug(parent);
+/** The first folder a Claude transcript records. Its project folder name is a lossy encoding of it. */
+function recordedClaudeHistoryCwd(content: string): string | null {
+  for (const line of content.split("\n")) {
+    if (!line.includes('"cwd"')) continue;
+    try {
+      const record = JSON.parse(line) as { cwd?: unknown };
+      if (typeof record.cwd === "string" && record.cwd.trim()) return record.cwd.trim();
+    } catch {
+      // a partial last line, or a record that only mentions cwd in its text
+    }
+  }
+  return null;
 }
 
-function deriveHistoryName(path: string): string {
-  const claudeCwd = inferClaudeHistoryCwd(path);
-  if (claudeCwd) {
-    return basename(claudeCwd) || claudeCwd;
+/** The decoded project folder name, only when that folder exists: "-" stands for "/", ".", "_" and "-" alike. */
+function inferClaudeHistoryCwd(path: string): string | null {
+  const decoded = decodeClaudeProjectsSlug(basename(dirname(path)));
+  if (!decoded) return null;
+  try {
+    return statSync(decoded).isDirectory() ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function claudeHistoryCwd(input: HistorySessionSnapshotInput, adapterType: HistoryAdapterType): string | null {
+  if (adapterType !== "claude-code") return null;
+  return recordedClaudeHistoryCwd(input.content) ?? inferClaudeHistoryCwd(input.path);
+}
+
+function deriveHistoryName(path: string, cwd: string | null): string {
+  if (cwd) {
+    return basename(cwd) || cwd;
   }
 
   const parent = basename(dirname(path));
@@ -326,11 +351,12 @@ export function supportsHistorySessionSnapshot(adapterType: string | null | unde
 }
 
 function buildBaseHistorySession(input: HistorySessionSnapshotInput, adapterType: HistoryAdapterType): Session {
-  const cwd = input.cwd?.trim() || inferClaudeHistoryCwd(input.path) || undefined;
+  const historyCwd = claudeHistoryCwd(input, adapterType);
+  const cwd = input.cwd?.trim() || historyCwd || undefined;
 
   return {
     id: input.sessionId?.trim() || `history:${input.path}`,
-    name: input.name?.trim() || deriveHistoryName(input.path),
+    name: input.name?.trim() || deriveHistoryName(input.path, historyCwd),
     adapterType,
     status: "idle",
     ...(cwd ? { cwd } : {}),

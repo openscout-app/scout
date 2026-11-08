@@ -12,6 +12,33 @@ describe("history snapshot replay", () => {
   // one fixture session doesn't leak into another's inference path.
   beforeEach(clearObservedContextWindows);
 
+  test("takes a Claude session's folder from its records, never from a guess at its project folder name", () => {
+    // "-" in the project folder name stands for "/", "." and "-" alike, so this decodes to
+    // /example/worktrees/my/project, which does not exist.
+    const path = "/example/home/.claude/projects/-example-worktrees-my-project/session-dash.jsonl";
+    const header = [
+      JSON.stringify({ type: "permission-mode", permissionMode: "default", sessionId: "session-dash" }),
+      JSON.stringify({ type: "mode", mode: "normal", sessionId: "session-dash" }),
+    ];
+    const snapshotOf = (lines: string[]) =>
+      createHistorySessionSnapshot({ path, content: lines.join("\n"), adapterType: "claude-code", baseTimestampMs: 0 }).snapshot;
+
+    expect(snapshotOf(header).session.cwd).toBeUndefined();
+
+    const withCwd = snapshotOf([
+      ...header,
+      JSON.stringify({
+        type: "user",
+        sessionId: "session-dash",
+        cwd: "/example/worktrees/my-project",
+        timestamp: "2026-04-22T12:00:01.000Z",
+        message: { role: "user", content: "hello" },
+      }),
+    ]);
+    expect(withCwd.session.cwd).toBe("/example/worktrees/my-project");
+    expect(withCwd.session.name).toBe("my-project");
+  });
+
   test("reconstructs a unified Claude Code snapshot from external jsonl history", () => {
     const basePath = "/Users/arach/.claude/projects/-Users-arach-dev-openscout/session-123.jsonl";
     const content = [
