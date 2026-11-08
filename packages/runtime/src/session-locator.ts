@@ -173,7 +173,7 @@ function extractClaudeMeta(path: string): { ids: string[]; cwd?: string } {
   if (parent.startsWith("-")) {
     // e.g. -Users-art-dev-openscout → /Users/art/dev/openscout (best-effort)
     const guessed = parent.replace(/^-/, "/").replace(/-/g, "/");
-    if (guessed.startsWith("/") && guessed.length > 1) {
+    if (guessed.startsWith("/") && guessed.length > 1 && pathIsDirectory(guessed)) {
       cwd = cwd ?? guessed;
     }
   }
@@ -332,4 +332,13 @@ export function defaultCodexSessionsRoot(homeDir = homedir()): string {
 
 export function defaultClaudeProjectsRoot(homeDir = homedir()): string {
   return join(homeDir, ".claude", "projects");
+}
+
+/** Slug decoding is lossy; never promote a nonexistent guess to a cwd. */
+function pathIsDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
