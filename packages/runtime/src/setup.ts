@@ -2238,11 +2238,11 @@ function shellQuote(value: string): string {
 }
 
 /**
- * How the statusline wrapper reaches the Scout CLI, or null when nothing runnable
- * is found. A bare `scout` that isn't on PATH would wire Claude Code to a command
- * that exits 127 on every prompt: no statusline, and no quota capture.
+ * How a wrapper Claude Code runs (the statusline, a hook) reaches the Scout
+ * CLI, or null when nothing runnable is found. A bare `scout` that isn't on
+ * PATH would wire Claude Code to a command that exits 127 on every call.
  */
-function resolveScoutStatuslineInvocation(): string | null {
+export function resolveScoutCliInvocation(): string | null {
   const explicit = normalizeOptionalString(process.env.OPENSCOUT_SCOUT_COMMAND);
   if (explicit) return explicit;
 
@@ -2328,7 +2328,7 @@ export async function installClaudeStatuslineTool(): Promise<ClaudeStatuslineIns
     };
   }
 
-  const scoutInvocation = resolveScoutStatuslineInvocation();
+  const scoutInvocation = resolveScoutCliInvocation();
   // Leave Claude's statusline alone rather than point it at a CLI that can't run.
   if (!scoutInvocation) {
     return {

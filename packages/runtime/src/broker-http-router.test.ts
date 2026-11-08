@@ -2,6 +2,7 @@ import { BrokerAssistantClaims, protectAssistantService, ASSISTANT_CLAIM_HEADER 
 import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsConfig } from "./mesh-approvals.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { NativePermissionAskError } from "./native-permission.js";
+import { HarnessHooksError } from "./harness-hooks.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1936,6 +1937,35 @@ test("native permission requests are opened and waited on only from this machine
   ]) {
     for (const path of ["/v1/permissions/native", "/v1/permissions/native/wait"]) {
       expect((await requestRouter(harness, "POST", path, { ...options, body: ask })).response.status).toBe(403);
+    }
+  }
+  expect(calls).toHaveLength(3);
+});
+
+test("harness hooks are read, applied and removed only from this machine", async () => {
+  const calls: string[] = [];
+  const status = [{ harness: "claude", hook: "permission-request", state: "absent" }];
+  const harnessHooks = {
+    status: async () => { calls.push("status"); return status; },
+    apply: async () => { calls.push("apply"); return { action: "apply", outcome: "changed", hooks: status }; },
+    remove: async () => { calls.push("remove"); throw new HarnessHooksError("settings.json is not valid JSON", "settings-unreadable"); },
+  } as unknown as NonNullable<BrokerHttpRouterDeps["harnessHooks"]>;
+  const harness = createHarness({ harnessHooks });
+  expect((await requestRouter(harness, "GET", "/v1/hooks")).body).toEqual({ hooks: status });
+  expect((await requestRouter(harness, "POST", "/v1/hooks/apply", { body: {} })).body).toMatchObject({ action: "apply", outcome: "changed" });
+  const refused = await requestRouter(harness, "POST", "/v1/hooks/remove", { body: {} });
+  expect(refused.response.status).toBe(409);
+  expect(refused.body).toMatchObject({ code: "settings-unreadable" });
+  expect(calls).toEqual(["status", "apply", "remove"]);
+  for (const options of [
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { transport: "loopback" as const, guest: true } },
+    { headers: { origin: "http://localhost:43120" } },
+    { headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    expect((await requestRouter(harness, "GET", "/v1/hooks", options)).response.status).toBe(403);
+    for (const path of ["/v1/hooks/apply", "/v1/hooks/remove"]) {
+      expect((await requestRouter(harness, "POST", path, { ...options, body: {} })).response.status).toBe(403);
     }
   }
   expect(calls).toHaveLength(3);
