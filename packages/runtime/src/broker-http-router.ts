@@ -13,6 +13,7 @@ import type { MeshDiagnostics } from "./mesh-diagnostics.js";
 import { TaskClosedError, completionReply } from "@openscout/protocol";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
+import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
 import { handleBrokerQuarantineRoute, type BrokerQuarantineQueries } from "./broker-quarantine-http-service.js";
@@ -242,6 +243,8 @@ export type BrokerHttpRouterDeps = {
   permissionService?: BrokerPermissionService;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
+  /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
+  harnessHooks?: Pick<HarnessHooks, "status" | "apply" | "remove">;
   journal: BrokerHttpJournal;
   knownInvocations: Map<string, InvocationRequest>;
   brokerService: ActiveScoutBrokerService;
@@ -630,6 +633,26 @@ export function createBrokerHttpRouter(
     } catch (error) {
       if (error instanceof NativePermissionAskError) badRequest(response, error);
       else json(response, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  if ((method === "GET" && url.pathname === "/v1/hooks")
+    || (method === "POST" && (url.pathname === "/v1/hooks/apply" || url.pathname === "/v1/hooks/remove"))) {
+    // Harness settings belong to this machine's login: only a local CLI edits them.
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest || request.transportContext?.scoped
+      || request.headers.origin || request.headers["x-openscout-forwarded-node-id"]) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    const hooks = deps.harnessHooks;
+    if (!hooks) { json(response, 404, { error: "harness_hooks_unsupported" }); return; }
+    try {
+      if (method === "GET") json(response, 200, { hooks: await hooks.status() });
+      else json(response, 200, url.pathname.endsWith("/apply") ? await hooks.apply() : await hooks.remove());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      json(response, error instanceof HarnessHooksError ? 409 : 500, {
+        error: message, ...(error instanceof HarnessHooksError ? { code: error.code } : {}),
+      });
     }
     return;
   }

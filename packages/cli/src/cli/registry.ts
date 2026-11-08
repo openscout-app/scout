@@ -42,6 +42,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "tell", hidden: true, summary: "Removed; use ask or reply" },
   { name: "session", summary: "Actions on a harness session" },
   { name: "statusline", summary: "Capture harness statusline metadata" },
+  { name: "hooks", summary: "Apply or remove Scout's hooks in harness settings (Claude Code permission requests)" },
   { name: "permission-hook", hidden: true, summary: "Claude Code PermissionRequest hook: answer permission dialogs from Scout" },
   { name: "speak", hidden: true, summary: "Removed; use ask or reply" },
   { name: "voice", summary: "Codex voice chat in the ChatGPT app: status, talk, mic, speakers, stop" },

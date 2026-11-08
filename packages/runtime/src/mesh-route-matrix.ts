@@ -137,6 +137,10 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/events": "local",
   "GET /v1/events/stream": "local",
   "GET /v1/home": "local",
+  // Harness settings on this login; the handler also refuses remote transport.
+  "GET /v1/hooks": "local",
+  "POST /v1/hooks/apply": "local",
+  "POST /v1/hooks/remove": "local",
   "GET /v1/inbox": "local",
   "GET /v1/inbox/stream": "local",
   "GET /v1/invocations/:id": "local",
