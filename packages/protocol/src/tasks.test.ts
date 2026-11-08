@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { taskNotificationPolicy, validateTaskAsk, validateTaskReply, type ScoutTaskAsk } from "./tasks.js";
 
 const task = (patch: Partial<ScoutTaskAsk> = {}): ScoutTaskAsk => ({ version: 1, ...patch });
-const CALLBACK = "async ({ result, scout }) => scout.open(result.files[0])";
+const CALLBACK = "export default ({ result, scout }) => scout.open(result.files[0]);";
 test.each([
   [{}, {}, "exactly one"],
   [{ operator: true }, { to: "worker" }, "exactly one"],
@@ -24,8 +24,8 @@ test.each([
   [{ operator: true, window: 10 }, {}, "--default-action"],
   [{ operator: true, window: 0 }, {}, "--window"],
   [{ operator: true, window: NaN }, {}, "--window"],
-  [{ callback: { code: "  " } }, { to: "worker" }, "--callback takes the source of a JavaScript function"],
-  [{ callback: "open" as never }, { to: "worker" }, "--callback takes the source of a JavaScript function"],
+  [{ callback: { code: "  " } }, { to: "worker" }, "--callback takes a JavaScript module file"],
+  [{ callback: "open" as never }, { to: "worker" }, "--callback takes a JavaScript module file"],
   [{ callback: { code: "x".repeat(16_001) } }, { to: "worker" }, "up to 16000 characters"],
   [{ callback: { code: CALLBACK }, fyi: true }, { to: "worker" }, "--callback belongs"],
   [{ callback: { code: CALLBACK }, ref: "task" }, {}, "--callback belongs"],

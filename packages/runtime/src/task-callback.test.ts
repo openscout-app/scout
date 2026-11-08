@@ -13,7 +13,9 @@ import {
   taskCallbackResult,
 } from "./task-callback.js";
 
-const OPEN_FIRST = "async ({ result, scout }) => { if (result.files[0]) await scout.open(result.files[0]); }";
+const OPEN_FIRST = "export default async ({ result, scout }) => { if (result.files[0]) await scout.open(result.files[0]); };";
+/** A callback file whose default export is `fn`. */
+const file = (fn: string) => `export default ${fn};`;
 const invocation = (patch: Partial<InvocationRequest> = {}, code = OPEN_FIRST): InvocationRequest => ({
   id: "inv-1",
   requesterId: "operator",
@@ -109,7 +111,7 @@ describe("ask --callback", () => {
       if (page) console.log("opened", await scout.open(page));
     }`;
     const linux = await runTaskCallback({
-      flight: flight({ output: `Notes ${notes}, page \`${page}\`` }), invocation: invocation({}, chooser),
+      flight: flight({ output: `Notes ${notes}, page \`${page}\`` }), invocation: invocation({}, file(chooser)),
       nodeId: "node-home", platform: "linux", open: opener(opened),
     });
     expect(linux).toEqual({ ok: true, opened: [page], logs: ["completed 2", `opened ${page}`] });
@@ -119,7 +121,7 @@ describe("ask --callback", () => {
 
   test("scout.open opens existing documents only, and a few per callback", async () => {
     const tryOpen = (target: string, platform: NodeJS.Platform = "darwin") => runTaskCallback({
-      flight: flight(), invocation: invocation({}, `({ scout }) => scout.open(${JSON.stringify(target)})`),
+      flight: flight(), invocation: invocation({}, file(`({ scout }) => scout.open(${JSON.stringify(target)})`)),
       nodeId: "node-home", platform, open: never,
     });
     expect(await tryOpen(script)).toMatchObject({ ok: false, error: `Error: scout.open opens html, pdf and image files only, not ${script}` });
@@ -130,7 +132,7 @@ describe("ask --callback", () => {
 
     const opened: Opened = [];
     const many = await runTaskCallback({
-      flight: flight(), invocation: invocation({}, `async ({ scout }) => { for (let i = 0; i < 9; i++) await scout.open(${JSON.stringify(page)}) }`),
+      flight: flight(), invocation: invocation({}, file(`async ({ scout }) => { for (let i = 0; i < 9; i++) await scout.open(${JSON.stringify(page)}) }`)),
       nodeId: "node-home", platform: "darwin", open: opener(opened),
     });
     expect(many).toMatchObject({ ok: false, error: "Error: scout.open opens at most 5 files per callback" });
@@ -141,9 +143,9 @@ describe("ask --callback", () => {
   test("a failed opener, a broken function and another host's task are reported or skipped", async () => {
     expect(await runTaskCallback({ flight: flight({ output: page }), invocation: invocation(), nodeId: "node-home", platform: "darwin",
       open: async () => ({ exitCode: 1 }) })).toMatchObject({ ok: false, opened: [], error: "Error: the opener exited 1" });
-    expect(await runTaskCallback({ flight: flight({ output: page }), invocation: invocation({}, "({ result ) =>"), nodeId: "node-home", open: never }))
+    expect(await runTaskCallback({ flight: flight({ output: page }), invocation: invocation({}, file("({ result ) =>")), nodeId: "node-home", open: never }))
       .toMatchObject({ ok: false, error: expect.stringContaining("SyntaxError") });
-    expect(await runTaskCallback({ flight: flight({ output: page }), invocation: invocation({}, "() => new Promise(() => {})"), nodeId: "node-home",
+    expect(await runTaskCallback({ flight: flight({ output: page }), invocation: invocation({}, file("() => new Promise(() => {})")), nodeId: "node-home",
       open: never, limits: { timeoutMs: 200 } })).toMatchObject({ ok: false, error: "the callback did not finish within 0.2s" });
     expect(await runTaskCallback({ flight: flight({ output: page }), invocation: invocation(), nodeId: "node-other", open: never })).toBeUndefined();
     expect(await runTaskCallback({ flight: flight({ output: "No page this time." }), invocation: invocation(), nodeId: "node-home", open: never }))
@@ -151,7 +153,7 @@ describe("ask --callback", () => {
   });
 
   test("the worker is not told about the callback", () => {
-    const code = "({ scout }) => scout.open('/tmp/secret-marker.html')";
+    const code = file("({ scout }) => scout.open('/tmp/secret-marker.html')");
     const withCallback = invocation({}, code);
     expect(buildLocalAgentDirectInvocationPrompt("ranger", withCallback)).toBe(buildLocalAgentDirectInvocationPrompt("ranger", invocation({ metadata: {} })));
     expect(buildLocalAgentNudge("ranger", withCallback, "flt-1")).not.toContain("secret-marker");

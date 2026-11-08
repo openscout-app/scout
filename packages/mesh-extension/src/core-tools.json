@@ -605,20 +605,9 @@
           "exclusiveMinimum": 0
         },
         "callback": {
-          "description": "JavaScript the runtime on the worker's host runs when the task ends, in a sandbox with no file, process or network access. The function gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only.",
-          "type": "object",
-          "properties": {
-            "code": {
-              "description": "The source of a JavaScript function, e.g. ({ result, scout }) => scout.open(result.files[0])",
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 16000
-            }
-          },
-          "required": [
-            "code"
-          ],
-          "additionalProperties": false
+          "description": "Local path of a JavaScript module file, e.g. open-page.js holding: export default ({ result, scout }) => scout.open(result.files[0]); The file is read here and sent with the task. The runtime on the worker's host runs it when the task ends, in a sandbox with no file, process or network access and no imports. Its default export gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only.",
+          "type": "string",
+          "minLength": 1
         },
         "image": {
           "description": "Local image path.",

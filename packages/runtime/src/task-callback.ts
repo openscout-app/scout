@@ -6,10 +6,12 @@ import { scoutHost, type ScoutHostRevealMode } from "./system-probes/scout-host.
 import { runSandboxedFunction, type SandboxLimits } from "./task-callback-sandbox.js";
 
 /**
- * `scout ask --callback`: the asker's JavaScript, run by the runtime on the
- * worker's host when the task ends. It is not part of the worker's prompt. The code
- * runs in the QuickJS sandbox; the task's result goes in as data, and
- * `scout.open` is its one way to act on the host.
+ * `scout ask --callback <file>`: the asker's JavaScript module, run by the
+ * runtime on the worker's host when the task ends. The asker's side reads the
+ * file and sends its source, so the worker's host needs no copy. It is not part
+ * of the worker's prompt. The module runs in the QuickJS sandbox; its default
+ * export gets the task's result as data, and `scout.open` is its one way to
+ * act on the host.
  */
 const TERMINAL_STATES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 /** `scout.open` opens documents only: opening a script or an app would run it. */

@@ -66,9 +66,9 @@ function drainJobs(runtime: QuickJSRuntime): void {
 }
 
 /**
- * Evaluates `code` as a function expression and calls it with `data` plus a
- * `scout` object of the given functions. Resolves when the function's return
- * value settles, the code throws, or the time budget runs out.
+ * Evaluates `code` as an ES module and calls its default export with `data`
+ * plus a `scout` object of the given functions. Resolves when the function's
+ * return value settles, the code throws, or the time budget runs out.
  */
 export async function runSandboxedFunction(input: {
   code: string;
@@ -139,18 +139,41 @@ export async function runSandboxedFunction(input: {
     context.setProp(argument, "scout", scoutObject);
     scoutObject.dispose();
 
-    const compiled = context.evalCode(`(\n${input.code}\n)`, "callback.js");
-    if (compiled.error) {
-      const error = describeGuestError(context, compiled.error);
-      compiled.error.dispose();
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), Math.max(0, deadline - Date.now()));
+    });
+    const tooLong = `the callback did not finish within ${limits.timeoutMs / 1000}s`;
+
+    // The callback file is an ES module whose default export is the function.
+    // No module loader is set, so an import fails.
+    const evaluated = context.evalCode(input.code, "callback.js", { type: "module" });
+    if (evaluated.error) {
+      const error = describeGuestError(context, evaluated.error);
+      evaluated.error.dispose();
       argument.dispose();
       return { ok: false, error, logs };
     }
-    const fn = compiled.value;
+    // Evaluation returns the module's exports, or a promise for them.
+    const loading = context.resolvePromise(evaluated.value);
+    evaluated.value.dispose();
+    drainJobs(runtime);
+    const loaded = await Promise.race([loading, timedOut]);
+    if (loaded === "timeout") {
+      argument.dispose();
+      return { ok: false, error: tooLong, logs };
+    }
+    if (loaded.error) {
+      const error = describeGuestError(context, loaded.error);
+      loaded.error.dispose();
+      argument.dispose();
+      return { ok: false, error, logs };
+    }
+    const fn = context.getProp(loaded.value, "default");
+    loaded.value.dispose();
     if (context.typeof(fn) !== "function") {
       fn.dispose();
       argument.dispose();
-      return { ok: false, error: "the callback must be a function", logs };
+      return { ok: false, error: "the callback file must export a default function", logs };
     }
     const called = context.callFunction(fn, context.undefined, argument);
     fn.dispose();
@@ -164,11 +187,7 @@ export async function runSandboxedFunction(input: {
     const settled = context.resolvePromise(returned);
     returned.dispose();
     drainJobs(runtime);
-    const timedOut = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), Math.max(0, deadline - Date.now()));
-    });
     const outcome = await Promise.race([settled, timedOut]);
-    const tooLong = `the callback did not finish within ${limits.timeoutMs / 1000}s`;
     if (outcome === "timeout") return { ok: false, error: tooLong, logs };
     // Calls the code started but did not await still count toward the run.
     while (inFlight.size > 0) {
