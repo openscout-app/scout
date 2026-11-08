@@ -100,3 +100,4 @@ export * from "./t3/adapter.js";
 export * from "./t3/broker-service.js";
 export { runtimeSessionHandleForEndpoint } from "./runtime-session-handle.js";
 export type { NativePermissionDisplay, NativePermissionQuestion } from "./native-permission.js";
+export { conversationIdForSession, conversationIdForAgent } from "./session-conversation.js";

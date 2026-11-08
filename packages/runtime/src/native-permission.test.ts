@@ -1,9 +1,12 @@
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import { assertValidCollaborationRecord, type QuestionRecord } from "@openscout/protocol";
 
 import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
-import type { ClaudeSessionRecord } from "./claude-session-records.js";
-import { describeNativePermission, nativePermissionDisplay, nativePermissionView, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
+import { claudeProjectDirectoryForCwd, type ClaudeSessionRecord } from "./claude-session-records.js";
+import { nativePermissionContext, describeNativePermission, nativePermissionDisplay, nativePermissionView, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
 
 function session(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
   return {
@@ -216,4 +219,58 @@ describe("native session permission requests", () => {
     expect((h.records.get(id)!.metadata!.permissionRequest as { native: { display: unknown } }).native.display)
       .toEqual({ action: "Run a command", command: "rm -rf dist", note: "Remove the build output" });
   });
+});
+
+test("hook transcript path is constrained to projects, its session filename, and real symlink target", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "native-context-"));
+  const root = join(dir, "projects");
+  const path = join(root, "project", `${ask.sessionId}.jsonl`);
+  const fixture = [
+    { type: "user", message: { content: "Create an isolated workspace." } },
+    { type: "assistant", timestamp: "2026-11-01T00:00:00Z", message: { content: [{ type: "text", text: "I will create a worktree before making changes." }, { type: "tool_use", id: "tool-one", name: "EnterWorktree", input: {} }] } },
+  ].map(line => JSON.stringify(line)).join("\n");
+  try {
+    await mkdir(join(root, "project"), { recursive: true });
+    await writeFile(path, fixture);
+    const hookAsk = { ...ask, toolName: "EnterWorktree", cwd: "/different/worktree", transcriptPath: path };
+    const record = { cwd: null };
+    expect(await nativePermissionContext(hookAsk, record, root)).toEqual({
+      text: "I will create a worktree before making changes.", source: "assistant", at: Date.parse("2026-11-01T00:00:00Z"),
+    });
+    expect(await nativePermissionContext({ ...hookAsk, toolName: "Bash" }, record, root)).toBeNull();
+    const outside = join(dir, `${ask.sessionId}.jsonl`);
+    await writeFile(outside, fixture);
+    expect(await nativePermissionContext({ ...hookAsk, transcriptPath: outside }, record, root)).toBeNull();
+    await rm(path);
+    await symlink(outside, path);
+    expect(await nativePermissionContext(hookAsk, record, root)).toBeNull();
+    expect(nativePermissionView(hookAsk, "Creating an isolated workspace.")).toMatchObject({ view: "turn.approve.tool", why: "Creating an isolated workspace." });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("open stores hook-time context from registry cwd even after the hook cwd moved", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "native-context-registry-"));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  const h = harness({ records: [session({ cwd: "/workspace/original" })] });
+  try {
+    process.env.CLAUDE_CONFIG_DIR = dir;
+    const project = claudeProjectDirectoryForCwd("/workspace/original");
+    await mkdir(project, { recursive: true });
+    // Hook-boundary fixture: both lines are on disk before open is called.
+    await writeFile(join(project, `${ask.sessionId}.jsonl`), [
+      { type: "user", message: { content: "Clean the build." } },
+      { type: "assistant", message: { content: [{ type: "text", text: "Removing the old build before testing." }, { type: "tool_use", id: "pending", name: "Bash", input: ask.toolInput }] } },
+    ].map(line => JSON.stringify(line)).join("\n"));
+    const opened = await h.native.open({ ...ask, cwd: "/workspace/moved", transcriptPath: "/outside/invented-session.jsonl" });
+    if (!("requestId" in opened)) throw new Error("Expected an open permission");
+    expect(h.records.get(opened.requestId)?.metadata?.permissionRequest).toMatchObject({
+      sessionId: ask.sessionId,
+      native: { context: { text: "Removing the old build before testing.", source: "assistant", at: null } },
+    });
+  } finally {
+    await h.native.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
 });

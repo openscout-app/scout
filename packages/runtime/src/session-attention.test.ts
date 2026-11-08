@@ -332,3 +332,14 @@ describe("session attention projection", () => {
     }
   });
 });
+
+test("approval and question context comes from preceding text, not later text", () => {
+  const turn = makeTurn({ id: "turn-context", blocks: [
+    textBlock("turn-context"),
+    commandBlock({ turnId: "turn-context", status: "awaiting_approval" }),
+    questionBlock({ turnId: "turn-context" }),
+    { ...textBlock("turn-context"), block: { ...textBlock("turn-context").block, id: "later", text: "Later text" } as TextBlock },
+  ] });
+  const items = projectSessionAttention(makeSnapshot([turn]));
+  for (const kind of ["approval", "question"]) expect(items.find(item => item.kind === kind)?.context).toEqual({ text: "All clear.", source: "assistant", at: 1000 });
+});

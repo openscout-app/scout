@@ -11,6 +11,7 @@
  * The transcript is observed source material. Nothing here answers the prompt.
  */
 
+import { shapeAttentionContext, type AttentionContext } from "../../attention-context.js";
 import { redactSecrets } from "../../secret-redaction.js";
 
 export type ClaudePendingToolCall = {
@@ -155,4 +156,51 @@ export function findClaudePendingToolCall(jsonl: string): ClaudePendingToolCall 
   const first = open[0];
   if (!first) return null;
   return { toolUseId: first.id, tool: first.tool, ...describeClaudeToolCall(first.tool, first.input), at: first.at, alsoPending: open.length - 1 };
+}
+
+/**
+ * Context immediately before the pending call. Accepts a bounded observed tail;
+ * callers doing file I/O must use readClaudePendingToolContext below.
+ */
+export function findClaudePendingToolContext(jsonl: string, toolName: string): AttentionContext | null {
+  const pending = findClaudePendingToolCall(jsonl);
+  if (!pending || pending.tool !== toolName) return null;
+  let prompt: AttentionContext | null = null;
+  let assistant: AttentionContext | null = null;
+  for (const raw of jsonl.split("\n")) {
+    let line: Line;
+    try { line = JSON.parse(raw) as Line; } catch { continue; }
+    if (!line || typeof line !== "object" || line.isSidechain === true) continue;
+    const timestamp = typeof line.timestamp === "string" ? Date.parse(line.timestamp) : NaN;
+    const at = Number.isFinite(timestamp) ? timestamp : null;
+    const blocks = blocksOf(line);
+    if (line.type === "user" && line.isMeta !== true && !blocks.some(b => b.type === "tool_result")) {
+      const content = line.message?.content;
+      const typed = typeof content === "string" ? content : blocks.filter(b => b.type === "text" && typeof b.text === "string").map(b => b.text).join("\n\n");
+      if (typed) { prompt = shapeAttentionContext(typed, "prompt", at); assistant = null; }
+    }
+    if (line.type !== "assistant") continue;
+    for (const block of blocks) {
+      if (block.type === "tool_use" && block.id === pending.toolUseId) return assistant ?? prompt;
+      if (block.type === "text" && typeof block.text === "string") assistant = shapeAttentionContext(block.text, "assistant", at);
+    }
+  }
+  return null;
+}
+
+/** Read at most 256 KiB; never import transcript lines as Scout messages. */
+export async function readClaudePendingToolContext(path: string, toolName: string): Promise<AttentionContext | null> {
+  const { open } = await import("node:fs/promises");
+  let file;
+  try {
+    file = await open(path, "r");
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size <= 0) return null;
+    const start = Math.max(0, stat.size - 256 * 1024);
+    const buffer = Buffer.alloc(stat.size - start);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
+    let tail = buffer.subarray(0, bytesRead).toString("utf8");
+    if (start > 0) tail = tail.slice(tail.indexOf("\n") + 1);
+    return findClaudePendingToolContext(tail, toolName);
+  } catch { return null; } finally { await file?.close(); }
 }

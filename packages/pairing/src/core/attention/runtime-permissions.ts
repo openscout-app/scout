@@ -1,3 +1,4 @@
+import { shapeAttentionContext, type AttentionContext } from "@openscout/agent-sessions";
 /**
  * Permission requests the runtime holds (question records carrying
  * `metadata.permissionRequest`): native Claude Code hooks and managed
@@ -61,8 +62,9 @@ type OpenPermission = {
   version: string;
   sessionId: string | null;
   projectRoot: string | null;
+  invocationId: string | null;
   decisions: string[];
-  native: { harness: string | null; display: NativePermissionDisplay | undefined } | null;
+  native: { harness: string | null; display: NativePermissionDisplay | undefined; context: AttentionContext | null } | null;
 };
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -109,6 +111,12 @@ export function parsePermissionDisplay(value: unknown): NativePermissionDisplay 
   return display;
 }
 
+function parseContext(value: unknown): AttentionContext | null {
+  const raw = object(value);
+  if (!raw || typeof raw.text !== "string" || !["assistant", "prompt", "task"].includes(String(raw.source))) return null;
+  return shapeAttentionContext(raw.text, raw.source as AttentionContext["source"], typeof raw.at === "number" ? raw.at : null);
+}
+
 function openPermission(record: CollaborationRecord): OpenPermission | null {
   if (record.kind !== "question" || record.state !== "open") return null;
   const raw = object(record.metadata?.permissionRequest);
@@ -120,8 +128,9 @@ function openPermission(record: CollaborationRecord): OpenPermission | null {
     version,
     sessionId: text(raw.sessionId) ?? null,
     projectRoot: text(raw.projectRoot) ?? null,
+    invocationId: text(raw.invocationId) ?? null,
     decisions: Array.isArray(raw.decisions) ? raw.decisions.filter((d): d is string => typeof d === "string") : [],
-    native: native ? { harness: text(native.harness) ?? null, display: parsePermissionDisplay(native.display) } : null,
+    native: native ? { harness: text(native.harness) ?? null, display: parsePermissionDisplay(native.display), context: parseContext(native.context) } : null,
   };
 }
 
@@ -132,14 +141,15 @@ function agentName(snapshot: ScoutBrokerSnapshot, actorId: string): string {
     ?? "Agent";
 }
 
-function adapterTypeFor(snapshot: ScoutBrokerSnapshot, permission: OpenPermission): string {
+function harnessFor(snapshot: ScoutBrokerSnapshot, permission: OpenPermission): string | null {
   if (permission.native?.harness) return permission.native.harness;
   const actorId = permission.record.createdById;
   const nativeHarness = /^native:([^:]+):/u.exec(actorId)?.[1];
   if (nativeHarness) return nativeHarness;
   const endpoint = Object.values(snapshot.endpoints ?? {}).find((candidate) => candidate.agentId === actorId);
   if (endpoint?.harness) return endpoint.harness;
-  return permission.native ? "native" : "tmux";
+  const invocation = snapshot.invocations?.[permission.invocationId ?? ""];
+  return invocation?.executionResolution?.harness.observed ?? invocation?.executionResolution?.harness.resolved ?? invocation?.execution?.harness ?? null;
 }
 
 function mobileDecisions(decisions: string[]): MobilePermissionDecision[] {
@@ -156,9 +166,14 @@ function permissionInboxItem(snapshot: ScoutBrokerSnapshot, permission: OpenPerm
     id: record.id,
     kind: "permission",
     createdAt: record.createdAt,
-    sessionId: permission.sessionId ?? record.conversationId ?? record.id,
+    sessionId: permission.sessionId ?? record.conversationId ?? "",
+    conversationId: record.conversationId ?? null,
+    harness: permission.sessionId ? harnessFor(snapshot, permission) : null,
+    context: permission.native?.context ?? shapeAttentionContext(
+      snapshot.invocations?.[permission.invocationId ?? ""]?.task, "task",
+    ),
     sessionName: agentName(snapshot, record.createdById),
-    adapterType: adapterTypeFor(snapshot, permission),
+    adapterType: harnessFor(snapshot, permission) ?? (permission.native ? "native" : "tmux"),
     turnId: null,
     blockId: null,
     version: null,

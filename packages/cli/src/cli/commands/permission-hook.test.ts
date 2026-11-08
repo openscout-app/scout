@@ -64,3 +64,9 @@ describe("scout permission-hook claude", () => {
     }
   });
 });
+
+test("passes transcript_path to the runtime without interpreting it", async () => {
+  const r = runtime([{ skipped: "no_live_session" }]);
+  await handleClaudePermissionHook(JSON.stringify({ ...JSON.parse(hook), transcript_path: "/example/.claude/projects/project/0f10496b.jsonl" }), r.deps);
+  expect(r.posts[0]?.body).toMatchObject({ transcriptPath: "/example/.claude/projects/project/0f10496b.jsonl" });
+});

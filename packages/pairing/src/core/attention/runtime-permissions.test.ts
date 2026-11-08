@@ -28,7 +28,7 @@ function permissionRecord(id: string, overrides: {
     metadata: {
       permissionRequest: overrides.permissionRequest ?? {
         sessionId: "sess-1",
-        projectRoot: "/Users/op/dev/scout-apps",
+        projectRoot: "/workspace/example-project",
         version: "v-1",
         decisions: ["once", "deny"],
         native: {
@@ -62,6 +62,9 @@ describe("queryPermissionInboxItems", () => {
       kind: "permission",
       createdAt: 1_000,
       sessionId: "sess-1",
+      conversationId: null,
+      harness: "claude",
+      context: null,
       sessionName: "Claude",
       adapterType: "claude",
       turnId: null,
@@ -70,7 +73,7 @@ describe("queryPermissionInboxItems", () => {
       risk: "medium",
       title: "Run a command",
       description: "Run a command:\nbun test",
-      detail: "scout-apps",
+      detail: "example-project",
       permission: {
         display: { action: "Run a command", command: "bun test", note: "Run the tests" },
         decisions: ["approve", "deny"],
@@ -83,7 +86,7 @@ describe("queryPermissionInboxItems", () => {
       createdById: "agent.scout.main",
       conversationId: "conv-9",
       summary: "Allow edits to src/a.ts?",
-      permissionRequest: { sessionId: "", projectRoot: "/tmp/proj", version: "v-2", decisions: ["once", "project", "deny"] },
+      permissionRequest: { sessionId: "managed-pane", projectRoot: "/tmp/proj", version: "v-2", decisions: ["once", "project", "deny"] },
     });
     const items = await queryPermissionInboxItems({
       loadBroker: broker([record], undefined, {
@@ -95,7 +98,9 @@ describe("queryPermissionInboxItems", () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       id: "perm-2",
-      sessionId: "conv-9",
+      sessionId: "managed-pane",
+      conversationId: "conv-9",
+      harness: "codex",
       sessionName: "Scout",
       adapterType: "codex",
       title: "Permission request",
@@ -106,14 +111,14 @@ describe("queryPermissionInboxItems", () => {
     expect(items[0]!.permission).not.toHaveProperty("display");
   });
 
-  test("never shows a raw actor id, and falls back to the request id for the session", async () => {
+  test("never shows a raw actor id, and never uses the request id for the session", async () => {
     const record = permissionRecord("perm-3", {
       createdById: "agent.unknown",
       permissionRequest: { version: "v-3", decisions: ["once", "deny"] },
     });
     const [item] = await queryPermissionInboxItems({ loadBroker: broker([record]) });
 
-    expect(item).toMatchObject({ sessionId: "perm-3", sessionName: "Agent", adapterType: "tmux", detail: null });
+    expect(item).toMatchObject({ sessionId: "", conversationId: null, harness: null, sessionName: "Agent", adapterType: "tmux", detail: null });
   });
 
   test("lists only open permission requests, newest first", async () => {
@@ -217,4 +222,16 @@ describe("decideMobilePermission", () => {
       { loadBroker: broker([permissionRecord("perm-1")], closedUrl) },
     )).toMatchObject({ ok: false, code: "unreachable" });
   });
+});
+
+test("native stored context and managed invocation task reach the phone", async () => {
+  const native = permissionRecord("native-context");
+  (native.metadata.permissionRequest.native as Record<string, unknown>).context = { text: "Creating an isolated worktree.", source: "assistant", at: 123 };
+  const managed = permissionRecord("managed-context", { conversationId: "chat", permissionRequest: {
+    sessionId: "tmux-pane", invocationId: "inv-one", version: "v1", decisions: ["once", "deny"],
+  } });
+  const state = { ...snapshot([native, managed]), invocations: { "inv-one": { task: "Earlier paragraph.\n\nRun the focused tests." } } } as unknown as ScoutBrokerSnapshot;
+  const items = await queryPermissionInboxItems({ loadBroker: async () => ({ baseUrl: "http://127.0.0.1:1", snapshot: state }) });
+  expect(items.find(item => item.id === "native-context")).toMatchObject({ sessionId: "sess-1", harness: "claude", context: { text: "Creating an isolated worktree.", source: "assistant", at: 123 } });
+  expect(items.find(item => item.id === "managed-context")).toMatchObject({ sessionId: "tmux-pane", conversationId: "chat", context: { text: "Run the focused tests.", source: "task", at: null } });
 });

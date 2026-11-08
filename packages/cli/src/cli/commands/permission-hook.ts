@@ -27,6 +27,7 @@ type HookInput = {
   cwd?: unknown;
   tool_name?: unknown;
   tool_input?: unknown;
+  transcript_path?: unknown;
 };
 
 type Opened = { requestId?: string; skipped?: string };
@@ -61,6 +62,7 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
     opened = await post<Opened>(scoutBrokerPaths.v1.permissionsNative, {
       harness: "claude", sessionId: input.session_id, cwd: input.cwd,
       toolName: input.tool_name, toolInput: input.tool_input ?? null,
+      ...(typeof input.transcript_path === "string" ? { transcriptPath: input.transcript_path } : {}),
     }, OPEN_TIMEOUT_MS);
   } catch {
     return;

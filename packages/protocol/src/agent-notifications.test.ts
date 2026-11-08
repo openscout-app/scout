@@ -193,3 +193,10 @@ describe("notificationPlainLine", () => {
     expect(cut.length).toBeLessThanOrEqual(30);
   });
 });
+
+test("tool approval why is the lock-screen body, old summary still works", () => {
+  const notification: AgentNotification = { ...base, view: "turn.approve.tool", tool: "EnterWorktree", summary: "target", why: "Creating an isolated workspace." };
+  expect(sealedAgentNotification(notification).lockScreen.body).toBe("Creating an isolated workspace.");
+  expect(collapseAgentNotification({ ...notification, why: undefined }).body).toBe("target");
+  expect((clampAgentNotification({ ...notification, why: "x".repeat(1000) }) as typeof notification).why!.length).toBeLessThanOrEqual(240);
+});
