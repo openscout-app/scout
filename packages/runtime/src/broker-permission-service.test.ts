@@ -327,3 +327,20 @@ describe("requests that outlive their waiter", () => {
     expect(parseTmuxPermission(moved)!.version).not.toBe(parseTmuxPermission(trust)!.version);
   });
 });
+
+test("native raise stores the resolved conversation without replacing the harness session id", async () => {
+  let captured: QuestionRecord | undefined;
+  const service = new BrokerPermissionService({
+    operatorId: "operator", nodeId: "node", createId: () => "permission-native",
+    conversationForSession: sessionId => sessionId === "native-session" ? "chat-one" : null,
+    record: async record => { captured = record; }, read: () => captured, requests: () => [],
+    flight: () => undefined, localInvocation: () => false, reattach: async () => ({ sessionOpen: false }),
+    transition: async () => undefined, notify: () => {},
+  });
+  await service.raise({
+    actorId: "native:claude:native-session", native: { harness: "claude" },
+    prompt: { sessionId: "native-session", projectRoot: "/workspace/project", text: "Use EnterWorktree", version: "v1", decisions: ["once", "deny"], isCurrent: async () => true, answer: async () => {} },
+  });
+  expect(captured?.conversationId).toBe("chat-one");
+  expect(captured?.metadata?.permissionRequest).toMatchObject({ sessionId: "native-session" });
+});

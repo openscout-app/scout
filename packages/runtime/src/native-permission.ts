@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
 import { watch } from "node:fs";
-import { basename, join } from "node:path";
+import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { readClaudePendingToolContext } from "@openscout/agent-sessions";
+import { findClaudeTranscript } from "./tail/claude-source.js";
+import { basename, join, relative, isAbsolute, sep } from "node:path";
 
 import type { AgentNotificationView } from "@openscout/protocol";
 
 import type { BrokerPermissionService } from "./broker-permission-service.js";
 import {
+  claudeTranscriptPathForSession,
   parseClaudeSessionRecord,
   readBoundedClaudeFile,
   readClaudeSessionRecords,
@@ -35,6 +40,7 @@ export type NativePermissionAsk = {
   cwd: string;
   toolName: string;
   toolInput: unknown;
+  transcriptPath?: string;
 };
 
 export type NativePermissionOpened =
@@ -138,15 +144,16 @@ export class NativePermissionRequests {
         if (!taken) throw new Error("The session's hook did not take the decision. Answer it in the session.");
       },
     };
+    const context = await nativePermissionContext(ask, record);
     const actorId = `native:${ask.harness}:${ask.sessionId}`;
     live.id = await this.deps.permissions.raise({
       prompt, actorId,
-      native: { harness: ask.harness, pid: record.pid, tool: ask.toolName, display: nativePermissionDisplay(ask), ...(record.jobId ? { jobId: record.jobId } : {}) },
+      native: { context, harness: ask.harness, pid: record.pid, tool: ask.toolName, display: nativePermissionDisplay(ask), ...(record.jobId ? { jobId: record.jobId } : {}) },
     });
     this.live.set(live.id, live);
     this.renew(live);
     this.watchRegistry();
-    this.deps.notify?.({ requestId: live.id, prompt, actorId, view: nativePermissionView(ask) });
+    this.deps.notify?.({ requestId: live.id, prompt, actorId, view: nativePermissionView(ask, context?.text) });
     return { requestId: live.id };
   }
 
@@ -396,13 +403,13 @@ export function nativePermissionDisplay(ask: Pick<NativePermissionAsk, "toolName
  * command, a file edit, a choice, or a tool with what it is for. Never parsed
  * back from the text.
  */
-export function nativePermissionView(ask: Pick<NativePermissionAsk, "toolName" | "toolInput">): AgentNotificationView {
+export function nativePermissionView(ask: Pick<NativePermissionAsk, "toolName" | "toolInput">, why?: string): AgentNotificationView {
   const display = nativePermissionDisplay(ask);
   if (display.command !== undefined) {
-    return { view: "turn.approve.command", command: display.command, ...(display.note ? { why: display.note } : {}) };
+    return { view: "turn.approve.command", command: display.command, ...(why || display.note ? { why: why ?? display.note } : {}) };
   }
   if ((display.action === "Edit a file" || display.action === "Write a file" || display.action === "Edit a notebook") && display.target) {
-    return { view: "turn.approve.edit", files: [{ path: display.target, added: 0, removed: 0 }] };
+    return { view: "turn.approve.edit", files: [{ path: display.target, added: 0, removed: 0 }], ...(why ? { summary: why } : {}) };
   }
   const first = display.questions?.[0];
   if (first) {
@@ -413,7 +420,7 @@ export function nativePermissionView(ask: Pick<NativePermissionAsk, "toolName" |
   }
   const field = display.fields?.[0];
   const summary = display.target ?? display.note ?? (field ? `${field.key}: ${field.value}` : undefined);
-  return { view: "turn.approve.tool", tool: toolLabel(ask.toolName), ...(summary ? { summary } : {}) };
+  return { view: "turn.approve.tool", tool: toolLabel(ask.toolName), ...(why ? { why } : {}), ...(summary ? { summary } : {}) };
 }
 
 /** What the board shows as text: what the session wants to do, as Claude Code's dialog says it. */
@@ -436,4 +443,26 @@ export function describeNativePermission(ask: Pick<NativePermissionAsk, "toolNam
     for (const { key, value } of display.fields ?? []) lines.push(`${key}: ${value}`);
   }
   return clip(lines.join("\n"), MAX_TEXT);
+}
+
+/** Validate the hook path physically too: symlinks must not escape projects. */
+export async function nativePermissionContext(ask: NativePermissionAsk, record: Pick<ClaudeSessionRecord, "cwd">, projectsRoot = join(homedir(), ".claude", "projects")) {
+  let hookPath: string | null = null;
+  if (typeof ask.transcriptPath === "string" && basename(ask.transcriptPath) === `${ask.sessionId}.jsonl`) {
+    try {
+      const root = await realpath(projectsRoot);
+      const candidate = await realpath(ask.transcriptPath);
+      const rel = relative(root, candidate);
+      if (rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+        && basename(candidate) === `${ask.sessionId}.jsonl`) hookPath = candidate;
+    } catch { /* Missing/invalid hook path: use registry cwd, never ask.cwd. */ }
+  }
+  const paths = [hookPath, record.cwd ? claudeTranscriptPathForSession(record.cwd, ask.sessionId) : null];
+  for (const path of paths) {
+    if (!path) continue;
+    const context = await readClaudePendingToolContext(path, ask.toolName);
+    if (context) return context;
+  }
+  const discovered = findClaudeTranscript(ask.sessionId);
+  return discovered ? readClaudePendingToolContext(discovered.transcriptPath, ask.toolName) : null;
 }

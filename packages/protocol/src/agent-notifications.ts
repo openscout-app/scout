@@ -45,7 +45,7 @@ export type AgentNotificationArtifact = {
 export type AgentNotificationView =
   | { view: "turn.approve.command"; command: string; cwd?: string; risk?: AgentNotificationRisk; why?: string }
   | { view: "turn.approve.edit"; summary?: string; files: AgentNotificationFileChange[]; risk?: AgentNotificationRisk }
-  | { view: "turn.approve.tool"; tool: string; summary?: string; risk?: AgentNotificationRisk }
+  | { view: "turn.approve.tool"; tool: string; why?: string; summary?: string; risk?: AgentNotificationRisk }
   | { view: "turn.question.choice"; question: string; context?: string; options: string[]; multiSelect?: boolean }
   | { view: "turn.question.open"; question: string; context?: string }
   | { view: "turn.failed"; error: string; excerpt?: string[]; elapsed?: string }
@@ -183,7 +183,7 @@ function aboutText(n: AgentNotification): string {
   switch (n.view) {
     case "turn.approve.command": return notificationPlainLine(n.why) || notificationPlainLine(n.command);
     case "turn.approve.edit": return notificationPlainLine(n.summary) || notificationPlainLine(n.files.map((f) => f.path).join(", "));
-    case "turn.approve.tool": return notificationPlainLine(n.summary);
+    case "turn.approve.tool": return notificationPlainLine(n.why) || notificationPlainLine(n.summary);
     case "turn.question.choice": return notificationPlainLine(n.question);
     case "turn.question.open": return notificationPlainLine(n.question);
     case "turn.failed": return notificationPlainLine(n.error);
@@ -356,7 +356,7 @@ export function clampAgentNotification(n: AgentNotification): AgentNotification 
     case "turn.approve.edit":
       return { ...base, files: base.files.slice(0, 8).map((f) => ({ ...f, path: clip(f.path, 160) })), ...(base.summary ? { summary: clip(base.summary, 300) } : {}) };
     case "turn.approve.tool":
-      return { ...base, tool: clip(base.tool, 80), ...(base.summary ? { summary: clip(base.summary, 300) } : {}) };
+      return { ...base, tool: clip(base.tool, 80), ...(base.why ? { why: clip(base.why, 240) } : {}), ...(base.summary ? { summary: clip(base.summary, 300) } : {}) };
     case "turn.question.choice":
       return { ...base, question: clip(base.question, 400), options: base.options.slice(0, 6).map((o) => clip(o, 60)), ...(base.context ? { context: clip(base.context, 300) } : {}) };
     case "turn.question.open":

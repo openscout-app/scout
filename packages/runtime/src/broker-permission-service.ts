@@ -18,6 +18,7 @@ export class BrokerPermissionService {
   private readonly adopting = new Map<string, Promise<Pending>>();
   private reconciling?: Promise<{ adopted: string[]; closed: string[]; failed: string[] }>;
   constructor(private readonly deps: {
+    conversationForSession?: (sessionId: string) => string | null;
     operatorId: string;
     nodeId: string;
     createId: () => string;
@@ -81,11 +82,13 @@ export class BrokerPermissionService {
    */
   async raise(input: { prompt: ManagedPermissionPrompt; actorId: string; native: Record<string, unknown> }): Promise<string> {
     const { prompt } = input;
+    const conversationId = this.deps.conversationForSession?.(prompt.sessionId) ?? null;
     const id = this.deps.createId();
     const record: QuestionRecord = {
       id, kind: "question", state: "open", acceptanceState: "none",
       title: "Permission request", summary: prompt.text,
       createdById: input.actorId, askedById: input.actorId,
+      ...(conversationId ? { conversationId } : {}),
       ownerId: this.deps.operatorId, nextMoveOwnerId: this.deps.operatorId,
       createdAt: Date.now(), updatedAt: Date.now(),
       metadata: { permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,

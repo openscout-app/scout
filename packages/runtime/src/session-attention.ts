@@ -1,3 +1,4 @@
+import { attentionContextBeforeBlock, type AttentionContext } from "@openscout/agent-sessions";
 import { normalizeApprovalRequest } from "@openscout/agent-sessions/protocol/approval-normalization";
 import type {
   ActionBlock,
@@ -34,6 +35,7 @@ export type SessionAttentionItem = {
   sourceLabel: string;
   actionKind?: ActionBlock["action"]["kind"];
   approval?: NormalizedApprovalRequest;
+  context?: AttentionContext | null;
 };
 
 export type ProjectSessionAttentionOptions = {
@@ -202,6 +204,7 @@ function questionAttentionItem(
   return {
     id: `session-question:${snapshot.session.id}:${turn.id}:${block.id}`,
     kind: "question",
+    context: attentionContextBeforeBlock(turn, block.id),
     title: block.header?.trim() || "Session needs input",
     summary: compactAttentionSummary(block.question),
     detail: options ? `Options: ${options}` : null,
@@ -231,6 +234,7 @@ function approvalAttentionItem(
       approval.version,
     ),
     kind: "approval",
+    context: attentionContextBeforeBlock(turn, approval.blockId),
     title: approval.title,
     summary: compactAttentionSummary(approval.description),
     detail: approval.detail,

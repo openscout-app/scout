@@ -12,6 +12,7 @@
  *   - passive: failures, consults, updates, and inferred attention.
  */
 
+import { attentionContextBeforeBlock } from "@openscout/agent-sessions";
 import { hostname as osHostname } from "node:os";
 import { basename } from "node:path";
 
@@ -104,7 +105,8 @@ function approvalView(
 ): AgentNotificationView {
   const action = block.action;
   const risk = action.approval?.risk ?? item.risk;
-  const why = action.approval?.description?.trim() || undefined;
+  const turn = snapshot?.turns.find(turn => turn.blocks.some(entry => entry.block.id === block.id));
+  const why = (turn ? attentionContextBeforeBlock(turn, block.id)?.text : null) ?? (action.approval?.description?.trim() || undefined);
   switch (action.kind) {
     case "command":
       return {
@@ -119,7 +121,7 @@ function approvalView(
       return { view: "turn.approve.edit", files: [file], risk, ...(why ? { summary: why } : {}) };
     }
     case "tool_call":
-      return { view: "turn.approve.tool", tool: action.toolName, risk, ...(why ? { summary: why } : {}) };
+      return { view: "turn.approve.tool", tool: action.toolName, risk, ...(why ? { why, summary: why } : {}) };
     case "subagent":
       return {
         view: "turn.approve.tool",

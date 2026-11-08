@@ -15,6 +15,8 @@ import { hostname as osHostname } from "node:os";
 import { initTRPC, tracked, TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
+  attentionContextBeforeBlock,
+  type AttentionContext,
   createHistorySessionSnapshot,
   inferHistorySessionAdapterType,
   isSessionRegistryError,
@@ -27,6 +29,7 @@ import {
   type SessionState,
 } from "@openscout/agent-sessions";
 import {
+  conversationIdForSession,
   projectSessionAttention,
   type NativePermissionDisplay,
   type SessionAttentionItem,
@@ -677,6 +680,12 @@ export type MobileInboxItem = {
   kind: MobileInboxItemKind;
   createdAt: number;
   sessionId: string;
+  /** Scout chat navigation; never substitute a native harness id here. */
+  conversationId?: string | null;
+  /** Set for harness session ids; sessionId stays intact for deduplication. */
+  harness?: string | null;
+  /** Observed words before the request, not a generated explanation. */
+  context?: AttentionContext | null;
   sessionName: string;
   adapterType: string;
   turnId: string | null;
@@ -723,6 +732,9 @@ function projectApprovalInboxItem(
     kind: "approval",
     createdAt: turn.startedAt,
     sessionId: normalized.sessionId,
+    conversationId: null,
+    harness: normalized.adapterType,
+    context: attentionContextBeforeBlock(turn, block.id),
     sessionName: normalized.sessionName,
     adapterType: normalized.adapterType,
     turnId: normalized.turnId,
@@ -757,6 +769,9 @@ function mobileInboxItemFromSessionAttention(item: SessionAttentionItem): Mobile
     kind: item.kind,
     createdAt: item.updatedAt,
     sessionId: item.sessionId,
+    conversationId: null,
+    harness: item.adapterType,
+    context: item.context ?? null,
     sessionName: item.sessionName,
     adapterType: item.adapterType,
     turnId: item.turnId,
@@ -883,6 +898,8 @@ async function queryOperatorNeedInboxItems(): Promise<MobileInboxItem[]> {
       kind: "ask" as const,
       createdAt: need.createdAt,
       sessionId: need.conversationId,
+      conversationId: need.conversationId,
+      harness: null,
       sessionName: name,
       adapterType: "agent",
       turnId: null,
@@ -912,6 +929,7 @@ async function queryHerdrInboxItems(): Promise<MobileInboxItem[]> {
     sessionId: item.sessionId,
     sessionName: item.sessionName,
     adapterType: item.harness,
+    harness: item.harness,
     turnId: null,
     blockId: null,
     version: item.version,
@@ -1081,10 +1099,11 @@ const mobileRouter = t.router({
 
   inbox: procedure
     .query(async ({ ctx }) => {
-      const [needs, permissions, herdr] = await Promise.all([
+      const [needs, permissions, herdr, broker] = await Promise.all([
         queryOperatorNeedInboxItems(),
         queryPermissionInboxItems(),
         queryHerdrInboxItems(),
+        loadScoutBrokerContext(undefined, { scope: "conversations", signal: AbortSignal.timeout(2_000) }).catch(() => null),
       ]);
       // A session the runtime holds a permission request for is answered
       // there; its Herdr pane would only repeat the same prompt.
@@ -1095,7 +1114,10 @@ const mobileRouter = t.router({
           ...permissions,
           ...herdr.filter((item) => !permissionSessions.has(item.sessionId)),
           ...queryMobileInboxItems(ctx.bridge),
-        ],
+        ].map(item => ({
+          ...item,
+          conversationId: item.conversationId ?? (broker ? conversationIdForSession(broker.snapshot, item.sessionId) : null),
+        })),
       };
     }),
 

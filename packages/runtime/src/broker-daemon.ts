@@ -1,5 +1,8 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { shapeAttentionContext } from "@openscout/agent-sessions";
+import { permissionDialogView } from "./agent-notification-builders.js";
+import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskService } from "./broker-tasks.js";
 import { SCOUT_TASKS_CAPABILITY, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
@@ -3044,6 +3047,7 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
 });
 
 const permissionService = new BrokerPermissionService({
+  conversationForSession: sessionId => conversationIdForSession(runtime.snapshot(), sessionId),
   operatorId: operatorActorId,
   nodeId,
   createId: () => createRuntimeId("permission"),
@@ -3066,7 +3070,14 @@ const permissionService = new BrokerPermissionService({
   // and rings as a permission request, and a tap opens the request.
   notify: (invocation, record, prompt) => {
     const flightId = runtime.flightForInvocation(invocation.id)?.id;
+    const context = shapeAttentionContext(invocation.task, "task");
+    const view = permissionDialogView(prompt.text);
+    if (context) {
+      if (view.view === "turn.approve.command" || view.view === "turn.approve.tool") view.why = context.text;
+      if (view.view === "turn.approve.edit") view.summary = context.text;
+    }
     operatorAttentionService.queuePermissionRequest({
+      view,
       requestId: record.id, text: prompt.text, agentId: invocation.targetAgentId, requesterNodeId: nodeId,
       projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: record.createdAt,
       ...(invocation.conversationId ? { conversationId: invocation.conversationId } : {}),
