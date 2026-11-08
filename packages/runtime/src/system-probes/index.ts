@@ -9,6 +9,7 @@ export * from "./git.js";
 export * from "./tmux.js";
 export * from "./herdr.js";
 export * from "./ps.js";
+export * from "./terminal-clients.js";
 export * from "./net-listeners.js";
 export * from "./sessions.js";
 export * from "./cert-status.js";
