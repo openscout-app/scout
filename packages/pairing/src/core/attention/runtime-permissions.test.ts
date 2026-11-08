@@ -178,9 +178,9 @@ describe("decideMobilePermission", () => {
 
   test.each([
     { status: 410, body: { error: "Permission request is already settled.", outcome: "ended", sessionOpen: false }, code: "ended", message: "The session isn't waiting on this anymore." },
-    { status: 409, body: { error: "Permission request changed. Refresh.", outcome: "refused" }, code: "refused", message: "Someone already answered this." },
+    { status: 409, body: { error: "Permission request changed. Refresh.", outcome: "refused" }, code: "refused", message: "It was answered elsewhere or changed. Refresh and look again." },
     { status: 502, body: { error: "hook did not take it", outcome: "unconfirmed" }, code: "unconfirmed", message: "The decision may not have reached the session. Check it there." },
-    { status: 403, body: { error: "forbidden", detail: "route is machine-local" }, code: "refused", message: "Someone already answered this." },
+    { status: 403, body: { error: "forbidden", detail: "route is machine-local" }, code: "refused", message: "It was answered elsewhere or changed. Refresh and look again." },
     { status: 500, body: "boom", code: "unconfirmed", message: "The decision may not have reached the session. Check it there." },
   ])("HTTP $status is $code", async ({ status, body, code, message }) => {
     reply = { status, body };

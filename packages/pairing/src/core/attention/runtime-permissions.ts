@@ -39,7 +39,7 @@ export type RuntimePermissionDeps = {
 const READ_TIMEOUT_MS = 2_000;
 
 const MESSAGES = {
-  refused: "Someone already answered this.",
+  refused: "It was answered elsewhere or changed. Refresh and look again.",
   unconfirmed: "The decision may not have reached the session. Check it there.",
   ended: "The session isn't waiting on this anymore.",
   unreachable: "Couldn't reach the runtime.",
