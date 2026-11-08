@@ -15,6 +15,7 @@ import type { HerdrPaneProjection } from "@openscout/protocol";
 import {
   appendContinuationAudit,
   claimContinuationActuation,
+  releaseContinuationActuation,
   type ContinuationDialog,
   type ContinuationDialogOption,
 } from "@openscout/runtime";
@@ -41,6 +42,7 @@ export type HerdrPermissionAnswerDeps = {
   sendKeys?: (session: string, target: string, keys: readonly string[]) => Promise<void>;
   audit?: typeof appendContinuationAudit;
   claim?: (key: string, ttlMs: number) => boolean;
+  release?: (key: string) => void;
 };
 
 const PREFIX = "herdr-permission:";
@@ -87,7 +89,10 @@ export async function answerHerdrPermission(
   // The same claim as continuation excludes competing claim acquisitions for
   // a 30-second window, not indefinitely. It does not verify a prompt answer.
   const claimKey = `${session}:${pane.terminalId ?? pane.paneId}:${dialog.command ?? ""}`;
-  if (!(deps.claim ?? claimContinuationActuation)(claimKey, CLAIM_TTL_MS)) {
+  // Plus the dialog's fingerprint: herdr's visible read often cuts off the
+  // command, so the parsed command alone can't tell one prompt from the next.
+  const claimId = `${claimKey}:${input.version}`;
+  if (!(deps.claim ?? claimContinuationActuation)(claimId, CLAIM_TTL_MS)) {
     try { record("claimed-elsewhere"); } catch { /* nothing was sent */ }
     return { ok: false, code: "claimed", message: "Something else is answering this prompt right now." };
   }
@@ -98,10 +103,15 @@ export async function answerHerdrPermission(
   } catch {
     return { ok: false, code: "send_failed", message: "Couldn't write the audit record, so nothing was sent." };
   }
+  // herdr's agent commands take the pane id; a terminal id is "agent_not_found".
   try {
-    await (deps.sendKeys ?? sendHerdrKeys)(session, pane.terminalId ?? pane.paneId, keys);
+    await (deps.sendKeys ?? sendHerdrKeys)(session, pane.paneId, keys);
   } catch {
     try { record("failed"); } catch { /* the attempt row already stands */ }
+    // Give the claim back so the operator's next tap is answered, not refused
+    // as "something else is answering". That tap reads the pane again and
+    // presses only if this same dialog is still up.
+    try { (deps.release ?? releaseContinuationActuation)(claimId); } catch { /* it expires on its own */ }
     return { ok: false, code: "send_failed", message: `Couldn't press the key in ${location}.` };
   }
   try { record("sent"); } catch { /* the attempt row already stands */ }
