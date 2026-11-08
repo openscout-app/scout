@@ -1684,6 +1684,72 @@ describe("Harness-native transcript metadata", () => {
     expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("Named");
   });
 
+  const writeClaudeTitles = (sessionId: string, titles: Record<string, unknown>[]) => {
+    const project = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-tmp-title-parts");
+    mkdirSync(project, { recursive: true });
+    const records = [
+      { type: "user", sessionId, cwd: "/tmp/title-parts", timestamp: new Date().toISOString(), message: { content: "hello" } },
+      ...titles,
+    ];
+    writeFileSync(join(project, `${sessionId}.jsonl`), records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  };
+  const discoveredClaude = async (sessionId: string) =>
+    (await ClaudeSource.discoverTranscripts([])).find((t) => t.sessionId === sessionId);
+
+  test("Claude discovery reports each title kind beside the merged title", async () => {
+    writeClaudeTitles("all-titles", [
+      { type: "ai-title", aiTitle: "Old AI summary" },
+      { type: "custom-title", customTitle: "Old custom name" },
+      { type: "agent-name", agentName: "  Docs helper  " },
+      { type: "custom-title", customTitle: " Release prep " },
+      { type: "ai-title", aiTitle: "Fix the release checklist" },
+    ]);
+    expect(await discoveredClaude("all-titles")).toMatchObject({
+      title: "Release prep",
+      customTitle: "Release prep",
+      agentName: "Docs helper",
+      aiTitle: "Fix the release checklist",
+    });
+  });
+
+  test("Claude discovery with only an AI title reports the other kinds as null", async () => {
+    writeClaudeTitles("ai-only", [{ type: "ai-title", aiTitle: "Summarize the build logs" }]);
+    expect(await discoveredClaude("ai-only")).toMatchObject({
+      title: "Summarize the build logs",
+      customTitle: null,
+      agentName: null,
+      aiTitle: "Summarize the build logs",
+    });
+  });
+
+  test("Claude discovery keeps a relay-made custom title as the merged title and exposes Claude's own", async () => {
+    const relayName = "relay-0b9e2f4a-5c1d-4e7f-8a3b-6d2c1e0f9a8b";
+    writeClaudeTitles("relay-named", [
+      { type: "ai-title", aiTitle: "Review the cache layer" },
+      { type: "agent-name", agentName: "Cache reviewer" },
+      { type: "custom-title", customTitle: relayName },
+    ]);
+    expect(await discoveredClaude("relay-named")).toMatchObject({
+      title: relayName,
+      customTitle: relayName,
+      agentName: "Cache reviewer",
+      aiTitle: "Review the cache layer",
+    });
+  });
+
+  test("Claude discovery reads a blank title as null", async () => {
+    writeClaudeTitles("blank-custom", [
+      { type: "custom-title", customTitle: "   " },
+      { type: "ai-title", aiTitle: "Draft the changelog" },
+    ]);
+    expect(await discoveredClaude("blank-custom")).toMatchObject({
+      title: "Draft the changelog",
+      customTitle: null,
+      agentName: null,
+      aiTitle: "Draft the changelog",
+    });
+  });
+
   test("Codex index uses the newest entry and tolerates partial lines", async () => {
     const root = process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT!;
     mkdirSync(root, { recursive: true });
@@ -1757,5 +1823,5 @@ test("title metadata reads the bounded tail and retains titles as appends push t
   ].join("\n") + "\n");
   expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("From tail");
   appendFileSync(path, JSON.stringify({ type: "padding", value: "x".repeat(600_000) }) + "\n");
-  expect((await ClaudeSource.discoverTranscripts([]))[0]?.title).toBe("From tail");
+  expect((await ClaudeSource.discoverTranscripts([]))[0]).toMatchObject({ title: "From tail", customTitle: "From tail", aiTitle: null });
 });
