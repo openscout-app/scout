@@ -3083,9 +3083,9 @@ const nativePermissions = new NativePermissionRequests({
   permissions: permissionService,
   launchedByScout: async (record) => isScoutBackgroundCopy(record)
     || Boolean(record.tmux?.session && (await listScoutLaunchedTmuxSessions()).has(record.tmux.session)),
-  notify: ({ requestId, prompt, actorId }) => {
+  notify: ({ requestId, prompt, actorId, view }) => {
     operatorAttentionService.queuePermissionRequest({
-      requestId, text: prompt.text, agentId: actorId, requesterNodeId: nodeId,
+      requestId, text: prompt.text, view, agentId: actorId, requesterNodeId: nodeId,
       projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: Date.now(),
     });
   },

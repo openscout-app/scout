@@ -3,7 +3,7 @@ import { assertValidCollaborationRecord, type QuestionRecord } from "@openscout/
 
 import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import type { ClaudeSessionRecord } from "./claude-session-records.js";
-import { describeNativePermission, nativePermissionDisplay, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
+import { describeNativePermission, nativePermissionDisplay, nativePermissionView, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
 
 function session(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
   return {
@@ -189,6 +189,20 @@ describe("native session permission requests", () => {
     });
     // No question in it: shown as its fields, like any other tool.
     expect(nativePermissionDisplay({ toolName: "AskUserQuestion", toolInput: { questions: [] } })).toEqual({ action: "Use AskUserQuestion" });
+  });
+
+  test("the lock screen gets a view from the display, never a parse of the text", () => {
+    expect(nativePermissionView(ask)).toEqual({ view: "turn.approve.command", command: "rm -rf dist", why: "Remove the build output" });
+    expect(nativePermissionView({ toolName: "Edit", toolInput: { file_path: "/tmp/a.ts" } }))
+      .toEqual({ view: "turn.approve.edit", files: [{ path: "/tmp/a.ts", added: 0, removed: 0 }] });
+    expect(nativePermissionView(question)).toEqual({
+      view: "turn.question.choice", question: "Which of these should I delete?", context: "Delete",
+      options: ["Old build scratch (1.4G)", "Old screenshots (494M)"],
+    });
+    expect(nativePermissionView({ toolName: "WebFetch", toolInput: { url: "https://example.com" } }))
+      .toEqual({ view: "turn.approve.tool", tool: "WebFetch", summary: "https://example.com" });
+    expect(nativePermissionView({ toolName: "mcp__scout__ask", toolInput: { to: "a" } }))
+      .toEqual({ view: "turn.approve.tool", tool: "ask from scout", summary: "to: a" });
   });
 
   test("the request carries the display laid out, bounded", async () => {

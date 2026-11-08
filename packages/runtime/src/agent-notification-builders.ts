@@ -301,9 +301,11 @@ export function agentNotificationForPermissionRequest(input: {
   conversationId?: string | null;
   messageId?: string | null;
   sessionId?: string | null;
+  /** Known as data (a native hook): used as is, and `text` is not parsed. */
+  view?: AgentNotificationView;
 }): AgentNotification {
   return {
-    ...permissionDialogView(input.text),
+    ...(input.view ?? permissionDialogView(input.text)),
     v: AGENT_NOTIFICATION_VERSION,
     itemId: input.requestId,
     sender: { name: input.agentName, agentId: input.agentId },
