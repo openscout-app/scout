@@ -2270,6 +2270,21 @@ export function resolveScoutCliInvocation(): string | null {
   return null;
 }
 
+/**
+ * The CLI that ships with this runtime, for a hook that calls the runtime's
+ * own routes: a checkout's CLI comes before a global `scout`, which can be an
+ * older release that lacks the hook's command. An installed package has no
+ * source entry, and its global `scout` is the same release.
+ */
+export function resolveRuntimeScoutCliInvocation(): string | null {
+  const explicit = normalizeOptionalString(process.env.OPENSCOUT_SCOUT_COMMAND);
+  if (explicit) return explicit;
+  const sourceEntry = resolveScoutCliSourceEntry();
+  const bun = sourceEntry ? resolveBunExecutable() : null;
+  if (sourceEntry && bun) return `${shellQuote(bun)} ${shellQuote(sourceEntry)}`;
+  return resolveScoutCliInvocation();
+}
+
 /** packages/cli/src/main.ts beside this runtime, from either src/ or a built dist/. */
 function resolveScoutCliSourceEntry(): string | null {
   const here = dirname(fileURLToPath(import.meta.url));

@@ -217,7 +217,7 @@ import {
   startMeshRendezvousPublisher,
   type MeshRendezvousPublisher,
 } from "./mesh-rendezvous.js";
-import { clearGitBranchCache, readRelayAgentOverrides, resolveScoutCliInvocation, writeRelayAgentOverrides } from "./setup.js";
+import { clearGitBranchCache, readRelayAgentOverrides, resolveRuntimeScoutCliInvocation, writeRelayAgentOverrides } from "./setup.js";
 import { HarnessHooks } from "./harness-hooks.js";
 import { broadcastApnsAlertToActiveMobileDevices } from "./mobile-push.js";
 import {
@@ -3417,7 +3417,7 @@ const routeRequest = createBrokerHttpRouter({
   }),
   permissionService,
   nativePermissions,
-  harnessHooks: new HarnessHooks({ scoutInvocation: resolveScoutCliInvocation }),
+  harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
     supportDirectory,
     lifecycle: async (action, phase) => {
