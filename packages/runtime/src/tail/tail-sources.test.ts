@@ -102,6 +102,28 @@ afterEach(() => {
 });
 
 describe("tail transcript sources", () => {
+  test.each([0, 300_000])("refreshes a header-only Claude transcript with a later cwd (header bytes %i)", (padding) => {
+    const cwd = "/example/worktrees/my-project";
+    const projectDir = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, cwd.replace(/\//g, "-"));
+    mkdirSync(projectDir, { recursive: true });
+    const path = join(projectDir, "late-cwd.jsonl");
+    writeFileSync(path, JSON.stringify({ type: "last-prompt", lastPrompt: "x".repeat(padding) }) + "\n");
+    const early = ClaudeSource.discoverTranscripts([])[0]!;
+    expect(early.cwd).toBeNull();
+
+    const record = { type: "user", cwd, sessionId: "late-cwd", timestamp: "2026-04-27T15:00:00Z", message: { content: "hello" } };
+    appendFileSync(path, JSON.stringify(record) + "\n");
+    // A running watcher learns cwd without waiting for rediscovery.
+    const event = ClaudeSource.parseLine(JSON.stringify(record), makeContext("claude", early));
+    expect(event?.cwd).toBe(cwd);
+    expect(early.cwd).toBe(cwd);
+    expect(ClaudeSource.discoverTranscripts([])[0]?.cwd).toBe(cwd);
+    // Keep learned metadata after it has aged out of both bounded reads.
+    appendFileSync(path, JSON.stringify({ type: "last-prompt", lastPrompt: "x".repeat(600_000) }) + "\n");
+    expect(ClaudeSource.discoverTranscripts([])[0]?.cwd).toBe(cwd);
+  });
+
+
   test("discovers and parses Claude transcript files without process discovery", () => {
     const projectDir = join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-Users-arach-dev-openscout");
     mkdirSync(projectDir, { recursive: true });

@@ -22,6 +22,22 @@ afterEach(() => {
 });
 
 describe("locateHarnessSession", () => {
+  test("does not assign Claude a nonexistent decoded cwd", () => {
+    const root = makeRoot("claude-slug");
+    const dir = join(root, "-example-worktrees-my-project");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "late-cwd.jsonl"), JSON.stringify({ type: "last-prompt" }) + "\n");
+    const result = locateHarnessSession({
+      nativeSessionId: "late-cwd",
+      harness: "claude",
+      claudeProjectsRoot: root,
+      codexSessionsRoot: makeRoot("codex-empty"),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.session.cwd).toBe("");
+  });
+
+
   test("finds a Codex rollout by session id and cwd", () => {
     const codexRoot = makeRoot("codex-sessions");
     const day = join(codexRoot, "2026", "08", "03");
