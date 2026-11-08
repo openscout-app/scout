@@ -1,6 +1,6 @@
 import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
-import { parseRosterAddress, SCOUT_TASK_CALLBACKS, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
+import { parseRosterAddress, SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
@@ -4469,7 +4469,9 @@ export function createScoutMcpServer(options: {
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),
         defaultAction: z.string().min(1).optional(), options: z.array(z.string().min(1)).optional(),
         permission: z.boolean().optional(), because: z.string().min(1).optional(), window: z.number().positive().optional(),
-        callback: z.enum(SCOUT_TASK_CALLBACKS).optional().describe("A function the runtime on the worker's host runs when the task completes. open: opens the first existing html, pdf or image file that the final reply names by absolute path or file:// URL. New tasks only."),
+        callback: z.object({
+          code: z.string().min(1).max(SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH).describe("The source of a JavaScript function, e.g. ({ result, scout }) => scout.open(result.files[0])"),
+        }).strict().optional().describe("JavaScript the runtime on the worker's host runs when the task ends, in a sandbox with no file, process or network access. The function gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only."),
         image: z.string().optional().describe("Local image path."),
         completion: completionRequestSchema.optional().describe("Require an explicit final reply; exact local id or session targets only, with a stable requestId."),
         relation: completionRelationSchema.optional().describe("Join child work or continue a parent flight; requires a stable requestId."),

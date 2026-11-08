@@ -1682,8 +1682,8 @@ describe("two-verb acceptance", () => {
   test("an agent task stores its closing step on the invocation", async () => {
     const h = createHarness();
     await h.service.accept({ requestId: "callback", intent: "consult", body: "Write the study", requesterId: "operator",
-      task: { version: 1, callback: "open" }, target: { kind: "agent_id", agentId: "agent-1" } });
-    expect(h.acceptedInvocations[0]).toMatchObject({ metadata: { taskVersion: 1, callback: "open" } });
+      task: { version: 1, callback: { code: "() => {}" } }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(h.acceptedInvocations[0]).toMatchObject({ metadata: { taskVersion: 1, callback: { code: "() => {}" } } });
     const plain = createHarness();
     await plain.service.accept({ requestId: "plain", intent: "consult", body: "Write the study", requesterId: "operator",
       task: { version: 1 }, target: { kind: "agent_id", agentId: "agent-1" } });

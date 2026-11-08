@@ -17,15 +17,21 @@ export type ScoutTaskAsk = {
   permission?: boolean;
   because?: string;
   /**
-   * A named function the runtime on the worker's host runs when the task
-   * completes. `open` opens the html, pdf or image file that the final reply
-   * names by absolute path. The worker's agent does not run it.
+   * JavaScript that the runtime on the worker's host runs when the task ends.
+   * It is not part of the worker's prompt. See {@link ScoutTaskCallback}.
    */
   callback?: ScoutTaskCallback;
 };
-/** The functions `ask --callback` can name. */
-export const SCOUT_TASK_CALLBACKS = ["open"] as const;
-export type ScoutTaskCallback = typeof SCOUT_TASK_CALLBACKS[number];
+/**
+ * `ask --callback`: the source of a JavaScript function, called with
+ * `{ result, scout }` when the task ends. `result` holds `taskId`, `state`
+ * (completed, failed or cancelled), `reply` (the final reply text) and `files`
+ * (existing files the reply names by absolute path). It runs in a sandbox with
+ * no file, process or network access; `scout.open(path)` opens an html, pdf or
+ * image file on that host, and `console.log` writes to the runtime log.
+ */
+export type ScoutTaskCallback = { code: string };
+export const SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH = 16_000;
 export type ScoutTaskReply = {
   requestId: string;
   senderId: string;
@@ -60,7 +66,7 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   if ((task.permission || task.because) && !task.operator) throw new Error("--permission and --because require --operator");
   if (route.channel && !task.fyi) throw new Error("--channel requires --fyi until task ownership for channels is defined");
   if (task.window !== undefined && (!task.defaultAction || !task.operator || task.fyi || !Number.isFinite(task.window) || task.window <= 0)) throw new Error("--window requires --default-action and a positive number of seconds");
-  if (task.callback !== undefined && !(SCOUT_TASK_CALLBACKS as readonly string[]).includes(task.callback)) throw new Error(`--callback takes one of: ${SCOUT_TASK_CALLBACKS.join(", ")}`);
+  if (task.callback !== undefined && (typeof task.callback?.code !== "string" || !task.callback.code.trim() || task.callback.code.length > SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH)) throw new Error(`--callback takes the source of a JavaScript function, up to ${SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH} characters`);
   if (task.callback !== undefined && (task.fyi || task.ref || task.cancel || task.operator || route.channel)) throw new Error("--callback belongs to a new task an agent carries out; it cannot be combined with --fyi, --ref, --cancel, --operator or --channel");
 }
 export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed">): void {

@@ -833,25 +833,34 @@ describe("explicit completion ask options", () => {
 });
 
 describe("ask --callback", () => {
-  test("keeps the command on the task, out of the message", () => {
+  const code = "({ result, scout }) => scout.open(result.files[0])";
+  test("keeps the function on the task, out of the message", () => {
     expect(parseAskCommandOptions([
-      "--to", "researcher", "--callback", "open", "Write the study",
+      "--to", "researcher", "--callback", code, "Write the study",
     ], "/tmp")).toMatchObject({
-      task: { version: 1, callback: "open" }, targetLabel: "researcher", message: "Write the study",
+      task: { version: 1, callback: { code } }, targetLabel: "researcher", message: "Write the study",
     });
-    expect(parseAskCommandOptions(["--project", ".", "--callback=open", "Run the suite"], "/tmp"))
-      .toMatchObject({ task: { callback: "open" }, message: "Run the suite" });
+    expect(parseAskCommandOptions(["--project", ".", `--callback=${code}`, "Run the suite"], "/tmp"))
+      .toMatchObject({ task: { callback: { code } }, message: "Run the suite" });
   });
 
-  test("refuses an empty, unknown, repeated or misplaced callback", () => {
-    expect(() => parseAskCommandOptions(["--to", "a", "--callback", 'open "$SCOUT_LINK"', "hi"], "/tmp"))
-      .toThrow("--callback takes one of: open");
+  test("a callback file is resolved now and read when the ask is sent", () => {
+    const parsed = parseAskCommandOptions(["--to", "researcher", "--callback-file", "then.js", "Write the study"], "/tmp/work");
+    expect(parsed).toMatchObject({ callbackFile: "/tmp/work/then.js", message: "Write the study" });
+    expect(parsed.task).not.toHaveProperty("callback");
+  });
+
+  test("refuses an empty, repeated or misplaced callback", () => {
     expect(() => parseAskCommandOptions(["--to", "a", "--callback", "", "hi"], "/tmp")).toThrow();
-    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "open", "--callback", "open", "hi"], "/tmp"))
-      .toThrow("only once");
-    expect(() => parseAskCommandOptions(["--ref", "task-1", "--callback", "open", "hi"], "/tmp"))
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", code, "--callback", code, "hi"], "/tmp"))
+      .toThrow("give one callback");
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", code, "--callback-file", "then.js", "hi"], "/tmp"))
+      .toThrow("give one callback");
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "x".repeat(16_001), "hi"], "/tmp"))
+      .toThrow("up to 16000 characters");
+    expect(() => parseAskCommandOptions(["--ref", "task-1", "--callback", code, "hi"], "/tmp"))
       .toThrow("--callback belongs");
-    expect(() => parseAskCommandOptions(["--operator", "--callback", "open", "hi"], "/tmp"))
+    expect(() => parseAskCommandOptions(["--operator", "--callback-file", "then.js", "hi"], "/tmp"))
       .toThrow("--callback belongs");
   });
 });

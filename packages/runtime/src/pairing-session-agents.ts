@@ -10,7 +10,6 @@ import type {
 import { normalizeAgentSelectorSegment } from "@openscout/protocol";
 
 import { buildLocalAgentDirectInvocationPrompt } from "./local-agents.js";
-import { callbackLine } from "./task-callback.js";
 import { openPairingLocalChannel } from "./pairing-local-socket.js";
 import { resolveOpenScoutPairingHomeForEnv } from "./support-paths.js";
 import { resolvePairingPort } from "./local-config.js";
@@ -898,8 +897,7 @@ function useDirectSessionTaskPrompt(endpoint: AgentEndpoint, invocation: Invocat
 
 function pairingInvocationPrompt(endpoint: AgentEndpoint, agentName: string, invocation: InvocationRequest): string {
   if (useDirectSessionTaskPrompt(endpoint, invocation)) {
-    const callbackNote = callbackLine(invocation);
-    return callbackNote ? `${invocation.task}\n\n${callbackNote}` : invocation.task;
+    return invocation.task;
   }
 
   return buildLocalAgentDirectInvocationPrompt(agentName, invocation);

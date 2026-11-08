@@ -4,7 +4,7 @@ import { ScoutCliError } from "./errors.ts";
 
 export async function readCliInputFile(
   filePath: string,
-  label: "message" | "prompt",
+  label: "message" | "prompt" | "callback",
 ): Promise<string> {
   let body: string;
   try {

@@ -8,7 +8,7 @@ import {
   parseAskCommandOptions,
   type ScoutAskCommandOptions,
 } from "../options.ts";
-import { resolvePromptBody } from "../input-file.ts";
+import { readCliInputFile, resolvePromptBody } from "../input-file.ts";
 import { scoutAskHandler } from "../../lib/core/broker/ask.ts";
 import type {
   ScoutAskReceipt,
@@ -48,8 +48,11 @@ export function renderAskCommandHelp(): string {
     "  --prompt-file <path>  read the message from a UTF-8 file (--body-file also accepted)",
     "  --label <label>      attach a searchable task label; repeatable",
     "  --reply-mode <notify|inline|none>  notify means acceptance, NOT operator push",
-    "  --callback open       when the task completes, the worker's host opens the page",
-    "                        (html, pdf, image) that the final reply names by path",
+    "  --callback <js>       a function the worker's runtime runs when the task ends:",
+    "                        ({ result, scout }) => ...; result has taskId, state, reply",
+    "                        and files; scout.open(path) opens an html, pdf or image file.",
+    "                        Sandboxed: no file, process or network access",
+    "  --callback-file <path> read the callback function from a file",
     "  --request-id <id>     reuse after an uncertain receipt; do not change content",
     "  --completion explicit require an explicit final reply on an exact local recipient",
     "  --join-to <task>      child of an active explicit-completion task",
@@ -61,7 +64,7 @@ export function renderAskCommandHelp(): string {
     "", "Examples:",
     '  scout ask --to reviewer "review the parser"',
     '  scout ask --project ../app --harness codex "run the suite"',
-    '  scout ask --to researcher --callback open "write the study as an html page"',
+    `  scout ask --to researcher --callback '({ result, scout }) => scout.open(result.files[0])' "write the study as an html page"`,
     '  scout ask --ref inv-123 "scope change: skip the tests"',
     '  scout ask --continue inv-123 "port the fix"',
     '  scout ask --operator --option yes --option no "Ship to production?"',
@@ -377,7 +380,9 @@ export async function runAskWithOptions(
   const callerSessionId = claimedSessionId(context.env);
   const receipt = await scoutAskHandler({
     requestId,
-    task: options.task ?? { version: 1 },
+    task: options.callbackFile
+      ? { ...(options.task ?? { version: 1 }), callback: { code: await readCliInputFile(options.callbackFile, "callback") } }
+      : options.task ?? { version: 1 },
     ...(options.image ? { image: await (await import("../task-image.ts")).readTaskImage(options.image) } : {}),
     completion: options.completion,
     relation: options.relation,

@@ -615,6 +615,7 @@
     "postpublish": "node ../../scripts/restore-publish-manifest.mjs ."
   },
   "dependencies": {
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
     "@noble/ciphers": "^2.1.1",
@@ -628,6 +629,7 @@
     "drizzle-orm": "^0.45.2",
     "ipaddr.js": "2.2.0",
     "protobufjs": "7.6.6",
+    "quickjs-emscripten-core": "0.32.0",
     "smol-toml": "^1.6.1",
     "standardwebhooks": "1.0.0",
     "varlock": "^1.16.0",
