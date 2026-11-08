@@ -9,4 +9,5 @@ CREATE INDEX IF NOT EXISTS idx_delivery_attempts_epoch_id ON delivery_attempts (
 CREATE INDEX IF NOT EXISTS idx_activity_items_epoch ON activity_items (CASE WHEN ts IS NULL THEN NULL WHEN CAST(ts AS REAL) < 1000000000000 THEN CAST(CAST(ts AS REAL) * 1000 AS INTEGER) ELSE CAST(ts AS INTEGER) END DESC);
 CREATE INDEX IF NOT EXISTS idx_invocations_state ON invocations (state);
 CREATE INDEX IF NOT EXISTS idx_invocations_requester_recency ON invocations (requester_id, COALESCE(completed_at, started_at, created_at) DESC);
+CREATE INDEX IF NOT EXISTS idx_invocations_completed_recovery ON invocations (target_agent_id, COALESCE(conversation_id, ''), COALESCE(completed_at, started_at, 0) DESC) WHERE state = 'completed';
 `;

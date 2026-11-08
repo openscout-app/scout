@@ -628,6 +628,10 @@ export const invocationsTable = sqliteTable("invocations", {
   traceJson: text("trace_json"),
 }, (table) => [
   index("idx_invocations_state").on(table.state),
+  index("idx_invocations_completed_recovery").on(
+    table.targetAgentId, sql`COALESCE(conversation_id, '')`,
+    sql`COALESCE(completed_at, started_at, 0) DESC`,
+  ).where(sql`state = 'completed'`),
   index("idx_invocations_requester_recency").on(table.requesterId, sql`COALESCE(completed_at, started_at, created_at) DESC`),
   index("idx_invocations_target_created_at").on(table.targetAgentId, table.createdAt),
   index("idx_invocations_requester_created_at").on(table.requesterId, desc(table.createdAt)),

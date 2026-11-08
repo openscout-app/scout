@@ -4887,6 +4887,10 @@ describe("web polling query plans", () => {
       queries.length = 0;
       queryFleet({ limit: 2, activityLimit: 0 });
       expect(queries[0]!.sql).toContain("AS MATERIALIZED");
+      const recoveryPlan = prepare(`EXPLAIN QUERY PLAN ${queries[0]!.sql}`)
+        .all(...queries[0]!.params as any[]).map((row: any) => row.detail).join("\n");
+      expect(recoveryPlan).toContain("SEARCH recovery_inv USING INDEX idx_invocations_completed_recovery");
+      expect(recoveryPlan).not.toContain("SEARCH recovery_inv USING INDEX idx_invocations_state");
       expect(queries.some(({ sql }) => /FROM activity_items ai\s+LEFT JOIN/.test(sql))).toBe(false);
     } finally {
       spy.mockRestore();

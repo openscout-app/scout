@@ -257,6 +257,8 @@ function fleetStatusLabel(status: WebFleetAskStatus): string {
   }
 }
 
+// Keep recovery expressions aligned with idx_invocations_completed_recovery:
+// a state-only index scans all completed history once per recent ask.
 export function queryFleetAskRows(requesterIds: string[], limit: number): FleetAskRow[] {
   const requesterClause = sqlPlaceholders(requesterIds.length);
   return db().prepare(

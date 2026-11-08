@@ -1,3 +1,4 @@
+import { mobileReadWorker } from "../../db/mobile-read.ts";
 import { basename, join, resolve } from "node:path";
 import { statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
@@ -33,8 +34,7 @@ import {
 import { createAgentWorkspace } from "@openscout/runtime/agent-workspace";
 
 import { upScoutAgent } from "../agents/service.ts";
-import { queryAgents, queryFleet } from "../../db-queries.ts";
-import { queryTerminalSessions } from "../../db/terminal-sessions.ts";
+import type { queryFleet } from "../../db-queries.ts";
 import {
   loadServiceBudgets,
   type ServiceGauge,
@@ -991,7 +991,7 @@ export async function getScoutMobileSessions(
 export async function getScoutFleet(
   options?: Parameters<typeof queryFleet>[0],
 ): Promise<ReturnType<typeof queryFleet>> {
-  return queryFleet(options);
+  return mobileReadWorker.read("fleet", options);
 }
 
 /**
@@ -1641,7 +1641,7 @@ export type ScoutMobileTerminal = {
 /// missing registry table; the try/catch is a defensive belt-and-braces.
 export async function getScoutMobileTerminals(): Promise<{ terminals: ScoutMobileTerminal[] }> {
   try {
-    const records = queryTerminalSessions({ limit: 12 });
+    const records = await mobileReadWorker.read("terminalSessions", { limit: 12 });
     const terminals: ScoutMobileTerminal[] = records.map((record) => ({
       id: record.id,
       sessionId: record.sourceSessionId,
