@@ -117,6 +117,64 @@ describe("answerHerdrPermission", () => {
     expect(sent).toEqual([]);
   });
 
+  test("keys go to the pane id, the target herdr's agent commands accept", async () => {
+    const targets: string[] = [];
+    const result = await answerHerdrPermission(
+      { itemId: item.id, version: item.version!, decision: "approve" },
+      { ...deps(BASH_PERMISSION, []), sendKeys: async (_session: string, target: string) => { targets.push(target); } },
+    );
+    expect(result.ok).toBe(true);
+    expect(targets).toEqual(["w1:p2"]);
+  });
+
+  test("a press that fails gives its claim back, so the next tap is answered", async () => {
+    const held = new Set<string>();
+    const claims = {
+      claim: (key: string) => (held.has(key) ? false : (held.add(key), true)),
+      release: (key: string) => { held.delete(key); },
+    };
+    const failing = await answerHerdrPermission(
+      { itemId: item.id, version: item.version!, decision: "approve" },
+      { ...deps(BASH_PERMISSION, []), ...claims, sendKeys: async () => { throw new Error("agent_not_found"); } },
+    );
+    expect(failing).toMatchObject({ ok: false, code: "send_failed" });
+
+    const sent: Array<readonly string[]> = [];
+    const retry = await answerHerdrPermission(
+      { itemId: item.id, version: item.version!, decision: "approve" },
+      { ...deps(BASH_PERMISSION, sent), ...claims },
+    );
+    expect(retry.ok).toBe(true);
+    expect(sent).toEqual([["enter"]]);
+  });
+
+  test("the next prompt in a pane isn't refused when herdr's read cuts off its command", async () => {
+    // A visible read that starts below the "Bash command" header: the parser
+    // falls back to the line above the question for both prompts.
+    const clipped = (rule: string) => `
+ Permission rule Bash(${rule}:*) requires confirmation for this command.
+ /permissions to update rules
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend
+`;
+    const held = new Set<string>();
+    const claim = (key: string) => (held.has(key) ? false : (held.add(key), true));
+    for (const rule of ["curl", "git"]) {
+      const prompt = herdrAttentionItem("scout", PANE, clipped(rule), 0);
+      const sent: Array<readonly string[]> = [];
+      const result = await answerHerdrPermission(
+        { itemId: prompt.id, version: prompt.version!, decision: "approve" },
+        { ...deps(clipped(rule), sent), claim },
+      );
+      expect(result.ok).toBe(true);
+      expect(sent).toEqual([["enter"]]);
+    }
+  });
+
   test("an unparsed blocked pane carries no version", () => {
     const blocked = herdrAttentionItem("scout", PANE, "Enter your name:", 0);
     expect(blocked.id.startsWith("herdr-blocked:")).toBe(true);
