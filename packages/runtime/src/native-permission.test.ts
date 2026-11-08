@@ -3,7 +3,7 @@ import { assertValidCollaborationRecord, type QuestionRecord } from "@openscout/
 
 import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import type { ClaudeSessionRecord } from "./claude-session-records.js";
-import { describeNativePermission, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
+import { describeNativePermission, nativePermissionDisplay, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
 
 function session(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
   return {
@@ -161,7 +161,45 @@ describe("native session permission requests", () => {
   test("the board text reads like the dialog", () => {
     expect(describeNativePermission({ toolName: "Edit", toolInput: { file_path: "/tmp/project/a.ts" } })).toBe("Edit /tmp/project/a.ts");
     expect(describeNativePermission({ toolName: "WebFetch", toolInput: { url: "https://example.com" } })).toBe("Fetch https://example.com");
-    expect(describeNativePermission({ toolName: "mcp__scout__ask", toolInput: { to: "a" } })).toBe("Use mcp__scout__ask\n{\"to\":\"a\"}");
+    expect(describeNativePermission({ toolName: "mcp__scout__ask", toolInput: { to: "a", body: "line one\nline two", n: 2, empty: "" } })).toBe("Use ask from scout\nto: a\nbody: line one line two\nn: 2");
     expect(describeNativePermission({ toolName: "Bash", toolInput: { command: "x".repeat(5_000) } }).length).toBe(2_000);
+    expect(describeNativePermission({ toolName: "Edit", toolInput: {} })).toBe("Edit a file");
+  });
+
+  const question = {
+    toolName: "AskUserQuestion",
+    toolInput: { questions: [{ question: "Which of these should I delete?", header: "Delete", multiSelect: true, options: [
+      { label: "Old build scratch (1.4G)", description: "A SwiftPM scratch build, untouched since Nov 5." },
+      { label: "Old screenshots (494M)" },
+      { description: "no label" },
+    ] }] },
+  };
+
+  test("a question it wants to ask reads as the question and its answers, not its JSON", () => {
+    expect(describeNativePermission(question)).toBe([
+      "Ask you a question:", "", "Which of these should I delete?",
+      "- Old build scratch (1.4G): A SwiftPM scratch build, untouched since Nov 5.", "- Old screenshots (494M)",
+    ].join("\n"));
+    expect(nativePermissionDisplay(question)).toEqual({
+      action: "Ask you a question",
+      questions: [{ header: "Delete", question: "Which of these should I delete?", options: [
+        { label: "Old build scratch (1.4G)", description: "A SwiftPM scratch build, untouched since Nov 5." },
+        { label: "Old screenshots (494M)" },
+      ] }],
+    });
+    // No question in it: shown as its fields, like any other tool.
+    expect(nativePermissionDisplay({ toolName: "AskUserQuestion", toolInput: { questions: [] } })).toEqual({ action: "Use AskUserQuestion" });
+  });
+
+  test("the request carries the display laid out, bounded", async () => {
+    expect(nativePermissionDisplay(ask)).toEqual({ action: "Run a command", command: "rm -rf dist", note: "Remove the build output" });
+    expect(nativePermissionDisplay({ toolName: "WebSearch", toolInput: { query: "bun test" } })).toEqual({ action: "Search the web", target: "bun test" });
+    const wide = nativePermissionDisplay({ toolName: "Thing", toolInput: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}`, "v".repeat(500)])) });
+    expect(wide.fields).toHaveLength(8);
+    expect(wide.fields![0]!.value.length).toBe(200);
+    const h = harness();
+    const id = await opened(h);
+    expect((h.records.get(id)!.metadata!.permissionRequest as { native: { display: unknown } }).native.display)
+      .toEqual({ action: "Run a command", command: "rm -rf dist", note: "Remove the build output" });
   });
 });

@@ -139,7 +139,7 @@ export class NativePermissionRequests {
     const actorId = `native:${ask.harness}:${ask.sessionId}`;
     live.id = await this.deps.permissions.raise({
       prompt, actorId,
-      native: { harness: ask.harness, pid: record.pid, tool: ask.toolName, ...(record.jobId ? { jobId: record.jobId } : {}) },
+      native: { harness: ask.harness, pid: record.pid, tool: ask.toolName, display: nativePermissionDisplay(ask), ...(record.jobId ? { jobId: record.jobId } : {}) },
     });
     this.live.set(live.id, live);
     this.renew(live);
@@ -275,39 +275,138 @@ function field(input: unknown, key: string): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-/** What the board shows: what the session wants to do, as Claude Code's dialog says it. */
-export function describeNativePermission(ask: Pick<NativePermissionAsk, "toolName" | "toolInput">): string {
+/**
+ * What a native permission asks, in parts a surface can lay out: the action
+ * as one line, and the command, target, questions or input fields under it.
+ * Every part is bounded. Stored on the request as `native.display`; the
+ * request's summary is the same thing as plain text.
+ */
+export type NativePermissionDisplay = {
+  /** What the session wants to do, as a short sentence: "Run a command", "Edit a file". */
+  action: string;
+  /** Bash: the command it wants to run. */
+  command?: string;
+  /** What the action names: a file, a page, a search. */
+  target?: string;
+  /** The session's own words on why: a command's description. */
+  note?: string;
+  /** AskUserQuestion: the questions it wants to put to the operator, with their offered answers. */
+  questions?: NativePermissionQuestion[];
+  /** Any other tool: its input, one line per field. */
+  fields?: Array<{ key: string; value: string }>;
+};
+
+export type NativePermissionQuestion = {
+  header?: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+};
+
+const MAX_QUESTIONS = 4;
+const MAX_OPTIONS = 8;
+const MAX_FIELDS = 8;
+
+function questionsOf(input: unknown): NativePermissionQuestion[] {
+  const raw = input && typeof input === "object" ? (input as Record<string, unknown>).questions : undefined;
+  if (!Array.isArray(raw)) return [];
+  const questions: NativePermissionQuestion[] = [];
+  for (const entry of raw.slice(0, MAX_QUESTIONS)) {
+    const question = field(entry, "question");
+    if (!question) continue;
+    const header = field(entry, "header");
+    const options = (Array.isArray((entry as Record<string, unknown>).options) ? (entry as Record<string, unknown>).options as unknown[] : [])
+      .slice(0, MAX_OPTIONS)
+      .map((option) => {
+        const label = field(option, "label");
+        const description = field(option, "description");
+        return label ? { label: clip(label, 80), ...(description ? { description: clip(description, 240) } : {}) } : null;
+      })
+      .filter((option): option is { label: string; description?: string } => option !== null);
+    questions.push({ ...(header ? { header: clip(header, 40) } : {}), question: clip(question, 500), options });
+  }
+  return questions;
+}
+
+function fieldValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value.trim() ? clip(value.replace(/\s+/gu, " "), 200) : null;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    const json = JSON.stringify(value);
+    return json && json !== "{}" && json !== "[]" ? clip(json, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
+function fieldsOf(input: unknown): Array<{ key: string; value: string }> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const fields: Array<{ key: string; value: string }> = [];
+  for (const [key, raw] of Object.entries(input as Record<string, unknown>)) {
+    if (fields.length >= MAX_FIELDS) break;
+    const value = fieldValue(raw);
+    if (value) fields.push({ key: clip(key, 60), value });
+  }
+  return fields;
+}
+
+/** `mcp__scout__ask` reads as "ask from scout". */
+function toolLabel(toolName: string): string {
+  const mcp = /^mcp__(.+?)__(.+)$/u.exec(toolName);
+  return mcp ? `${mcp[2]} from ${mcp[1]}` : toolName;
+}
+
+/** What a native permission asks, laid out (`NativePermissionDisplay`). */
+export function nativePermissionDisplay(ask: Pick<NativePermissionAsk, "toolName" | "toolInput">): NativePermissionDisplay {
   const input = ask.toolInput;
-  const lines: string[] = [];
+  const target = (key: string) => {
+    const value = field(input, key);
+    return value ? { target: clip(value, 600) } : {};
+  };
   switch (ask.toolName) {
     case "Bash": {
-      lines.push("Run a command:", field(input, "command") ?? "(no command)");
       const description = field(input, "description");
-      if (description) lines.push("", description);
-      break;
+      return { action: "Run a command", command: clip(field(input, "command") ?? "(no command)", MAX_TEXT), ...(description ? { note: clip(description, 400) } : {}) };
     }
     case "Edit":
     case "MultiEdit":
-      lines.push(`Edit ${field(input, "file_path") ?? "a file"}`);
-      break;
+      return { action: "Edit a file", ...target("file_path") };
     case "Write":
-      lines.push(`Write ${field(input, "file_path") ?? "a file"}`);
-      break;
+      return { action: "Write a file", ...target("file_path") };
     case "NotebookEdit":
-      lines.push(`Edit ${field(input, "notebook_path") ?? "a notebook"}`);
-      break;
+      return { action: "Edit a notebook", ...target("notebook_path") };
     case "WebFetch":
-      lines.push(`Fetch ${field(input, "url") ?? "a page"}`);
-      break;
+      return { action: "Fetch a page", ...target("url") };
     case "WebSearch":
-      lines.push(`Search the web for ${field(input, "query") ?? "something"}`);
+      return { action: "Search the web", ...target("query") };
+    case "AskUserQuestion": {
+      const questions = questionsOf(input);
+      if (questions.length) return { action: questions.length > 1 ? "Ask you some questions" : "Ask you a question", questions };
       break;
-    default: {
-      lines.push(`Use ${ask.toolName}`);
-      let json = "";
-      try { json = JSON.stringify(input ?? {}); } catch { json = ""; }
-      if (json && json !== "{}") lines.push(clip(json, 600));
     }
+  }
+  const fields = fieldsOf(input);
+  return { action: `Use ${clip(toolLabel(ask.toolName), 120)}`, ...(fields.length ? { fields } : {}) };
+}
+
+/** What the board shows as text: what the session wants to do, as Claude Code's dialog says it. */
+export function describeNativePermission(ask: Pick<NativePermissionAsk, "toolName" | "toolInput">): string {
+  const display = nativePermissionDisplay(ask);
+  const lines: string[] = [];
+  if (display.command !== undefined) {
+    lines.push(`${display.action}:`, display.command);
+    if (display.note) lines.push("", display.note);
+  } else if (display.target) {
+    // "Edit /tmp/a.ts", "Fetch https://…", "Search the web for …", as the dialog says it.
+    const verb = { "Edit a file": "Edit", "Write a file": "Write", "Edit a notebook": "Edit", "Fetch a page": "Fetch", "Search the web": "Search the web for" }[display.action];
+    lines.push(verb ? `${verb} ${display.target}` : `${display.action}: ${display.target}`);
+  } else {
+    lines.push(display.questions?.length ? `${display.action}:` : display.action);
+    for (const question of display.questions ?? []) {
+      lines.push("", question.question);
+      for (const option of question.options) lines.push(`- ${option.label}${option.description ? `: ${option.description}` : ""}`);
+    }
+    for (const { key, value } of display.fields ?? []) lines.push(`${key}: ${value}`);
   }
   return clip(lines.join("\n"), MAX_TEXT);
 }
