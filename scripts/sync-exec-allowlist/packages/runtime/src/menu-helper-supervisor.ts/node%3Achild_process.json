@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/menu-helper-supervisor.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "async open -n -g of the declared menu helper bundle, with a timeout, when no helper from that bundle runs",
+  "owner": "runtime"
+}
