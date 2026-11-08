@@ -113,7 +113,8 @@ import {
   throwIfAborted,
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
-import type { WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import { WorkClaimConflictError } from "./broker-work-claims.js";
+import type { WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -1847,8 +1848,13 @@ export function createBrokerHttpRouter(
         json(response, 200, await work.review(await readRequestBody<WorkReviewRequest>(request, { maxBytes: 64 * 1024 })));
         return;
       }
+      if (method === "POST" && url.pathname === "/v1/work/claim") {
+        json(response, 200, await work.claim(await readRequestBody<WorkClaimRequest>(request, { maxBytes: 16 * 1024 })));
+        return;
+      }
     } catch (error) {
-      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      if (error instanceof WorkClaimConflictError) json(response, error.status, error.conflict);
+      else if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
       else badRequest(response, error);
       return;
     }

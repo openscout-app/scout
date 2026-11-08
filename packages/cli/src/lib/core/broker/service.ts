@@ -1,4 +1,4 @@
-import { SCOUT_TASKS_CAPABILITY, agentRosterTag, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload } from "@openscout/protocol";
+import { SCOUT_TASKS_CAPABILITY, agentRosterTag, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -534,6 +534,8 @@ export type ScoutWorkItemUpdate = {
   eventSummary?: string;
   updatedAtMs?: number;
   source?: string;
+  /** The caller's session, recorded on a claim this update takes. */
+  sessionAddress?: string;
 };
 
 export type ScoutAskTargetDiagnostic = ScoutTargetDiagnostic;
@@ -3079,6 +3081,46 @@ function brokerSnapshotWorkItem(
   return record?.kind === "work_item" ? record : null;
 }
 
+/** A claim the runtime refused. The message names the holder, the lease left and what to do. */
+export class ScoutWorkClaimConflictError extends Error {
+  constructor(readonly conflict: WorkClaimConflict) {
+    super(conflict.error);
+    this.name = "ScoutWorkClaimConflictError";
+  }
+}
+
+function workClaimConflictFrom(error: unknown): ScoutWorkClaimConflictError | null {
+  if (error instanceof ScoutWorkClaimConflictError) return error;
+  if (error instanceof ScoutBrokerHttpError && error.status === 409) {
+    try {
+      const body = JSON.parse(error.body) as Partial<WorkClaimConflict>;
+      if (typeof body.code === "string" && body.code.startsWith("work_claim_") && typeof body.error === "string") {
+        return new ScoutWorkClaimConflictError(body as WorkClaimConflict);
+      }
+    } catch {
+      return null;
+    }
+  }
+  // The in-process broker throws the runtime's own conflict error.
+  const conflict = (error as { conflict?: WorkClaimConflict } | null)?.conflict;
+  if (conflict && typeof conflict.code === "string" && conflict.code.startsWith("work_claim_")) {
+    return new ScoutWorkClaimConflictError(conflict);
+  }
+  return null;
+}
+
+/** Claim, renew or release a work item. The runtime decides as one compare-and-set. */
+export async function claimScoutWorkItem(
+  input: WorkClaimRequest,
+  baseUrl = resolveScoutBrokerUrl(),
+): Promise<WorkClaimResponse> {
+  try {
+    return await brokerPostJson<WorkClaimResponse>(baseUrl, scoutBrokerPaths.v1.workClaim, input);
+  } catch (error) {
+    throw workClaimConflictFrom(error) ?? error;
+  }
+}
+
 export async function updateScoutWorkItem(
   input: ScoutWorkItemUpdate,
 ): Promise<ScoutTrackedWorkItem | null> {
@@ -3087,9 +3129,44 @@ export async function updateScoutWorkItem(
     return null;
   }
 
-  const current = brokerSnapshotWorkItem(broker.snapshot, input.workId.trim());
+  let current = brokerSnapshotWorkItem(broker.snapshot, input.workId.trim());
   if (!current) {
     throw new Error(`unknown work item: ${input.workId}`);
+  }
+
+  // Ownership is the runtime's call. Taking the item is a claim; handing off a
+  // held item releases the claim first. A lost claim throws before any write.
+  const actorId = input.actorId?.trim();
+  const requestedOwnerId =
+    input.ownerId === undefined ? current.ownerId : normalizeOptionalString(input.ownerId);
+  const heldClaim = workClaimOf(current);
+  const holding = Boolean(
+    actorId && heldClaim?.claimantId === actorId && workClaimStatus(heldClaim, Date.now()) === "active",
+  );
+  const takes = Boolean(
+    actorId && requestedOwnerId === actorId
+      && (current.ownerId !== actorId || ((input.state ?? current.state) === "working" && current.state === "open")),
+  );
+  let claimRecorded = false;
+  if (actorId && takes) {
+    try {
+      const result = await claimScoutWorkItem(
+        { workId: current.id, action: "claim", actorId, sessionAddress: input.sessionAddress },
+        broker.baseUrl,
+      );
+      claimRecorded = !result.renewed;
+    } catch (error) {
+      // A runtime from before claims has no claim route; keep its old write path.
+      if (!(error instanceof ScoutBrokerHttpError && error.status === 404)) throw error;
+    }
+  } else if (actorId && holding && requestedOwnerId !== actorId) {
+    await claimScoutWorkItem(
+      { workId: current.id, action: "release", actorId, sessionAddress: input.sessionAddress, leaseGeneration: heldClaim?.leaseGeneration },
+      broker.baseUrl,
+    );
+  }
+  if (claimRecorded && current.ownerId !== actorId) {
+    current = { ...current, ownerId: actorId, nextMoveOwnerId: actorId };
   }
 
   const updatedAtMs = input.updatedAtMs ?? Date.now();
@@ -3154,17 +3231,23 @@ export async function updateScoutWorkItem(
       : current.metadata,
   };
 
-  await brokerPostJson(
-    broker.baseUrl,
-    scoutBrokerPaths.v1.collaborationRecords,
-    updated,
-  );
+  try {
+    await brokerPostJson(
+      broker.baseUrl,
+      scoutBrokerPaths.v1.collaborationRecords,
+      updated,
+    );
+  } catch (error) {
+    throw workClaimConflictFrom(error) ?? error;
+  }
 
+  const derivedKind = deriveWorkItemEventKind(current, updated);
   const event: CollaborationEvent = {
     id: buildScoutEntityId("evt", updatedAtMs),
     recordId: updated.id,
     recordKind: "work_item",
-    kind: deriveWorkItemEventKind(current, updated),
+    // The runtime already recorded the claim.
+    kind: claimRecorded && derivedKind === "claimed" ? "progressed" : derivedKind,
     actorId: input.actorId,
     at: updatedAtMs,
     summary:
@@ -5700,7 +5783,11 @@ export type ScoutWorkPosition = {
 };
 
 export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMoveResponse> {
-  return brokerPostJson<WorkMoveResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workMove, input);
+  try {
+    return await brokerPostJson<WorkMoveResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workMove, input);
+  } catch (error) {
+    throw workClaimConflictFrom(error) ?? error;
+  }
 }
 
 export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {
