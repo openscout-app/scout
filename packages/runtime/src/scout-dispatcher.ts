@@ -76,7 +76,22 @@ export interface BrokerRouteTargetInput {
   targetSessionId?: string | null;
   targetLabel?: string | null;
   routePolicy?: ScoutRoutePolicy | null;
-  execution?: { harness?: AgentHarness } | null;
+  execution?: { harness?: AgentHarness; targetSessionId?: string | null } | null;
+}
+
+/**
+ * The exact harness session a request names without a session_id target: a
+ * bare targetSessionId, or the session its execution continues when the
+ * request names no agent. A project path only says where to look; the
+ * session id is the more exact of the two, so it routes. An agent with a
+ * session to continue still routes to that agent.
+ */
+export function bareRouteSessionId(input: BrokerRouteTargetInput): string | undefined {
+  const bare = input.targetSessionId?.trim();
+  if (bare) return bare;
+  if (input.target && input.target.kind !== "project_path") return undefined;
+  if (input.targetAgentId?.trim() || input.targetLabel?.trim()) return undefined;
+  return input.execution?.targetSessionId?.trim() || undefined;
 }
 
 export type BrokerAgentCandidate = AgentIdentityCandidate & {
@@ -917,7 +932,7 @@ export function resolveBrokerRouteTarget(
 
   const directSessionId = routeTarget?.kind === "session_id"
     ? normalizedRouteTargetValue(routeTarget)
-    : input.targetSessionId?.trim();
+    : bareRouteSessionId(input);
   if (directSessionId) {
     const directSessionHarness = routeTarget?.kind === "session_id"
       ? routeTarget.harness

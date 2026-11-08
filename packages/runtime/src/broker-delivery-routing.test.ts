@@ -11,6 +11,7 @@ import {
   BrokerDeliveryRouter,
   buildDeliveryReceipt,
   callerContextForDelivery,
+  exactSessionRouteTarget,
   executionWithRouteParams,
   normalizeScoutLabels,
   projectPathRouteTarget,
@@ -339,6 +340,71 @@ describe("broker delivery routing", () => {
       expect(result.session.endpoint.metadata?.externalSessionId).toBe(sessionId);
       expect(result.session.endpoint.metadata?.flatDispatch).toBe(true);
     }
+  });
+
+  test("a project path that continues a session routes to that session, not the project", async () => {
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    const sessionId = "019fbee7-2a7f-7eb0-84bf-da22717c74d0";
+    const scoutSessionId = `flat-codex-${sessionId}`;
+    const woke: string[] = [];
+
+    const router = new BrokerDeliveryRouter({
+      runtimeSnapshot: () => runtime.snapshot(),
+      nodeId: "node-1",
+      isInactiveLocalAgent: () => false,
+      wakeExactHarnessSession: async (input) => {
+        woke.push(input.nativeSessionId);
+        await runtime.upsertActor({
+          id: scoutSessionId,
+          kind: "session",
+          displayName: "blink:019fbee7",
+          handle: scoutSessionId,
+          labels: ["cardless-session", "session"],
+          metadata: { cardless: true, flatDispatch: true },
+        });
+        await runtime.upsertEndpoint({
+          id: `endpoint.${scoutSessionId}.node-1.codex_app_server`,
+          agentId: scoutSessionId,
+          nodeId: "node-1",
+          harness: "codex",
+          transport: "codex_app_server",
+          state: "idle",
+          cwd: "/Users/art/dev/blink-worktree",
+          projectRoot: "/Users/art/dev/blink-worktree",
+          sessionId: scoutSessionId,
+          metadata: { cardless: true, flatDispatch: true, externalSessionId: sessionId, nativeSessionId: sessionId },
+        });
+        return { ok: true };
+      },
+    });
+
+    // A sibling worktree path that no project is registered at, as an older
+    // composer sent it: the path says where, the execution names the session.
+    const input = {
+      target: { kind: "project_path" as const, projectPath: "/Users/art/dev/blink-worktree" },
+      execution: { harness: "codex" as const, session: "existing" as const, targetSessionId: sessionId },
+    };
+    expect(exactSessionRouteTarget(input)).toMatchObject({ nativeSessionId: sessionId, harness: "codex" });
+
+    const result = await router.resolveWithImplicitProjectAgent(input, {
+      requesterId: "operator",
+      currentDirectory: "/Users/art/dev/blink-worktree",
+      reason: "project path continues a session",
+    });
+
+    expect(woke).toEqual([sessionId]);
+    expect(result.kind).toBe("resolved_session");
+    if (result.kind === "resolved_session") {
+      expect(result.session.endpoint.metadata?.externalSessionId).toBe(sessionId);
+    }
+  });
+
+  test("an agent with a session to continue still routes to the agent", () => {
+    const execution = { harness: "codex" as const, session: "existing" as const, targetSessionId: "native-1" };
+    expect(exactSessionRouteTarget({ target: { kind: "agent_id", agentId: "agent-1" }, execution })).toBeNull();
+    expect(exactSessionRouteTarget({ targetAgentId: "agent-1", execution })).toBeNull();
+    expect(exactSessionRouteTarget({ targetLabel: "@agent", execution })).toBeNull();
+    expect(exactSessionRouteTarget({ execution })).toMatchObject({ nativeSessionId: "native-1", label: "session:codex:native-1" });
   });
 
   test("fork-if-live is forwarded to wake and routes to the fork, not the live source", async () => {
