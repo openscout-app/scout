@@ -6,6 +6,7 @@ import {
   type ScoutLaunchableHarness,
   type ScoutOwnedRuntimeCatalog,
   type ScoutOwnedRuntimeHarness,
+  type ScoutOwnedRuntimeModel,
   type ScoutReasoningEffort,
   type ScoutRuntimeHarnessPresentation,
   type ScoutRuntimeModelPresentation,
@@ -369,9 +370,21 @@ export function scoutRuntimeLatestModelInFamily(
   family: string,
   catalog: ScoutOwnedRuntimeCatalog = SCOUT_RUNTIME_CATALOG,
 ): string | undefined {
+  return scoutRuntimeLatestModel(harness, (model) => model.family === family, catalog)?.id;
+}
+
+/**
+ * The newest enabled model that matches, by the same rule as a family: the
+ * harness default when it matches, otherwise the first match in catalog order.
+ */
+export function scoutRuntimeLatestModel(
+  harness: string,
+  matches: (model: ScoutOwnedRuntimeModel) => boolean,
+  catalog: ScoutOwnedRuntimeCatalog = SCOUT_RUNTIME_CATALOG,
+): ScoutOwnedRuntimeModel | undefined {
   const models = (scoutRuntimeHarness(harness, catalog)?.models ?? [])
-    .filter((model) => model.enabled && model.family === family);
-  return (models.find((model) => model.default) ?? models[0])?.id;
+    .filter((model) => model.enabled && matches(model));
+  return models.find((model) => model.default) ?? models[0];
 }
 
 /** Canonical model aliases shared by every request boundary and spawn path. */

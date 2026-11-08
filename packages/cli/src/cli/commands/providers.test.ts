@@ -304,7 +304,7 @@ describe("providers command", () => {
     expect(map.assignments.find((assignment) => assignment.role === "adversarial_critique"))
       .toMatchObject({ modelLabel: "Grok 4.6" });
     expect(map.assignments.find((assignment) => assignment.role === "implementation"))
-      .toMatchObject({ modelLabel: "GPT-5.6 Sol" });
+      .toMatchObject({ modelLabel: "GPT-6.1 Sol" });
     expect(map.models.find((model) => model.modelLabel === "Kimi Code")).toMatchObject({
       guidance: "use_now",
       quotaRisk: false,
@@ -324,7 +324,7 @@ describe("providers command", () => {
     const capabilityBiasedMap = buildOrchestrationProviderMap(report, { now: NOW, bias: "capability" });
     expect(capabilityBiasedMap.bias).toBe("capability");
     expect(capabilityBiasedMap.assignments.find((assignment) => assignment.role === "product_judgment"))
-      .toMatchObject({ modelLabel: "Fable 5" });
+      .toMatchObject({ modelLabel: "Fable 5.1" });
     const rendered = renderOrchestrationProviderMap(map);
     expect(rendered).toContain("Orchestration map · quota-aware");
     expect(rendered).toContain("Large-context synthesis");
@@ -374,13 +374,13 @@ describe("providers command", () => {
     expect(map.assignments).toHaveLength(1);
     expect(map.assignments[0]).toMatchObject({
       role: "product_judgment",
-      modelLabel: "GPT-5.6 Sol",
+      modelLabel: "GPT-6.1 Sol",
       route: { providerId: "codex" },
       quotaRisk: false,
       quotaRiskMessage: null,
       alternatives: expect.arrayContaining([
         expect.objectContaining({
-          label: "Fable 5",
+          label: "Fable 5.1",
           quotaRisk: true,
         }),
       ]),
@@ -428,20 +428,20 @@ describe("providers command", () => {
 
     const assignment = map.assignments[0]!;
     expect(assignment).toMatchObject({
-      modelLabel: "GPT-5.6 Sol",
+      modelLabel: "GPT-6.1 Sol",
       quotaRisk: true,
     });
     expect(assignment.alternatives[0]).toMatchObject({
-      label: "Sonnet 4.6",
+      label: "Sonnet 5.5",
       route: { providerId: "claude" },
       quotaRisk: false,
     });
     expect(assignment.alternatives[1]).toMatchObject({
-      label: "GPT-5.6 Terra",
+      label: "GPT-6 Astra",
       route: { providerId: "codex" },
       quotaRisk: true,
     });
-    expect(map.models.find((model) => model.modelLabel === "GPT-5.6 Sol"))
+    expect(map.models.find((model) => model.modelLabel === "GPT-6.1 Sol"))
       .toMatchObject({ guidance: "conserve", quotaRisk: true });
   });
 
@@ -450,8 +450,8 @@ describe("providers command", () => {
       generatedAt: NOW,
       gauges: [
         {
-          id: "minimax",
-          label: "minimax",
+          id: "claude",
+          label: "claude",
           kind: "quota",
           fill: 0.8,
           windows: [{
@@ -460,12 +460,12 @@ describe("providers command", () => {
             windowMs: 7 * 24 * 60 * 60_000,
             resetAt: NOW + 60 * 60_000,
             capturedAt: NOW,
-            source: "MiniMax API",
+            source: "Claude local status",
           }],
         },
         {
-          id: "claude",
-          label: "claude",
+          id: "grok",
+          label: "grok",
           kind: "quota",
           fill: 0.5,
           windows: [{
@@ -474,30 +474,30 @@ describe("providers command", () => {
             windowMs: 7 * 24 * 60 * 60_000,
             resetAt: NOW + 3.5 * 24 * 60 * 60_000,
             capturedAt: NOW,
-            source: "Claude local status",
+            source: "Grok local billing",
           }],
         },
       ],
     }, formatOptions);
     const map = buildOrchestrationProviderMap(report, {
       now: NOW,
-      role: "evidence_inventory",
+      role: "product_judgment",
       bias: "capability",
     });
 
     const assignment = map.assignments[0]!;
-    expect(assignment).toMatchObject({ modelLabel: "MiniMax M3", quotaRisk: true });
+    expect(assignment).toMatchObject({ modelLabel: "Fable 5.1", quotaRisk: true });
     expect(assignment.alternatives[0]).toMatchObject({
-      label: "Haiku 4.5",
+      label: "Grok 4.6",
       quotaRisk: false,
       quota: { confidence: "fresh", minimumRemainingPercent: 50 },
     });
     expect(assignment.alternatives[1]).toMatchObject({
-      label: "GPT-5.6 Luna",
+      label: "GPT-6.1 Sol",
       quotaRisk: false,
       quota: { confidence: "unknown", minimumRemainingPercent: null },
     });
-    expect(map.models.find((model) => model.modelLabel === "GPT-5.6 Luna"))
+    expect(map.models.find((model) => model.modelLabel === "GPT-6.1 Sol"))
       .toMatchObject({ guidance: "probe_first", quotaRisk: false });
   });
 

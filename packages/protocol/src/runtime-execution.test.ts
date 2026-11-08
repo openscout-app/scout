@@ -6,6 +6,7 @@ import {
   formatScoutRuntimeSpec,
   isModelSelectableHarness,
   normalizeScoutRuntimeModel,
+  scoutRuntimeLatestModel,
   scoutRuntimeLatestModelInFamily,
   SCOUT_LAUNCHABLE_HARNESSES,
   SCOUT_REASONING_EFFORT_LABELS,
@@ -162,8 +163,10 @@ describe("runtime execution contracts", () => {
     expect(normalizeScoutRuntimeModel("claude", "fable")).toEqual({
       ok: true,
       requested: "fable",
-      resolved: "claude-fable-5",
+      resolved: "claude-fable-5-1",
     });
+    expect(normalizeScoutRuntimeModel("claude", "sonnet")).toEqual({ ok: true, requested: "sonnet", resolved: "claude-sonnet-5-5" });
+    expect(normalizeScoutRuntimeModel("claude", "haiku")).toEqual({ ok: true, requested: "haiku", resolved: "claude-haiku-5-5" });
     // Family aliases follow the catalog's newest model, not a pinned release.
     expect(normalizeScoutRuntimeModel("claude", "opus")).toEqual({
       ok: true,
@@ -191,6 +194,28 @@ describe("runtime execution contracts", () => {
     };
     expect(scoutRuntimeLatestModelInFamily("claude", "Opus", catalog)).toBe("claude-opus-5-5");
     expect(scoutRuntimeLatestModelInFamily("claude", "Sonnet", catalog)).toBeUndefined();
+  });
+
+  test("resolves a model tier by the same rule as a family", () => {
+    const codex = SCOUT_RUNTIME_CATALOG.harnesses.find((entry) => entry.id === "codex")!;
+    const catalog = {
+      ...SCOUT_RUNTIME_CATALOG,
+      harnesses: [{
+        ...codex,
+        models: [
+          { id: "gpt-7-astra", label: "7 Astra", enabled: true, default: true, family: "GPT" },
+          { id: "gpt-7-sol", label: "7 Sol", enabled: false, family: "GPT" },
+          { id: "gpt-6.1-sol", label: "6.1 Sol", enabled: true, family: "GPT" },
+          { id: "gpt-6-sol", label: "6 Sol", enabled: true, family: "GPT" },
+        ],
+      }],
+    };
+    const sol = (model: { id: string }) => model.id.endsWith("-sol");
+    expect(scoutRuntimeLatestModel("codex", sol, catalog)?.id).toBe("gpt-6.1-sol");
+    expect(scoutRuntimeLatestModel("codex", (model) => model.family === "GPT", catalog)?.id).toBe("gpt-7-astra");
+    expect(scoutRuntimeLatestModel("codex", (model) => model.id.endsWith("-terra"), catalog)).toBeUndefined();
+    expect(scoutRuntimeLatestModel("codex", sol)?.id).toBe("gpt-6.1-sol");
+    expect(scoutRuntimeLatestModel("codex", (model) => model.id.endsWith("-luna"))?.id).toBe("gpt-6-luna");
   });
 
   test("does not format sparse runtime tuples ambiguously", () => {

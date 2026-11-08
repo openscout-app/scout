@@ -2,7 +2,7 @@
 
 export const SCOUT_RUNTIME_CATALOG_DATA = {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-10-05.1",
+  "revision": "2026-11-08.1",
   "harnesses": [
     {
       "id": "claude",
@@ -45,6 +45,14 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
           }
         },
         {
+          "id": "claude-fable-5-1",
+          "label": "Fable 5.1",
+          "enabled": true,
+          "family": "Fable",
+          "version": "5.1",
+          "contextWindowTokens": 1000000
+        },
+        {
           "id": "claude-fable-5",
           "label": "Fable 5",
           "enabled": true,
@@ -52,13 +60,32 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
           "version": "5"
         },
         {
+          "id": "claude-sonnet-5-5",
+          "label": "Sonnet 5.5",
+          "enabled": true,
+          "family": "Sonnet",
+          "version": "5.5",
+          "contextWindowTokens": 1000000,
+          "presentation": {
+            "detail": "Balanced"
+          }
+        },
+        {
           "id": "claude-sonnet-4-6",
           "label": "Sonnet 4.6",
           "enabled": true,
           "family": "Sonnet",
-          "version": "4.6",
+          "version": "4.6"
+        },
+        {
+          "id": "claude-haiku-5-5",
+          "label": "Haiku 5.5",
+          "enabled": true,
+          "family": "Haiku",
+          "version": "5.5",
+          "contextWindowTokens": 1000000,
           "presentation": {
-            "detail": "Balanced"
+            "detail": "Fast"
           }
         },
         {
@@ -66,10 +93,7 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
           "label": "Haiku 4.5",
           "enabled": true,
           "family": "Haiku",
-          "version": "4.5",
-          "presentation": {
-            "detail": "Fast"
-          }
+          "version": "4.5"
         },
         {
           "id": "claude-opus-4-8",

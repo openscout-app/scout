@@ -1,4 +1,9 @@
-import { scoutRuntimeHarness, scoutRuntimeLatestModelInFamily } from "./runtime-execution.js";
+import {
+  scoutRuntimeDefaultModel,
+  scoutRuntimeHarness,
+  scoutRuntimeLatestModel,
+  type ScoutOwnedRuntimeModel,
+} from "./runtime-execution.js";
 
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -154,73 +159,101 @@ type RolePolicy = {
   candidates: RuntimeCandidate[];
 };
 
-// The Opus role follows the catalog's newest Opus instead of pinning a release.
-const OPUS = latestClaudeModel("Opus", { id: "claude-opus-5-5", label: "Opus 5.5" });
+type CatalogModel = { id: string; label: string };
 
-function latestClaudeModel(family: string, fallback: { id: string; label: string }): { id: string; label: string } {
-  const id = scoutRuntimeLatestModelInFamily("claude", family);
-  const model = scoutRuntimeHarness("claude")?.models.find((entry) => entry.id === id);
-  return model ? { id: model.id, label: model.label } : fallback;
+/**
+ * Every routed model comes from the runtime catalog, so a model release needs
+ * only a catalog entry. A family or tier resolves to its newest enabled entry
+ * by the same rule as `--model opus`: the harness default when it matches,
+ * otherwise the first match in catalog order. Each fallback is today's answer
+ * and applies only when the catalog has no match.
+ */
+const MODELS = {
+  fable: catalogModel("claude", inFamily("Fable"), { id: "claude-fable-5-1", label: "Fable 5.1" }),
+  opus: catalogModel("claude", inFamily("Opus"), { id: "claude-opus-5-5", label: "Opus 5.5" }),
+  sonnet: catalogModel("claude", inFamily("Sonnet"), { id: "claude-sonnet-5-5", label: "Sonnet 5.5" }),
+  haiku: catalogModel("claude", inFamily("Haiku"), { id: "claude-haiku-5-5", label: "Haiku 5.5" }),
+  astra: catalogModel("codex", (model) => model.id === scoutRuntimeDefaultModel("codex"), { id: "gpt-6-astra", label: "GPT-6 Astra" }),
+  sol: catalogModel("codex", (model) => model.id.endsWith("-sol"), { id: "gpt-6.1-sol", label: "GPT-6.1 Sol" }),
+  luna: catalogModel("codex", (model) => model.id.endsWith("-luna"), { id: "gpt-6-luna", label: "GPT-6 Luna" }),
+  grok: catalogModel("grok", inFamily("Grok"), { id: "grok-4.6", label: "Grok 4.6" }),
+  glm: catalogModel("opencode", inFamily("GLM"), { id: "opencode-go/glm-5.2", label: "GLM-5.2" }),
+  deepseek: catalogModel("opencode", inFamily("DeepSeek"), { id: "opencode-go/deepseek-v4-pro", label: "DeepSeek V4 Pro" }),
+} as const;
+
+function inFamily(family: string): (model: ScoutOwnedRuntimeModel) => boolean {
+  return (model) => model.family === family;
+}
+
+function catalogModel(
+  harness: string,
+  matches: (model: ScoutOwnedRuntimeModel) => boolean,
+  fallback: CatalogModel,
+): CatalogModel {
+  const model = scoutRuntimeLatestModel(harness, matches);
+  return model ? { id: model.id, label: catalogModelLabel(model) } : fallback;
+}
+
+/** "6.1 Sol" in the GPT family reads as "GPT-6.1 Sol"; "Opus 5.5" already names its family. */
+function catalogModelLabel(model: ScoutOwnedRuntimeModel): string {
+  const family = model.family?.trim();
+  if (!family || model.label.toLowerCase().startsWith(family.toLowerCase())) return model.label;
+  return `${family}-${model.label}`;
 }
 
 const RUNTIMES = {
   fable: runtimeDefinition(
-    "Fable 5", "claude", "claude", "claude-fable-5", "max", "Fable",
+    MODELS.fable.label, "claude", "claude", MODELS.fable.id, "max", "Fable",
     "Premium product taste, rapid design iterations, and premise-level critique.",
     "Uses the premium shared Claude allowance; do not spend it on routine mechanical work.",
   ),
   sol: runtimeDefinition(
-    "GPT-5.6 Sol", "codex", "codex", "gpt-5.6-sol", "xhigh", null,
+    MODELS.sol.label, "codex", "codex", MODELS.sol.id, "xhigh", null,
     "Load-bearing coding, debugging, integration, and technically grounded judgment.",
-    "Highest Codex tier; reserve deep turns for work where failure is expensive.",
+    "Runs at xhigh effort; reserve deep turns for work where failure is expensive.",
   ),
   grok: runtimeDefinition(
-    "Grok 4.6", "grok", "grok", "grok-4.6", null, "Grok",
+    MODELS.grok.label, "grok", "grok", MODELS.grok.id, null, "Grok",
     "Independent assumption checking, deletion pressure, and adversarial critique.",
     "Do not make it the sole implementation authority; verify conclusions against repository evidence.",
   ),
   kimi: runtimeDefinition(
-    "Kimi Code", "kimi", "kimi", null, null, "Kimi",
+    scoutRuntimeHarness("kimi")?.label ?? "Kimi Code", "kimi", "kimi", null, null, "Kimi",
     "Dense repository and study synthesis through the native Kimi harness.",
     "The harness owns the concrete model and quota telemetry can be stale; probe before large fan-out.",
   ),
   opus: runtimeDefinition(
-    OPUS.label, "claude", "claude", OPUS.id, "high", "Opus",
+    MODELS.opus.label, "claude", "claude", MODELS.opus.id, "high", "Opus",
     "Long-context synthesis, nuanced architecture, and coherent product reasoning.",
     "Premium shared Claude quota; avoid routine scans and repetitive verification.",
   ),
   glm: runtimeDefinition(
-    "GLM-5.2", "opencode", "opencode", "opencode-go/glm-5.2", null, "OpenCode",
+    MODELS.glm.label, "opencode", "opencode", MODELS.glm.id, null, "OpenCode",
     "Independent broad-context synthesis through OpenCode.",
     "OpenCode quota is not visible in Scout; use a bounded canary before scaling.",
   ),
-  terra: runtimeDefinition(
-    "GPT-5.6 Terra", "codex", "codex", "gpt-5.6-terra", "high", null,
+  astra: runtimeDefinition(
+    MODELS.astra.label, "codex", "codex", MODELS.astra.id, "high", null,
     "Balanced implementation, correctness review, and technical critique.",
-    "Prefer Sol for the hardest integration boundary when its additional spend is justified.",
-  ),
-  minimax: runtimeDefinition(
-    "MiniMax M3", "minimax", "opencode", "opencode-go/minimax-m3", null, "OpenCode",
-    "Cost-effective structured evidence collection and comparison.",
-    "Verify load-bearing conclusions with a stronger reviewer before acceptance.",
+    "Costs more per turn than Sol; keep it for review and correctness work where the extra depth pays off.",
   ),
   luna: runtimeDefinition(
-    "GPT-5.6 Luna", "codex", "codex", "gpt-5.6-luna", "medium", null,
+    MODELS.luna.label, "codex", "codex", MODELS.luna.id, "medium", null,
     "Inexpensive source mapping, test enumeration, and mechanical audit work.",
     "Keep it out of sole high-stakes product judgment and final acceptance.",
   ),
   haiku: runtimeDefinition(
-    "Haiku 4.5", "claude", "claude", "claude-haiku-4-5", "low", null,
+    MODELS.haiku.label, "claude", "claude", MODELS.haiku.id, "low", null,
     "Fast narrow scans and classification inside the Claude harness.",
-    "Lighter reasoning and a smaller context window make broad synthesis a poor fit.",
+    "Lighter reasoning makes broad synthesis and final judgment a poor fit.",
   ),
   sonnet: runtimeDefinition(
-    "Sonnet 4.6", "claude", "claude", "claude-sonnet-4-6", "high", null,
+    MODELS.sonnet.label, "claude", "claude", MODELS.sonnet.id, "high", null,
     "Strong generalist implementation with a large context window.",
     "Shares Claude's provider allowance and can become a poor choice when that pool is guarded.",
   ),
   deepseek: runtimeDefinition(
-    "DeepSeek V4 Pro", "opencode", "opencode", "opencode-go/deepseek-v4-pro", null, "OpenCode",
+    MODELS.deepseek.label, "opencode", "opencode", MODELS.deepseek.id, null, "OpenCode",
     "Code-centric review through an independent model lineage.",
     "Quota is opaque and findings should not be the sole acceptance authority.",
   ),
@@ -254,7 +287,7 @@ const ROLE_POLICIES: Record<OrchestrationRoleId, RolePolicy> = {
     candidates: [
       roleCandidate("fable", 100, "High-fidelity design critique, rapid UX/visual iteration stress-testing, and premise challenge."),
       roleCandidate("grok", 91, "Contrarian perspective, uncompromising edge-case discovery, and aggressive premise challenge."),
-      roleCandidate("terra", 84, "Rigorous technical inspection of code correctness and runtime invariants."),
+      roleCandidate("astra", 84, "Rigorous technical inspection of code correctness and runtime invariants."),
     ],
   },
   evidence_inventory: {
@@ -262,7 +295,6 @@ const ROLE_POLICIES: Record<OrchestrationRoleId, RolePolicy> = {
     objective: "Grep and AST inventory, reference tracing, log audit, and structured fact collection.",
     strategy: "Select fast, cost-effective models with high precision on structured evidence gathering.",
     candidates: [
-      roleCandidate("minimax", 100, "Fast, cost-effective structured evidence indexing and pattern enumeration."),
       roleCandidate("luna", 95, "Low-latency source tracing, test inventory, and reference mapping."),
       roleCandidate("haiku", 87, "Rapid mechanical file scans and categorization."),
     ],
@@ -273,7 +305,7 @@ const ROLE_POLICIES: Record<OrchestrationRoleId, RolePolicy> = {
     strategy: "Select code-generation champions with high instruction following and strong language typing skills.",
     candidates: [
       roleCandidate("sol", 100, "Deep technical accuracy, robust multi-file refactors, and complex logic execution."),
-      roleCandidate("terra", 91, "Reliable structured implementation with strong type-system adherence."),
+      roleCandidate("astra", 91, "Reliable structured implementation with strong type-system adherence."),
       roleCandidate("sonnet", 87, "Strong generalist coding with fast turn times and clear explanations."),
     ],
   },
@@ -282,7 +314,7 @@ const ROLE_POLICIES: Record<OrchestrationRoleId, RolePolicy> = {
     objective: "Diff analysis, security audit, regression detection, and style conformity.",
     strategy: "Select models with high sensitivity to subtle bugs, invariant violations, and edge-case behaviors.",
     candidates: [
-      roleCandidate("terra", 100, "Strict invariant checking, subtle logic flaw detection, and boundary test coverage."),
+      roleCandidate("astra", 100, "Strict invariant checking, subtle logic flaw detection, and boundary test coverage."),
       roleCandidate("opus", 96, "High-level architectural consistency and API surface evolution review."),
       roleCandidate("deepseek", 87, "Independent second-opinion review focused on code-level edge cases."),
     ],
