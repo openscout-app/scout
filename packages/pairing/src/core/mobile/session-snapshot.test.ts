@@ -32,6 +32,8 @@ const {
 } = await import("./service.ts");
 
 import { invalidateScoutBrokerContextCache } from "../broker/service.ts";
+import { mobileReadWorker } from "../../db/mobile-read.ts";
+import { SQLiteControlPlaneStore } from "../../../../runtime/src/sqlite-store.ts";
 
 let broker: ReturnType<typeof Bun.serve> | undefined;
 let snapshotRequests = 0;
@@ -61,8 +63,22 @@ afterEach(() => {
 });
 
 test("empty provider and terminal registry fixtures retain empty mobile shapes", async () => {
-  expect(await getScoutMobileServiceBudgets()).toEqual({ budgets: [] });
-  expect(await getScoutMobileTerminals()).toEqual({ terminals: [] });
+  // Terminal records are read in a worker thread, which module mocks do not
+  // reach and which copies the environment when it starts. Give it an empty
+  // fixture registry, and start it after the environment points there.
+  const originalControlHome = process.env.OPENSCOUT_CONTROL_HOME;
+  process.env.OPENSCOUT_CONTROL_HOME = fixtureRoot;
+  const store = new SQLiteControlPlaneStore(join(fixtureRoot, "control-plane.sqlite"));
+  mobileReadWorker.close();
+  try {
+    expect(await getScoutMobileServiceBudgets()).toEqual({ budgets: [] });
+    expect(await getScoutMobileTerminals()).toEqual({ terminals: [] });
+  } finally {
+    mobileReadWorker.close();
+    store.close();
+    if (originalControlHome === undefined) delete process.env.OPENSCOUT_CONTROL_HOME;
+    else process.env.OPENSCOUT_CONTROL_HOME = originalControlHome;
+  }
 });
 
 test("mobile runtime capabilities hide the duplicate Grok harness", async () => {
