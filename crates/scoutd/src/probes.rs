@@ -1524,7 +1524,10 @@ impl ProbeEngine {
         op_timeout_ms: Option<u64>,
     ) -> Result<Value, ProbeFailure> {
         let timeout = effective_probe_timeout(self.options.tmux_probe_timeout, op_timeout_ms);
-        let args = tmux_socket_args(
+        // `-u` keeps the tabs in the format: tmux prints them as "_" without a
+        // UTF-8 locale, and a daemon can run without one.
+        let mut args = vec!["-u".to_string()];
+        args.extend(tmux_socket_args(
             &parsed.socket_path,
             &[
                 "display-message",
@@ -1533,7 +1536,7 @@ impl ProbeEngine {
                 parsed.target.as_str(),
                 "#{pane_pid}\t#{pane_tty}\t#{pane_current_path}",
             ],
-        );
+        ));
         match run_capped_command_with_input(
             &self.options.tmux_bin,
             &args,
@@ -4432,6 +4435,55 @@ mod tests {
         assert_eq!(rows[0]["currentPath"], json!("/workspace/app"));
         assert_eq!(rows[4]["currentPath"], json!("/workspace/foo|bar"));
         assert!(rows.iter().all(|row| row.get("host").is_none()));
+    }
+
+    #[test]
+    fn tmux_pane_detail_passes_utf8_flag_so_tabs_survive() {
+        let dir = unique_temp_dir("scoutd-tmux-pane-detail");
+        let argv_path = dir.join("argv.txt");
+        let tmux = dir.join("tmux");
+        // Like tmux for a client without a UTF-8 locale: the tabs in the
+        // format print as "_" unless -u was passed.
+        write_executable(
+            &tmux,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > {}
+row='4242\t/dev/ttys004\t/workspace/app\n'
+if [ "$1" = "-u" ]; then
+  printf "$row"
+else
+  printf "$row" | tr '\t' '_'
+fi
+"#,
+                shell_quote(&argv_path.to_string_lossy())
+            ),
+        );
+        let mut options = base_options(dir.join("probes.sock"));
+        options.tmux_bin = tmux.to_string_lossy().to_string();
+        let engine = ProbeEngine::new(options);
+
+        let snapshot = engine.snapshot(
+            super::TMUX_PANES_ID,
+            Some(r#"{"kind":"detail","socketPath":"default","target":"%1"}"#.to_string()),
+            Some(0),
+            Some(2_000),
+        );
+
+        assert!(snapshot.error.is_none(), "error={:?}", snapshot.error);
+        assert_eq!(
+            snapshot.value,
+            json!({
+                "panePid": 4242,
+                "paneTty": "ttys004",
+                "paneCurrentPath": "/workspace/app",
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(&argv_path).unwrap(),
+            "-u\ndisplay-message\n-p\n-t\n%1\n#{pane_pid}\t#{pane_tty}\t#{pane_current_path}\n"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

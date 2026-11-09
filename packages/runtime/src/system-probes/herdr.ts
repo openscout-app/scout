@@ -23,7 +23,13 @@ import { defineProbeFamily, probeRunOutput, type ProbeCtx, type ProbeSnapshot } 
 import { execProbeFile, execSystemFile } from "./exec.js";
 import { gitRevParseProbe } from "./git.js";
 import { runWithScoutdFallback } from "./scoutd-client.js";
-import { readClientProcessTable, readMacAppIndex, summarizeTerminalClients, type TerminalClientRef } from "./terminal-clients.js";
+import {
+  readClientProcessTable,
+  readMacAppIndex,
+  summarizeTerminalClients,
+  type ClientProcessTable,
+  type TerminalClientRef,
+} from "./terminal-clients.js";
 
 const HERDR_TTL_MS = 5_000;
 const HERDR_TIMEOUT_MS = 2_000;
@@ -191,12 +197,20 @@ const HERDR_DEFAULT_SESSION = "default";
  * `herdr session attach X`. Servers (`herdr server`), one-shot commands
  * (`herdr session list`, `herdr --version`) and remote attaches are not
  * clients of a session on this host.
+ *
+ * `ps` prints argv joined by spaces, so splitting alone cannot keep a herdr
+ * path that holds a space together. `executable` is the process table's
+ * `comm`; on macOS that is argv[0] in full. When it begins the command line it
+ * marks where the executable ends. Otherwise (Linux reports a short kernel
+ * name) the first whitespace-separated token is the executable.
  */
-export function parseHerdrClientSession(command: string): string | null {
-  const tokens = command.trim().split(/\s+/u).filter(Boolean);
-  const bin = tokens[0];
+export function parseHerdrClientSession(command: string, executable?: string | null): string | null {
+  const line = command.trim();
+  const exe = executable?.trim();
+  const leading = exe && (line === exe || line.startsWith(`${exe} `)) ? exe : null;
+  const rest = (leading ? line.slice(leading.length) : line).split(/\s+/u).filter(Boolean);
+  const bin = leading ?? rest.shift();
   if (!bin || basename(bin) !== "herdr") return null;
-  const rest = tokens.slice(1);
   let session = HERDR_DEFAULT_SESSION;
   let index = 0;
   while (index < rest.length && rest[index]!.startsWith("-")) {
@@ -221,10 +235,17 @@ export function parseHerdrClientSession(command: string): string | null {
   return null;
 }
 
-/** Herdr client processes on this host, with the session each attaches to. */
-export function herdrClientRefs(commandRows: readonly { pid: number; command: string }[]): TerminalClientRef[] {
+/**
+ * Herdr client processes on this host, with the session each attaches to.
+ * `table` supplies each pid's `comm`, which tells the executable from its
+ * arguments when its path holds a space.
+ */
+export function herdrClientRefs(
+  commandRows: readonly { pid: number; command: string }[],
+  table?: ClientProcessTable,
+): TerminalClientRef[] {
   return commandRows.flatMap((row) => {
-    const session = parseHerdrClientSession(row.command);
+    const session = parseHerdrClientSession(row.command, table?.get(row.pid)?.comm);
     return session ? [{ pid: row.pid, session }] : [];
   });
 }
@@ -236,7 +257,7 @@ export function herdrClientRefs(commandRows: readonly { pid: number; command: st
 export async function readHerdrSessionClients(sessionName: string): Promise<TerminalSessionClients | null> {
   const processes = await readClientProcessTable();
   if (!processes) return null;
-  return summarizeTerminalClients(herdrClientRefs(processes.commandRows), sessionName, {
+  return summarizeTerminalClients(herdrClientRefs(processes.commandRows, processes.table), sessionName, {
     table: processes.table,
     apps: readMacAppIndex,
   });

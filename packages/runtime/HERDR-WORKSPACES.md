@@ -21,7 +21,12 @@ read. Herdr owns its workspaces and reported panel identities; a reported
 - Each digest preserves the protocol model's `session`, `live`, `observedAt`,
   `savedAt`, `unavailable`, totals/status counts, attention/working lists,
   directory groups, shapes, notes and truncation, and adds `availability`.
-  Saved panes have unknown status and no live target. These are host observations,
+  Saved panes have unknown status and no live target.
+- A live digest also carries `clients` (herdr clients attached to the session,
+  counted from this host's process table) and `apps` (the macOS apps they run
+  in) when the process table was readable, and each pane carries `gitBranch`
+  when the host read it: null outside a git checkout or on a detached HEAD.
+  All three are optional. A saved digest never carries `clients` or `apps`. These are host observations,
   not selectors into Scout agents or conversations.
 
 Enumeration failure, malformed output and a missing executable are

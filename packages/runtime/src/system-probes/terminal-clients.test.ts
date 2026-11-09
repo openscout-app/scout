@@ -117,6 +117,33 @@ describe("herdr client command parse", () => {
       { pid: 14, command: "-zsh" },
     ])).toEqual([{ pid: 11, session: "work" }, { pid: 13, session: "default" }]);
   });
+
+  test("uses the executable to keep a herdr path that holds a space together", () => {
+    const bin = "/workspace/my tools/bin/herdr";
+    expect(parseHerdrClientSession(`${bin} --session work`, bin)).toBe("work");
+    expect(parseHerdrClientSession(`${bin} session attach work`, bin)).toBe("work");
+    expect(parseHerdrClientSession(bin, bin)).toBe("default");
+    expect(parseHerdrClientSession(`${bin} server`, bin)).toBeNull();
+    expect(parseHerdrClientSession("/workspace/my tools/bin/vim herdr", "/workspace/my tools/bin/vim")).toBeNull();
+    // Without the executable, the split stops at the space and finds no herdr.
+    expect(parseHerdrClientSession(`${bin} --session work`)).toBeNull();
+    // A short kernel name (Linux) does not begin the line, so the split is used.
+    expect(parseHerdrClientSession(`${bin} --session work`, "herdr")).toBeNull();
+    expect(parseHerdrClientSession("/usr/local/bin/herdr --session work", "herdr")).toBe("work");
+    // An executable that is only a prefix of the first word is not used.
+    expect(parseHerdrClientSession("/workspace/bin/herdrx --session work", "/workspace/bin/herdr")).toBeNull();
+  });
+
+  test("collects client refs whose herdr path holds a space from the process table", () => {
+    const processes = table({
+      21: [1, "/workspace/my tools/bin/herdr", "/workspace/my tools/bin/herdr --session work"],
+      22: [1, "/workspace/my tools/bin/herdr", "/workspace/my tools/bin/herdr server"],
+      23: [1, "-zsh"],
+    });
+    const rows = [...processes].map(([pid, entry]) => ({ pid, command: entry.command ?? "" }));
+    expect(herdrClientRefs(rows, processes)).toEqual([{ pid: 21, session: "work" }]);
+    expect(herdrClientRefs(rows)).toEqual([]);
+  });
 });
 
 describe("tmux client list parse", () => {
