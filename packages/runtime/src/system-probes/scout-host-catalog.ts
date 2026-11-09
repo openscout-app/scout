@@ -7,7 +7,7 @@ export const SCOUT_HOST_PROBE_SCHEMA_VERSIONS = {
   "git.mergeBase": 1,
   "git.logLastCommitUnix": 1,
   "git.worktreeListPorcelain": 1,
-  "tmux.sessions": 2,
+  "tmux.sessions": 3,
   "tmux.panes": 1,
   "zellij.sessions": 1,
   "ps.runtime": 1,

@@ -19,6 +19,16 @@ export type TmuxSessionInfo = {
   activityAt: number | null;
   currentCommand: string | null;
   currentPath: string | null;
+  /**
+   * The active window's name. With tmux's automatic-rename on, this follows the
+   * running command; a name a harness or person set stays put.
+   */
+  windowName?: string | null;
+  /**
+   * The active pane's title, as a harness or person set it. Null when nobody
+   * set one: tmux titles a new pane with the host name, and that is not a title.
+   */
+  paneTitle?: string | null;
 };
 
 export type ZellijSessionInfo = {
@@ -117,15 +127,61 @@ export function zellijSocketKey(input?: string | { env?: RuntimeEnv; socketDir?:
   return input?.socketDir?.trim() || zellijSocketDirFromEnv(input?.env ?? process.env);
 }
 
+/**
+ * One `list-sessions` row per session, tab-delimited because a window name or
+ * pane title can hold "|". The pane title is last, so a tab inside it folds
+ * back into it. `#{host}` is read only to recognize tmux's default pane title
+ * and is never reported. Run it with `-u`: without a UTF-8 locale tmux prints
+ * each tab as "_".
+ */
+export const TMUX_SESSION_LIST_FORMAT = [
+  "#{session_name}",
+  "#{session_windows}",
+  "#{session_attached}",
+  "#{session_created}",
+  "#{session_activity}",
+  "#{pane_current_command}",
+  "#{pane_current_path}",
+  "#{window_name}",
+  "#{host}",
+  "#{pane_title}",
+].join("\t");
+
+const TMUX_SESSION_FIELD_COUNT = 10;
+/** Rows from before window names and titles: seven "|"-delimited fields. */
+const LEGACY_TMUX_SESSION_FIELD_COUNT = 7;
+
+function firstHostLabel(value: string): string {
+  return value.split(".")[0] ?? value;
+}
+
+/**
+ * The pane title to report, or null when it is tmux's default. tmux titles a
+ * new pane with the host name at the time, so the match ignores case and the
+ * domain suffix: a pane titled "box.local" still matches a host that is now
+ * "box.lan".
+ */
+export function reportedTmuxPaneTitle(title: string | undefined, host: string | undefined): string | null {
+  const cleaned = cleanOptionalString(title);
+  if (!cleaned) return null;
+  const hostName = cleanOptionalString(host)?.toLowerCase();
+  if (!hostName) return cleaned;
+  const lowered = cleaned.toLowerCase();
+  if (lowered === hostName) return null;
+  const isBareHostName = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/u.test(lowered);
+  return isBareHostName && firstHostLabel(lowered) === firstHostLabel(hostName) ? null : cleaned;
+}
+
 export function parseTmuxSessionList(output: string): TmuxSessionInfo[] {
   return output
     .split(/\r?\n/gu)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
-      const [name, windows, attached, createdAt, activityAt, currentCommand, currentPath] = line.includes("|")
-        ? splitDelimitedLine(line, "|", 7)
-        : splitDelimitedLine(line, "\t", 7);
+    .map((line): TmuxSessionInfo | null => {
+      // A tab row is never split on "|": its window name or title may hold one.
+      const [name, windows, attached, createdAt, activityAt, currentCommand, currentPath, windowName, host, paneTitle] = line.includes("\t")
+        ? splitDelimitedLine(line, "\t", TMUX_SESSION_FIELD_COUNT)
+        : splitDelimitedLine(line, "|", LEGACY_TMUX_SESSION_FIELD_COUNT);
       if (!name) return null;
       return {
         name,
@@ -135,6 +191,8 @@ export function parseTmuxSessionList(output: string): TmuxSessionInfo[] {
         activityAt: activityAt ? Number.parseInt(activityAt, 10) || null : null,
         currentCommand: cleanOptionalString(currentCommand),
         currentPath: cleanOptionalString(currentPath),
+        windowName: cleanOptionalString(windowName),
+        paneTitle: reportedTmuxPaneTitle(paneTitle, host),
       };
     })
     .filter((session): session is TmuxSessionInfo => Boolean(session));
@@ -164,10 +222,11 @@ export function parseZellijSessionList(output: string): ZellijSessionInfo[] {
 async function readTmuxSessionsLocal(key: string, ctx: ProbeCtx): Promise<TmuxSessionInfo[]> {
   try {
     const { stdout } = await execProbeFile(ctx, tmuxBin(), [
+      "-u", // keep the tabs in the format: tmux prints them as "_" without a UTF-8 locale
       ...tmuxSocketArgs(key),
       "list-sessions",
       "-F",
-      "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}|#{pane_current_command}|#{pane_current_path}",
+      TMUX_SESSION_LIST_FORMAT,
     ], {
       maxStdoutBytes: 512 * 1024,
       maxStderrBytes: 64 * 1024,
