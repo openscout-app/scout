@@ -89,6 +89,16 @@ export type TerminalHostSession = {
   attachedClients?: number | null;
   cwd?: string | null;
   currentCommand?: string | null;
+  /**
+   * The active window's name, when the host has windows. Under tmux's
+   * automatic-rename it follows {@link currentCommand}.
+   */
+  windowName?: string | null;
+  /**
+   * The active pane's title, as a harness or person set it. Null when nobody
+   * did: a host's default title (tmux uses the host name) is not reported.
+   */
+  paneTitle?: string | null;
   paneId?: string | null;
   /** Anything host-specific worth surfacing. Must not carry socket paths. */
   metadata?: Record<string, unknown>;

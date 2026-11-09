@@ -55,7 +55,7 @@ if (!runScoutdConformance) {
 
 test("tmux session parser preserves host-reported last activity", () => {
   expect(parseTmuxSessionList(
-    "alpha|2|1|1710000000|1710003600|zsh|/Users/art/dev/alpha\n",
+    "alpha|2|1|1710000000|1710003600|zsh|/workspace/alpha\n",
   )).toEqual([{
     name: "alpha",
     windows: 2,
@@ -63,7 +63,9 @@ test("tmux session parser preserves host-reported last activity", () => {
     createdAt: 1710000000,
     activityAt: 1710003600,
     currentCommand: "zsh",
-    currentPath: "/Users/art/dev/alpha",
+    currentPath: "/workspace/alpha",
+    windowName: null,
+    paneTitle: null,
   }]);
 });
 
@@ -1312,17 +1314,22 @@ exit 64
     const script = join(directory, "tmux-fixture.sh");
     writeFileSync(script, `#!/bin/sh
 mode="\${OPENSCOUT_TEST_TMUX_MODE:-success}"
+utf8=0
 if [ "$1" = "-u" ]; then
+  utf8=1
   shift
 fi
 if [ "$1" = "-S" ]; then
   shift 2
 fi
 if [ "$1" = "list-sessions" ]; then
-  cat <<'ROWS'
-alpha|2|1|1710000000|1710003600|zsh|/Users/art/dev/alpha
-beta|1|0|||node|
-ROWS
+  rows='alpha\\t2\\t1\\t1710000000\\t1710003600\\tzsh\\t/workspace/alpha\\teditor\\tbox.local\\tclaude | fix tests\\nbeta\\t1\\t0\\t\\t\\tnode\\t\\tnode\\tbox.local\\tbox.local\\n'
+  # Like tmux for a client without UTF-8: tabs print as "_" unless -u was passed.
+  if [ "$utf8" = 1 ]; then
+    printf "$rows"
+  else
+    printf "$rows" | tr '\\t' '_'
+  fi
   exit 0
 fi
 if [ "$1" = "display-message" ]; then
@@ -2078,7 +2085,9 @@ exit 64
         createdAt: 1710000000,
         activityAt: 1710003600,
         currentCommand: "zsh",
-        currentPath: "/Users/art/dev/alpha",
+        currentPath: "/workspace/alpha",
+        windowName: "editor",
+        paneTitle: "claude | fix tests",
       },
       {
         name: "beta",
@@ -2088,6 +2097,8 @@ exit 64
         activityAt: null,
         currentCommand: "node",
         currentPath: null,
+        windowName: "node",
+        paneTitle: null,
       },
     ]);
   }, SCOUTD_CONFORMANCE_TIMEOUT_MS);

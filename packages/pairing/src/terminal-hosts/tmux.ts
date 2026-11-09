@@ -51,6 +51,8 @@ export const tmuxTerminalHost: TerminalHostAdapter = {
       attachedClients: session.attached,
       cwd: session.currentPath,
       currentCommand: session.currentCommand,
+      windowName: session.windowName ?? null,
+      paneTitle: session.paneTitle ?? null,
       metadata: {
         windows: session.windows,
         ...(session.createdAt ? { startedAt: session.createdAt * 1000 } : {}),
