@@ -31,7 +31,7 @@ try{
     let own=c.subject==="owner"?altered:owner,helper=c.subject==="engine"?altered:engine;
     const subject=join(scratch,kind+"-owner.ts"),enginePath=join(scratch,kind+"-engine.ts"),worker=join(scratch,kind+"-worker.ts"),test=join(scratch,kind+".test.ts");
     hashes[kind]={owner:createHash("sha256").update(own).digest("hex"),engine:createHash("sha256").update(helper).digest("hex")};
-    for(const [from,to]of [["../support-paths.js","packages/runtime/src/support-paths.ts"],["./trust-capsule.js","packages/runtime/src/pairing-security/trust-capsule.ts"],["./trust-cutover.js","packages/runtime/src/pairing-security/trust-cutover.ts"]])own=own.replaceAll(JSON.stringify(from),JSON.stringify(url(to!)));
+    for(const [from,to]of [["../node-identity.js","packages/runtime/src/node-identity.ts"],["../instance.js","packages/runtime/src/instance.ts"],["./host-binding.js","packages/runtime/src/pairing-security/host-binding.ts"],["../support-paths.js","packages/runtime/src/support-paths.ts"],["./trust-capsule.js","packages/runtime/src/pairing-security/trust-capsule.ts"],["./trust-cutover.js","packages/runtime/src/pairing-security/trust-cutover.ts"]])own=own.replaceAll(JSON.stringify(from),JSON.stringify(url(to!)));
     own=own.replaceAll('"./trust-reclamation.js"',JSON.stringify(pathToFileURL(enginePath).href));
     helper=helper.replaceAll('"./trust-capsule.js"',JSON.stringify(url("packages/runtime/src/pairing-security/trust-capsule.ts")));
     writeFileSync(subject,own);writeFileSync(enginePath,helper);

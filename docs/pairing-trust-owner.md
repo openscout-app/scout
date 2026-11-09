@@ -407,7 +407,8 @@ the new owner over an existing store, trusted maintenance must:
 2. Keep the existing node identity and select its original Scout instance.
 3. Run `scout pair bind-host <migration-id> --quiescent` with one retained ID.
    The command refuses live runtime, supervisor and pairing process markers,
-   requires stopped pairing intent, and retains a private authority backup.
+   and retains a private authority backup. Stop the supervising service with
+   `scout app stop` before invoking it, so launchd cannot restart a writer.
    `--quiescent` asserts that all other and older store users are excluded;
    process markers cannot prove exclusion of arbitrary external writers.
    Unpublished single-link binding temporary files are retained in the backup

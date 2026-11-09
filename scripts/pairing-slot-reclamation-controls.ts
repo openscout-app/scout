@@ -25,7 +25,7 @@ try{
    for(const [kind,raw] of [["healthy",original],["bypass",original.replace(control.needle,control.replacement)]]){
     const subject=join(scratch,`${kind}.ts`),worker=join(scratch,`${kind}-worker.ts`),test=join(scratch,`${kind}.test.ts`);
     let source=raw!;
-    for(const [from,to] of [["../support-paths.js","packages/runtime/src/support-paths.ts"],["./trust-capsule.js","packages/runtime/src/pairing-security/trust-capsule.ts"],["./trust-cutover.js","packages/runtime/src/pairing-security/trust-cutover.ts"],["./trust-reclamation.js","packages/runtime/src/pairing-security/trust-reclamation.ts"]])source=source.replaceAll(JSON.stringify(from),JSON.stringify(url(to!)));
+    for(const [from,to] of [["../node-identity.js","packages/runtime/src/node-identity.ts"],["../instance.js","packages/runtime/src/instance.ts"],["./host-binding.js","packages/runtime/src/pairing-security/host-binding.ts"],["../support-paths.js","packages/runtime/src/support-paths.ts"],["./trust-capsule.js","packages/runtime/src/pairing-security/trust-capsule.ts"],["./trust-cutover.js","packages/runtime/src/pairing-security/trust-cutover.ts"],["./trust-reclamation.js","packages/runtime/src/pairing-security/trust-reclamation.ts"]])source=source.replaceAll(JSON.stringify(from),JSON.stringify(url(to!)));
     writeFileSync(subject,source);hashes[kind!]=createHash("sha256").update(raw!).digest("hex");
     writeFileSync(worker,readFileSync(join(root,"scripts/pairing-slot-reclamation-worker.ts"),"utf8").replace('"../packages/runtime/src/pairing-security/trust-owner.ts"',JSON.stringify(subject)));
     writeFileSync(test,readFileSync(join(root,"scripts/pairing-slot-reclamation-process.test.ts"),"utf8")

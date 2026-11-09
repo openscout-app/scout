@@ -2,8 +2,7 @@ import {existsSync, mkdirSync, readFileSync, writeFileSync, lstatSync, openSync,
 import {join} from "node:path";
 import {PairingTrustOwner} from "@openscout/runtime/pairing-security/trust-owner";
 import {resolveOpenScoutSupportPaths} from "@openscout/runtime/support-paths";
-import {resolveScoutPairingSupervisorPaths, readScoutPairingProcessPid, isScoutPairingProcessRunning,
-  readScoutPairingSupervisorIntent} from "@openscout/runtime/pairing-supervisor";
+import {resolveScoutPairingSupervisorPaths, readScoutPairingProcessPid, isScoutPairingProcessRunning} from "@openscout/runtime/pairing-supervisor";
 import type {ScoutCommandContext} from "../context.ts";
 
 /** Trusted operator maintenance, deliberately independent of a running runtime.
@@ -16,8 +15,6 @@ export function runPairHostBinding(context: ScoutCommandContext, args: string[])
   const assertStopped=()=>{
     for(const file of [paths.runtimePidPath,paths.supervisorPidPath])
       if(isScoutPairingProcessRunning(readScoutPairingProcessPid(file))) throw Error("Stop Scout's runtime, pairing controller and supervisor before scout pair bind-host.");
-    if(readScoutPairingSupervisorIntent(paths.intentPath).desiredState === "running")
-      throw Error("Pairing restart intent is running; stop Scout before scout pair bind-host.");
     for(const [file,keys] of [["broker-heartbeat.json",["pid"]],["scoutd-state.json",["scoutdPid","basePid","probePid"]]] as const){
       const path=join(support.runtimeDirectory,file);if(!existsSync(path))continue;
       let record:Record<string,unknown>;try{record=JSON.parse(readFileSync(path,"utf8"));}catch{throw Error("Cannot verify stopped runtime: "+file);}

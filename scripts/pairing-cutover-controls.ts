@@ -18,7 +18,7 @@ const controls = [
   ]]},
   {id: "no-roll-forward", test: "barrier and partial-retirement interruptions", edits: [['this.finishPendingCutover(root);', '']]},
   {id: "unchecked-retirement", test: "changed retirement candidates", edits: [[
-    'if (id(stat) !== item.identity || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");', '',
+    'if (this.persistentIdentity(stat) !== item.identity || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");', '',
   ]]},
   {id: "unchecked-inventory", test: "absent or corrupt capsule and retirement evidence", edits: [[
     'if (!bytes || bytes.length !== part.bytes || hash(bytes) !== part.sha256) refuse("migration_inventory_invalid");',
@@ -69,7 +69,7 @@ for (const control of controls) {
     for (const [kind, raw] of [["healthy", original], ["bypass", bypass]]) {
       const subject = join(scratch, `${kind}.ts`), worker = join(scratch, `${kind}-worker.ts`);
       let source = raw!;
-      for (const [from, to] of [["../support-paths.js", "packages/runtime/src/support-paths.ts"],
+      for (const [from, to] of [["../node-identity.js","packages/runtime/src/node-identity.ts"],["../instance.js","packages/runtime/src/instance.ts"],["./host-binding.js","packages/runtime/src/pairing-security/host-binding.ts"],["../support-paths.js", "packages/runtime/src/support-paths.ts"],
         ["./trust-capsule.js", "packages/runtime/src/pairing-security/trust-capsule.ts"],
         ["./trust-cutover.js", "packages/runtime/src/pairing-security/trust-cutover.ts"],["./trust-reclamation.js","packages/runtime/src/pairing-security/trust-reclamation.ts"]]) source = source.replaceAll(JSON.stringify(from), JSON.stringify(url(to!)));
       writeFileSync(subject, source); hashes[kind!] = createHash("sha256").update(raw!).digest("hex");
@@ -81,6 +81,7 @@ for (const control of controls) {
       let tests = readFileSync(join(project, unit ? "packages/runtime/src/pairing-security/trust-cutover.test.ts" : "scripts/pairing-cutover-process.test.ts"), "utf8");
       for (const from of ["./trust-owner.ts", "../" + ownerPath]) tests = tests.replace(JSON.stringify(from), JSON.stringify(subject));
       for (const from of ["./fixtures/pairing-capsule.ts", "../../../../scripts/fixtures/pairing-capsule.ts"]) tests = tests.replace(JSON.stringify(from), JSON.stringify(url("scripts/fixtures/pairing-capsule.ts")));
+      tests = tests.replaceAll('"../packages/runtime/src/node-identity.ts"',JSON.stringify(url("packages/runtime/src/node-identity.ts")));
       tests = tests.replaceAll('"../../../../scripts/fixtures/pairing-v1/pairing-security/trust-owner.ts"', JSON.stringify(url("scripts/fixtures/pairing-v1/pairing-security/trust-owner.ts")));
       for (const from of ["./trust-cutover.ts", "../packages/runtime/src/pairing-security/trust-cutover.ts"]) tests = tests.replace(JSON.stringify(from), JSON.stringify(url("packages/runtime/src/pairing-security/trust-cutover.ts")));
       tests = tests.replace('fileURLToPath(new URL("..", import.meta.url))', JSON.stringify(project))
