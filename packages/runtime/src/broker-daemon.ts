@@ -117,6 +117,7 @@ import { BrokerRendezvousService } from "./broker-rendezvous-service.js";
 import { BrokerOperatorAttentionService } from "./broker-operator-attention-service.js";
 import { BrokerLocalAgentSyncService } from "./broker-local-agent-sync-service.js";
 import { createRelayAgentRegistrySignatureReader } from "./relay-agent-registry-signature.js";
+import { relayEndpointsTakingObservation } from "./relay-endpoint-session-observation.js";
 import {
   DEFAULT_CARDLESS_SESSION_IDLE_TTL_MS,
   idleCardlessSessionExpiryCandidates,
@@ -920,7 +921,11 @@ const durableRecords: BrokerDurableRecordStore = new BrokerDurableRecordStore({
 const upsertNodeDurably = durableRecords.upsertNode;
 const upsertActorDurably = durableRecords.upsertActor;
 const upsertAgentDurably = durableRecords.upsertAgent;
-const upsertEndpointDurably = durableRecords.upsertEndpoint;
+const upsertEndpointRecordDurably = durableRecords.upsertEndpoint;
+async function upsertEndpointDurably(endpoint: AgentEndpoint): Promise<void> {
+  await upsertEndpointRecordDurably(endpoint);
+  await mirrorObservedTmuxSessionToRelayEndpoints(endpoint);
+}
 const deleteEndpointDurably = durableRecords.deleteEndpoint;
 const deleteAgentDurably = durableRecords.deleteAgent;
 const deleteActorDurably = durableRecords.deleteActor;
@@ -1626,6 +1631,27 @@ async function transitionInvocation(
   // Recording can reject a stale patch after another writer completes/cancels
   // the invocation. Never return the uncommitted proposal to a side-effect caller.
   return runtime.flightForInvocation(invocationId)!;
+}
+
+/**
+ * A verified tmux observation is a fact about the tmux session. The
+ * relay-registry endpoint for the same session gets it too, so clients can map
+ * that agent to its transcript. Mirroring writes the record directly: it
+ * changes no state, so it must not trigger dispatch recovery, and a failure
+ * here must not fail the write that carried the observation.
+ */
+async function mirrorObservedTmuxSessionToRelayEndpoints(endpoint: AgentEndpoint): Promise<void> {
+  if (endpoint.nodeId !== nodeId) return;
+  try {
+    for (const target of relayEndpointsTakingObservation(endpoint, Object.values(runtime.peek().endpoints))) {
+      await upsertEndpointRecordDurably(target);
+    }
+  } catch (error) {
+    console.warn(
+      `[openscout-runtime] could not mirror the observed session of ${endpoint.id} to relay endpoints:`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 async function persistEndpoint(endpoint: AgentEndpoint): Promise<void> {
