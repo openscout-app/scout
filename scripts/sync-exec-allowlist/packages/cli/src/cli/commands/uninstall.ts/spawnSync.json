@@ -1,0 +1,7 @@
+{
+  "path": "packages/cli/src/cli/commands/uninstall.ts",
+  "symbol": "spawnSync",
+  "category": "cli",
+  "reason": "interactive uninstaller one-shot commands (plutil, ps, kill, harness mcp remove, bun/npm remove)",
+  "owner": "desktop"
+}

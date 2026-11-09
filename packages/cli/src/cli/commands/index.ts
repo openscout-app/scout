@@ -65,6 +65,7 @@ export type ScoutCommandName =
   | "tell"
   | "tui"
   | "up"
+  | "uninstall"
   | "update"
   | "wait"
   | "watch"
@@ -185,6 +186,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./up.ts")).runUpCommand;
     case "update":
       return (await import("./update.ts")).runUpdateCommand;
+    case "uninstall":
+      return (await import("./uninstall.ts")).runUninstallCommand;
     case "wait":
       return (await import("./wait.ts")).runWaitCommand;
     case "watch":
