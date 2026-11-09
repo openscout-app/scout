@@ -5422,8 +5422,12 @@ export function createScoutMcpServer(options: {
         currentDirectory,
         options.defaultCurrentDirectory,
       );
-      const trimmedFlightId = flightId.trim();
+      const requestedId = flightId.trim();
       const brokerUrl = deps.resolveBrokerUrl();
+      // Accept an invocation id too: getFlight resolves it to its flight.
+      const trimmedFlightId = requestedId.startsWith("inv-")
+        ? (await deps.getFlight(brokerUrl, requestedId))?.id ?? requestedId
+        : requestedId;
       let flight: ScoutFlightRecord | null = null;
       let waitStatus: "completed" | "terminal" | "pending" = "pending";
 
