@@ -28,7 +28,7 @@ function input(overrides: Partial<MobileMeshNodesInput> = {}): MobileMeshNodesIn
         id: "ep-builder",
         agentId: "builder",
         harness: "claude",
-        projectRoot: "/Users/arach/dev/openscout",
+        projectRoot: "/Users/guest/dev/openscout",
         metadata: { branch: "main", lastSeenAt: NOW - 2_000 },
       },
     },

@@ -145,8 +145,8 @@ describe("classifyClaudeCodePrompt", () => {
   });
 
   test("a skill body is context named for the skill", () => {
-    const result = classifyClaudeCodePrompt("Base directory for this skill: /Users/art/.claude/skills/disk-cleanup\n\n# Disk-space master skill\n\n<example>x</example>");
-    expect(result.parts).toEqual([{ kind: "context", name: "skill", label: "Skill", detail: "disk-cleanup", text: "Base directory for this skill: /Users/art/.claude/skills/disk-cleanup\n\n# Disk-space master skill\n\n<example>x</example>" }]);
+    const result = classifyClaudeCodePrompt("Base directory for this skill: /Users/you/.claude/skills/disk-cleanup\n\n# Disk-space master skill\n\n<example>x</example>");
+    expect(result.parts).toEqual([{ kind: "context", name: "skill", label: "Skill", detail: "disk-cleanup", text: "Base directory for this skill: /Users/you/.claude/skills/disk-cleanup\n\n# Disk-space master skill\n\n<example>x</example>" }]);
     expect(result.harnessOnly).toBe(true);
   });
 

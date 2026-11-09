@@ -305,7 +305,7 @@ describe("buildScoutAttentionReport", () => {
             homeNodeId: "node-1",
             authorityNodeId: "node-1",
             advertiseScope: "local",
-            metadata: { projectRoot: "/Users/arach/dev/openscout" },
+            metadata: { projectRoot: "/Users/guest/dev/openscout" },
           },
         },
         messages: {
@@ -314,7 +314,7 @@ describe("buildScoutAttentionReport", () => {
             conversationId: "channel.system",
             actorId: "system",
             originNodeId: "node-1",
-            body: "Please work in /Users/arach/dev/openscout. Previous run failed.",
+            body: "Please work in /Users/guest/dev/openscout. Previous run failed.",
             class: "status",
             visibility: "private",
             policy: "durable",
@@ -326,7 +326,7 @@ describe("buildScoutAttentionReport", () => {
     );
 
     expect(report.projects).toHaveLength(1);
-    expect(report.projects[0]?.projectRoot).toBe("/Users/arach/dev/openscout");
+    expect(report.projects[0]?.projectRoot).toBe("/Users/guest/dev/openscout");
     expect(report.projects[0]?.reasons).toContain("recent risky message");
   });
 
@@ -346,7 +346,7 @@ describe("buildScoutAttentionReport", () => {
             homeNodeId: "node-1",
             authorityNodeId: "node-1",
             advertiseScope: "local",
-            metadata: { projectRoot: "/Users/arach/dev/talkie" },
+            metadata: { projectRoot: "/Users/guest/dev/talkie" },
           },
         },
         invocations: {

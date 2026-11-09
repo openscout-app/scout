@@ -12,7 +12,7 @@ function makeSession(input: Partial<Session> = {}): Session {
     name: "Codex OpenScout",
     adapterType: "codex",
     status: "active",
-    cwd: "/Users/art/dev/openscout",
+    cwd: "/Users/you/dev/openscout",
     model: "gpt-5",
     ...input,
   };
@@ -133,7 +133,7 @@ describe("session display projection", () => {
       },
       metadata: {
         adapterType: "codex",
-        cwd: "/Users/art/dev/openscout",
+        cwd: "/Users/you/dev/openscout",
         model: "gpt-5",
         provider: "openai",
         sessionName: "Codex OpenScout",

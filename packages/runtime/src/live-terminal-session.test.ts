@@ -16,7 +16,7 @@ const PS_OUTPUT = [
   "  900     1 ??       /Applications/Ghostty.app/Contents/MacOS/ghostty",
   "  901   900 ttys009  -zsh",
   "85103   901 ttys009  grok",
-  "85200 85103 ttys009  /Users/art/.bun/bin/bun /Users/art/.local/bin/scout mcp",
+  "85200 85103 ttys009  /Users/you/.bun/bin/bun /Users/you/.local/bin/scout mcp",
   "69633   901 ttys017  claude --resume 9ce71018",
   "69700 69633 ttys017  node scout mcp",
 ].join("\n");

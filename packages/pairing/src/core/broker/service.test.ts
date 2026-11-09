@@ -1986,7 +1986,7 @@ describe("sendScoutConversationSteer", () => {
               metadata: {
                 cardless: true,
                 handle: "project-schubert",
-                projectRoot: "/Users/art/dev/lattices",
+                projectRoot: "/Users/you/dev/lattices",
               },
             },
           },
@@ -2000,8 +2000,8 @@ describe("sendScoutConversationSteer", () => {
               transport: "codex_app_server",
               state: "offline",
               sessionId: "session-lattices",
-              projectRoot: "/Users/art/dev/lattices",
-              cwd: "/Users/art/dev/lattices",
+              projectRoot: "/Users/you/dev/lattices",
+              cwd: "/Users/you/dev/lattices",
               metadata: {
                 cardless: true,
                 handle: "project-schubert",

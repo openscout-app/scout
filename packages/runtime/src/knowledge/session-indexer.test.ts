@@ -49,7 +49,7 @@ function writeKimiWireFixture(sessionsRoot: string): string {
     join(sessionsRoot, "wd_openscout_test", sessionId, "state.json"),
     JSON.stringify({
       version: 2,
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       title: "iOS navigation slice",
     }),
     "utf8",
@@ -132,7 +132,7 @@ describe("session knowledge indexer (kimi)", () => {
         "state.json",
       ),
       JSON.stringify({
-        workDir: "/Users/art/dev/openscout",
+        workDir: "/Users/you/dev/openscout",
         title: "iOS navigation slice",
       }),
       "utf8",
@@ -162,11 +162,11 @@ describe("session knowledge indexer (kimi)", () => {
 
 describe("basic session scan (no index)", () => {
   function writeClaudeFixture(projectsRoot: string): void {
-    const dir = join(projectsRoot, "-Users-art-dev-openscout");
+    const dir = join(projectsRoot, "-Users-you-dev-openscout");
     mkdirSync(dir, { recursive: true });
     const sessionId = "0f2c7a1e-basic-scan";
     const base = {
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       sessionId,
       timestamp: new Date(Date.now() - 30_000).toISOString(),
     };
@@ -203,7 +203,7 @@ describe("basic session scan (no index)", () => {
         expect(hit.sourceRefs[0]?.kind).toBe("harness_transcript");
         const ref = hit.sourceRefs[0]!;
         if (ref.kind !== "harness_transcript") throw new Error("missing transcript reference");
-        const transcript = readFileSync(join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-Users-art-dev-openscout", "0f2c7a1e-basic-scan.jsonl"));
+        const transcript = readFileSync(join(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT!, "-Users-you-dev-openscout", "0f2c7a1e-basic-scan.jsonl"));
         expect(ref.recordRange).toEqual([1, 1]);
         const [start, end] = ref.byteRange!;
         expect(JSON.parse(transcript.subarray(start, end).toString()).message.content).toBe("Why does the knowledge index child exit 1?");

@@ -79,14 +79,14 @@ describe("history snapshot replay", () => {
   });
 
   test("reconstructs a unified Claude Code snapshot from external jsonl history", () => {
-    const basePath = "/Users/arach/.claude/projects/-Users-arach-dev-openscout/session-123.jsonl";
+    const basePath = "/Users/guest/.claude/projects/-Users-guest-dev-openscout/session-123.jsonl";
     const content = [
       JSON.stringify({
         type: "system",
         subtype: "init",
         timestamp: "2026-04-22T12:00:00.000Z",
         session_id: "claude-upstream-session",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         model: "claude-sonnet-test",
       }),
       JSON.stringify({
@@ -142,7 +142,7 @@ describe("history snapshot replay", () => {
         type: "tool_result",
         timestamp: "2026-04-22T12:00:03.500Z",
         tool_use_id: "tool-bash-1",
-        content: "/Users/arach/dev/openscout",
+        content: "/Users/guest/dev/openscout",
       }),
       JSON.stringify({
         type: "tool_use",
@@ -188,7 +188,7 @@ describe("history snapshot replay", () => {
     expect(snapshot.session.id).toBe(`history:${basePath}`);
     expect(snapshot.session.adapterType).toBe("claude-code");
     expect(snapshot.session.name).toBe("openscout");
-    expect(snapshot.session.cwd).toBe("/Users/arach/dev/openscout");
+    expect(snapshot.session.cwd).toBe("/Users/guest/dev/openscout");
     expect(snapshot.session.model).toBe("claude-sonnet-test");
     expect(snapshot.session.providerMeta).toEqual(
       expect.objectContaining({
@@ -219,7 +219,7 @@ describe("history snapshot replay", () => {
     if (commandBlock.type === "action") {
       expect(commandBlock.action.kind).toBe("command");
       expect(commandBlock.action.status).toBe("completed");
-      expect(commandBlock.action.output).toBe("/Users/arach/dev/openscout");
+      expect(commandBlock.action.output).toBe("/Users/guest/dev/openscout");
     }
 
     const questionBlock = turn.blocks[2]!.block;
@@ -233,14 +233,14 @@ describe("history snapshot replay", () => {
   });
 
   test("populates Claude context usage from latest assistant input and inferred model window", () => {
-    const basePath = "/Users/arach/.claude/projects/-Users-arach-dev-openscout/session-usage.jsonl";
+    const basePath = "/Users/guest/.claude/projects/-Users-guest-dev-openscout/session-usage.jsonl";
     const content = [
       JSON.stringify({
         type: "system",
         subtype: "init",
         timestamp: "2026-04-22T12:00:00.000Z",
         session_id: "claude-usage-session",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         model: "claude-opus-4-8",
       }),
       JSON.stringify({
@@ -312,14 +312,14 @@ describe("history snapshot replay", () => {
   });
 
   test("replays embedded assistant tool_use and user tool_result records without inflating turns", () => {
-    const basePath = "/Users/arach/.claude/projects/-Users-arach-dev-openscout/session-embedded.jsonl";
+    const basePath = "/Users/guest/.claude/projects/-Users-guest-dev-openscout/session-embedded.jsonl";
     const content = [
       JSON.stringify({
         type: "system",
         subtype: "init",
         timestamp: "2026-04-25T23:00:00.000Z",
         session_id: "claude-embedded-session",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         model: "claude-opus-4-8",
       }),
       JSON.stringify({
@@ -353,7 +353,7 @@ describe("history snapshot replay", () => {
             {
               type: "tool_result",
               tool_use_id: "toolu_bash_1",
-              content: "/Users/arach/dev/openscout",
+              content: "/Users/guest/dev/openscout",
               is_error: false,
             },
           ],
@@ -398,7 +398,7 @@ describe("history snapshot replay", () => {
     if (actionBlock.type === "action") {
       expect(actionBlock.action.kind).toBe("command");
       expect(actionBlock.action.status).toBe("completed");
-      expect(actionBlock.action.output).toBe("/Users/arach/dev/openscout");
+      expect(actionBlock.action.output).toBe("/Users/guest/dev/openscout");
     }
 
     const textBlock = turn.blocks[2]!.block;
@@ -410,14 +410,14 @@ describe("history snapshot replay", () => {
   });
 
   test("captures observe runtime and deduped usage metadata from Claude history", () => {
-    const basePath = "/Users/arach/.claude/projects/-Users-arach-dev-openscout/session-observe-meta.jsonl";
+    const basePath = "/Users/guest/.claude/projects/-Users-guest-dev-openscout/session-observe-meta.jsonl";
     const content = [
       JSON.stringify({
         type: "system",
         subtype: "init",
         timestamp: "2026-04-25T23:00:00.000Z",
         session_id: "claude-observe-session",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         model: "claude-opus-4-8",
       }),
       JSON.stringify({
@@ -492,7 +492,7 @@ describe("history snapshot replay", () => {
             {
               type: "tool_result",
               tool_use_id: "toolu_bash_1",
-              content: "/Users/arach/dev/openscout",
+              content: "/Users/guest/dev/openscout",
               is_error: false,
             },
           ],
@@ -554,14 +554,14 @@ describe("history snapshot replay", () => {
   });
 
   test("reconstructs a Codex snapshot from external jsonl history", () => {
-    const basePath = "/Users/arach/.codex/sessions/2026/05/29/rollout-2026-05-29T21-08-19-codex-session.jsonl";
+    const basePath = "/Users/guest/.codex/sessions/2026/05/29/rollout-2026-05-29T21-08-19-codex-session.jsonl";
     const content = [
       JSON.stringify({
         timestamp: "2026-05-30T01:08:36.827Z",
         type: "session_meta",
         payload: {
           id: "codex-session",
-          cwd: "/Users/arach/dev/openscout",
+          cwd: "/Users/guest/dev/openscout",
           originator: "Codex Desktop",
           cli_version: "0.133.0-alpha.1",
           source: "vscode",
@@ -587,7 +587,7 @@ describe("history snapshot replay", () => {
         timestamp: "2026-05-30T01:08:36.839Z",
         type: "turn_context",
         payload: {
-          cwd: "/Users/arach/dev/openscout",
+          cwd: "/Users/guest/dev/openscout",
           model: "gpt-5.5",
           approval_policy: "never",
           timezone: "America/Toronto",
@@ -620,7 +620,7 @@ describe("history snapshot replay", () => {
           name: "exec_command",
           arguments: JSON.stringify({
             cmd: "pwd",
-            workdir: "/Users/arach/dev/openscout",
+            workdir: "/Users/guest/dev/openscout",
           }),
           call_id: "call-shell-1",
         },
@@ -631,7 +631,7 @@ describe("history snapshot replay", () => {
         payload: {
           type: "function_call_output",
           call_id: "call-shell-1",
-          output: "Exit code: 0\nOutput:\n/Users/arach/dev/openscout\n",
+          output: "Exit code: 0\nOutput:\n/Users/guest/dev/openscout\n",
         },
       }),
       JSON.stringify({
@@ -716,7 +716,7 @@ describe("history snapshot replay", () => {
     const snapshot = result.snapshot;
     expect(snapshot.session.adapterType).toBe("codex");
     expect(snapshot.session.name).toBe("openscout");
-    expect(snapshot.session.cwd).toBe("/Users/arach/dev/openscout");
+    expect(snapshot.session.cwd).toBe("/Users/guest/dev/openscout");
     expect(snapshot.session.model).toBe("gpt-5.5");
     expect(snapshot.session.providerMeta).toEqual(
       expect.objectContaining({
@@ -784,7 +784,7 @@ describe("history snapshot replay", () => {
     if (commandBlock.type === "action") {
       expect(commandBlock.action.kind).toBe("command");
       expect(commandBlock.action.status).toBe("completed");
-      expect(commandBlock.action.output).toContain("/Users/arach/dev/openscout");
+      expect(commandBlock.action.output).toContain("/Users/guest/dev/openscout");
     }
 
     const patchBlock = turn.blocks[2]!.block;
@@ -797,13 +797,13 @@ describe("history snapshot replay", () => {
   });
 
   test("keeps Codex host metadata out of visible assistant text", () => {
-    const basePath = "/Users/arach/.codex/sessions/2026/07/03/codex-host-metadata.jsonl";
+    const basePath = "/Users/guest/.codex/sessions/2026/07/03/codex-host-metadata.jsonl";
     const assistantText = [
       "Committed, pushed, and merged.",
       "",
-      "::git-stage{cwd=\"/Users/arach/dev/openscout\"}",
-      "::git-commit{cwd=\"/Users/arach/dev/openscout\"}",
-      "::git-push{cwd=\"/Users/arach/dev/openscout\" branch=\"codex/project-level-view\"}",
+      "::git-stage{cwd=\"/Users/guest/dev/openscout\"}",
+      "::git-commit{cwd=\"/Users/guest/dev/openscout\"}",
+      "::git-push{cwd=\"/Users/guest/dev/openscout\" branch=\"codex/project-level-view\"}",
       "",
       "<oai-mem-citation>",
       "<citation_entries>",
@@ -885,13 +885,13 @@ describe("history snapshot replay", () => {
   });
 
   test("infers a Codex model window when token logs omit the denominator", () => {
-    const basePath = "/Users/arach/.codex/sessions/2026/05/30/codex-no-window.jsonl";
+    const basePath = "/Users/guest/.codex/sessions/2026/05/30/codex-no-window.jsonl";
     const content = [
       JSON.stringify({
         timestamp: "2026-05-30T01:09:00.000Z",
         type: "turn_context",
         payload: {
-          cwd: "/Users/arach/dev/openscout",
+          cwd: "/Users/guest/dev/openscout",
           model: "gpt-5.5",
         },
       }),
@@ -932,13 +932,13 @@ describe("history snapshot replay", () => {
   });
 
   test("reconstructs Pi JSONL history into an observable session", () => {
-    const path = "/Users/art/Library/Application Support/OpenScout/runtime/agents/review/pi-sessions/2026-06-02T15-42-59-840Z_relay-review-pi.jsonl";
+    const path = "/Users/you/Library/Application Support/OpenScout/runtime/agents/review/pi-sessions/2026-06-02T15-42-59-840Z_relay-review-pi.jsonl";
     const content = [
       JSON.stringify({
         type: "session",
         id: "relay-review-pi",
         timestamp: "2026-06-02T15:42:59.840Z",
-        cwd: "/Users/art/dev/lattices",
+        cwd: "/Users/you/dev/lattices",
       }),
       JSON.stringify({
         type: "model_change",
@@ -973,7 +973,7 @@ describe("history snapshot replay", () => {
           role: "toolResult",
           toolCallId: "call-1",
           toolName: "bash",
-          content: [{ type: "text", text: "/Users/art/dev/lattices\n" }],
+          content: [{ type: "text", text: "/Users/you/dev/lattices\n" }],
           isError: false,
         },
       }),
@@ -998,7 +998,7 @@ describe("history snapshot replay", () => {
     expect(result.parsedLineCount).toBe(6);
     expect(result.skippedLineCount).toBe(0);
     expect(result.snapshot.session.adapterType).toBe("pi");
-    expect(result.snapshot.session.cwd).toBe("/Users/art/dev/lattices");
+    expect(result.snapshot.session.cwd).toBe("/Users/you/dev/lattices");
     expect(result.snapshot.session.model).toBe("MiniMax-M3");
     expect(result.snapshot.session.providerMeta).toEqual(expect.objectContaining({
       externalSessionId: "relay-review-pi",
@@ -1020,7 +1020,7 @@ describe("history snapshot replay", () => {
     if (actionBlock?.type === "action") {
       expect(actionBlock.action.kind).toBe("command");
       expect(actionBlock.action.status).toBe("completed");
-      expect(actionBlock.action.output).toContain("/Users/art/dev/lattices");
+      expect(actionBlock.action.output).toContain("/Users/you/dev/lattices");
     }
     const finalText = result.snapshot.turns[1]?.blocks.find((block) => block.block.type === "text")?.block;
     expect(finalText?.type).toBe("text");
@@ -1030,7 +1030,7 @@ describe("history snapshot replay", () => {
   });
 
   test("marks unsupported harness history clearly", () => {
-    const path = "/Users/arach/.unknown/history.jsonl";
+    const path = "/Users/guest/.unknown/history.jsonl";
 
     expect(inferHistorySessionAdapterType(path)).toBe("unknown");
     expect(supportsHistorySessionSnapshotForPath(path)).toBe(false);

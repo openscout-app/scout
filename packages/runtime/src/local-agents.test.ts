@@ -594,15 +594,15 @@ describe("local agent prompts", () => {
   });
 
   test("system prompt composes shared base, project context, and broker-backed protocol", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
-    const prompt = buildLocalAgentSystemPrompt("shaper", "shaper", "/Users/arach/dev/shaper");
+    const prompt = buildLocalAgentSystemPrompt("shaper", "shaper", "/Users/guest/dev/shaper");
 
     expect(prompt).toContain('You are "shaper", a relay agent for the shaper project.');
     expect(prompt).toContain("Project context:");
-    expect(prompt).toContain("Codebase root: /Users/arach/dev/shaper");
-    expect(prompt).toContain("Projects root: /Users/arach/dev");
+    expect(prompt).toContain("Codebase root: /Users/guest/dev/shaper");
+    expect(prompt).toContain("Projects root: /Users/guest/dev");
     expect(prompt).toContain(`${scoutCli} inbox --as shaper --latest 20 --json`);
     expect(prompt).toContain(`${scoutCli} channel <name> --latest 20 --json`);
     expect(prompt).toContain(`${scoutCli} send --to <agent> --as shaper "your message"`);
@@ -633,29 +633,29 @@ describe("local agent prompts", () => {
         agentId: "shaper",
         displayName: "Shaper",
         projectName: "shaper",
-        projectPath: "/Users/arach/dev/shaper",
+        projectPath: "/Users/guest/dev/shaper",
         brokerUrl: DEFAULT_BROKER_URL,
         relayCommand: `node ${JSON.stringify(join(repoRoot, "packages", "cli", "bin", "scout.mjs"))}`,
-        projectsRoot: "/Users/arach/dev",
-        relayHub: "/Users/arach/.openscout/relay",
+        projectsRoot: "/Users/guest/dev",
+        relayHub: "/Users/guest/.openscout/relay",
         openscoutRoot: repoRoot,
         scoutSkill: scoutSkillPath,
       },
     );
 
     expect(
-      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/arach/dev/shaper", legacyPrompt),
+      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/guest/dev/shaper", legacyPrompt),
     ).toBeUndefined();
   });
 
   test("direct claude runtime prompt forbids reply tools for final-response capture", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "shaper",
       "shaper",
-      "/Users/arach/dev/shaper",
+      "/Users/guest/dev/shaper",
       { transport: "claude_stream_json" },
     );
 
@@ -665,13 +665,13 @@ describe("local agent prompts", () => {
   });
 
   test("direct Pi RPC runtime prompt captures final responses through the broker", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "minimax",
       "openscout",
-      "/Users/arach/dev/openscout",
+      "/Users/guest/dev/openscout",
       { transport: "pi_rpc" },
     );
 
@@ -681,13 +681,13 @@ describe("local agent prompts", () => {
   });
 
   test("tmux claude runtime remains the default local agent context", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "shaper",
       "shaper",
-      "/Users/arach/dev/shaper",
+      "/Users/guest/dev/shaper",
     );
 
     expect(prompt).toContain("Relay protocol:");
@@ -697,25 +697,25 @@ describe("local agent prompts", () => {
   });
 
   test("explicit tmux generated prompts normalize away as current defaults", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "shaper",
       "shaper",
-      "/Users/arach/dev/shaper",
+      "/Users/guest/dev/shaper",
       { transport: "tmux" },
     );
 
     expect(
-      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/arach/dev/shaper", prompt),
+      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/guest/dev/shaper", prompt),
     ).toBeUndefined();
   });
 
   test("system prompt template renders shared fragments, path aliases, and env variables at wake time", () => {
     process.env.OPENSCOUT_TEST_PROMPT_VAR = "broker-ready";
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = renderLocalAgentSystemPromptTemplate(
       [
@@ -731,21 +731,21 @@ describe("local agent prompts", () => {
         agentId: "shaper",
         displayName: "Shaper",
         projectName: "shaper",
-        projectPath: "/Users/arach/dev/shaper",
+        projectPath: "/Users/guest/dev/shaper",
         brokerUrl: DEFAULT_BROKER_URL,
         relayCommand: "bun relay",
-        projectsRoot: "/Users/arach/dev",
-        relayHub: "/Users/arach/.openscout/relay",
+        projectsRoot: "/Users/guest/dev",
+        relayHub: "/Users/guest/.openscout/relay",
         openscoutRoot: repoRoot,
         scoutSkill: scoutSkillPath,
       },
     );
 
     expect(prompt).toContain('You are "shaper", a relay agent for the shaper project.');
-    expect(prompt).toContain("Codebase root: /Users/arach/dev/shaper");
-    expect(prompt).toContain("Projects root: /Users/arach/dev");
-    expect(prompt).toContain("Base path: /Users/arach/dev");
-    expect(prompt).toContain("Workspace root: /Users/arach/dev/shaper");
+    expect(prompt).toContain("Codebase root: /Users/guest/dev/shaper");
+    expect(prompt).toContain("Projects root: /Users/guest/dev");
+    expect(prompt).toContain("Base path: /Users/guest/dev");
+    expect(prompt).toContain("Workspace root: /Users/guest/dev/shaper");
     expect(prompt).not.toContain(`Broker URL: ${DEFAULT_BROKER_URL}`);
     expect(prompt).toContain("Use the Scout CLI for broker reads and writes");
     expect(prompt).toContain("bun relay inbox --as shaper --latest 20 --json");

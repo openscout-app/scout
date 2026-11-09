@@ -73,8 +73,8 @@ describe("Claude statusline capture", () => {
     const payload = (model: string, level: string) => JSON.stringify({
       session_id: sessionId,
       session_name: "project-woolf-20-relay-agent",
-      transcript_path: `/Users/art/.claude/projects/-Users-art-dev-openscout/${sessionId}.jsonl`,
-      cwd: "/Users/art/dev/openscout",
+      transcript_path: `/Users/you/.claude/projects/-Users-you-dev-openscout/${sessionId}.jsonl`,
+      cwd: "/Users/you/dev/openscout",
       effort: { level },
       model: { id: model, display_name: model },
     });
@@ -87,8 +87,8 @@ describe("Claude statusline capture", () => {
       model: "claude-sonnet-5",
       reasoningEffort: "medium",
       sessionName: "project-woolf-20-relay-agent",
-      cwd: "/Users/art/dev/openscout",
-      transcriptPath: `/Users/art/.claude/projects/-Users-art-dev-openscout/${sessionId}.jsonl`,
+      cwd: "/Users/you/dev/openscout",
+      transcriptPath: `/Users/you/.claude/projects/-Users-you-dev-openscout/${sessionId}.jsonl`,
       capturedAt: 2_000,
     });
     // History still has both ticks; the per-session file is the latest only.
@@ -108,7 +108,7 @@ describe("Claude statusline capture", () => {
     const capturedAt = Date.UTC(2026, 5, 19, 12, 0, 0);
     const result = await captureClaudeStatuslineSnapshot(JSON.stringify({
       model: { id: "claude-opus-4-8", display_name: "Opus 4.8" },
-      workspace: { current_dir: "/Users/art/dev/openscout" },
+      workspace: { current_dir: "/Users/you/dev/openscout" },
       context_window: { used_percentage: 31 },
       rate_limits: {
         five_hour: { used_percentage: 12 },
@@ -121,7 +121,7 @@ describe("Claude statusline capture", () => {
     const history = readFileSync(resolveClaudeStatuslineHistoryPath(), "utf8").trim().split("\n");
 
     expect(latest).toEqual(expect.objectContaining({
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       openscoutCapturedAt: capturedAt,
     }));
     expect(history).toHaveLength(1);

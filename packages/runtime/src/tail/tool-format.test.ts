@@ -8,7 +8,7 @@ describe("formatToolCall", () => {
       "exec_command",
       JSON.stringify({
         cmd: "sed -n '1,180p' design/studio/components/studies/PhoneFrame.tsx",
-        workdir: "/Users/arach/dev/talkie",
+        workdir: "/Users/guest/dev/talkie",
         yield_time_ms: 10000,
         max_output_tokens: 2048,
       }),
@@ -22,9 +22,9 @@ describe("formatToolCall", () => {
   });
 
   test("file tools show the last two path segments, folding $HOME", () => {
-    expect(formatToolCall("Read", { file_path: "/Users/arach/dev/openscout/design/studio/views/scout-tail.tsx" }))
+    expect(formatToolCall("Read", { file_path: "/Users/guest/dev/openscout/design/studio/views/scout-tail.tsx" }))
       .toBe("Read views/scout-tail.tsx");
-    expect(formatToolCall("Edit", { file_path: "/Users/arach/dev/openscout/packages/web/server/core/broker/service.ts" }))
+    expect(formatToolCall("Edit", { file_path: "/Users/guest/dev/openscout/packages/web/server/core/broker/service.ts" }))
       .toBe("Edit broker/service.ts");
   });
 

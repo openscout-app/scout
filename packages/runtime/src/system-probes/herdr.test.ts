@@ -25,8 +25,8 @@ describe("herdr session helpers", () => {
           default: true,
           name: "default",
           running: true,
-          session_dir: "/Users/art/.config/herdr",
-          socket_path: "/Users/art/.config/herdr/herdr.sock",
+          session_dir: "/Users/you/.config/herdr",
+          socket_path: "/Users/you/.config/herdr/herdr.sock",
         },
         {
           default: false,
@@ -35,7 +35,7 @@ describe("herdr session helpers", () => {
         },
       ],
     }))).toEqual([
-      { name: "default", isDefault: true, running: true, sessionDir: "/Users/art/.config/herdr" },
+      { name: "default", isDefault: true, running: true, sessionDir: "/Users/you/.config/herdr" },
       { name: "scout-local-1", isDefault: false, running: false, sessionDir: null },
     ]);
   });
@@ -163,9 +163,9 @@ describe("parseHerdrTopology", () => {
           agent: "claude",
           agent_session: { agent: "claude", kind: "id", source: "herdr:claude", value: "0a7c0c5c-c3f0-4c50-b141-9d6993c8da75" },
           agent_status: "idle",
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           focused: false,
-          foreground_cwd: "/Users/art/dev/openscout",
+          foreground_cwd: "/Users/you/dev/openscout",
           label: "Claude · primary",
           pane_id: "w2:p2",
           scroll: { max_offset_from_bottom: 42, offset_from_bottom: 0, viewport_rows: 69 },
@@ -176,9 +176,9 @@ describe("parseHerdrTopology", () => {
         {
           agent: "kimi",
           agent_status: "working",
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           focused: true,
-          foreground_cwd: "/Users/art/.kimi-code/plugins/managed/action-browser",
+          foreground_cwd: "/Users/you/.kimi-code/plugins/managed/action-browser",
           label: "Kimi · K2",
           pane_id: "w2:p5",
           tab_id: "w2:t1",
@@ -187,9 +187,9 @@ describe("parseHerdrTopology", () => {
         },
         {
           agent_status: "unknown",
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           focused: false,
-          foreground_cwd: "/Users/art/dev/openscout",
+          foreground_cwd: "/Users/you/dev/openscout",
           label: "scout shell",
           pane_id: "w2:p6",
           tab_id: "w2:t2",
@@ -218,7 +218,7 @@ describe("parseHerdrTopology", () => {
       ["Claude · primary", "claude", "idle"],
       ["Kimi · K2", "kimi", "working"],
     ]);
-    expect(herd.panes[1]).toMatchObject({ focused: true, foregroundCwd: "/Users/art/.kimi-code/plugins/managed/action-browser" });
+    expect(herd.panes[1]).toMatchObject({ focused: true, foregroundCwd: "/Users/you/.kimi-code/plugins/managed/action-browser" });
     // Scroll state projects when herdr reports it, and reads as null when the
     // host (or an older herdr) does not.
     expect(herd.panes[0]?.scroll).toEqual({ maxOffsetFromBottom: 42, offsetFromBottom: 0, viewportRows: 69 });
@@ -417,7 +417,7 @@ describe("parseHerdrPersistedTopology", () => {
       {
         id: "w1",
         custom_name: null,
-        identity_cwd: "/Users/art/dev/talkie",
+        identity_cwd: "/Users/you/dev/talkie",
         public_pane_numbers: { "1": 1, "2": 2 },
         public_tab_numbers: [1, 2],
         tabs: [
@@ -426,10 +426,10 @@ describe("parseHerdrPersistedTopology", () => {
             layout: { Pane: 1 },
             panes: {
               "1": {
-                cwd: "/Users/art/dev/talkie",
+                cwd: "/Users/you/dev/talkie",
                 agent_session: { source: "herdr:claude", agent: "claude", kind: "id", value: "sess-1" },
               },
-              "2": { cwd: "/Users/art/dev/openscout", agent_session: null },
+              "2": { cwd: "/Users/you/dev/openscout", agent_session: null },
             },
             zoomed: false,
             focused: 1,
@@ -467,7 +467,7 @@ describe("parseHerdrPersistedTopology", () => {
     const [claude, shell] = main!.panes;
     expect(claude!.agent).toBe("claude");
     expect(claude!.agentSession).toEqual({ source: "herdr:claude", agent: "claude", kind: "id", value: "sess-1" });
-    expect(claude!.cwd).toBe("/Users/art/dev/talkie");
+    expect(claude!.cwd).toBe("/Users/you/dev/talkie");
     expect(claude!.focused).toBe(true);
     expect(shell!.agent).toBeNull();
     expect(shell!.focused).toBe(false);
@@ -484,7 +484,7 @@ describe("parseHerdrPersistedTopology", () => {
 
   test("falls back to the workspace identity cwd when a pane did not record one", () => {
     const workspaces = parseHerdrPersistedTopology(persisted)!;
-    expect(workspaces[0]!.tabs[1]!.panes[0]!.cwd).toBe("/Users/art/dev/talkie");
+    expect(workspaces[0]!.tabs[1]!.panes[0]!.cwd).toBe("/Users/you/dev/talkie");
   });
 
   test("returns null for values that are not a session state", () => {

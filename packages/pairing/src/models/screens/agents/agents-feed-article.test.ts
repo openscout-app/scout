@@ -53,13 +53,13 @@ describe("splitBeats", () => {
 
 describe("paths", () => {
   test("relative paths resolve against the workspace root", () => {
-    expect(resolveUpdatePath("design/a.tsx", "/Users/art/dev/openscout/")).toBe("/Users/art/dev/openscout/design/a.tsx");
+    expect(resolveUpdatePath("design/a.tsx", "/Users/you/dev/openscout/")).toBe("/Users/you/dev/openscout/design/a.tsx");
     expect(resolveUpdatePath("/abs/b.ts", null)).toBe("/abs/b.ts");
     expect(resolveUpdatePath("~/c.ts", "/r")).toBeNull();
     expect(resolveUpdatePath("d.ts", null)).toBeNull();
   });
   test("display folds the home directory", () => {
-    expect(displayPath("/Users/art/dev/x.ts")).toBe("~/dev/x.ts");
+    expect(displayPath("/Users/you/dev/x.ts")).toBe("~/dev/x.ts");
   });
 });
 
