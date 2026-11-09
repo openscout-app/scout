@@ -35,6 +35,7 @@ import type {
   HerdrSessionTopology,
   HerdrTabLayout,
   HerdrTopologyUnavailableReason,
+  TerminalSessionClients,
 } from "./terminal-host-topology.js";
 
 /** Total emitted panes across every group before the digest declares truncation. */
@@ -71,6 +72,12 @@ export type HerdrDigestPane = {
    * happened, not work happening. Null when herdr did not report scroll state.
    */
   backlog: number | null;
+  /**
+   * Git branch at the pane's working directory, as the host read it. Null
+   * outside a git checkout or on a detached HEAD. Absent when it was not read.
+   * See {@link HerdrPaneProjection.gitBranch}.
+   */
+  gitBranch?: string | null;
 };
 
 export type HerdrDigestGroup = {
@@ -115,6 +122,14 @@ export type HerdrWorkspaceDigest = {
    * a stopped session. Null on a live read.
    */
   unavailable: HerdrTopologyUnavailableReason | null;
+  /**
+   * Herdr clients attached to the session, counted on its host. Set only when
+   * the projection carried them: a live read whose process table was
+   * readable. Absent otherwise. See {@link TerminalSessionClients}.
+   */
+  clients?: TerminalSessionClients["clients"];
+  /** Apps those clients run in. Present whenever `clients` is. */
+  apps?: TerminalSessionClients["apps"];
   totals: {
     workspaces: number;
     tabs: number;
@@ -181,6 +196,7 @@ function toDigestPane(pane: HerdrPaneProjection): HerdrDigestPane {
     directory: paneDirectory(pane),
     focused: pane.focused,
     backlog: pane.scroll?.maxOffsetFromBottom ?? null,
+    ...(pane.gitBranch !== undefined ? { gitBranch: pane.gitBranch } : {}),
   };
 }
 
@@ -352,6 +368,10 @@ export function digestHerdrTopology(
     observedAt: topology.observedAt,
     savedAt: topology.savedAt ?? null,
     unavailable: topology.running ? null : topology.unavailable ?? "not_running",
+    // Clients are a live-read fact; a saved layout never claims them.
+    ...(topology.running && typeof topology.clients === "number"
+      ? { clients: topology.clients, apps: [...(topology.apps ?? [])] }
+      : {}),
     totals: {
       workspaces: topology.workspaces.length,
       tabs: tabTotal,

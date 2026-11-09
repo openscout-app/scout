@@ -239,6 +239,29 @@ describe("digestHerdrTopology", () => {
     ]));
     expect(JSON.stringify(build())).toBe(JSON.stringify(build()));
   });
+
+  test("carries attached clients, their apps and each pane's branch when the host read them", () => {
+    const apps = ["Example Term"];
+    const digest = digestHerdrTopology(topology([
+      pane("w1:p1", { agentStatus: "blocked", cwd: "/workspace/app", gitBranch: "main" }),
+      pane("w1:p2", { cwd: "/workspace/notes", gitBranch: null }),
+      pane("w1:p3", { cwd: "/workspace/other" }),
+    ], { clients: 2, apps }));
+    expect(digest.clients).toBe(2);
+    expect(digest.apps).toEqual(["Example Term"]);
+    expect(digest.apps).not.toBe(apps);
+    const branches = Object.fromEntries(digest.groups.flatMap((group) => group.panes)
+      .map((entry) => [entry.paneId, "gitBranch" in entry ? entry.gitBranch : "absent"]));
+    expect(branches).toEqual({ "w1:p1": "main", "w1:p2": null, "w1:p3": "absent" });
+    expect(digest.needsYou[0]?.gitBranch).toBe("main");
+  });
+
+  test("leaves clients, apps and branches absent when the host did not read them", () => {
+    const digest = digestHerdrTopology(topology([pane("w1:p1")]));
+    expect("clients" in digest).toBe(false);
+    expect("apps" in digest).toBe(false);
+    expect("gitBranch" in digest.groups[0]!.panes[0]!).toBe(false);
+  });
 });
 
 describe("renderHerdrWorkspaceDigest", () => {

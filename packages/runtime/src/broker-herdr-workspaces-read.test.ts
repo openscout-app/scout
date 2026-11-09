@@ -38,6 +38,21 @@ test("versioned local digest preserves panel identity without claiming a Scout b
   expect(result.digests[0].needsYou[0]).not.toHaveProperty("identity");
 });
 
+test("digests carry attached clients, their apps and pane branches from the live topology", async () => {
+  const live = topology();
+  live.clients = 1; live.apps = ["Example Term"];
+  live.workspaces[0]!.tabs[0]!.panes[0]!.gitBranch = "main";
+  const result = await body({ ...deps(), topology: async () => ({ topology: live, availability: "available" }) });
+  expect(result.digests[0]).toMatchObject({ clients: 1, apps: ["Example Term"] });
+  expect(result.digests[0].needsYou[0]).toMatchObject({ paneId: "w0:t0:p0", gitBranch: "main" });
+  expect(result.digests[0].groups[0]!.panes[0]).toMatchObject({ gitBranch: "main" });
+  // Without them, the digest stays as it was: no clients, apps or branch keys.
+  const plain = await body();
+  expect(plain.digests[0]).not.toHaveProperty("clients");
+  expect(plain.digests[0]).not.toHaveProperty("apps");
+  expect(plain.digests[0].needsYou[0]).not.toHaveProperty("gitBranch");
+});
+
 test("failed enumeration with a stale value never becomes available empty or leaks raw probe errors", async () => {
   for (const fail of [async () => { throw new Error("secret path"); }, async () => ({ ...snapshot(), status: "failed" as const, error: { code: "exit", message: "secret path", at: 200 } })]) {
     const result = await body({ ...deps(), sessions: fail });

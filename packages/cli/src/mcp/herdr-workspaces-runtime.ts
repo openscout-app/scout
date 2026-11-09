@@ -15,10 +15,12 @@ const pane = z.object({
   agentSession: z.object({ agent: id, kind: id, source: id, value: text }).strict().nullable().optional(),
   agent: text.nullable(), status: z.enum(["idle", "working", "blocked", "done", "unknown"]),
   directory: text.nullable(), focused: z.boolean(), backlog: integer.nullable(),
+  gitBranch: text.nullable().optional(),
 }).strict();
 const digest = z.object({
   session, live: z.boolean(), observedAt: z.number().finite(), savedAt: z.number().finite().nullable(),
   unavailable: z.enum(["not_running", "unreadable"]).nullable(), availability,
+  clients: integer.optional(), apps: z.array(text).max(256).optional(),
   totals: z.object({ workspaces: integer, tabs: integer, panes: integer, agents: integer }).strict(), counts,
   needsYou: z.array(pane).max(12), working: z.array(pane).max(12),
   groups: z.array(z.object({ directory: text.nullable(), name: text, counts,
@@ -59,6 +61,8 @@ function validate(value: unknown, requestedSession: string | undefined): HerdrWo
     const panes = row.groups.flatMap(group => group.panes);
     if (panes.length > 40 || new Set(panes.map(p => JSON.stringify([p.workspaceId, p.paneId]))).size !== panes.length
       || row.live && (row.savedAt !== null || row.unavailable !== null)
+      // Clients are a live-read fact, and apps travel with the count.
+      || (row.clients === undefined) !== (row.apps === undefined) || !row.live && row.clients !== undefined
       || !row.live && [...panes, ...row.needsYou, ...row.working].some(p => p.target !== null || p.status !== "unknown")) throw invalid();
   }
   if (result.availability === "not_scanned" && result.digests.length) throw invalid();
