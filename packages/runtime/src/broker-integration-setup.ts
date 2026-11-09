@@ -117,6 +117,13 @@ export class BrokerIntegrationSetupService {
     return manifest;
   }
   get(id: string): SlackSetupReceipt { return this.receipt(this.row(id)); }
+  /** Every setup operation in this realm, oldest first; receipts carry credential references, never secrets. */
+  list(): SlackSetupReceipt[] {
+    return this.db.query<Row>("SELECT record_json FROM integration_setup_operations WHERE owner_realm_id = ?1").all(this.deps.ownerRealmId)
+      .map(row => decode(row)!)
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map(operation => this.receipt(operation));
+  }
   classifyMention(id: string, text: string): "addressed" | "not_addressed" | "ambiguous" {
     const operation = this.row(id);
     const mentions = new Set([...text.matchAll(/<@([UW][A-Z0-9]+)(?:\|[^>]+)?>/g)].map(match => match[1]));

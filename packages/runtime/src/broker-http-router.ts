@@ -889,6 +889,8 @@ export function createBrokerHttpRouter(
       const match = /^\/v1\/integrations\/setup\/([^/]+)(\/(?:resume|credentials|manifest|verify|rebind|lifecycle|worker|deliver|events))?$/.exec(url.pathname);
       if (method === "POST" && url.pathname === "/v1/integrations/setup") {
         json(response, 200, integrationSetupService.setup(await readRequestBody(request)));
+      } else if (method === "GET" && url.pathname === "/v1/integrations/setup") {
+        json(response, 200, { integrations: integrationSetupService.list() });
       } else if (method === "GET" && match?.[2] === "/manifest") {
         json(response, 200, integrationSetupService.manifest(decodeURIComponent(match[1]!)));
       } else if (method === "GET" && match && !match[2]) {
