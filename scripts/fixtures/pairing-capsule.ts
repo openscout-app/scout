@@ -9,7 +9,7 @@ import {pack,digest,CUTOVER,commitName,doneName,dataName,CHUNK_TARGET,
   type CapsuleRow,type CapsuleBarrier,type CapsuleHead,type ManagedPolicy} from "../../packages/runtime/src/pairing-security/trust-capsule.ts";
 
 export function legacyFixture(path:string, options:{generations?:number;keys?:number;factory?:typeof pairingTrustOwner;
-  prepare?:(owner:PairingTrustOwner)=>void;projection?:string|null}={}) {
+  prepare?:(owner:PairingTrustOwner)=>void;projection?:string|null;bindHost?:boolean}={}) {
   const root=realpathSync(path), temp=realpathSync(tmpdir());
   if(!root.startsWith(temp+"/") || !root.split("/").at(-1)!.startsWith("pairing-capsule-") || readdirSync(root).length)throw Error("empty temporary capsule fixture required");
   const generations=options.generations??1, keyCount=options.keys??(generations?1:0);
@@ -26,6 +26,7 @@ export function legacyFixture(path:string, options:{generations?:number;keys?:nu
     const bytes=pack("generation",generation);writeFileSync(join(root,`trusted-peers.owner.${revision}.json`),bytes,{mode:0o600});previousHash=digest(bytes);
   }
   if(generations>1)writeFileSync(join(root,"trusted-peers.json"),JSON.stringify(peers,null,2),{mode:0o600});
+  if(options.bindHost)owner.bindToHost("fixture-host",{quiescent:true});
   if(generations){
     const before=owner.read();if(before.revision!==generations-1)throw Error("legacy fixture verification failed");
     const peer={publicKey:keys[0]!,pairedAt:"2026-01-01T00:00:00Z",name:"final-name"};

@@ -50,6 +50,12 @@ export function loadOrCreateNodeIdentity(supportDirectory?: string): NodeIdentit
   return createNodeIdentity(supportDirectory);
 }
 
+/** Read the existing host identity without minting a replacement key. */
+export function readNodeIdentity(supportDirectory?: string): NodeIdentity | null {
+  const path = nodeIdentityPath(supportDirectory);
+  return existsSync(path) ? readAndValidateNodeIdentity(path) : null;
+}
+
 /**
  * Return the machine qualifier persisted with the long-term node key, creating
  * it from the current hostname only once. Display names may follow the live
