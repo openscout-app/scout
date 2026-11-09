@@ -13,7 +13,10 @@
  * The server builds this from `herdr --session <n> workspace list`,
  * `tab list`, and `pane list` JSON, with assigned names from `agent list`
  * joined by terminal + pane id, plus the per-tab layout geometry from
- * `herdr --session <n> api snapshot`. A session whose server is stopped
+ * `herdr --session <n> api snapshot`. Two host facts herdr does not report
+ * ride along on a live read: the session's attached clients and the apps they
+ * run in (from the host's process table), and each pane's git branch. A
+ * session whose server is stopped
  * projects from its persisted `session.json` instead — same shape, marked by
  * `running: false` and `savedAt`; geometry, terminal ids, and live agent
  * status are simply absent from a persisted projection. A session with no
@@ -57,6 +60,13 @@ export type HerdrPaneProjection = {
    * Null when the host does not report scroll state (older herdr).
    */
   scroll: HerdrPaneScroll | null;
+  /**
+   * Git branch checked out at the pane's working directory (the foreground cwd
+   * when herdr reports one). Herdr does not report it; the host reads it.
+   * Null when the directory is not in a git checkout or HEAD is detached.
+   * Absent when it was not read: a persisted projection, or an older host.
+   */
+  gitBranch?: string | null;
 };
 
 export type HerdrPaneScroll = {
@@ -138,6 +148,23 @@ export type HerdrWorkspaceProjection = {
  */
 export type HerdrTopologyUnavailableReason = "not_running" | "unreadable";
 
+/**
+ * Terminal clients attached to one multiplexer session, as the session's own
+ * host counts them from its process table. A remote session therefore carries
+ * the answer from the machine it runs on, not from the machine reading it.
+ */
+export type TerminalSessionClients = {
+  /** Client processes attached to the session. */
+  clients: number;
+  /**
+   * Display names of the macOS apps those clients run in, de-duplicated, in
+   * the order of the first client seen in each. A helper app that attaches on
+   * behalf of another app reports the app that owns it. Always empty on other
+   * platforms, and for clients that run outside any app (for example over ssh).
+   */
+  apps: string[];
+};
+
 export type HerdrSessionTopology = {
   /** Herdr session name, e.g. "openscout". */
   session: string;
@@ -157,6 +184,14 @@ export type HerdrSessionTopology = {
    * on a live read. See {@link HerdrTopologyUnavailableReason}.
    */
   unavailable?: HerdrTopologyUnavailableReason | null;
+  /**
+   * Herdr clients attached to this session, counted on its host. Set only on a
+   * live read; absent when the projection is persisted or the host's process
+   * table could not be read. See {@link TerminalSessionClients}.
+   */
+  clients?: TerminalSessionClients["clients"];
+  /** Apps those clients run in. Present whenever `clients` is. */
+  apps?: TerminalSessionClients["apps"];
 };
 
 export function emptyHerdrSessionTopology(

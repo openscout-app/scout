@@ -2,9 +2,12 @@ import type { RuntimeEnv } from "../portable-types.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { defineProbeFamily, type ProbeCtx } from "./registry.js";
+import type { TerminalSessionClients } from "@openscout/protocol";
+
+import { defineProbeFamily, type ProbeCtx, type ProbeSnapshot } from "./registry.js";
 import { execProbeFile, ProbeCommandError } from "./exec.js";
 import { runWithScoutdFallback } from "./scoutd-client.js";
+import { readClientProcessTable, readMacAppIndex, summarizeTerminalClients, type TerminalClientRef } from "./terminal-clients.js";
 import { resolveOpenScoutHomeForEnv } from "../support-paths.js";
 
 const TMUX_TTL_MS = 5_000;
@@ -382,6 +385,96 @@ export function readTmuxSessionExistsSnapshot(sessionName: string, options: { en
 
 export function invalidateTmuxSessions(options: { env?: RuntimeEnv; socketPath?: string | null; reason?: string } = {}): void {
   tmuxSessionsProbe.invalidate({ env: options.env, socketPath: options.socketPath }, options.reason);
+  tmuxClientsProbe.invalidate({ env: options.env, socketPath: options.socketPath }, options.reason);
+}
+
+/** Parse `tmux list-clients -F "#{client_pid}\t#{session_name}"`. */
+export function parseTmuxClientList(output: string): TerminalClientRef[] {
+  const clients: TerminalClientRef[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    const pidText = line.slice(0, tab).trim();
+    const session = line.slice(tab + 1).trim();
+    const pid = /^\d+$/u.test(pidText) ? Number.parseInt(pidText, 10) : 0;
+    if (pid > 0 && session) clients.push({ pid, session });
+  }
+  return clients;
+}
+
+async function readTmuxClientsLocal(key: string, ctx: ProbeCtx): Promise<TerminalClientRef[]> {
+  try {
+    const { stdout } = await execProbeFile(ctx, tmuxBin(), [
+      "-u", // keep the tab: tmux prints it as "_" without a UTF-8 locale
+      ...tmuxSocketArgs(key),
+      "list-clients",
+      "-F",
+      "#{client_pid}\t#{session_name}",
+    ], {
+      maxStdoutBytes: 256 * 1024,
+      maxStderrBytes: 64 * 1024,
+    });
+    return parseTmuxClientList(stdout);
+  } catch (error) {
+    // No server on this socket is an ordinary state: no clients.
+    if (isUnavailable(error)) return [];
+    throw error;
+  }
+}
+
+/** Client pids per tmux socket. scoutd does not serve this; it runs locally. */
+export const tmuxClientsProbe = defineProbeFamily<string | { env?: RuntimeEnv; socketPath?: string | null }, TerminalClientRef[]>({
+  id: "tmux.clients",
+  ttlMs: TMUX_TTL_MS,
+  timeoutMs: TMUX_TIMEOUT_MS,
+  maxKeys: 16,
+  idleKeyTtlMs: 5 * 60_000,
+  maxConcurrentKeys: 2,
+  normalizeKey: tmuxSocketKey,
+  run: (key, ctx) => readTmuxClientsLocal(key, ctx),
+});
+
+/**
+ * Clients attached to each tmux session on one socket, and the apps they run
+ * in. Null when the client list or the process table could not be read.
+ */
+export async function readTmuxSessionClients(
+  options: { env?: RuntimeEnv; socketPath?: string | null; maxAgeMs?: number } = {},
+): Promise<Map<string, TerminalSessionClients> | null> {
+  const snapshot = await tmuxClientsProbe.for({ env: options.env, socketPath: options.socketPath })
+    .fresh({ maxAgeMs: options.maxAgeMs ?? TMUX_TTL_MS });
+  if (!snapshot.value || snapshot.at === null) return null;
+  const refs = snapshot.value;
+  const sessions = [...new Set(refs.map((ref) => ref.session))];
+  if (sessions.length === 0) return new Map();
+  const processes = await readClientProcessTable();
+  if (!processes) return null;
+  const summaries = new Map<string, TerminalSessionClients>();
+  for (const session of sessions) {
+    summaries.set(session, await summarizeTerminalClients(refs, session, { table: processes.table, apps: readMacAppIndex }));
+  }
+  return summaries;
+}
+
+export type TmuxSessionWithClients = TmuxSessionInfo & Partial<TerminalSessionClients>;
+
+/**
+ * The tmux session list with each session's clients and their apps. Sessions
+ * keep `attached` as tmux reports it; `clients` and `apps` are absent when the
+ * client read failed, and a session with no client reads as zero and [].
+ */
+export async function readTmuxSessionsWithClients(
+  options: { env?: RuntimeEnv; socketPath?: string | null; maxAgeMs?: number } = {},
+): Promise<ProbeSnapshot<TmuxSessionWithClients[]>> {
+  const [snapshot, clients] = await Promise.all([
+    tmuxSessionsProbe.for({ env: options.env, socketPath: options.socketPath }).fresh({ maxAgeMs: options.maxAgeMs ?? TMUX_TTL_MS }),
+    readTmuxSessionClients(options).catch(() => null),
+  ]);
+  if (!snapshot.value || !clients) return snapshot;
+  return {
+    ...snapshot,
+    value: snapshot.value.map((session) => ({ ...session, ...(clients.get(session.name) ?? { clients: 0, apps: [] }) })),
+  };
 }
 
 export async function readZellijSessionExists(sessionName: string, options: { env?: RuntimeEnv; socketDir?: string | null; maxAgeMs?: number } = {}): Promise<boolean> {

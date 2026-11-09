@@ -1,7 +1,7 @@
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { emptyHerdrSessionTopology } from "@openscout/protocol";
 import type {
@@ -13,6 +13,7 @@ import type {
   HerdrTabProjection,
   HerdrTopologyUnavailableReason,
   HerdrWorkspaceProjection,
+  TerminalSessionClients,
 } from "@openscout/protocol";
 
 
@@ -20,7 +21,9 @@ import type { RuntimeEnv } from "../portable-types.js";
 
 import { defineProbeFamily, probeRunOutput, type ProbeCtx, type ProbeSnapshot } from "./registry.js";
 import { execProbeFile, execSystemFile } from "./exec.js";
+import { gitRevParseProbe } from "./git.js";
 import { runWithScoutdFallback } from "./scoutd-client.js";
+import { readClientProcessTable, readMacAppIndex, summarizeTerminalClients, type TerminalClientRef } from "./terminal-clients.js";
 
 const HERDR_TTL_MS = 5_000;
 const HERDR_TIMEOUT_MS = 2_000;
@@ -177,6 +180,66 @@ export function buildHerdrWorkspaceCreateCommand(
   if (input.label?.trim()) args.push("--label", input.label.trim());
   args.push("--no-focus");
   return args;
+}
+
+const HERDR_DEFAULT_SESSION = "default";
+
+/**
+ * The session a process is a herdr client of, read from its command line, or
+ * null when it is not a client. A client is bare `herdr` (the default
+ * session), `herdr --session X`, `herdr -s X`, `herdr --session=X`, or
+ * `herdr session attach X`. Servers (`herdr server`), one-shot commands
+ * (`herdr session list`, `herdr --version`) and remote attaches are not
+ * clients of a session on this host.
+ */
+export function parseHerdrClientSession(command: string): string | null {
+  const tokens = command.trim().split(/\s+/u).filter(Boolean);
+  const bin = tokens[0];
+  if (!bin || basename(bin) !== "herdr") return null;
+  const rest = tokens.slice(1);
+  let session = HERDR_DEFAULT_SESSION;
+  let index = 0;
+  while (index < rest.length && rest[index]!.startsWith("-")) {
+    const flag = rest[index]!;
+    if (flag === "--session" || flag === "-s") {
+      const value = rest[index + 1];
+      if (!value || value.startsWith("-")) return null;
+      session = value;
+      index += 2;
+    } else if (flag.startsWith("--session=")) {
+      const value = flag.slice("--session=".length);
+      if (!value) return null;
+      session = value;
+      index += 1;
+    } else {
+      return null;
+    }
+  }
+  const positional = rest.slice(index);
+  if (positional.length === 0) return session;
+  if (positional.length === 3 && positional[0] === "session" && positional[1] === "attach") return positional[2]!;
+  return null;
+}
+
+/** Herdr client processes on this host, with the session each attaches to. */
+export function herdrClientRefs(commandRows: readonly { pid: number; command: string }[]): TerminalClientRef[] {
+  return commandRows.flatMap((row) => {
+    const session = parseHerdrClientSession(row.command);
+    return session ? [{ pid: row.pid, session }] : [];
+  });
+}
+
+/**
+ * Herdr clients attached to one session, counted from this host's process
+ * table. Null when the process table could not be read.
+ */
+export async function readHerdrSessionClients(sessionName: string): Promise<TerminalSessionClients | null> {
+  const processes = await readClientProcessTable();
+  if (!processes) return null;
+  return summarizeTerminalClients(herdrClientRefs(processes.commandRows), sessionName, {
+    table: processes.table,
+    apps: readMacAppIndex,
+  });
 }
 
 /**
@@ -760,6 +823,59 @@ async function readPersistedHerdrTopology(
     return null;
   }
 }
+/** Distinct pane directories a live read looks up a branch for; the rest stay absent. */
+const HERDR_BRANCH_DIRECTORY_CAP = 32;
+
+function herdrPaneDirectory(pane: { foregroundCwd: string | null; cwd: string | null }): string | null {
+  return pane.foregroundCwd ?? pane.cwd;
+}
+
+/**
+ * The git branch at each pane directory named in a `pane list` payload. Uses
+ * the cached `git rev-parse` probe, so a directory is read at most once a
+ * minute. A detached HEAD or a directory outside git maps to null; a failed
+ * read is left out, so the pane's branch stays absent rather than null.
+ */
+async function readHerdrPaneBranches(paneList: string): Promise<Map<string, string | null>> {
+  const panes = unwrapHerdrResult(paneList)?.panes;
+  if (!Array.isArray(panes)) return new Map();
+  const directories = [...new Set(panes.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Record<string, unknown>;
+    const directory = herdrPaneDirectory({ foregroundCwd: herdrString(record.foreground_cwd), cwd: herdrString(record.cwd) });
+    return directory?.startsWith("/") ? [directory] : [];
+  }))].slice(0, HERDR_BRANCH_DIRECTORY_CAP);
+  const entries = await Promise.all(directories.map(async (directory): Promise<[string, string | null] | null> => {
+    try {
+      const snapshot = await gitRevParseProbe.for({ repoRoot: directory, kind: "abbrevRefHead" }).fresh({ maxAgeMs: 60_000 });
+      // A failed read (a timeout) is not "no branch": leave the pane unread.
+      if (snapshot.error && snapshot.value === null) return null;
+      const branch = snapshot.value?.trim();
+      return [directory, branch && branch !== "HEAD" ? branch : null];
+    } catch {
+      return null;
+    }
+  }));
+  return new Map(entries.filter((entry): entry is [string, string | null] => entry !== null));
+}
+
+/** Set `gitBranch` on every pane whose directory was looked up. */
+export function withHerdrPaneBranches(
+  workspaces: HerdrWorkspaceProjection[],
+  branches: ReadonlyMap<string, string | null>,
+): HerdrWorkspaceProjection[] {
+  if (branches.size === 0) return workspaces;
+  for (const workspace of workspaces) {
+    for (const tab of workspace.tabs) {
+      for (const pane of tab.panes) {
+        const directory = herdrPaneDirectory(pane);
+        if (directory && branches.has(directory)) pane.gitBranch = branches.get(directory) ?? null;
+      }
+    }
+  }
+  return workspaces;
+}
+
 async function readHerdrTopologyUncached(sessionName: string, env: RuntimeEnv): Promise<HerdrTopologyRead> {
   const bin = herdrBin(env);
   const exec = (args: string[]) => execSystemFile(bin, ["--session", sessionName, ...args], {
@@ -779,12 +895,17 @@ async function readHerdrTopologyUncached(sessionName: string, env: RuntimeEnv): 
         throw new Error("Invalid Herdr topology inventory");
       }
     }
-    const [snapshot, agentList] = await Promise.all([
+    // Clients and branches are host facts herdr does not report. Like the
+    // geometry, they are additive: failing to read them leaves them absent and
+    // does not change the projection's availability.
+    const [snapshot, agentList, clients, branches] = await Promise.all([
       exec(["api", "snapshot"]).then((r) => r.stdout).catch(() => undefined),
       exec(["agent", "list"]).then((r) => r.stdout).catch(() => undefined),
+      readHerdrSessionClients(sessionName).catch(() => null),
+      readHerdrPaneBranches(paneList).catch(() => new Map<string, string | null>()),
     ]);
     const snapshotRoot = snapshot ? unwrapHerdrResult(snapshot)?.snapshot : null;
-    const workspaces = parseHerdrTopology({ workspaceList, tabList, paneList, agentList, snapshot });
+    const workspaces = withHerdrPaneBranches(parseHerdrTopology({ workspaceList, tabList, paneList, agentList, snapshot }), branches);
     const completeTree = workspaces.length === (unwrapHerdrResult(workspaceList)!.workspaces as unknown[]).length
       && workspaces.reduce((n, w) => n + w.tabs.length, 0) === (unwrapHerdrResult(tabList)!.tabs as unknown[]).length
       && workspaces.reduce((n, w) => n + w.tabs.reduce((n, t) => n + t.panes.length, 0), 0) === (unwrapHerdrResult(paneList)!.panes as unknown[]).length;
@@ -795,6 +916,7 @@ async function readHerdrTopologyUncached(sessionName: string, env: RuntimeEnv): 
       running: true,
       workspaces,
       observedAt: Date.now(),
+      ...(clients ? { clients: clients.clients, apps: clients.apps } : {}),
     } };
   } catch {
     // The live read failed. Usually the session's herdr server is simply not

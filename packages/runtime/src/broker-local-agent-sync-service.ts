@@ -7,6 +7,7 @@ import type {
 } from "@openscout/protocol";
 
 import type { LocalAgentBinding } from "./local-agents.js";
+import { latestTmuxSessionObservations, withObservedTmuxSession } from "./relay-endpoint-session-observation.js";
 import type { RelayAgentOverride } from "./setup.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
@@ -264,6 +265,10 @@ export class BrokerLocalAgentSyncService {
   private async syncSnapshot(): Promise<void> {
     const bindings = await this.options.loadRegisteredLocalAgentBindings(this.options.nodeId);
     const previousEndpoints = captureRegistries(this.options.runtime, ["endpoints"]).endpoints;
+    // A registry binding is rebuilt from relay-agents.json and knows nothing the
+    // harness reported. Keep the verified tmux observation of its session, from
+    // its own last record or from the session-backed endpoint Scout invoked.
+    const observations = latestTmuxSessionObservations(Object.values(previousEndpoints));
     this.options.log?.(
       `[openscout-runtime] local agent sync found ${bindings.length} registered agent${bindings.length === 1 ? "" : "s"}`,
     );
@@ -273,9 +278,12 @@ export class BrokerLocalAgentSyncService {
         await this.options.upsertActor(binding.actor);
       }
       await this.options.upsertAgent(binding.agent);
-      const endpoint = preserveMissingTmuxEndpointState(
-        previousEndpoints[binding.endpoint.id],
-        binding.endpoint,
+      const endpoint = withObservedTmuxSession(
+        preserveMissingTmuxEndpointState(
+          previousEndpoints[binding.endpoint.id],
+          binding.endpoint,
+        ),
+        observations,
       );
       await this.options.persistEndpoint(endpoint);
       this.options.log?.(
@@ -439,12 +447,15 @@ export class BrokerLocalAgentSyncService {
       `[openscout-runtime] warming ${coreBindings.length} core local agent${coreBindings.length === 1 ? "" : "s"}`,
     );
 
+    const observations = latestTmuxSessionObservations(
+      Object.values(captureRegistries(this.options.runtime, ["endpoints"]).endpoints),
+    );
     for (const binding of coreBindings) {
       if (binding.actor.id !== binding.agent.id) {
         await this.options.upsertActor(binding.actor);
       }
       await this.options.upsertAgent(binding.agent);
-      await this.options.persistEndpoint(binding.endpoint);
+      await this.options.persistEndpoint(withObservedTmuxSession(binding.endpoint, observations));
       this.options.log?.(
         `[openscout-runtime] core local agent ready ${binding.agent.id} -> ${binding.endpoint.transport}:${binding.endpoint.sessionId ?? binding.endpoint.id}`,
       );
