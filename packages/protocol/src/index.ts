@@ -90,3 +90,5 @@ export type { ObservedSessionMaterialFile, ObservedSessionMaterials } from "./se
 
 export * from "./host-attention.js";
 export * from "./tasks.js";
+
+export * from "./shows.js";

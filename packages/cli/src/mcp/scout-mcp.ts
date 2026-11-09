@@ -3429,6 +3429,22 @@ export function createScoutMcpServer(options: {
     },
   });
 
+  server.registerTool("show", {
+    title: "Show Your Work",
+    description: "Put a screenshot of what you built, a short screen recording, or a finished document/file on the operator's project canvas with an optional caption. Use this when you have something worth looking at, not just a status message. The runtime keeps an immutable copy; showing the same path again creates a new version. Local workspace files only; never show credentials, secrets, or harness transcripts. No conversation, hooks, or setup needed.",
+    inputSchema: z.object({ path: z.string().min(1), caption: z.string().max(4000).optional() }),
+    annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+  }, async input => {
+    const currentDirectory = resolveToolCurrentDirectory(undefined, options.defaultCurrentDirectory);
+    const caller = await aliasToolCaller(undefined, currentDirectory);
+    const result = await aliasBrokerRequest("/v1/shows", { method: "POST", body: JSON.stringify({
+      ...input, caller: { ...caller, metadata: { ...caller.metadata,
+        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : undefined,
+      } },
+    }) });
+    return { content: createTextContent(result) };
+  });
+
   const EXTERNAL_SESSION_TOOL_TITLES = {
     attach: "Attach External Session",
     get: "Get External Session",

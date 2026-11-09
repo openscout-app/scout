@@ -39,6 +39,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "reply": node("--ref= --to= --progress --failed --image= --request-id= --as= --cwd="),
   "ask": node("--operator --fyi --cancel --continue= --default-action= --window= --option= --because= --permission --image= --alias-host= --alias-project= --as= --background --body-file= --channel= --completion= --context-root= --continue-for= --effort= --foreground --harness= --host= --join-to= --label= --labels= --model= --new --no-wait --notify --on= --placement= --profile= --project= --prompt-file= --reasoning-effort= --ref= --reply-mode= --request-id= --runtime= --session= --timeout= --to="),
   "roster": node("--dry-run --reset", { "list": node(), "ls": node(), "project": node(), "import": node(), "resolve": node() }),
+  "show": node("--caption="),
   "alias": node("--expires-at= --expires-in= --host= --if-revision= --include-inactive --project= --replace --self --self-agent --target= --to=", { "set": node(), "list": node(), "resolve": node(), "repoint": node(), "unset": node() }),
   "wait": node("--timeout="),
   "flight": node("--timeout=", { "get": node(), "wait": node(), "cancel": node() }),

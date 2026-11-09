@@ -105,6 +105,10 @@ const expectedRouteInventory = [
   "GET /v1/roles/catalog",
   "GET /v1/roster",
   "GET /v1/runtime-catalog",
+  "GET /v1/shows",
+  "GET /v1/shows/:id/bytes",
+  "GET /v1/shows/capability",
+  "GET /v1/shows/events",
   "GET /v1/snapshot",
   "GET /v1/supervision-handoff",
   "GET /v1/tail/discover",
@@ -228,6 +232,7 @@ const expectedRouteInventory = [
   "POST /v1/roster/import",
   "POST /v1/roster/projects/code",
   "POST /v1/roster/resolve",
+  "POST /v1/shows",
   "POST /v1/surfaces/deck",
   "POST /v1/thread-watches/close",
   "POST /v1/thread-watches/open",
@@ -277,7 +282,7 @@ describe("broker HTTP route inventory", () => {
   test("follows every current delegated HTTP handler without a manually maintained source list", () => {
     const { sources } = delegatedRouteInventory(routerSource);
     for (const file of [
-      "broker-attachments-http.ts", "broker-history-http-service.ts",
+      "broker-shows-http.ts", "broker-attachments-http.ts", "broker-history-http-service.ts",
       "broker-quarantine-http-service.ts", "broker-access-http-routes.ts",
       "broker-mcp-event-routes.ts", "broker-guest-http-routes.ts",
       "broker-http-entity-write-routes.ts", "mesh-approvals.ts",

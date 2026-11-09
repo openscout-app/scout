@@ -13,6 +13,7 @@ export type ScoutCommandName =
   | "operator"
   | "ask"
   | "reply"
+  | "show"
   | "alias"
   | "roster"
   | "broadcast"
@@ -90,6 +91,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./reply.ts")).runReplyCommand;
     case "ask":
       return (await import("./ask.ts")).runAskCommand;
+    case "show":
+      return (await import("./show.ts")).runShowCommand;
     case "alias":
       return (await import("./alias.ts")).runAliasCommand;
     case "roster":

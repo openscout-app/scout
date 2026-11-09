@@ -36,6 +36,11 @@ export const TRPC_UPGRADE_ROUTE = "GET /trpc";
  * TRPC_UPGRADE_ROUTE allowlist entry, which the inventory test exempts).
  */
 const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
+  "GET /v1/shows": "local",
+  "GET /v1/shows/capability": "local",
+  "GET /v1/shows/events": "local",
+  "GET /v1/shows/:id/bytes": "local",
+  "POST /v1/shows": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
   "POST /v1/access/admin": "local",
