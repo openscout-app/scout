@@ -3,6 +3,7 @@ import { open, mkdir, writeFile } from "node:fs/promises";
 import { homedir, platform, release, arch, totalmem, uptime } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { constants } from "node:fs";
 import { loadOpenScoutRuntimeBuildIdentity } from "./build-info.js";
 import { detectCodingAgentHost } from "./coding-agent-host.js";
 import { resolveOpenScoutSupportPaths } from "./support-paths.js";
@@ -220,12 +221,37 @@ export async function collectDiagnosticReport(options: DiagnosticOptions = {}): 
 
 export async function submitDiagnosticReport(options: DiagnosticOptions = {}): Promise<DiagnosticReceipt> {
   const report = await collectDiagnosticReport(options);
+  return submitPreparedDiagnosticReport(report, options);
+}
+
+/** Send an already collected, redacted report without collecting more data.
+ * A UI can minimize and preview a collector result, obtain consent, then send
+ * those exact bytes. Never pass an untrusted request body as the report. */
+export async function submitPreparedDiagnosticReport(
+  report: DiagnosticReport,
+  options: Pick<DiagnosticOptions, "supportDirectory" | "localOnly" | "endpoint" | "fetch"> = {},
+): Promise<DiagnosticReceipt> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(report.id)) throw new Error("Invalid diagnostic report ID");
   const body = JSON.stringify(report, null, 2);
   if (Buffer.byteLength(body) > MAX_REPORT_BYTES) throw new Error("Diagnostic report exceeds 1 MiB limit");
   const directory = join(options.supportDirectory ?? resolveOpenScoutSupportPaths().supportDirectory, "reports");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const localPath = join(directory, `${report.id}.json`);
-  await writeFile(localPath, body, { mode: 0o600, flag: "wx" });
+  try {
+    await writeFile(localPath, body, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Retry an offline submission using the identical private copy. A changed,
+    // linked, public or foreign copy must never be silently overwritten.
+    const file = await open(localPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077)
+        || (process.getuid && stat.uid !== process.getuid())
+        || stat.size !== Buffer.byteLength(body) || await file.readFile("utf8") !== body)
+        throw new Error("Saved diagnostic report does not match the prepared report");
+    } finally { await file.close(); }
+  }
   const saved: DiagnosticReceipt = { id: report.id, status: "saved", localPath };
   if (options.localOnly) return saved;
   try {

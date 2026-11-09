@@ -7,7 +7,10 @@ evidence proportionate to their risk.
 ## Before you start
 
 - Search existing issues and pull requests before opening a new lane.
-- Use an issue for a substantial behavior change or public protocol decision.
+- Explain substantial behavior or protocol changes in the pull request before
+  implementation expands. Agents must not create or comment on public issues
+  unless the operator explicitly asks. Use the private feedback channel for
+  Scout feedback when authorized, and report internal failures in the handoff.
 - Do not file security vulnerabilities publicly; follow [SECURITY.md](./SECURITY.md).
 - Keep private Scout product code, assets, credentials, and internal release
   material out of this public repository.
