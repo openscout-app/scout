@@ -77,6 +77,10 @@ person whose machine it is.
 
 ## Commits and pull requests
 
+- Follow the [branching policy](CONTRIBUTING.md#branch-from-canonical-main).
+  Local `main` tracks canonical `upstream/main`; fork `origin/main` is a
+  fast-forward mirror. Make changes in topic worktrees and target canonical
+  `main`. Historical integration branches are not new PR or release bases.
 - Commit subjects use gitmoji: `🐛 Fix session route resolution`,
   `📝 Clarify runtime ownership`.
 - Do not add AI co-author trailers or "Generated with" lines.
