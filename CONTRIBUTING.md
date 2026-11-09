@@ -25,6 +25,75 @@ Before editing, committing, or pushing, verify `pwd`,
 project placement does not prove the shell's working directory. Set the command
 working directory explicitly when the recorded chat directory is stale.
 
+## Branch from canonical main
+
+`openscout-app/scout:main` is the integration branch and source of truth.
+In a fork-based checkout, use these remote names:
+
+| Ref | Purpose |
+| --- | --- |
+| `upstream/main` | Canonical core history from `openscout-app/scout` |
+| `origin/main` | Fast-forward mirror in your fork |
+| Local `main` | Local copy of canonical main; tracks `upstream/main` |
+| `origin/<topic>` | Published work for one pull request into canonical `main` |
+
+Keep feature commits on short-lived topic branches. Use `fix/<description>`,
+`feat/<description>`, `docs/<description>`, or another descriptive name.
+Create a separate worktree for each task so the main checkout can keep running
+the developer's suite. Existing `develop`, `core-split`, or historical branches
+are not integration or release bases.
+
+Configure a fork-based checkout once, after verifying its remotes:
+
+```bash
+git config --local branch.main.remote upstream
+git config --local branch.main.merge refs/heads/main
+git config --local remote.pushDefault origin
+git config --local push.default simple
+git config --local pull.ff only
+```
+
+Start a task from fresh canonical history:
+
+```bash
+git fetch upstream main
+git worktree add -b fix/short-description ../scout-short-description upstream/main
+```
+
+Commit and push the topic branch from that worktree. Open its pull request
+against `openscout-app/scout:main`, not your fork's `main`.
+
+If canonical main advances, merge it into the topic branch and repeat affected
+checks on the resulting head. Keep published branch history intact unless its
+owner explicitly authorizes a rewrite. Review and merge the exact checked head.
+Prefer a merge commit so that head remains in canonical history. If a maintainer
+uses squash, record the reviewed head and resulting canonical commit separately.
+
+After merging, the fork owner synchronizes the fork's `main`:
+
+```bash
+git fetch origin main
+git fetch upstream main
+git merge-base --is-ancestor origin/main upstream/main &&
+  git push origin upstream/main:refs/heads/main
+git fetch origin main
+git rev-list --left-right --count origin/main...upstream/main
+```
+
+The final command must print `0 0`. If the ancestor check or push fails, inspect
+the divergence and stop. Do not force-push either `main` or discard fork-only work.
+Keep `origin/main` free of feature commits and fork-local PR merges.
+
+Update local `main` with `git merge --ff-only upstream/main` when that checkout
+is on `main` and clean. If it contains work, preserve that work and coordinate
+with its owner before updating it. Retire a topic branch and its worktree only
+after its merge and ownership are confirmed.
+
+Release tags name reviewed commits from canonical `main`. A source merge,
+fork synchronization, local build, installation, and publication are separate
+delivery states. Record each state explicitly. Run proportional local checks;
+hosted CI and publication require explicit maintainer authorization.
+
 ## Set up the repository
 
 ```bash
