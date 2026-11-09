@@ -16,11 +16,23 @@ import { CAPSULE_PREFIX, CUTOVER, CHUNK_TARGET, SLOT_LIMIT, commitName, doneName
 import { CUT_DIRECTORY, RESERVATION_FILES, RESERVATION_BYTES, reserveName, cutChild, cutName, cutBodies,
   type CutClaim, type CutPlan, type CutFile, type CutRetired, type CutResult } from "./trust-cutover.js";
 
+import {readNodeIdentity, nodeIdentityPath} from "../node-identity.js";
+import {resolveOpenScoutInstanceName} from "../instance.js";
+import {PAIRING_HOST_BINDING_FILE, readPairingHostBinding, publishPairingHostBinding,
+  persistentFileIdentity, type PairingBindingHost, type PairingHostBinding} from "./host-binding.js";
+
 import {reclaimCapsuleStaging, type CapsuleReclamationReceipt} from "./trust-reclamation.js";
 export type {CapsuleReclamationReceipt} from "./trust-reclamation.js";
 
 export type TrustedPeer = { publicKey: string; name?: string; pairedAt: string; lastSeen?: string };
+/** Authenticated authority id when bound; legacy physical id only for maintenance. */
 export type PairingRootIdentity = Readonly<{ path: string; id: string }>;
+export type PairingTrustOwnerOptions = {
+  /** Trusted local bootstrap; reads must not create or silently replace a host key. */
+  host?: () => PairingBindingHost;
+  /** Production stores require ownership binding. Legacy readers are maintenance/test only. */
+  requireHostBinding?: boolean;
+};
 declare const contextBrand: unique symbol;
 export type PairingTrustContext = { readonly [contextBrand]: true };
 /** Trusted bootstrap only. No loader, environment selector or remote installer.
@@ -124,8 +136,82 @@ function fullKey(key: string) { if (!/^[0-9a-f]{64}$/.test(key)) refuse("full_ke
 
 export class PairingTrustOwner {
   readonly path: string;
-  private rootId: string | null = null;
-  constructor(path: string) { this.path = canonical(path); }
+  private physicalRootId: string | null = null;
+  private binding: PairingHostBinding | null = null;
+  private bindingStat: string | null = null;
+  private bindingMaintenance = false;
+  constructor(path: string, private readonly options: PairingTrustOwnerOptions = {}) { this.path = canonical(path); }
+  private host(): PairingBindingHost {
+    if (this.options.host) return this.options.host();
+    let keyPath: string;
+    try { keyPath = realpathSync(nodeIdentityPath()); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return refuse("host_identity_required"); throw error; }
+    if (keyPath === this.path || keyPath.startsWith(this.path + "/")) return refuse("host_identity_not_independent");
+    const identity = readNodeIdentity();
+    if (!identity) return refuse("host_identity_required");
+    return {identity, instanceId: resolveOpenScoutInstanceName()};
+  }
+  private loadBinding(): PairingHostBinding | null {
+    let stat: Stats;
+    try { stat = lstatSync(join(this.path, PAIRING_HOST_BINDING_FILE)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (this.binding) refuse("host_binding_missing");
+      return null;
+    }
+    const stamp = `${id(stat)}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    if (this.bindingStat !== stamp) {
+      const observed = readPairingHostBinding(this.path, this.host(), refuse);
+      if (this.binding && JSON.stringify(observed) !== JSON.stringify(this.binding)) refuse("host_binding_changed");
+      this.binding = observed; this.bindingStat = stamp;
+    }
+    return this.binding;
+  }
+  private persistentIdentity(stat: Stats): string { return this.binding ? persistentFileIdentity(stat) : id(stat); }
+  private initializeBinding(): void {
+    const root = this.root(true)!;
+    if (this.binding || !this.options.requireHostBinding) return;
+    const inventory = readdirSync(root.path);
+    // Never turn existing peer data, a generation, marker, or capsule into an
+    // authenticated store merely by starting a newer binary.
+    if (inventory.some(name => name === PEERS || name === MARKER || name.startsWith(PREFIX)
+      || name.startsWith(CAPSULE_PREFIX) || name.startsWith(".pairing-"))) refuse("host_binding_required");
+    const physical = this.physicalRootId;
+    publishPairingHostBinding(root.path, this.host(), "initialize", null, () => {
+      this.root(); if (this.physicalRootId !== physical) refuse("root_replaced");
+    }, refuse);
+    this.loadBinding();
+  }
+  /** Explicit maintenance only. The caller excludes ALL root users. Existing
+   * journal bytes/revisions and exact mutation retries are left intact. Its
+   * old physical root string becomes a signed, opaque authority identifier.
+   * Existing v2/managed state needs its own migration; never relabel file claims. */
+  bindToHost(migrationId: string, options: {quiescent: true}): PairingHostBinding {
+    if (options?.quiescent !== true) refuse("host_binding_quiescence_required");
+    const root = this.root(true)!;
+    if (adapters.has(root.id) || [...liveInvocations].some(item => item.active && item.root.id === root.id)) refuse("host_binding_holder_active");
+    if (this.binding) {
+      if (this.binding.migrationId !== migrationId) refuse("host_binding_conflict");
+      this.readAuthority(); this.syncDirectory(root); return structuredClone(this.binding);
+    }
+    const inventory = readdirSync(root.path);
+    if (inventory.some(name => name.startsWith(CAPSULE_PREFIX) || name.startsWith(".pairing-v2")
+      || name === MARKER || name.startsWith(".pairing-"))) refuse("host_binding_legacy_store_required");
+    this.bindingMaintenance = true;
+    try {
+      const before = this.readyState(root);
+      if (before.managed || before.pendingStage || before.adoption) refuse("host_binding_legacy_store_required");
+      const binding = publishPairingHostBinding(root.path, this.host(), migrationId, root.id, () => {
+        this.check(root);
+        const current = this.readyState(root);
+        if (current.hash !== before.hash || current.projectionHash !== before.projectionHash) refuse("revision_conflict");
+      }, refuse);
+      this.loadBinding();
+      const after = this.readyState(this.root()!);
+      if (after.hash !== before.hash || after.projectionHash !== before.projectionHash) refuse("revision_conflict");
+      return structuredClone(binding);
+    } finally { this.bindingMaintenance = false; }
+  }
   private root(create = false): PairingRootIdentity | null {
     if (create) {
       const missing: string[] = []; let directory = this.path;
@@ -140,13 +226,14 @@ export class PairingTrustOwner {
     }
     let stat;
     try { stat = lstatSync(this.path); } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT" && this.rootId === null) return null;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT" && this.physicalRootId === null) return null;
       throw e;
     }
     owned(stat, true);
-    if (this.rootId !== null && id(stat) !== this.rootId) refuse("root_replaced");
-    this.rootId = id(stat);
-    return Object.freeze({path: this.path, id: this.rootId});
+    if (this.physicalRootId !== null && id(stat) !== this.physicalRootId) refuse("root_replaced");
+    this.physicalRootId = id(stat);
+    const binding = this.loadBinding();
+    return Object.freeze({path: this.path, id: binding?.authorityId ?? this.physicalRootId});
   }
   private check(root: PairingRootIdentity) { if (this.root()?.id !== root.id) refuse("root_replaced"); }
   private readFile(root: PairingRootIdentity, name: string, stagedGeneration = name.startsWith(PREFIX)): Buffer | null {
@@ -186,7 +273,7 @@ export class PairingTrustOwner {
   private syncDirectory(root: PairingRootIdentity) {
     this.check(root);
     const fd = openSync(root.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { if (id(fstatSync(fd)) !== root.id) refuse("root_replaced"); fsyncSync(fd); this.check(root); }
+    try { if (id(fstatSync(fd)) !== this.physicalRootId) refuse("root_replaced"); fsyncSync(fd); this.check(root); }
     finally { closeSync(fd); }
   }
   private stage(root: PairingRootIdentity, bytes: string, prefix = ".pairing-owner"): string {
@@ -271,6 +358,9 @@ export class PairingTrustOwner {
   private state(root: PairingRootIdentity, allowPending = false, materialize = true): State {
     this.check(root);
     const inventory = readdirSync(root.path);
+    if (this.options.requireHostBinding && !this.binding && !this.bindingMaintenance
+      && inventory.some(name => name === PEERS || name === MARKER || name.startsWith(PREFIX)
+        || name.startsWith(CAPSULE_PREFIX) || name.startsWith(".pairing-v2"))) refuse("host_binding_required");
     if (inventory.some(n => n.startsWith(CAPSULE_PREFIX) || n.startsWith(".pairing-v2"))) return this.capsuleState(root, allowPending, inventory, materialize);
     const marker = this.marker(root);
     const names = readdirSync(root.path).filter(n => n.startsWith(PREFIX));
@@ -410,13 +500,13 @@ export class PairingTrustOwner {
     this.check(root);
     const stat = lstatSync(join(root.path, CUT_DIRECTORY));
     owned(stat, true);
-    if (claim.rootId !== root.id || id(stat) !== claim.identity) refuse("migration_claim_changed");
+    if (claim.rootId !== root.id || this.persistentIdentity(stat) !== claim.identity) refuse("migration_claim_changed");
   }
   private syncCutDirectory(root: PairingRootIdentity, claim: CutClaim) {
     this.cutDirectory(root, claim);
     const fd = openSync(join(root.path, CUT_DIRECTORY), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try {
-      if (id(fstatSync(fd)) !== claim.identity) refuse("migration_claim_changed");
+      if (this.persistentIdentity(fstatSync(fd)) !== claim.identity) refuse("migration_claim_changed");
       fsyncSync(fd);
     } finally { closeSync(fd); }
     this.cutDirectory(root, claim);
@@ -443,7 +533,7 @@ export class PairingTrustOwner {
     try { stat = lstatSync(join(root.path, CUT_DIRECTORY)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     owned(stat, true);
-    if (id(stat) !== claim.identity) refuse("migration_claim_changed");
+    if (this.persistentIdentity(stat) !== claim.identity) refuse("migration_claim_changed");
     const names = readdirSync(join(root.path, CUT_DIRECTORY));
     if (names.length > RESERVATION_FILES || names.some(name => !cutName(name))) refuse("migration_claim_changed");
     // Keep the claim until all payloads are gone, including when helpers race.
@@ -608,7 +698,7 @@ export class PairingTrustOwner {
           const bytes = this.readFile(root, item.name, false);
           if (!bytes) continue;
           const stat = lstatSync(join(root.path, item.name)); owned(stat);
-          if (id(stat) !== item.identity || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");
+          if (this.persistentIdentity(stat) !== item.identity || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");
           this.check(root);
           try { unlinkSync(join(root.path, item.name)); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -663,7 +753,7 @@ export class PairingTrustOwner {
       try { mkdirSync(join(root.path, CUT_DIRECTORY), {mode: 0o700}); stat = lstatSync(join(root.path, CUT_DIRECTORY)); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") refuse("migration_busy"); throw error; }
       owned(stat, true);
-      const claim: CutClaim = {rootId: root.id, token: randomUUID(), identity: id(stat), migrationId};
+      const claim: CutClaim = {rootId: root.id, token: randomUUID(), identity: this.persistentIdentity(stat), migrationId};
       let reserved = false, uncertain = false;
       try {
         this.syncCutDirectory(root, claim); this.syncDirectory(root);
@@ -679,7 +769,7 @@ export class PairingTrustOwner {
           rows.push([o.mutationId, o.revision, o.type, o.publicKey, o.changed, saved.request, bytes.length,
             o.type === "manage" ? generation.managed : null]);
           if (o.type === "manage") policy = {revision, marker: generation.managed!};
-          retired.push({name, sha256: hash(bytes), bytes: bytes.length, identity: id(lstatSync(join(root.path, name)))});
+          retired.push({name, sha256: hash(bytes), bytes: bytes.length, identity: this.persistentIdentity(lstatSync(join(root.path, name)))});
         }
         if (rows.length !== state.revision || !rows.every((row, index) => rowValid(row, index + 1, root.id))
           || rows.reduce((sum, row) => sum + row[6], 0) !== state.bytes
@@ -758,7 +848,7 @@ export class PairingTrustOwner {
         if (cap.barrier.migration) tokens.add(cap.barrier.migration.token);
         return {revision: state.revision, logicalHead: state.hash, physicalHead: cap.physicalHash, cutHash: cap.cutHash, references, tokens};
       };
-      return reclaimCapsuleStaging(root, reclamationId, {check: () => this.check(root), authority, fail: refuse});
+      return reclaimCapsuleStaging(root, reclamationId, {check: () => this.check(root), authority, fail: refuse, persistentIdentity: stat => this.persistentIdentity(stat)});
     });
   }
   private capsulePolicy(root: PairingRootIdentity, policy: ManagedPolicy | null) {
@@ -795,8 +885,8 @@ export class PairingTrustOwner {
         const bytes = this.readFile(root,`${name}/${child}`,false); if (!bytes) refuse("revision_conflict");
         const claim = unpack<Record<string,unknown>>(bytes,"claim",refuse);
         if (claim.rootId !== root.id || claim.index !== index || !token(claim.token) || child !== `${claim.token}.json`
-          || claim.identity !== id(stat) || id(lstatSync(path)) !== id(stat)) refuse("unsafe_path");
-        const slot = {index,token:claim.token,identity:id(stat)};
+          || claim.identity !== this.persistentIdentity(stat) || id(lstatSync(path)) !== id(stat)) refuse("unsafe_path");
+        const slot = {index,token:claim.token,identity:this.persistentIdentity(stat)};
         if(claims.has(slot.token))refuse("capsule_slot_invalid");claims.set(slot.token,slot);
         let total = bytes.length;
         for (const candidate of [dataName(slot.token), ...(["peers","commit","marker","done"] as const).map(r=>stageName(slot.token,r))]) {
@@ -943,7 +1033,7 @@ export class PairingTrustOwner {
   /** The descriptor must stay open for the entire check/use interval. */
   private slotMatches(root: PairingRootIdentity, slot: CapsuleSlot, fd: number): boolean {
     const stat=fstatSync(fd);owned(stat,true);
-    if(id(stat)!==slot.identity)return false;
+    if(this.persistentIdentity(stat)!==slot.identity)return false;
     const directory=join(root.path,slotName(slot.index));
     try {
       if(id(lstatSync(directory))!==id(stat))return false;
@@ -951,7 +1041,7 @@ export class PairingTrustOwner {
       if(!bytes)return false; // Includes a newer mkdir before its token write.
       const claim=unpack<Record<string,unknown>>(bytes,"claim",refuse);
       if(!same(claim,{rootId:root.id,...slot}))refuse("capsule_slot_invalid");
-      return id(lstatSync(directory))===id(stat);
+      return this.persistentIdentity(lstatSync(directory))===this.persistentIdentity(stat);
     } catch(e) {if((e as NodeJS.ErrnoException).code==="ENOENT")return false;throw e;}
   }
   private syncSlot(root: PairingRootIdentity, slot: CapsuleSlot) {
@@ -975,7 +1065,7 @@ export class PairingTrustOwner {
       try {
         const stat=fstatSync(fd);
         owned(stat,true);
-        const slot={index,token:randomUUID(),identity:id(stat)},child=`${slot.token}.json`;
+        const slot={index,token:randomUUID(),identity:this.persistentIdentity(stat)},child=`${slot.token}.json`;
         let renamed=false;
         try {
           this.writeNew(root,`${candidate}/${child}`,pack("claim",{rootId:root.id,...slot}));
@@ -1036,7 +1126,7 @@ export class PairingTrustOwner {
   private capsuleFileIdentity(root: PairingRootIdentity, name: string): RetiredFile {
     const bytes=this.readFile(root,name,false);if(!bytes)refuse("revision_conflict");
     const stat=lstatSync(join(root.path,name));owned(stat);
-    return {name,sha256:hash(bytes),identity:id(stat)};
+    return {name,sha256:hash(bytes),identity:this.persistentIdentity(stat)};
   }
   private completeCapsule(root: PairingRootIdentity, snapshot: State) {
     if(completing.has(root.id))refuse("publication_incomplete");
@@ -1081,7 +1171,7 @@ export class PairingTrustOwner {
             const bytes=this.readFile(root,retired.name,false);
             if(!bytes)continue;
             const stat=lstatSync(join(root.path,retired.name));owned(stat);
-            if(id(stat)!==retired.identity || hash(bytes)!==retired.sha256)refuse("capsule_retirement_changed");
+            if(this.persistentIdentity(stat)!==retired.identity || hash(bytes)!==retired.sha256)refuse("capsule_retirement_changed");
             this.check(root);
             try{unlinkSync(join(root.path,retired.name));}catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
           }
@@ -1200,6 +1290,7 @@ export class PairingTrustOwner {
   /** One callback invocation; a context permits at most one publication.
    * Reads can repeat. Capturing an object does not capture gate ownership. */
   withInvocation<T>(body: (context: PairingTrustContext) => T): T {
+    this.root(true); this.initializeBinding();
     const root = this.root(true)!; const adapter = adapters.get(root.id);
     if (!adapter) refuse("managed_adapter_required");
     return adapter.withGate(root, holder => {
@@ -1249,6 +1340,7 @@ export class PairingTrustOwner {
    * Pending publication completes with a full build before any view is served. */
   readAuthority(context?: PairingTrustContext): PairingAuthorityView {
     this.root(true);
+    this.initializeBinding();
     return this.operation(context, root => {
       const state = this.readyState(root!, false);
       return {revision: state.revision, peers: structuredClone(state.peers),
@@ -1271,6 +1363,7 @@ export class PairingTrustOwner {
    * This is not a grant; only a matching live opportunity can admit a peer. */
   pairingAuthorityStamp(): string {
     this.root(true);
+    this.initializeBinding();
     return this.operation(undefined, root => this.pairingOpportunityStamp(root!, this.readyState(root!)));
   }
   private pairingOpportunityStamp(root: PairingRootIdentity, state: State): string {
@@ -1283,6 +1376,7 @@ export class PairingTrustOwner {
     if (typeof room !== "string" || !room || room.length > 256 || !Number.isFinite(expiresAt) || expiresAt <= Date.now()
       || expiresAt - Date.now() > 300_000) refuse("invalid_pairing_opportunity");
     this.root(true);
+    this.initializeBinding();
     const stamp = (root: PairingRootIdentity, state: State) => this.pairingOpportunityStamp(root, state);
     const baseline = this.operation(undefined, root => stamp(root!, this.readyState(root!)));
     if (expectedAuthorityStamp !== undefined && expectedAuthorityStamp !== baseline) refuse("pairing_opportunity_closed");
@@ -1341,6 +1435,7 @@ export class PairingTrustOwner {
     else if (mutation.type === "revoke") fullKey(mutation.publicKey);
     else if (mutation.type !== "manage") refuse("invalid_mutation");
     this.root(true);
+    this.initializeBinding();
     return this.operation(context, (bound, invocation) => {
       const root = bound!, state = this.readyState(root);
       const request = JSON.stringify([expectedRevision, mutation.type,
@@ -1434,6 +1529,7 @@ export class PairingTrustOwner {
   /** Typed trusted-bootstrap registration, root identity checked before install.
    * Unregistration does not delete the persistent managed marker. */
   register(adapter: PairingTrustAdapter): () => void {
+    this.root(true); this.initializeBinding();
     const root = this.root(true)!;
     if (!adapter || !/^[a-z0-9.-]{1,64}$/.test(adapter.id) || typeof adapter.withGate !== "function"
       || typeof adapter.currentHolder !== "function") refuse("invalid_adapter");
@@ -1444,6 +1540,6 @@ export class PairingTrustOwner {
 }
 export function pairingTrustOwner(path = resolveOpenScoutPairingHome()): PairingTrustOwner {
   const root = canonical(path); let owner = owners.get(root);
-  if (!owner) { owner = new PairingTrustOwner(root); owners.set(root, owner); }
+  if (!owner) { owner = new PairingTrustOwner(root, {requireHostBinding: root === canonical(resolveOpenScoutPairingHome())}); owners.set(root, owner); }
   return owner;
 }

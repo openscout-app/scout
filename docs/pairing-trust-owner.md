@@ -90,7 +90,8 @@ The same root gains immutable `trusted-peers.owner.<revision>.json` generations.
 Each is an envelope containing a `generation` and its SHA-256 checksum. A
 generation contains:
 
-- schema, root identity (device and inode), and contiguous revision;
+- schema, authority root ID, and contiguous revision (the legacy device/inode
+  string becomes opaque after explicit host binding);
 - hash of the previous generation's bytes (the legacy seed hash for revision 1);
 - the complete peer array and the digest of its exact JSON projection;
 - the managed marker value, or null;
@@ -364,13 +365,74 @@ The runner stops on a timed maximum breach or failed percentiles. This qualifies
 the migrated-store read path, not registry admissions, gate holds,
 idle CPU, native durability or physical phones.
 
+## Durable host ownership
+
+The configured pairing store is owned by the runtime's existing Ed25519 node
+identity, held outside the pairing directory. `trusted-peers.host-binding.json`
+is a versioned signed record containing the full host key ID, instance name,
+random store ID, canonical pairing path, authority ID and maintenance ID. A
+reader verifies the signature against the independently loaded local host key;
+it never adopts a public key supplied by the store. Missing host keys are errors,
+not permission to mint replacement identities. No new keychain or HMAC secret is
+introduced.
+
+The authority ID is durable. A new store uses `host-store:<UUID>`. An explicitly
+migrated v1 store retains its historical root string as an **opaque signed ID**,
+so migration changes no generation, projection, revision, mutation ID or saved
+retry outcome. It is no longer compared to the current filesystem device number.
+A fresh process on the same logical host and instance can open that store after
+restart, mount device renumbering, or restoration of completed authority at the same canonical path.
+Another host key, instance or path refuses. Restoring the host's private key on
+replacement hardware intentionally carries its logical identity; this is not a
+hardware-attestation or same-user sandbox guarantee.
+
+Device/inode checks remain local operation guards. Each owner pins the physical
+root it first observes and refuses replacement during its lifetime. Opened file
+and directory descriptors retain their existing no-follow, owner, permissions,
+link and before/after checks. For host-bound stores, persistent v2 file claims use
+inode plus birth time within the authenticated store, instead of persisting an
+OS device number. A filesystem without a usable birth time refuses that v2
+operation rather than weakening its claim.
+
+### Activation and legacy migration
+
+New, empty configured stores are bound when authority is initialized. A missing
+plain `read()` remains inert. Existing authority is never authenticated merely
+because a new binary starts: it reports `host_binding_required`. Before deploying
+the new owner over an existing store, trusted maintenance must:
+
+1. Back up the store and exclude **all** users and writers, including old binaries.
+2. Keep the existing node identity and select its original Scout instance.
+3. Call `owner.bindToHost(maintenanceId, {quiescent: true})` with one retained ID.
+4. Verify the returned binding, peer set, revision and exact recorded retries.
+5. Resume only binaries that implement the binding contract.
+
+The method validates the entire existing v1 authority before signing and publishes
+only the binding, with exclusive creation and file/directory durability barriers.
+A retry verifies the already published binding and original ID. A directory root
+mismatch, corrupt chain, unmanaged external projection adoption, pending stage,
+registered managed adapter or existing v2 capsule refuses. These require their
+own reviewed recovery/migration; the host key must not bless them automatically.
+A valid signed binding interrupted after exclusive publication can finish its
+retained staging link on a later authenticated read; an invalid signature or
+foreign host cannot trigger that completion.
+
+The `pairingTrustOwner()` factory requires this binding for the configured
+pairing path (including an explicit spelling of that same path). Direct
+`PairingTrustOwner` construction and alternate-root readers retain a
+legacy-maintenance seam for old-format validation and fixtures; it must not replace the configured factory
+in production. Once bound, even a legacy-maintenance owner verifies the binding.
+A required production owner refuses a missing/deleted binding instead of falling
+back to unbound authority. An older binary cannot enforce this policy: exclude
+old writers before activation, as with managed-mode adoption.
+
 ## Root identity and external writers
 
 All default call sites use `resolveOpenScoutPairingHome`: the supported
 `OPENSCOUT_PAIRING_HOME`, `SCOUT_PAIRING_HOME`, `OPENSCOUT_PAIRING_DIR`, explicit
 `OPENSCOUT_SCOUT_HOME/pairing`, and instance defaults have one path resolver.
-The owner normalizes lexical/ancestor aliases, binds the root's device/inode,
-and checks that identity around I/O. A final symlink root, symlink data file,
+The owner normalizes lexical/ancestor aliases, authenticates durable host
+ownership when configured, and separately pins the root's device/inode around I/O. A final symlink root, symlink data file,
 hard-linked data file, wrong owner, writable-by-others root/file or replaced
 bound root refuses. Different roots have separate owners. Aliasing an ancestor
 does not create a second owner; final symlink roots remain unsupported.
@@ -398,8 +460,10 @@ Detection cannot cancel an operation admitted before an external write.
 **A managed marker cannot constrain an old binary that does not check it.**
 Old binaries and raw editors are unsupported writers after managed adoption.
 Detection is not exclusion. A consuming host must separately prove old-writer
-exclusion before relying on gated admission. Do not copy an owner store to a new
-root/inode as if its revision were valid there; root migration needs review.
+exclusion before relying on gated admission. Do not move an owner store to a different configured path, instance or host
+as if its authority were valid there; scope migration needs review. Host-bound
+restoration at the original path with the original host identity is supported
+by a fresh process; an existing process still refuses physical replacement.
 
 ## Dormant managed-store seam
 
