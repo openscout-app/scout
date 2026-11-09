@@ -1333,7 +1333,12 @@ if [ "$1" = "list-sessions" ]; then
   exit 0
 fi
 if [ "$1" = "display-message" ]; then
-  printf '123\\t/dev/ttys003\\t/Users/art/dev/project\\n'
+  row='123\\t/dev/ttys003\\t/workspace/project\\n'
+  if [ "$utf8" = 1 ]; then
+    printf "$row"
+  else
+    printf "$row" | tr '\\t' '_'
+  fi
   exit 0
 fi
 if [ "$1" = "capture-pane" ]; then
@@ -2118,7 +2123,7 @@ exit 64
     expect(daemon.value).toEqual({
       panePid: 123,
       paneTty: "ttys003",
-      paneCurrentPath: "/Users/art/dev/project",
+      paneCurrentPath: "/workspace/project",
     });
   }, SCOUTD_CONFORMANCE_TIMEOUT_MS);
 
