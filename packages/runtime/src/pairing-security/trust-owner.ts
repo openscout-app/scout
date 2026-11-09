@@ -96,7 +96,15 @@ const encodePeers = (peers: readonly TrustedPeer[]) => JSON.stringify(peers, nul
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 function refuse(code: string): never { throw new PairingTrustError(code); }
 export class PairingTrustError extends Error {
-  constructor(readonly code: string) { super(`pairing_trust_${code}`); }
+  constructor(readonly code: string) {
+    const help: Record<string,string> = {
+      host_binding_required: "stop Scout, then run scout pair bind-host <migration-id> --quiescent",
+      host_identity_required: "initialize the host runtime identity first, then stop Scout before migration",
+      host_binding_scope_mismatch: "use the original Scout instance and canonical pairing path; scope changes require reviewed migration",
+      host_binding_legacy_store_required: "managed, capsule or pending stores require separate reviewed recovery before host binding",
+    };
+    super(`pairing_trust_${code}` + (help[code] ? `: ${help[code]}` : ""));
+  }
 }
 function owned(stat: Stats, directory = false, legacyProjection = false, stagedGeneration = false) {
   if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())

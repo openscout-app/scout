@@ -381,7 +381,7 @@ migrated v1 store retains its historical root string as an **opaque signed ID**,
 so migration changes no generation, projection, revision, mutation ID or saved
 retry outcome. It is no longer compared to the current filesystem device number.
 A fresh process on the same logical host and instance can open that store after
-restart, mount device renumbering, or restoration of completed authority at the same canonical path.
+restart, mount device renumbering, or restoration of completed v1 authority at the same canonical path.
 Another host key, instance or path refuses. Restoring the host's private key on
 replacement hardware intentionally carries its logical identity; this is not a
 hardware-attestation or same-user sandbox guarantee.
@@ -391,7 +391,9 @@ root it first observes and refuses replacement during its lifetime. Opened file
 and directory descriptors retain their existing no-follow, owner, permissions,
 link and before/after checks. For host-bound stores, persistent v2 file claims use
 inode plus birth time within the authenticated store, instead of persisting an
-OS device number. A filesystem without a usable birth time refuses that v2
+OS device number. Completed v1 restoration does not imply v2 file-claim
+restoration: v2 claims retain inode and birth-time identity and require their own
+reviewed recovery after a file-copy restore. A filesystem without a usable birth time refuses that v2
 operation rather than weakening its claim.
 
 ### Activation and legacy migration
@@ -403,7 +405,14 @@ the new owner over an existing store, trusted maintenance must:
 
 1. Back up the store and exclude **all** users and writers, including old binaries.
 2. Keep the existing node identity and select its original Scout instance.
-3. Call `owner.bindToHost(maintenanceId, {quiescent: true})` with one retained ID.
+3. Run `scout pair bind-host <migration-id> --quiescent` with one retained ID.
+   The command refuses live runtime, supervisor and pairing process markers,
+   requires stopped pairing intent, and retains a private authority backup.
+   `--quiescent` asserts that all other and older store users are excluded;
+   process markers cannot prove exclusion of arbitrary external writers.
+   Unpublished single-link binding temporary files are retained in the backup
+   before removal, so a crash before publication does not permanently block
+   explicit recovery. Other pending stages are refused.
 4. Verify the returned binding, peer set, revision and exact recorded retries.
 5. Resume only binaries that implement the binding contract.
 
@@ -461,7 +470,7 @@ Detection cannot cancel an operation admitted before an external write.
 Old binaries and raw editors are unsupported writers after managed adoption.
 Detection is not exclusion. A consuming host must separately prove old-writer
 exclusion before relying on gated admission. Do not move an owner store to a different configured path, instance or host
-as if its authority were valid there; scope migration needs review. Host-bound
+as if its authority were valid there; scope migration needs review. Host-bound completed v1 authority
 restoration at the original path with the original host identity is supported
 by a fresh process; an existing process still refuses physical replacement.
 

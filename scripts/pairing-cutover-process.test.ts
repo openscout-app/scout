@@ -1,21 +1,25 @@
-import {afterEach, expect, test} from "bun:test";
+import {afterAll, afterEach, expect, test} from "bun:test";
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, unlinkSync, statSync, utimesSync, linkSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join} from "node:path";
 import {fileURLToPath} from "node:url";
 import {createHash} from "node:crypto";
 import {pairingTrustOwner} from "../packages/runtime/src/pairing-security/trust-owner.ts";
+import {loadOrCreateNodeIdentity} from "../packages/runtime/src/node-identity.ts";
 import {legacyFixture} from "./fixtures/pairing-capsule.ts";
 import {CUT_DIRECTORY, RESERVATION_BYTES} from "../packages/runtime/src/pairing-security/trust-cutover.ts";
 
 const project = fileURLToPath(new URL("..", import.meta.url));
 const worker = join(project, "scripts/pairing-cutover-worker.ts");
 const roots: string[] = [], removers: (() => void)[] = [];
+const support=mkdtempSync(join(tmpdir(),"pairing-cutover-host-")), priorSupport=process.env.OPENSCOUT_SUPPORT_DIRECTORY;
+process.env.OPENSCOUT_SUPPORT_DIRECTORY=support;loadOrCreateNodeIdentity(support);
+afterAll(()=>{if(priorSupport===undefined)delete process.env.OPENSCOUT_SUPPORT_DIRECTORY;else process.env.OPENSCOUT_SUPPORT_DIRECTORY=priorSupport;rmSync(support,{recursive:true,force:true});});
 function fixture(managed = false) {
   const parent = mkdtempSync(join(tmpdir(), "pairing-capsule-process-")); roots.push(parent);
   const data = join(parent, "pairing-capsule-data"), coordination = join(parent, "coordination");
   mkdirSync(data, {mode: 0o700}); mkdirSync(coordination);
-  const f = legacyFixture(data, {factory: pairingTrustOwner, generations: 3, keys: 2, prepare: managed ? owner => {
+  const f = legacyFixture(data, {bindHost:true, factory: pairingTrustOwner, generations: 3, keys: 2, prepare: managed ? owner => {
     let holder: object | null = null;
     removers.push(owner.register({id: "cutover.test", withGate(_r, body) {holder = {}; try {return body(holder);} finally {holder = null;}}, currentHolder() {return holder;}}));
     owner.mutate(3, "managed", {type: "manage"});

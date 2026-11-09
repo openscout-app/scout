@@ -1,3 +1,4 @@
+import {runPairHostBinding} from "./pair-host-binding.ts";
 import { localConfigHome } from "@openscout/runtime/local-config";
 import { createPendingPairRequestStore, pairRequestStatePath, type PairRequest } from "@openscout/pairing/pair-requests";
 import { decideHostPairingRequest } from "@openscout/pairing/host";
@@ -45,6 +46,7 @@ function parsePairCommandOptions(args: string[]): ScoutPairCommandOptions {
 export function renderPairCommandHelp(): string {
   return [
     "Usage: scout pair [--managed] [--relay URL]",
+    "       scout pair bind-host <migration-id> --quiescent",
     "       scout pair requests [list]",
     "       scout pair requests show <token>",
     "       scout pair requests approve <token>",
@@ -87,6 +89,7 @@ async function runPairRequests(context: ScoutCommandContext, args: string[]): Pr
 
 export async function runPairCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) { context.stdout(renderPairCommandHelp()); return; }
+  if (args[0] === "bind-host") return runPairHostBinding(context,args.slice(1));
   if (args[0] === "requests") return runPairRequests(context, args.slice(1));
   const options = parsePairCommandOptions(args);
   const session = await startScoutPairingSession({
