@@ -4,6 +4,7 @@ import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {fileURLToPath,pathToFileURL} from "node:url";
 import {createHash} from "node:crypto";
+import {uncoloredEnv} from "./uncolored-env.ts";
 const root=fileURLToPath(new URL("..",import.meta.url)),explicit=process.argv[2];
 const out=explicit??mkdtempSync(join(tmpdir(),"pairing-view-evidence-"));mkdirSync(out,{recursive:true});
 const original=readFileSync(join(root,"packages/runtime/src/pairing-security/trust-owner.ts"),"utf8");
@@ -31,7 +32,7 @@ for(const c of controls){
    for(const [from,to]of [["../node-identity.js","packages/runtime/src/node-identity.ts"],["../instance.js","packages/runtime/src/instance.ts"],["./host-binding.js","packages/runtime/src/pairing-security/host-binding.ts"],["../support-paths.js","packages/runtime/src/support-paths.ts"],["./trust-capsule.js","packages/runtime/src/pairing-security/trust-capsule.ts"],["./trust-cutover.js","packages/runtime/src/pairing-security/trust-cutover.ts"],["./trust-reclamation.js","packages/runtime/src/pairing-security/trust-reclamation.ts"]])source=source.replaceAll(JSON.stringify(from),JSON.stringify(url(to!)));
    writeFileSync(subject,source);
    writeFileSync(tests,unit.replace('"./trust-owner.ts"',JSON.stringify(subject)).replace('"./trust-capsule.ts"',JSON.stringify(url("packages/runtime/src/pairing-security/trust-capsule.ts"))).replace('"../../../../scripts/fixtures/pairing-capsule.ts"',JSON.stringify(url("scripts/fixtures/pairing-capsule.ts"))))
-   const child=Bun.spawn([process.execPath,"test",tests,"--test-name-pattern",c.test],{stdout:"pipe",stderr:"pipe"});
+   const child=Bun.spawn([process.execPath,"test",tests,"--test-name-pattern",c.test],{env:uncoloredEnv(),stdout:"pipe",stderr:"pipe"});
    const [exit,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);const log=stdout+stderr;
    writeFileSync(join(out,`${c.id}-${kind}.log`),log);
    if(kind==="healthy"?exit!==0:!(exit!==0&&log.includes("(fail)")&&log.includes(c.test)&&!(/Cannot find module|ParseError|SyntaxError|timed out|fixture coordination/.test(log))))throw Error(`${c.id}/${kind}: invalid evidence in ${out}`);

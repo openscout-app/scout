@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { uncoloredEnv } from "./uncolored-env.ts";
 const root = fileURLToPath(new URL("..",import.meta.url)), output = process.argv[2];
 if (!output) throw Error("usage: bun scripts/pairing-trust-owner-controls.ts <evidence-directory>");
 mkdirSync(output,{recursive:true});
@@ -119,7 +120,7 @@ expect(interposed).toBe(true);expect(owner.read()).toEqual({revision:2,peers:[]}
       writeFileSync(baselineModule,relocate(original));
       writeFileSync(baselineTest,tests.replaceAll(module,baselineModule));
       await checkDisk(control.id+"-positive");
-      const baseline=Bun.spawn([process.execPath,"test",baselineTest],{stdout:"pipe",stderr:"pipe"});
+      const baseline=Bun.spawn([process.execPath,"test",baselineTest],{env:uncoloredEnv(),stdout:"pipe",stderr:"pipe"});
       const [code,out,err]=await Promise.all([baseline.exited,new Response(baseline.stdout).text(),new Response(baseline.stderr).text()]);
       writeFileSync(join(output,`${control.id}-positive.log`),out+err);
       if (code !== 0) throw Error(`positive control fixture failed: ${control.id}`);
@@ -127,7 +128,7 @@ expect(interposed).toBe(true);expect(owner.read()).toEqual({revision:2,peers:[]}
     }
     writeFileSync(testFile,tests);
     await checkDisk(control.id);
-    const child = Bun.spawn([process.execPath,"test",testFile],{stdout:"pipe",stderr:"pipe"});
+    const child = Bun.spawn([process.execPath,"test",testFile],{env:uncoloredEnv(),stdout:"pipe",stderr:"pipe"});
     const [exit,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
     const log=stdout+stderr; writeFileSync(join(output,`${control.id}.log`),log);
     const caught = exit !== 0 && log.includes(`(fail)`) && log.includes(control.expected) && !log.includes("Cannot find module");
