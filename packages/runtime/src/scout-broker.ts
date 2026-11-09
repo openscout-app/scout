@@ -54,6 +54,7 @@ import {
   maybePostJsonToActiveScoutBrokerService,
   maybeReadJsonFromActiveScoutBrokerService,
   requestScoutBrokerJson,
+  ScoutBrokerHttpError,
 } from "./broker-api.js";
 import { resolveOpenScoutSupportPaths } from "./support-paths.js";
 import {
@@ -1599,7 +1600,21 @@ async function loadBrokerFlight(baseUrl: string, flightId: string): Promise<Scou
   const snapshot = await brokerReadJson<{
     flights?: Record<string, ScoutFlightRecord>;
   }>(baseUrl, "/v1/snapshot");
-  return snapshot.flights?.[flightId] ?? null;
+  const hot = snapshot.flights?.[flightId];
+  if (hot) return hot;
+  // History rotation evicts terminal flights from the snapshot hot set, often
+  // within the hour. The exact flight read is served from durable storage, so
+  // a finished flight is still found instead of "no longer available".
+  try {
+    const stored = await brokerReadJson<{ flight?: ScoutFlightRecord }>(
+      baseUrl,
+      `/v1/flights/${encodeURIComponent(flightId)}`,
+    );
+    return stored.flight?.id === flightId ? stored.flight : null;
+  } catch (error) {
+    if (error instanceof ScoutBrokerHttpError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 export async function waitForScoutFlight(

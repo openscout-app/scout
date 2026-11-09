@@ -23,6 +23,12 @@ export interface AcpAgentInvocationOptions {
   timeoutMs?: number;
   hardCeilingMs?: number;
   adapterOptions?: Record<string, unknown>;
+  /**
+   * Called with the provider-native ACP session id as soon as the session
+   * exists, before the prompt runs. Without it the id is only known when the
+   * turn returns, so a long turn has no native identity while it works.
+   */
+  onNativeSession?: (nativeSessionId: string) => Promise<void> | void;
 }
 
 export interface AcpAgentInvocationResult {
@@ -182,9 +188,18 @@ export async function invokeAcpAgent(
 ): Promise<AcpAgentInvocationResult> {
   const key = resolvedPoolKey(options);
   const entry = await entryForInvocation(options);
+  const onNativeSession = options.onNativeSession;
   const turn = entry.client.turn({
     input: options.prompt,
     timeoutMs: acpTurnCeilingMs(options),
+    ...(onNativeSession ? {
+      onSessionReady: (session: { nativeId?: string }) => {
+        const nativeSessionId = session.nativeId?.trim();
+        if (!nativeSessionId) return;
+        entry.nativeSessionId = nativeSessionId;
+        void Promise.resolve().then(() => onNativeSession(nativeSessionId)).catch(() => undefined);
+      },
+    } : {}),
   }).then((result) => {
     const nativeSessionId = result.session.nativeId?.trim()
       || entry.nativeSessionId
