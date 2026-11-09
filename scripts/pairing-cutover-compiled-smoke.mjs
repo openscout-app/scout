@@ -1,15 +1,20 @@
 /** Compiled first-party runtime witness. Run after the runtime build on Node 24. */
 import assert from "node:assert/strict";
 import {mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync, chmodSync} from "node:fs";
+import {randomBytes} from "node:crypto";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {pairingTrustOwner, PairingTrustOwner} from "../packages/runtime/dist/pairing-security/trust-owner.js";
 
+// The trust root id is keyed by the host identity in the trust root.
+const identity = dir => writeFileSync(join(dir, "identity.json"), JSON.stringify({publicKey: "00".repeat(32),
+  privateKey: randomBytes(32).toString("hex"), createdAt: "2026-01-01T00:00:00Z"}), {mode: 0o600});
 assert.equal(Number(process.versions.node.split(".")[0]), 24, "qualification requires Node 24");
 const parent = mkdtempSync(join(tmpdir(), "pairing-capsule-parent-"));
 chmodSync(parent, 0o775);
 const root = mkdtempSync(join(parent, "pairing-capsule-compiled-"));
 try {
+  identity(root);
   const owner = pairingTrustOwner(root), peer = {publicKey: "a".repeat(64), pairedAt: "date"};
   owner.mutate(0, "seed", {type: "grant", peer});
   const legacy = readFileSync(join(root, "trusted-peers.owner.1.json")), stamp = owner.pairingAuthorityStamp();
@@ -42,6 +47,7 @@ try {
 // Keep an immediate tmpdir() parent too: hosted Linux witnesses real /tmp 1777.
 const direct = mkdtempSync(join(tmpdir(), "pairing-capsule-direct-"));
 try {
+ identity(direct);
  const owner = pairingTrustOwner(direct);
  owner.mutate(0, "seed", {type: "grant", peer: {publicKey: "b".repeat(64), pairedAt: "date"}});
  owner.migrateToCapsule("direct-cut");

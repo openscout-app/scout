@@ -8,10 +8,10 @@ const root=fileURLToPath(new URL("..",import.meta.url)),explicit=process.argv[2]
 const out=explicit??mkdtempSync(join(tmpdir(),"pairing-view-evidence-"));mkdirSync(out,{recursive:true});
 const original=readFileSync(join(root,"packages/runtime/src/pairing-security/trust-owner.ts"),"utf8");
 const unit=readFileSync(join(root,"packages/runtime/src/pairing-security/trust-authority-view.test.ts"),"utf8");
-const row='!rowValid(value,rowCount+1,root.id)';
+const row='!rowValid(value,rowCount+1,v => this.rootIs(root, v))';
 const method=original.slice(original.indexOf('  readAuthority(context?:'),original.indexOf('  /** Membership is authoritative;'));
 const controls=[
- {id:"view-skips-row-validation",test:"authority refusal equivalence: row validation",edits:[[row,'(materialize && !rowValid(value,rowCount+1,root.id))']]},
+ {id:"view-skips-row-validation",test:"authority refusal equivalence: row validation",edits:[[row,'(materialize && !rowValid(value,rowCount+1,v => this.rootIs(root, v)))']]},
  {id:"view-before-completion",test:"authority view completes a real committed publication",edits:[['const state = this.readyState(root!, false);','const state = this.state(root!, true, false);']]},
  {id:"view-cached-positive",test:"authority refusal equivalence: changed early chunk",edits:[
   ['const completing = new Set<string>();','const completing = new Set<string>(); const viewCache=new WeakMap<PairingTrustOwner,PairingAuthorityView>();'],

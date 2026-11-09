@@ -4,10 +4,17 @@ import {expect, mock, test} from "bun:test";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
 const original={...fs}, descriptors=new Map<number,string>();
-let reuse:{path:string;ino:number}|null=null, remapped=0;
+let reuse:{path:string;ino:number;birthtimeMs:number}|null=null, remapped=0;
+// Real slot directory observations. Persisted slot identities are keyed
+// hashes, so the test finds the inode behind one by recomputing it.
+const seen:{ino:number;birthtimeMs:number}[]=[];
 let afterUnlink:((path:string)=>void)|null=null;
 const remap=(path:string,stat:fs.Stats)=>{
-  if(reuse && (path===reuse.path || path.includes("/.pairing-claim-") && stat.isDirectory())){Object.defineProperty(stat,"ino",{value:reuse.ino,configurable:true});remapped++;}
+  if(stat.isDirectory() && (path.includes("/.pairing-claim-") || path.includes("/.pairing-v2-slot-")))seen.push({ino:stat.ino,birthtimeMs:stat.birthtimeMs});
+  // Reuse the inode AND the birth time: the identity inputs collide exactly.
+  if(reuse && (path===reuse.path || path.includes("/.pairing-claim-") && stat.isDirectory())){
+    Object.defineProperty(stat,"ino",{value:reuse.ino,configurable:true});
+    Object.defineProperty(stat,"birthtimeMs",{value:reuse.birthtimeMs,configurable:true});remapped++;}
   return stat;
 };
 fs.lstatSync=((path:any,...args:any[])=>remap(String(path),(original.lstatSync as any)(path,...args))) as any;
@@ -28,13 +35,17 @@ function fixture(body:(f:ReturnType<typeof capsuleFixture>)=>void){
   try{body(capsuleFixture(path,{generations:3,keys:1,factory:pairingTrustOwner}));}
   finally{reuse=null;afterUnlink=null;original.rmSync(path,{recursive:true,force:true});}
 }
-function observe(root:string,slot:any){reuse={path:join(root,`.pairing-v2-slot-${slot.index}`),ino:Number(slot.identity.split(":")[1])};remapped=0;}
+function behind(owner:any,slot:any){
+  const root=owner.root(),found=seen.find(s=>owner.objectId(root,s)===slot.identity);
+  if(!found)throw Error("slot identity was never observed");return found;
+}
+function observe(owner:any,slot:any){reuse={path:join(owner.path,`.pairing-v2-slot-${slot.index}`),...behind(owner,slot)};remapped=0;}
 test("reused inode is not the previous head's token: ordinary v2 writes still succeed",()=>{
   for(const simulate of [false,true])fixture(f=>{
     f.owner.mutate(3,"first",{type:"grant",peer:peer(161)});
     const head=JSON.parse(original.readFileSync(join(f.root,"trusted-peers.v2.commit.2.json"),"utf8")).capsule;
     expect(original.existsSync(join(f.root,`.pairing-v2-slot-${head.slot.index}`))).toBe(false);
-    if(simulate)observe(f.root,head.slot);
+    if(simulate)observe(f.owner,head.slot);
     const second=f.owner.mutate(4,"second",{type:"grant",peer:peer(178)});
     expect(second.revision).toBe(5);expect(f.owner.read().revision).toBe(5);
     if(simulate)expect(remapped).toBeGreaterThan(0);
@@ -44,7 +55,7 @@ test("reused inode is not the previous head's token: ordinary v2 writes still su
 test("stale release never removes an empty or initialized newer claim with the same inode",()=>fixture(f=>{
   const owner=f.owner as any;
   owner.operation(undefined,(root:any)=>{
-    const old=owner.claimCapsuleSlot(root);owner.releaseCapsuleSlot(root,old);observe(f.root,old);
+    const old=owner.claimCapsuleSlot(root);owner.releaseCapsuleSlot(root,old);observe(owner,old);
     original.mkdirSync(reuse!.path,{mode:0o700});
     owner.releaseCapsuleSlot(root,old);
     expect(original.existsSync(reuse!.path)).toBe(true);
@@ -74,7 +85,7 @@ test("release pins the directory until after token unlink and rmdir",()=>fixture
       original.rmdirSync(path);original.mkdirSync(path,{mode:0o700});
       // Original descriptor still pins the deleted inode; the replacement
       // cannot have that inode. Do not inject impossible reuse while pinned.
-      expect(original.lstatSync(path).ino).not.toBe(Number(slot.identity.split(":")[1]));
+      expect(original.lstatSync(path).ino).not.toBe(behind(owner,slot).ino);
     };
     owner.releaseCapsuleSlot(root,slot);afterUnlink=null;
     expect(observed).toBe(true);expect(original.existsSync(path)).toBe(true);

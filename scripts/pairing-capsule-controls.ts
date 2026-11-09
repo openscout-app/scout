@@ -18,7 +18,7 @@ const controls=[
     ['const p=h.parts[i]!, bytes=this.readFile(root,p.name,false);','const p=h.parts[i]!, bytes=i===0 && cached.has(root.id)?cached.get(root.id)!:this.readFile(root,p.name,false); if(i===0 && bytes)cached.set(root.id,bytes);'],
   ]},
   {id:"managed-head-flag",test:"v2 permanent managed policy",edits:[
-    ['if(!same(policy,h.policy) || !same(cutPolicy,b.policy)) refuse("managed_downgrade");','policy=h.policy;'],
+    ['if(!same(policy,headPolicy) || !same(cutPolicy,barrierPolicy)) refuse("managed_downgrade");','policy=headPolicy;'],
   ]},
   {id:"physical-stamp",test:"v2 first-cut stamp",edits:[
     ['[root.id, state.revision, state.hash, state.projectionHash, state.managed]','[root.id, state.revision, state.capsule?.physicalHash??state.hash, state.projectionHash, state.managed]'],
@@ -52,7 +52,8 @@ for(const control of controls){
       hashes[kind!]=createHash("sha256").update(text!).digest("hex");
       let tests=unit.replace('"./trust-owner.ts"',JSON.stringify(module))
         .replace('"./trust-capsule.ts"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-capsule.ts")).href))
-        .replace('"../../../../scripts/fixtures/pairing-capsule.ts"',JSON.stringify(pathToFileURL(join(root,"scripts/fixtures/pairing-capsule.ts")).href));
+        .replace('"../../../../scripts/fixtures/pairing-capsule.ts"',JSON.stringify(pathToFileURL(join(root,"scripts/fixtures/pairing-capsule.ts")).href))
+        .replace('"../../../../scripts/fixtures/pairing-identity.ts"',JSON.stringify(pathToFileURL(join(root,"scripts/fixtures/pairing-identity.ts")).href));
       if(control.id==="omitted-v2-sync")tests=`import {expect,test,mock} from "bun:test";
 import fs from "node:fs";
 import {join} from "node:path";

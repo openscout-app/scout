@@ -66,6 +66,13 @@ async function freePort() {
 }
 const port = await freePort(), relay = startRelay(port, {hostname: "127.0.0.1"}), url = `ws://127.0.0.1:${port}`;
 let host = generateKeyPair();
+// The trust store keys its root id from the pairing identity on disk. These
+// scenarios use an in-memory host key, so save it as the runtime would.
+function persistHostIdentity() {
+  writeFileSync(join(process.env.OPENSCOUT_PAIRING_HOME!, "identity.json"), JSON.stringify({
+    publicKey: bytesToHex(host.publicKey), privateKey: bytesToHex(host.privateKey), createdAt: new Date().toISOString(),
+  }), {mode: 0o600, flag: "wx"});
+}
 const phone = generateKeyPair(), other = generateKeyPair(), key = bytesToHex(phone.publicKey), owner = pairingTrustOwner();
 let bridgeEvents: ((e: unknown) => void) | undefined, opportunity: PairingOpportunity | undefined;
 const bridge = {
@@ -118,6 +125,7 @@ if (scenario === "account-controller") {
     assert.equal(runtime.accountRoom, room); runtime.cancelPairing(opened.windowId);
   }
 } else if (accountMode) {
+  persistHostIdentity();
   accountStore = createPendingPairRequestStore({statePath:pairRequestStatePath(localConfigHome())});
   const store = accountStore;
   const decisionStore = scenario === "account-cas-deny" || scenario === "account-cas-delivered" ? {
@@ -131,6 +139,7 @@ if (scenario === "account-controller") {
     admitNewDevice:(key,signal)=>{accountSignal=signal;admittedCallbacks++;return scenario === "account-error" ? Promise.reject(Error("fixture refusal")) : admit(key,signal);},
   });
 } else {
+  persistHostIdentity();
   connection = connectToRelay(url, host, bridge as any, {
     kind: "pairing",
     admitNewPeer: (k, room, live) => opportunity?.admit(k, room, live) ?? false,

@@ -46,21 +46,24 @@ export function unpack<T>(bytes:Buffer, field:string, refuse:(code:string)=>neve
   if (!record(envelope) || !record(envelope[field]) || envelope.sha256!==digest(JSON.stringify(envelope[field]))) refuse("capsule_checksum");
   return envelope[field] as T;
 }
-export function markerValid(value:unknown, rootId:string):value is ManagedMarker {
-  return record(value) && value.schema==="scout.pairing-trust-managed/v1" && value.rootId===rootId
+/** Accepts a persisted root id. See rootIs in trust-owner.ts: current keyed
+ * ids and legacy dev:ino ids with a matching inode both pass. */
+export type RootMatcher = (value:unknown) => boolean;
+export function markerValid(value:unknown, rootIs:RootMatcher):value is ManagedMarker {
+  return record(value) && value.schema==="scout.pairing-trust-managed/v1" && rootIs(value.rootId)
     && typeof value.adapterId==="string" && /^[a-z0-9.-]{1,64}$/.test(value.adapterId);
 }
-export function policyValid(value:unknown, rootId:string, revision:number):value is ManagedPolicy|null {
-  return value===null || record(value) && integer(value.revision,1,revision) && markerValid(value.marker,rootId);
+export function policyValid(value:unknown, rootIs:RootMatcher, revision:number):value is ManagedPolicy|null {
+  return value===null || record(value) && integer(value.revision,1,revision) && markerValid(value.marker,rootIs);
 }
 export function partValid(p:unknown):p is CapsulePart {
   return record(p) && typeof p.name==="string" && /^trusted-peers\.v2\.data\.[a-f0-9-]{36}\.json$/.test(p.name)
     && hex(p.sha256) && integer(p.bytes,2,FILE_LIMIT) && integer(p.count,1,65536);
 }
-export function rowValid(row:unknown, revision:number, rootId:string):row is CapsuleRow {
+export function rowValid(row:unknown, revision:number, rootIs:RootMatcher):row is CapsuleRow {
   return Array.isArray(row) && row.length===8 && typeof row[0]==="string" && /^[a-zA-Z0-9._:-]{1,128}$/.test(row[0])
     && row[1]===revision && ["grant","revoke","manage","refresh"].includes(row[2])
-    && (row[2]==="manage" ? row[3]===null && markerValid(row[7],rootId) : hex(row[3]) && row[7]===null)
+    && (row[2]==="manage" ? row[3]===null && markerValid(row[7],rootIs) : hex(row[3]) && row[7]===null)
     && typeof row[4]==="boolean" && typeof row[5]==="string" && integer(row[6],1,FILE_LIMIT);
 }
 export function outcome(row:CapsuleRow):TrustOutcome {

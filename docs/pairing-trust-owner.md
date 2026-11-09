@@ -90,7 +90,7 @@ The same root gains immutable `trusted-peers.owner.<revision>.json` generations.
 Each is an envelope containing a `generation` and its SHA-256 checksum. A
 generation contains:
 
-- schema, root identity (device and inode), and contiguous revision;
+- schema, root identity (see [Root identity](#root-identity)), and contiguous revision;
 - hash of the previous generation's bytes (the legacy seed hash for revision 1);
 - the complete peer array and the digest of its exact JSON projection;
 - the managed marker value, or null;
@@ -369,8 +369,8 @@ idle CPU, native durability or physical phones.
 All default call sites use `resolveOpenScoutPairingHome`: the supported
 `OPENSCOUT_PAIRING_HOME`, `SCOUT_PAIRING_HOME`, `OPENSCOUT_PAIRING_DIR`, explicit
 `OPENSCOUT_SCOUT_HOME/pairing`, and instance defaults have one path resolver.
-The owner normalizes lexical/ancestor aliases, binds the root's device/inode,
-and checks that identity around I/O. A final symlink root, symlink data file,
+The owner normalizes lexical/ancestor aliases, binds the root's device/inode
+for the life of the open owner, and checks that identity around I/O. A final symlink root, symlink data file,
 hard-linked data file, wrong owner, writable-by-others root/file or replaced
 bound root refuses. Different roots have separate owners. Aliasing an ancestor
 does not create a second owner; final symlink roots remain unsupported.
@@ -398,8 +398,40 @@ Detection cannot cancel an operation admitted before an external write.
 **A managed marker cannot constrain an old binary that does not check it.**
 Old binaries and raw editors are unsupported writers after managed adoption.
 Detection is not exclusion. A consuming host must separately prove old-writer
-exclusion before relying on gated admission. Do not copy an owner store to a new
-root/inode as if its revision were valid there; root migration needs review.
+exclusion before relying on gated admission. A store's records are bound to
+the host pairing identity, not to a path or inode; see [Root identity](#root-identity).
+
+## Root identity
+
+Persisted records carry `rootId: "r2:<hex>"`. The hex is an HMAC-SHA256 over the
+label `scout.pairing-trust-root/v2`, keyed by HKDF-SHA256 (info
+`scout.pairing-trust-root-key/v1`) of the host pairing private key in
+`identity.json` in the trust root. The id survives reboots, device renumbering
+and moves, and reveals nothing in plain text. A new host identity yields a new
+id, so the old store refuses with `generation_invalid`: paired peers pinned the
+old key. Without a readable identity the owner refuses with
+`root_key_unavailable` (or `root_key_unsafe` for a group- or world-writable
+file) when it first needs the id. `PairingTrustOwnerOptions.rootKey` injects
+another key source.
+
+Records that name a file or directory inside the root (the cutover claim,
+capsule slot claims, retirement and reclamation proofs) carry
+`identity: "o2:<hex>"`, an HMAC with the same key over the root id, the inode
+and, on macOS, the birth time. It detects a replaced object without exposing
+its inode.
+
+`dev:ino` is used only within one process: `root_replaced` while an owner is
+open, and the lstat/fstat matches around each read. It is never persisted:
+`st_dev` is assigned at mount time and can change across a reboot.
+
+Stores written before this format carry legacy `dev:ino` ids. A legacy root id
+is accepted when its inode matches the current root's, and a legacy object id
+when its inode matches the object's; the device part is ignored. New records
+use `r2:` and `o2:`. Managed markers are compared after normalizing their root
+id, so a legacy-to-`r2:` transition is not a `managed_downgrade`. A legacy store
+copied to a new directory (a new inode) still refuses. After the first `r2:`
+write, a binary that predates this format refuses the store. Historical
+capsule rows are carried byte for byte and keep their original ids.
 
 ## Dormant managed-store seam
 

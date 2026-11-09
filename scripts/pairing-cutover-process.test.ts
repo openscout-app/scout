@@ -6,6 +6,7 @@ import {fileURLToPath} from "node:url";
 import {createHash} from "node:crypto";
 import {pairingTrustOwner} from "../packages/runtime/src/pairing-security/trust-owner.ts";
 import {legacyFixture} from "./fixtures/pairing-capsule.ts";
+import {pairingTrustOwner as oldPairingTrustOwner} from "./fixtures/pairing-v1/pairing-security/trust-owner.ts";
 import {CUT_DIRECTORY, RESERVATION_BYTES} from "../packages/runtime/src/pairing-security/trust-cutover.ts";
 
 const project = fileURLToPath(new URL("..", import.meta.url));
@@ -15,7 +16,11 @@ function fixture(managed = false) {
   const parent = mkdtempSync(join(tmpdir(), "pairing-capsule-process-")); roots.push(parent);
   const data = join(parent, "pairing-capsule-data"), coordination = join(parent, "coordination");
   mkdirSync(data, {mode: 0o700}); mkdirSync(coordination);
-  const f = legacyFixture(data, {factory: pairingTrustOwner, generations: 3, keys: 2, prepare: managed ? owner => {
+  // An unmanaged store stays entirely legacy, so the pinned v1 binary can
+  // still read it before the cut. The current owner's first write is r2:,
+  // which a v1 binary refuses; the managed fixture's manage write is one.
+  const f = legacyFixture(data, {factory: pairingTrustOwner, generations: 3, keys: 2,
+    finalWriter: managed ? undefined : oldPairingTrustOwner, prepare: managed ? owner => {
     let holder: object | null = null;
     removers.push(owner.register({id: "cutover.test", withGate(_r, body) {holder = {}; try {return body(holder);} finally {holder = null;}}, currentHolder() {return holder;}}));
     owner.mutate(3, "managed", {type: "manage"});
@@ -101,7 +106,7 @@ test("barrier and partial-retirement interruptions recover with real old-reader 
     for (const mode of ["old-read", "old-write"]) {
       const refused = await result(launch(mode, f, {managed, revision: f.revision}));
       expect(refused.value.ok, `${point}:${mode}`).toBe(false);
-      expect(refused.value.error).toMatch(/generation_(checksum|gap|invalid)|capacity/);
+      expect(refused.value.error).toMatch(/generation_(checksum|gap|invalid)|capacity|managed_marker_invalid/);
     }
     const recovered = await result(launch("read", f, {managed}));
     expect(recovered.value, `${managed}:${point}:${recovered.stderr}`).toMatchObject({ok: true, snapshot: {revision: f.revision}});
@@ -109,7 +114,7 @@ test("barrier and partial-retirement interruptions recover with real old-reader 
     expect((await result(launch("cut", f, {managed}))).value).toMatchObject({ok: true, result: {revision: f.revision}});
     for (const mode of ["old-read", "old-write"]) {
       const refused = await result(launch(mode, f, {managed, revision: f.revision}));
-      expect(refused.value.ok).toBe(false); expect(refused.value.error).toMatch(/generation_(checksum|gap|invalid)|capacity/);
+      expect(refused.value.ok).toBe(false); expect(refused.value.error).toMatch(/generation_(checksum|gap|invalid)|capacity|managed_marker_invalid/);
     }
     expect(legacyNames(f)).toEqual([`trusted-peers.owner.${f.revision + 1}.json`]);
     expect(existsSync(join(f.data, CUT_DIRECTORY))).toBe(false);

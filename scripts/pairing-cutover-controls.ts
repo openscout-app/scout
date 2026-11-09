@@ -18,7 +18,7 @@ const controls = [
   ]]},
   {id: "no-roll-forward", test: "barrier and partial-retirement interruptions", edits: [['this.finishPendingCutover(root);', '']]},
   {id: "unchecked-retirement", test: "changed retirement candidates", edits: [[
-    'if (id(stat) !== item.identity || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");', '',
+    'if (!this.objectIs(root, item.identity, stat) || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");', '',
   ]]},
   {id: "unchecked-inventory", test: "absent or corrupt capsule and retirement evidence", edits: [[
     'if (!bytes || bytes.length !== part.bytes || hash(bytes) !== part.sha256) refuse("migration_inventory_invalid");',
@@ -33,15 +33,15 @@ const controls = [
     'try { renameSync(join(root.path, cutChild(name)), join(root.path, name)); }\n            catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; this.writeNew(root, name, source); }',
   ]]},
   {id: "older-holder-bypass", unit: true, test: "a live pinned-v1 holder exposed", edits: [[
-    'if (held && (!captured || captured !== invocations.getStore() || !captured.active\n      || captured.owner !== this || captured.root.id !== observed!.id || captured.holder !== held)) refuse("migration_holder_active");', '',
+    'if (held && (!captured || captured !== invocations.getStore() || !captured.active\n      || captured.owner !== this || captured.root.fs !== observed!.fs || captured.holder !== held)) refuse("migration_holder_active");', '',
   ]]},
   {id: "live-invocation-bypass", unit: true, test: "migration refuses another observable live invocation", edits: [
-    ['if ([...liveInvocations].some(active => active.active && active.root.id === root.id && active !== invocation)) refuse("migration_holder_active");', ''],
-    ['if ([...liveInvocations].some(active => active.active && active.root.id === root.id\n      && active !== invocations.getStore())) refuse("migration_holder_active");', ''],
+    ['if ([...liveInvocations].some(active => active.active && active.root.fs === root.fs && active !== invocation)) refuse("migration_holder_active");', ''],
+    ['if ([...liveInvocations].some(active => active.active && active.root.fs === root.fs\n      && active !== invocations.getStore())) refuse("migration_holder_active");', ''],
   ]},
   {id: "root-barriers-omitted", test: "the full 320 MiB reservation", edits: [[
-    'if (id(fstatSync(fd)) !== root.id) refuse("root_replaced"); fsyncSync(fd); this.check(root);',
-    'if (id(fstatSync(fd)) !== root.id) refuse("root_replaced"); void fd; this.check(root);',
+    'if (id(fstatSync(fd)) !== root.fs) refuse("root_replaced"); fsyncSync(fd); this.check(root);',
+    'if (id(fstatSync(fd)) !== root.fs) refuse("root_replaced"); void fd; this.check(root);',
   ]]},
   {id: "cleanup-false-positive", test: "failed post-receipt cleanup refuses", edits: [['!existsSync(join(root.path, CUT_DIRECTORY)) && this.cutReceipt(root, barrier, cutHash)', 'this.cutReceipt(root, barrier, cutHash)']]},
   {id: "half-reservation", test: "the full 320 MiB reservation", edits: [
@@ -50,7 +50,7 @@ const controls = [
   ]},
   {id: "cached-migrated-positive", unit: true, test: "migrated reads remain exhaustive", edits: [
     ['const completing = new Set<string>();', 'const completing = new Set<string>(); const cached = new Map<string, State>();'],
-    ['return this.capsuleState(root, allowPending, inventory, materialize);', '{if (!cached.has(root.id)) cached.set(root.id, this.capsuleState(root, allowPending, inventory, materialize)); return cached.get(root.id)!;}'],
+    ['return this.capsuleState(root, allowPending, inventory, materialize);', '{if (!cached.has(root.fs)) cached.set(root.fs, this.capsuleState(root, allowPending, inventory, materialize)); return cached.get(root.fs)!;}'],
   ]},
 ];
 const url = (path: string) => pathToFileURL(join(project, path)).href;
@@ -81,7 +81,8 @@ for (const control of controls) {
       let tests = readFileSync(join(project, unit ? "packages/runtime/src/pairing-security/trust-cutover.test.ts" : "scripts/pairing-cutover-process.test.ts"), "utf8");
       for (const from of ["./trust-owner.ts", "../" + ownerPath]) tests = tests.replace(JSON.stringify(from), JSON.stringify(subject));
       for (const from of ["./fixtures/pairing-capsule.ts", "../../../../scripts/fixtures/pairing-capsule.ts"]) tests = tests.replace(JSON.stringify(from), JSON.stringify(url("scripts/fixtures/pairing-capsule.ts")));
-      tests = tests.replaceAll('"../../../../scripts/fixtures/pairing-v1/pairing-security/trust-owner.ts"', JSON.stringify(url("scripts/fixtures/pairing-v1/pairing-security/trust-owner.ts")));
+      for (const from of ["../../../../scripts/fixtures/pairing-v1/pairing-security/trust-owner.ts", "./fixtures/pairing-v1/pairing-security/trust-owner.ts"])
+        tests = tests.replaceAll(JSON.stringify(from), JSON.stringify(url("scripts/fixtures/pairing-v1/pairing-security/trust-owner.ts")));
       for (const from of ["./trust-cutover.ts", "../packages/runtime/src/pairing-security/trust-cutover.ts"]) tests = tests.replace(JSON.stringify(from), JSON.stringify(url("packages/runtime/src/pairing-security/trust-cutover.ts")));
       tests = tests.replace('fileURLToPath(new URL("..", import.meta.url))', JSON.stringify(project))
         .replace('join(project, "scripts/pairing-cutover-worker.ts")', JSON.stringify(worker));

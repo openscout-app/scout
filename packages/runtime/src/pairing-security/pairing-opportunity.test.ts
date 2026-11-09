@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pairingTrustOwner } from "./trust-owner.ts";
+import { testRootKey, writeTestIdentity } from "../../../../scripts/fixtures/pairing-identity.ts";
 const roots:string[]=[];const key="a".repeat(64),other="b".repeat(64);
-function setup(){const root=mkdtempSync(join(tmpdir(),"pairing-opportunity-"));roots.push(root);return pairingTrustOwner(root);}
+function setup(){const root=mkdtempSync(join(tmpdir(),"pairing-opportunity-"));roots.push(root);writeTestIdentity(root);return pairingTrustOwner(root);}
 afterEach(()=>{for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});
 test("single completion, correct room, cancel and timeout",async()=>{
  const owner=setup();const window=owner.openPairingOpportunity("room",Date.now()+1000);
@@ -76,7 +77,7 @@ test("startup cannot arm an approval against a changed decision authority", () =
 
 test("approval baseline initializes a fresh owner root without granting trust", () => {
  const parent=mkdtempSync(join(tmpdir(),"pairing-approval-root-"));roots.push(parent);
- const owner=pairingTrustOwner(join(parent,"new-root"));
+ const owner=pairingTrustOwner(join(parent,"new-root"),{rootKey:testRootKey()});
  expect(owner.read().revision).toBe(0);
  const stamp=owner.pairingAuthorityStamp();expect(stamp).toMatch(/^[a-f0-9]{64}$/);
  expect(owner.openPairingOpportunity("request",Date.now()+1000,key,stamp).isOpen()).toBe(true);

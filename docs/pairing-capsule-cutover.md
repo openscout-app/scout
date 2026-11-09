@@ -39,7 +39,7 @@ after the root has migrated. This ID is separate from trust-mutation IDs.
 5. Keep at least 3 GiB free for qualification. This observation is separate
    from the migration's real 320 MiB reservation. Preserve a diagnostic backup
    under quiescence if historical peer snapshots are needed. Backups are not
-   live authority and cannot simply be loaded at another device/inode.
+   live authority and cannot simply be loaded under another host identity.
 
 Managed deployments must also provide their existing trusted adapter and native
 gate. The owner rejects a different observable live invocation or a holder that

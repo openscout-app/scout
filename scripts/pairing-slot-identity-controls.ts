@@ -9,7 +9,7 @@ const output=process.argv[2]??mkdtempSync(join(tmpdir(),"pairing-slot-controls-"
 const original=readFileSync(join(root,"packages/runtime/src/pairing-security/trust-owner.ts"),"utf8");
 const tests=readFileSync(join(root,"scripts/pairing-slot-identity.test.ts"),"utf8");
 const controls=[
-  {id:"head-inode-only",test:"reused inode is not the previous head's token",needle:'const ownSlotExists=!!(h.slot && same(slots.claims.get(h.slot.token),h.slot));',replacement:'const ownSlotExists=!!(h.slot && names.includes(slotName(h.slot.index)) && id(lstatSync(join(root.path,slotName(h.slot.index))))===h.slot.identity);'},
+  {id:"head-inode-only",test:"reused inode is not the previous head's token",needle:'const ownSlotExists=!!(h.slot && same(slots.claims.get(h.slot.token),h.slot));',replacement:'const ownSlotExists=!!(h.slot && names.includes(slotName(h.slot.index)) && this.objectIs(root,h.slot.identity,lstatSync(join(root.path,slotName(h.slot.index)))));'},
   {id:"release-inode-only",test:"stale release never removes an empty or initialized newer claim",needle:'if(!bytes)return false; // Includes a newer mkdir before its token write.',replacement:'if(!bytes)return true; // Planted inode-only ownership bypass.'},
   {id:"release-without-pin",test:"release pins the directory until after token unlink and rmdir",needle:'if(!this.slotMatches(root,slot,fd))return;',replacement:'if(!this.slotMatches(root,slot,fd))return; closeSync(fd); fd=openSync(root.path,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);'},
 ];

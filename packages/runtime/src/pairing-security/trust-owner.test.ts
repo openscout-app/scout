@@ -4,12 +4,13 @@ import { createHash } from "node:crypto";
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testRootKey, writeTestIdentity } from "../../../../scripts/fixtures/pairing-identity.ts";
 import { PairingTrustOwner, pairingTrustOwner, type PairingTrustAdapter, type PairingRootIdentity, type PairingTrustContext } from "./trust-owner.ts";
 
 const roots: string[] = [], unregister: Array<() => void> = [];
 const keyA = "a".repeat(64), keyB = "b".repeat(64);
 const peer = (publicKey = keyA) => ({publicKey, pairedAt: "2026-01-01T00:00:00Z"});
-function root() { const path = mkdtempSync(join(tmpdir(), "pairing-owner-")); roots.push(path); return path; }
+function root() { const path = mkdtempSync(join(tmpdir(), "pairing-owner-")); roots.push(path); writeTestIdentity(path); return path; }
 function owner() { return pairingTrustOwner(root()); }
 function adapter() {
   const storage = new AsyncLocalStorage<{root: string; holder: object}>();
@@ -49,8 +50,8 @@ afterEach(() => { for (const remove of unregister.splice(0)) remove(); for (cons
 
 describe("pairing canonical owner", () => {
   test("missing read is inert; lazy adoption preserves legacy record shape", () => {
-    const parent = root(), path = join(parent, "missing"), o = pairingTrustOwner(path);
-    expect(o.read()).toEqual({revision: 0, peers: []}); expect(readdirSync(parent)).toEqual([]);
+    const parent = root(), path = join(parent, "missing"), o = pairingTrustOwner(path, {rootKey: testRootKey()});
+    expect(o.read()).toEqual({revision: 0, peers: []}); expect(readdirSync(parent)).toEqual(["identity.json"]);
     mkdirSync(path, {mode: 0o700}); writeFileSync(join(path, "trusted-peers.json"), JSON.stringify([peer()]), {mode: 0o600});
     expect(o.read().revision).toBe(0);
     const result = o.mutate(0, "one", {type: "grant", peer: peer(keyB)});
@@ -284,7 +285,7 @@ describe("pairing canonical owner", () => {
   test("registration alone does not adopt or create a managed default", () => {
     const o = owner(), a = adapter(), remove = o.register(a.value); unregister.push(remove);
     expect(o.read().revision).toBe(0);
-    expect(readdirSync(o.path)).toEqual([]);
+    expect(readdirSync(o.path)).toEqual(["identity.json"]);
     o.mutate(0,"ordinary-grant",{type:"grant",peer:peer()});
     writeFileSync(join(o.path,"trusted-peers.json"),JSON.stringify([peer(keyB)]));
     expect(o.read().peers).toEqual([peer(keyB)]); remove();

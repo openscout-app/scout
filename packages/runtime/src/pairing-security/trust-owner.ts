@@ -1,7 +1,7 @@
 /** Canonical pairing trust persistence. No I/O or adapter installation on import.
  * See docs/pairing-trust-owner.md for the on-disk and interruption contract. */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID, randomFillSync } from "node:crypto";
+import { createHash, createHmac, hkdfSync, randomUUID, randomFillSync } from "node:crypto";
 import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync,
   mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync,
@@ -10,7 +10,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { resolveOpenScoutPairingHome } from "../support-paths.js";
 import { CAPSULE_PREFIX, CUTOVER, CHUNK_TARGET, SLOT_LIMIT, commitName, doneName, dataName, slotName, stageName,
-  pack, unpack, hex, integer, token, same, policyValid, partValid, rowValid, outcome,
+  pack, unpack, hex, integer, token, same, policyValid, markerValid, partValid, rowValid, outcome,
   logicalHead, legacyCharge, type CapsuleBarrier, type CapsuleHead, type CapsuleDecoded,
   type CapsuleSlot, type CapsuleRow, type CapsulePart, type ManagedPolicy, type RetiredFile } from "./trust-capsule.js";
 import { CUT_DIRECTORY, RESERVATION_FILES, RESERVATION_BYTES, reserveName, cutChild, cutName, cutBodies,
@@ -20,7 +20,17 @@ import {reclaimCapsuleStaging, type CapsuleReclamationReceipt} from "./trust-rec
 export type {CapsuleReclamationReceipt} from "./trust-reclamation.js";
 
 export type TrustedPeer = { publicKey: string; name?: string; pairedAt: string; lastSeen?: string };
+/** `id` is the persisted root id (`r2:<hmac>`), bound to the host identity.
+ * It is derived lazily, because it needs the root key; reading `id` without
+ * one refuses with root_key_unavailable. */
 export type PairingRootIdentity = Readonly<{ path: string; id: string }>;
+/** Returns the host-held secret that keys persisted root and object ids. The
+ * default reads the private key from `identity.json` in the trust root. */
+export type PairingRootKeySource = (rootPath: string) => Uint8Array;
+export type PairingTrustOwnerOptions = Readonly<{ rootKey?: PairingRootKeySource }>;
+/** In-process view of the root. `fs` (dev:ino) is valid only for this boot:
+ * the device number is assigned at mount time. It is never persisted. */
+type Root = PairingRootIdentity & Readonly<{ fs: string; ino: number }>;
 declare const contextBrand: unique symbol;
 export type PairingTrustContext = { readonly [contextBrand]: true };
 /** Trusted bootstrap only. No loader, environment selector or remote installer.
@@ -65,7 +75,7 @@ type State = { revision: number; peers: TrustedPeer[]; hash: string; peersHash: 
   managed: Marker | null; outcomes: Record<string, SavedOutcome>; bytes: number;
   projectionHash: string; adoption: ProjectionAdoption | null; pendingStage: string | null; projectionStage: string | null;
   capsule?: CapsuleDecoded };
-type Invocation = { owner: PairingTrustOwner; root: PairingRootIdentity; adapter: PairingTrustAdapter;
+type Invocation = { owner: PairingTrustOwner; root: Root; adapter: PairingTrustAdapter;
   holder: object; active: boolean; used: boolean };
 const invocations = new AsyncLocalStorage<Invocation>();
 const liveInvocations = new Set<Invocation>();
@@ -91,7 +101,46 @@ function owned(stat: Stats, directory = false, legacyProjection = false, stagedG
     || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0
     || (!directory && ((stat.nlink !== 1 && !(stagedGeneration && stat.nlink === 2)) || (!legacyProjection && (stat.mode & 0o077) !== 0)))) refuse("unsafe_path");
 }
+/** Same-boot object identity for TOCTOU checks. Never persist it: st_dev can
+ * change across a reboot when the volume mount order changes. */
 function id(stat: Stats) { return `${stat.dev}:${stat.ino}`; }
+const LEGACY_ID = /^(\d+):(\d+)$/, ROOT_ID = /^r2:[a-f0-9]{64}$/, OBJECT_ID = /^o2:[a-f0-9]{64}$/;
+/** Persisted object identity format: the keyed v2 form, or a legacy dev:ino. */
+const identityFormat = (value: unknown) => typeof value === "string" && (OBJECT_ID.test(value) || LEGACY_ID.test(value));
+/** A legacy dev:ino record matches by inode only. The device part may come
+ * from an earlier boot. A replaced object has a new inode and still fails. */
+function legacyMatches(value: string, ino: number) { const m = LEGACY_ID.exec(value); return !!m && m[2] === String(ino); }
+/** Object ids only. Birth time is stable across reboots and renames on APFS
+ * and HFS+. Other platforms can report ctime in its place, so leave it out. */
+function birth(stat: Stats) { return process.platform === "darwin" && stat.birthtimeMs > 0 ? String(stat.birthtimeMs) : ""; }
+const ROOT_KEY_INFO = "scout.pairing-trust-root-key/v1";
+/** The host pairing identity is the only host-held secret in core. It lives
+ * in the same directory as the trust store, so each pairing home keys itself. */
+function identityRootKey(rootPath: string): Uint8Array {
+  const path = join(rootPath, "identity.json");
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") refuse("root_key_unavailable"); throw e; }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0 || stat.size > 64 * 1024) refuse("root_key_unsafe");
+    const value = JSON.parse(readFileSync(fd, "utf8"));
+    if (!record(value) || typeof value.privateKey !== "string" || !/^[0-9a-f]{64}$/.test(value.privateKey)) refuse("root_key_unavailable");
+    return Buffer.from(value.privateKey, "hex");
+  } catch (e) { if (e instanceof PairingTrustError) throw e; return refuse("root_key_unavailable"); }
+  finally { closeSync(fd); }
+}
+const mac = (key: Buffer, parts: readonly string[]) => createHmac("sha256", key).update(JSON.stringify(parts)).digest("hex");
+const deriveRootKey = (secret: Uint8Array) => {
+  if (!(secret instanceof Uint8Array) || secret.length < 32) refuse("root_key_unavailable");
+  return Buffer.from(hkdfSync("sha256", secret, Buffer.alloc(0), ROOT_KEY_INFO, 32));
+};
+const rootIdFor = (key: Buffer) => `r2:${createHmac("sha256", key).update("scout.pairing-trust-root/v2").digest("hex")}`;
+/** Persisted root id: bound to the host pairing identity alone. It survives
+ * reboots, device renumbering and moves, and reveals nothing in plain text.
+ * A new host identity yields a new id, so the old store is refused: paired
+ * peers pinned the old key. `secret` is what the root key source returns. */
+export function pairingRootId(secret: Uint8Array): string { return rootIdFor(deriveRootKey(secret)); }
 /** Ancestor aliases (e.g. the system temporary directory) normalize; a final
  * symlink root is rejected. A spelling must never choose a second owner. */
 function canonical(path: string): string {
@@ -124,9 +173,46 @@ function fullKey(key: string) { if (!/^[0-9a-f]{64}$/.test(key)) refuse("full_ke
 
 export class PairingTrustOwner {
   readonly path: string;
-  private rootId: string | null = null;
-  constructor(path: string) { this.path = canonical(path); }
-  private root(create = false): PairingRootIdentity | null {
+  private fsId: string | null = null;
+  private stableId: string | null = null;
+  private key: Buffer | null = null;
+  private readonly rootKeySource: PairingRootKeySource;
+  constructor(path: string, options: PairingTrustOwnerOptions = {}) {
+    this.path = canonical(path);
+    this.rootKeySource = options.rootKey ?? identityRootKey;
+  }
+  private rootKey(): Buffer {
+    return this.key ??= deriveRootKey(this.rootKeySource(this.path));
+  }
+  private stableRootId(): string { return this.stableId ??= rootIdFor(this.rootKey()); }
+  /** Accept a persisted root id: the current keyed id, or a legacy dev:ino
+   * with this root's inode. Legacy ids are checked first and need no key. */
+  private rootIs(root: Root, value: unknown): boolean {
+    if (typeof value !== "string") return false;
+    if (LEGACY_ID.test(value)) return legacyMatches(value, root.ino);
+    return ROOT_ID.test(value) && value === root.id;
+  }
+  /** Persisted identity of a file or directory inside this root: keyed by the
+   * host identity, with no device number and no plain-text inode. Claim,
+   * slot and retirement records use it to detect a replaced object. */
+  private objectId(root: Root, stat: Stats): string {
+    return `o2:${mac(this.rootKey(), ["scout.pairing-trust-object-id/v2", root.id, String(stat.ino), birth(stat)])}`;
+  }
+  private objectIs(root: Root, value: unknown, stat: Stats): boolean {
+    if (typeof value !== "string") return false;
+    if (LEGACY_ID.test(value)) return legacyMatches(value, stat.ino);
+    return OBJECT_ID.test(value) && value === this.objectId(root, stat);
+  }
+  /** Validate a managed marker and rewrite its root id to the current form,
+   * so a legacy-to-v2 transition compares equal and is never a downgrade. */
+  private normMarker(root: Root, value: unknown, code: string): Marker {
+    if (!markerValid(value, v => this.rootIs(root, v))) refuse(code);
+    return {schema: "scout.pairing-trust-managed/v1", rootId: root.id, adapterId: value.adapterId};
+  }
+  private normPolicy(root: Root, value: ManagedPolicy | null, code: string): ManagedPolicy | null {
+    return value === null ? null : {revision: value.revision, marker: this.normMarker(root, value.marker, code)};
+  }
+  private root(create = false): Root | null {
     if (create) {
       const missing: string[] = []; let directory = this.path;
       while (!existsSync(directory)) { missing.push(directory); directory = dirname(directory); }
@@ -140,16 +226,17 @@ export class PairingTrustOwner {
     }
     let stat;
     try { stat = lstatSync(this.path); } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT" && this.rootId === null) return null;
+      if ((e as NodeJS.ErrnoException).code === "ENOENT" && this.fsId === null) return null;
       throw e;
     }
     owned(stat, true);
-    if (this.rootId !== null && id(stat) !== this.rootId) refuse("root_replaced");
-    this.rootId = id(stat);
-    return Object.freeze({path: this.path, id: this.rootId});
+    if (this.fsId !== null && id(stat) !== this.fsId) refuse("root_replaced");
+    this.fsId ??= id(stat);
+    const owner = this;
+    return Object.freeze({path: this.path, fs: this.fsId, ino: stat.ino, get id() { return owner.stableRootId(); }});
   }
-  private check(root: PairingRootIdentity) { if (this.root()?.id !== root.id) refuse("root_replaced"); }
-  private readFile(root: PairingRootIdentity, name: string, stagedGeneration = name.startsWith(PREFIX)): Buffer | null {
+  private check(root: Root) { if (this.root()?.fs !== root.fs) refuse("root_replaced"); }
+  private readFile(root: Root, name: string, stagedGeneration = name.startsWith(PREFIX)): Buffer | null {
     this.check(root); const path = join(root.path, name);
     let fd: number;
     try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -165,7 +252,7 @@ export class PairingTrustOwner {
   /** The CAS staging hard link stays live until projection rename. Its presence
    * distinguishes an in-flight owner publication from an unmanaged old writer.
    * Any owner operation can help finish a verified head publication. */
-  private pendingStage(root: PairingRootIdentity, revision: number): string | null {
+  private pendingStage(root: Root, revision: number): string | null {
     const target = lstatSync(join(root.path, `${PREFIX}${revision}.json`));
     if (target.nlink === 1) return null;
     owned(target, false, false, true);
@@ -183,18 +270,18 @@ export class PairingTrustOwner {
     if (matches.length !== 1) refuse("unsafe_path");
     this.check(root); return matches[0]!;
   }
-  private syncDirectory(root: PairingRootIdentity) {
+  private syncDirectory(root: Root) {
     this.check(root);
     const fd = openSync(root.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { if (id(fstatSync(fd)) !== root.id) refuse("root_replaced"); fsyncSync(fd); this.check(root); }
+    try { if (id(fstatSync(fd)) !== root.fs) refuse("root_replaced"); fsyncSync(fd); this.check(root); }
     finally { closeSync(fd); }
   }
-  private stage(root: PairingRootIdentity, bytes: string, prefix = ".pairing-owner"): string {
+  private stage(root: Root, bytes: string, prefix = ".pairing-owner"): string {
     const name = `${prefix}-${randomUUID()}.tmp`, path = join(root.path, name);
     this.writeNew(root, name, bytes);
     return path;
   }
-  private writeNew(root: PairingRootIdentity, name: string, bytes: string | Buffer) {
+  private writeNew(root: Root, name: string, bytes: string | Buffer) {
     this.check(root);
     if ((name.includes("/") && !/^\.pairing-v2-slot-[0-7]\/[a-f0-9-]{36}\.json$/.test(name)
       && !/^\.pairing-claim-[a-f0-9-]{36}\/[a-f0-9-]{36}\.json$/.test(name)
@@ -209,7 +296,7 @@ export class PairingTrustOwner {
   }
   /** Display-only data. Broken/unsafe advisory files never affect authority.
    * O_NONBLOCK also prevents a raced-in FIFO from blocking an advisory read. */
-  private lastSeen(root: PairingRootIdentity): Map<string, string> {
+  private lastSeen(root: Root): Map<string, string> {
     let fd: number | undefined;
     try {
       this.check(root);
@@ -243,7 +330,7 @@ export class PairingTrustOwner {
     }
     return latest;
   }
-  private recordLastSeen(root: PairingRootIdentity, peers: readonly TrustedPeer[], publicKey: string, lastSeen: string) {
+  private recordLastSeen(root: Root, peers: readonly TrustedPeer[], publicKey: string, lastSeen: string) {
     let staged: string | null = null;
     try {
       if (!Number.isFinite(Date.parse(lastSeen))) return;
@@ -261,14 +348,11 @@ export class PairingTrustOwner {
     } catch { /* Best effort: metadata failure must not fail a handshake. */ }
     finally { if (staged) { try { unlinkSync(staged); } catch {} } }
   }
-  private marker(root: PairingRootIdentity): Marker | null {
+  private marker(root: Root): Marker | null {
     const bytes = this.readFile(root, MARKER); if (!bytes) return null;
-    const value = JSON.parse(bytes.toString());
-    if (value.schema !== "scout.pairing-trust-managed/v1" || value.rootId !== root.id
-      || typeof value.adapterId !== "string" || !/^[a-z0-9.-]{1,64}$/.test(value.adapterId)) refuse("managed_marker_invalid");
-    return value;
+    return this.normMarker(root, JSON.parse(bytes.toString()), "managed_marker_invalid");
   }
-  private state(root: PairingRootIdentity, allowPending = false, materialize = true): State {
+  private state(root: Root, allowPending = false, materialize = true): State {
     this.check(root);
     const inventory = readdirSync(root.path);
     if (inventory.some(n => n.startsWith(CAPSULE_PREFIX) || n.startsWith(".pairing-v2"))) return this.capsuleState(root, allowPending, inventory, materialize);
@@ -292,7 +376,7 @@ export class PairingTrustOwner {
       current.bytes += bytes.length; if (current.bytes > TOTAL_LIMIT) refuse("capacity");
       const envelope = JSON.parse(bytes.toString()), value: Generation = envelope.generation;
       if (!record(value) || envelope.sha256 !== hash(JSON.stringify(value))) refuse("generation_checksum");
-      if (value.schema !== "scout.pairing-trust-owner/v1" || value.rootId !== root.id || value.revision !== revision
+      if (value.schema !== "scout.pairing-trust-owner/v1" || !this.rootIs(root, value.rootId) || value.revision !== revision
         || !/^[a-f0-9]{64}$/.test(value.previousHash) || (revision > 1 && value.previousHash !== current.hash)
         || !record(value.mutation)) refuse("generation_invalid");
       const peers = peersOf(value.peers);
@@ -307,18 +391,20 @@ export class PairingTrustOwner {
         || Object.hasOwn(current.outcomes, outcome.mutationId)) refuse("generation_invalid");
       const outcomes = current.outcomes;
       Object.defineProperty(outcomes, outcome.mutationId, {value: saved, enumerable: true});
-      if (current.managed && JSON.stringify(value.managed) !== JSON.stringify(current.managed)) refuse("managed_downgrade");
+      // Compare normalized markers: the same marker under a legacy and a v2 root id is not a downgrade.
+      const managed = value.managed == null ? value.managed : this.normMarker(root, value.managed, "generation_invalid");
+      if (current.managed && JSON.stringify(managed) !== JSON.stringify(current.managed)) refuse("managed_downgrade");
       if (value.adoption != null && (!record(value.adoption)
         || !/^[a-f0-9]{64}$/.test(value.adoption.fromProjectionHash) || !/^[a-f0-9]{64}$/.test(value.adoption.toProjectionHash))) refuse("generation_invalid");
       if (value.projectionStage !== undefined && !/^\.pairing-owner-[a-f0-9-]{36}\.tmp$/.test(value.projectionStage)) refuse("generation_invalid");
       const pendingStage = this.pendingStage(root, revision);
       if (pendingStage && revision !== revisions.at(-1)) refuse("publication_incomplete");
-      current = {...value, peers, outcomes, hash: hash(bytes), bytes: current.bytes,
+      current = {...value, managed, peers, outcomes, hash: hash(bytes), bytes: current.bytes,
         projectionHash, adoption: null, pendingStage, projectionStage: value.projectionStage ?? null};
     }
     if (JSON.stringify(current.managed) !== JSON.stringify(marker)) refuse("managed_marker_mismatch");
     if (marker) {
-      const adapter = adapters.get(root.id);
+      const adapter = adapters.get(root.fs);
       if (!adapter || adapter.id !== marker.adapterId) refuse("managed_adapter_required");
       const active = invocations.getStore();
       if (!active || active.owner !== this) refuse("managed_context_required");
@@ -340,7 +426,7 @@ export class PairingTrustOwner {
     }
     return current;
   }
-  private retainedStage(root: PairingRootIdentity, name: string, generationAlias = false): Buffer | null {
+  private retainedStage(root: Root, name: string, generationAlias = false): Buffer | null {
     try { return this.readFile(root, name, generationAlias); }
     catch (error) {
       // The shared source can be consumed while its fd is being inspected.
@@ -353,9 +439,9 @@ export class PairingTrustOwner {
   /** Publish from ONE consumable source, shared by the reserving writer and all
    * helpers. Never recreate it: a delayed rename then gets ENOENT instead of
    * overwriting a newer revision. This is not a liveness/age-based lock. */
-  private completePublication(root: PairingRootIdentity, state: State) {
-    if (completing.has(root.id)) refuse("publication_incomplete");
-    completing.add(root.id);
+  private completePublication(root: Root, state: State) {
+    if (completing.has(root.fs)) refuse("publication_incomplete");
+    completing.add(root.fs);
     try {
       const bytes = encodePeers(state.peers);
       if (hash(bytes) !== state.peersHash) refuse("publication_incomplete");
@@ -392,9 +478,9 @@ export class PairingTrustOwner {
       // Structural integrity/marker/context refusals keep their precise codes.
       if (error instanceof PairingTrustError) throw error;
       refuse("publication_incomplete");
-    } finally { completing.delete(root.id); }
+    } finally { completing.delete(root.fs); }
   }
-  private readyState(root: PairingRootIdentity, materialize = true): State {
+  private readyState(root: Root, materialize = true): State {
     this.finishPendingCutover(root);
     const state = this.state(root, true, materialize);
     if (state.capsule) {
@@ -406,44 +492,44 @@ export class PairingTrustOwner {
     if (state.pendingStage) this.completePublication(root, state);
     return state.pendingStage ? this.state(root) : state;
   }
-  private cutDirectory(root: PairingRootIdentity, claim: CutClaim) {
+  private cutDirectory(root: Root, claim: CutClaim) {
     this.check(root);
     const stat = lstatSync(join(root.path, CUT_DIRECTORY));
     owned(stat, true);
-    if (claim.rootId !== root.id || id(stat) !== claim.identity) refuse("migration_claim_changed");
+    if (!this.rootIs(root, claim.rootId) || !this.objectIs(root, claim.identity, stat)) refuse("migration_claim_changed");
   }
-  private syncCutDirectory(root: PairingRootIdentity, claim: CutClaim) {
+  private syncCutDirectory(root: Root, claim: CutClaim) {
     this.cutDirectory(root, claim);
     const fd = openSync(join(root.path, CUT_DIRECTORY), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try {
-      if (id(fstatSync(fd)) !== claim.identity) refuse("migration_claim_changed");
+      if (!this.objectIs(root, claim.identity, fstatSync(fd))) refuse("migration_claim_changed");
       fsyncSync(fd);
     } finally { closeSync(fd); }
     this.cutDirectory(root, claim);
   }
-  private cutSource(root: PairingRootIdentity, claim: CutClaim, name: string) {
+  private cutSource(root: Root, claim: CutClaim, name: string) {
     if (!cutName(name)) refuse("migration_plan_invalid");
     this.cutDirectory(root, claim);
     const bytes = this.retainedStage(root, cutChild(name), name === "barrier.json");
     this.cutDirectory(root, claim);
     return bytes;
   }
-  private cutReceipt(root: PairingRootIdentity, barrier: CapsuleBarrier, cutHash: string) {
+  private cutReceipt(root: Root, barrier: CapsuleBarrier, cutHash: string) {
     const bytes = this.readFile(root, CUTOVER, false);
     if (!bytes) return false;
     const receipt = unpack<Record<string, unknown>>(bytes, "receipt", refuse);
-    if (receipt.schema !== "scout.pairing-cutover-done/v2" || receipt.rootId !== root.id
+    if (receipt.schema !== "scout.pairing-cutover-done/v2" || !this.rootIs(root, receipt.rootId)
       || receipt.cutHash !== cutHash || receipt.migrationId !== barrier.migration?.migrationId) refuse("migration_receipt_invalid");
     return true;
   }
   /** Only the creator before CAS, or a barrier/receipt-authorized helper after
    * CAS, owns this exact directory inode. No recursive or age-based cleanup. */
-  private removeCutFiles(root: PairingRootIdentity, claim: CutClaim) {
+  private removeCutFiles(root: Root, claim: CutClaim) {
     let stat;
     try { stat = lstatSync(join(root.path, CUT_DIRECTORY)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     owned(stat, true);
-    if (id(stat) !== claim.identity) refuse("migration_claim_changed");
+    if (!this.objectIs(root, claim.identity, stat)) refuse("migration_claim_changed");
     const names = readdirSync(join(root.path, CUT_DIRECTORY));
     if (names.length > RESERVATION_FILES || names.some(name => !cutName(name))) refuse("migration_claim_changed");
     // Keep the claim until all payloads are gone, including when helpers race.
@@ -463,7 +549,7 @@ export class PairingTrustOwner {
   }
   /** Materialize 320 MiB, not a sparse truncate or free-space observation.
    * Later sources reuse these allocated files; no second bulk allocation. */
-  private reserveCutover(root: PairingRootIdentity, claim: CutClaim) {
+  private reserveCutover(root: Root, claim: CutClaim) {
     const buffer = Buffer.alloc(FILE_LIMIT);
     let allocated = 0;
     for (let index = 0; index < RESERVATION_FILES; index++) {
@@ -479,7 +565,7 @@ export class PairingTrustOwner {
     this.syncCutDirectory(root, claim);
     this.syncDirectory(root);
   }
-  private fillCutReservation(root: PairingRootIdentity, claim: CutClaim, index: number, name: string, bytes: string) {
+  private fillCutReservation(root: Root, claim: CutClaim, index: number, name: string, bytes: string) {
     if (index >= RESERVATION_FILES || !cutName(name) || Buffer.byteLength(bytes) > FILE_LIMIT) refuse("capacity");
     this.cutDirectory(root, claim);
     const source = join(root.path, cutChild(reserveName(index))), target = join(root.path, cutChild(name));
@@ -496,7 +582,7 @@ export class PairingTrustOwner {
       renameSync(source, target);
     } finally { closeSync(fd); }
   }
-  private finishPendingCutover(root: PairingRootIdentity) {
+  private finishPendingCutover(root: Root) {
     if (!existsSync(join(root.path, CUT_DIRECTORY))) return;
     // Private pre-CAS staging is deliberately invisible to v1 authority.
     const names = readdirSync(root.path).filter(name => /^trusted-peers\.owner\.[1-9][0-9]*\.json$/.test(name));
@@ -507,22 +593,24 @@ export class PairingTrustOwner {
     if (!record(JSON.parse(bytes.toString()).barrier)) return;
     const barrier = unpack<CapsuleBarrier>(bytes, "barrier", refuse);
     const m = barrier.migration;
-    if (barrier.schema !== "scout.pairing-cut/v2" || barrier.rootId !== root.id
+    if (barrier.schema !== "scout.pairing-cut/v2" || !this.rootIs(root, barrier.rootId)
       || !integer(barrier.revision, 0, REVISION_LIMIT) || name !== `${PREFIX}${barrier.revision + 1}.json`
       || !m || !token(m.token) || !/^[a-zA-Z0-9._:-]{1,128}$/.test(m.migrationId)
-      || !/^\d+:\d+$/.test(m.identity) || !hex(m.planHash)
+      || !identityFormat(m.identity) || !hex(m.planHash)
       || !hex(barrier.logicalHead) || !hex(barrier.logicalPeersHash) || !hex(barrier.checkpointPeersHash)
       || !hex(barrier.projectionHash) || !hex(barrier.outcomesDigest) || !integer(barrier.chargedBytes, 0, TOTAL_LIMIT)
-      || !policyValid(barrier.policy, root.id, barrier.revision)) refuse("migration_barrier_invalid");
+      || !policyValid(barrier.policy, v => this.rootIs(root, v), barrier.revision)) refuse("migration_barrier_invalid");
     this.completeCutover(root, barrier, bytes);
   }
-  private completeCutover(root: PairingRootIdentity, barrier: CapsuleBarrier, barrierBytes: Buffer) {
-    const m = barrier.migration!, claim: CutClaim = {rootId: root.id, token: m.token, identity: m.identity, migrationId: m.migrationId};
+  private completeCutover(root: Root, barrier: CapsuleBarrier, barrierBytes: Buffer) {
+    // The claim is the persisted one, possibly written before a reboot with a legacy id.
+    const m = barrier.migration!, claim: CutClaim = {rootId: barrier.rootId, token: m.token, identity: m.identity, migrationId: m.migrationId};
     const cutHash = hash(barrierBytes);
-    if ([...liveInvocations].some(active => active.active && active.root.id === root.id
+    if ([...liveInvocations].some(active => active.active && active.root.fs === root.fs
       && active !== invocations.getStore())) refuse("migration_holder_active");
     this.capsulePolicy(root, barrier.policy);
-    if (!same(this.marker(root), barrier.policy?.marker ?? null)) refuse("managed_marker_mismatch");
+    const barrierPolicy = this.normPolicy(root, barrier.policy, "migration_barrier_invalid");
+    if (!same(this.marker(root), barrierPolicy?.marker ?? null)) refuse("managed_marker_mismatch");
     try {
       if (!this.cutReceipt(root, barrier, cutHash)) {
         const barrierPath = join(root.path, `${PREFIX}${barrier.revision + 1}.json`);
@@ -556,16 +644,17 @@ export class PairingTrustOwner {
           const values = JSON.parse(bytes.toString());
           if (!Array.isArray(values) || values.length !== part.count) refuse("migration_chunk_invalid");
           for (const row of values) {
-            if (!rowValid(row, rows.length + 1, root.id) || ids.has(row[0])) refuse("migration_outcome_invalid");
+            if (!rowValid(row, rows.length + 1, v => this.rootIs(root, v)) || ids.has(row[0])) refuse("migration_outcome_invalid");
             ids.add(row[0]); rows.push(row); charge += row[6];
             if (row[2] === "manage") {
               if (policy) refuse("managed_downgrade");
-              policy = {revision: row[1], marker: row[7]!};
+              policy = {revision: row[1], marker: this.normMarker(root, row[7], "migration_outcome_invalid")};
             }
           }
         }
         if (rows.length !== plan.revision || hash(JSON.stringify(rows)) !== plan.outcomesDigest
-          || charge !== plan.chargedBytes || charge > TOTAL_LIMIT || !same(policy, plan.policy)) refuse("migration_outcome_invalid");
+          || charge !== plan.chargedBytes || charge > TOTAL_LIMIT
+          || !same(policy, this.normPolicy(root, plan.policy, "migration_outcome_invalid"))) refuse("migration_outcome_invalid");
         this.capsulePolicy(root, policy);
         const retired: CutRetired[] = [];
         let retiredBytes = 0;
@@ -579,7 +668,7 @@ export class PairingTrustOwner {
           for (const item of values) {
             if (!record(item) || item.name !== `${PREFIX}${retired.length + 1}.json` || !hex(item.sha256)
               || !integer(item.bytes, 1, FILE_LIMIT) || typeof item.identity !== "string"
-              || !/^\d+:\d+$/.test(item.identity)) refuse("migration_inventory_invalid");
+              || !identityFormat(item.identity)) refuse("migration_inventory_invalid");
             retired.push(item as CutRetired); retiredBytes += item.bytes;
           }
         }
@@ -608,7 +697,7 @@ export class PairingTrustOwner {
           const bytes = this.readFile(root, item.name, false);
           if (!bytes) continue;
           const stat = lstatSync(join(root.path, item.name)); owned(stat);
-          if (id(stat) !== item.identity || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");
+          if (!this.objectIs(root, item.identity, stat) || bytes.length !== item.bytes || hash(bytes) !== item.sha256) refuse("migration_retirement_changed");
           this.check(root);
           try { unlinkSync(join(root.path, item.name)); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -640,14 +729,14 @@ export class PairingTrustOwner {
     if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(migrationId)) refuse("invalid_mutation");
     // Refuse a visible older holder BEFORE attempting a potentially blocking
     // acquisition. This cannot discover an unobservable foreign process.
-    const observed = this.root(), adapter = observed ? adapters.get(observed.id) : undefined;
+    const observed = this.root(), adapter = observed ? adapters.get(observed.fs) : undefined;
     const held = observed && adapter?.currentHolder(observed);
     const captured = context === undefined ? undefined : contexts.get(context as object);
     if (held && (!captured || captured !== invocations.getStore() || !captured.active
-      || captured.owner !== this || captured.root.id !== observed!.id || captured.holder !== held)) refuse("migration_holder_active");
+      || captured.owner !== this || captured.root.fs !== observed!.fs || captured.holder !== held)) refuse("migration_holder_active");
     return this.operation(context, (root, invocation) => {
       if (!root) refuse("migration_missing_root");
-      if ([...liveInvocations].some(active => active.active && active.root.id === root.id && active !== invocation)) refuse("migration_holder_active");
+      if ([...liveInvocations].some(active => active.active && active.root.fs === root.fs && active !== invocation)) refuse("migration_holder_active");
       const state = this.readyState(root);
       if (state.capsule) {
         const b = state.capsule.barrier;
@@ -663,7 +752,7 @@ export class PairingTrustOwner {
       try { mkdirSync(join(root.path, CUT_DIRECTORY), {mode: 0o700}); stat = lstatSync(join(root.path, CUT_DIRECTORY)); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") refuse("migration_busy"); throw error; }
       owned(stat, true);
-      const claim: CutClaim = {rootId: root.id, token: randomUUID(), identity: id(stat), migrationId};
+      const claim: CutClaim = {rootId: root.id, token: randomUUID(), identity: this.objectId(root, stat), migrationId};
       let reserved = false, uncertain = false;
       try {
         this.syncCutDirectory(root, claim); this.syncDirectory(root);
@@ -676,12 +765,13 @@ export class PairingTrustOwner {
           const generation = JSON.parse(bytes.toString()).generation as Generation;
           const saved = generation.mutation, o = saved.outcome;
           if (!same(saved, state.outcomes[o.mutationId])) refuse("revision_conflict");
-          rows.push([o.mutationId, o.revision, o.type, o.publicKey, o.changed, saved.request, bytes.length,
-            o.type === "manage" ? generation.managed : null]);
-          if (o.type === "manage") policy = {revision, marker: generation.managed!};
-          retired.push({name, sha256: hash(bytes), bytes: bytes.length, identity: id(lstatSync(join(root.path, name)))});
+          // New capsule records carry the current root id, never a legacy one.
+          const managed = o.type === "manage" ? this.normMarker(root, generation.managed, "migration_outcome_invalid") : null;
+          rows.push([o.mutationId, o.revision, o.type, o.publicKey, o.changed, saved.request, bytes.length, managed]);
+          if (managed) policy = {revision, marker: managed};
+          retired.push({name, sha256: hash(bytes), bytes: bytes.length, identity: this.objectId(root, lstatSync(join(root.path, name)))});
         }
-        if (rows.length !== state.revision || !rows.every((row, index) => rowValid(row, index + 1, root.id))
+        if (rows.length !== state.revision || !rows.every((row, index) => rowValid(row, index + 1, v => this.rootIs(root, v)))
           || rows.reduce((sum, row) => sum + row[6], 0) !== state.bytes
           || !same(policy?.marker ?? null, state.managed)) refuse("migration_outcome_invalid");
         const payloads: [string, string][] = [];
@@ -742,12 +832,12 @@ export class PairingTrustOwner {
     if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(reclamationId) || options?.quiescent !== true) refuse("reclamation_quiescence_required");
     const observed = this.root();
     if (!observed) refuse("reclamation_missing_root");
-    const adapter = adapters.get(observed.id);
-    if (adapter?.currentHolder(observed) || [...liveInvocations].some(i => i.active && i.root.id === observed.id)) refuse("reclamation_holder_active");
+    const adapter = adapters.get(observed.fs);
+    if (adapter?.currentHolder(observed) || [...liveInvocations].some(i => i.active && i.root.fs === observed.fs)) refuse("reclamation_holder_active");
     return this.operation(undefined, (bound, invocation) => {
       const root = bound!;
       const authority = () => {
-        if ([...liveInvocations].some(i => i.active && i.root.id === root.id && i !== invocation)) refuse("reclamation_holder_active");
+        if ([...liveInvocations].some(i => i.active && i.root.fs === root.fs && i !== invocation)) refuse("reclamation_holder_active");
         if (invocation) this.validateInvocation(invocation, root);
         const state = this.readyState(root), cap = state.capsule;
         if (!cap) refuse("reclamation_capsule_required");
@@ -758,12 +848,14 @@ export class PairingTrustOwner {
         if (cap.barrier.migration) tokens.add(cap.barrier.migration.token);
         return {revision: state.revision, logicalHead: state.hash, physicalHead: cap.physicalHash, cutHash: cap.cutHash, references, tokens};
       };
-      return reclaimCapsuleStaging(root, reclamationId, {check: () => this.check(root), authority, fail: refuse});
+      return reclaimCapsuleStaging(root, reclamationId, {check: () => this.check(root), authority, fail: refuse,
+        objectId: stat => this.objectId(root, stat), objectIs: (value, stat) => this.objectIs(root, value, stat),
+        rootIs: value => this.rootIs(root, value)});
     });
   }
-  private capsulePolicy(root: PairingRootIdentity, policy: ManagedPolicy | null) {
+  private capsulePolicy(root: Root, policy: ManagedPolicy | null) {
     if (!policy) return;
-    const adapter = adapters.get(root.id);
+    const adapter = adapters.get(root.fs);
     if (!adapter || adapter.id !== policy.marker.adapterId) refuse("managed_adapter_required");
     const active = invocations.getStore();
     if (!active || active.owner !== this) refuse("managed_context_required");
@@ -774,7 +866,7 @@ export class PairingTrustOwner {
    * Tokens identify claims across time. dev:ino alone is only meaningful while
    * an open directory descriptor pins that object; freed inodes can be reused.
    * Nonempty claims stay occupied; no PID, timestamp or age takeover. */
-  private capsuleSlots(root: PairingRootIdentity, inventory: string[]) {
+  private capsuleSlots(root: Root, inventory: string[]) {
     const claims = new Map<string,CapsuleSlot>(), allowed = new Set<string>();
     for (const name of inventory.filter(n => n.startsWith(".pairing-v2-slot-"))) {
       if (!/^\.pairing-v2-slot-[0-7]$/.test(name)) refuse("capacity");
@@ -794,9 +886,9 @@ export class PairingTrustOwner {
         if (!/^[a-f0-9-]{36}\.json$/.test(child)) refuse("unsafe_path");
         const bytes = this.readFile(root,`${name}/${child}`,false); if (!bytes) refuse("revision_conflict");
         const claim = unpack<Record<string,unknown>>(bytes,"claim",refuse);
-        if (claim.rootId !== root.id || claim.index !== index || !token(claim.token) || child !== `${claim.token}.json`
-          || claim.identity !== id(stat) || id(lstatSync(path)) !== id(stat)) refuse("unsafe_path");
-        const slot = {index,token:claim.token,identity:id(stat)};
+        if (!this.rootIs(root, claim.rootId) || claim.index !== index || !token(claim.token) || child !== `${claim.token}.json`
+          || !this.objectIs(root, claim.identity, stat) || id(lstatSync(path)) !== id(stat)) refuse("unsafe_path");
+        const slot = {index,token:claim.token,identity:claim.identity as string};
         if(claims.has(slot.token))refuse("capsule_slot_invalid");claims.set(slot.token,slot);
         let total = bytes.length;
         for (const candidate of [dataName(slot.token), ...(["peers","commit","marker","done"] as const).map(r=>stageName(slot.token,r))]) {
@@ -812,21 +904,21 @@ export class PairingTrustOwner {
     }
     this.check(root); return {claims,allowed};
   }
-  private capsuleState(root: PairingRootIdentity, allowPending: boolean, inventory: string[], materialize = true): State {
+  private capsuleState(root: Root, allowPending: boolean, inventory: string[], materialize = true): State {
     const names = inventory.filter(n=>n.startsWith(PREFIX) || n.startsWith(CAPSULE_PREFIX) || n.startsWith(".pairing-v2")).sort();
     if (names.length > 360) refuse("capacity");
     const barriers = names.filter(n=>n.startsWith(PREFIX));
     if (barriers.length !== 1) refuse("capsule_unexpected_history");
     const barrierBytes = this.readFile(root,barriers[0]!,false); if (!barrierBytes) refuse("capsule_barrier_required");
     const b = unpack<CapsuleBarrier>(barrierBytes,"barrier",refuse), cutHash = hash(barrierBytes);
-    if (b.schema !== "scout.pairing-cut/v2" || b.rootId !== root.id || !integer(b.revision,0,REVISION_LIMIT)
+    if (b.schema !== "scout.pairing-cut/v2" || !this.rootIs(root,b.rootId) || !integer(b.revision,0,REVISION_LIMIT)
       || barriers[0] !== `${PREFIX}${b.revision+1}.json` || !hex(b.logicalHead) || !hex(b.logicalPeersHash)
       || !hex(b.checkpointPeersHash) || !hex(b.projectionHash) || !hex(b.outcomesDigest)
-      || !integer(b.chargedBytes,0,TOTAL_LIMIT) || !policyValid(b.policy,root.id,b.revision)
+      || !integer(b.chargedBytes,0,TOTAL_LIMIT) || !policyValid(b.policy,v => this.rootIs(root, v),b.revision)
       || !Array.isArray(b.parts) || b.parts.length>256 || !b.parts.every(partValid)) refuse("capsule_barrier_invalid");
     const cutBytes = this.readFile(root,CUTOVER,false); if (!cutBytes) refuse("capsule_cutover_incomplete");
     const cut = unpack<Record<string,unknown>>(cutBytes,"receipt",refuse);
-    if (cut.schema !== "scout.pairing-cutover-done/v2" || cut.rootId !== root.id || cut.cutHash !== cutHash) refuse("capsule_cutover_incomplete");
+    if (cut.schema !== "scout.pairing-cutover-done/v2" || !this.rootIs(root,cut.rootId) || cut.cutHash !== cutHash) refuse("capsule_cutover_incomplete");
     const serials = names.filter(n=>n.startsWith(`${CAPSULE_PREFIX}commit.`)).map(n=>{
       const match=/^trusted-peers\.v2\.commit\.([1-9][0-9]*)\.json$/.exec(n);
       if (!match || !integer(Number(match[1]),1,Number.MAX_SAFE_INTEGER)) refuse("capsule_serial_invalid");
@@ -837,11 +929,11 @@ export class PairingTrustOwner {
     const physical = this.readFile(root,name,true); if (!physical) refuse("revision_conflict");
     const h = unpack<CapsuleHead>(physical,"capsule",refuse), physicalHash = hash(physical);
     if (h.schema !== "scout.pairing-capsule/v2") refuse("capsule_version_unsupported");
-    if (h.rootId !== root.id || h.cutHash !== cutHash || h.serial !== serial || !integer(h.revision,b.revision,REVISION_LIMIT)
+    if (!this.rootIs(root,h.rootId) || h.cutHash !== cutHash || h.serial !== serial || !integer(h.revision,b.revision,REVISION_LIMIT)
       || h.serial!==h.revision-b.revision+1
       || !hex(h.logicalHead) || !hex(h.previousLogicalHead) || !hex(h.previousPhysicalHead)
       || !hex(h.logicalPeersHash) || !hex(h.checkpointPeersHash) || !hex(h.projectionHash) || !hex(h.outcomesDigest)
-      || !integer(h.chargedBytes,0,TOTAL_LIMIT) || !policyValid(h.policy,root.id,h.revision)
+      || !integer(h.chargedBytes,0,TOTAL_LIMIT) || !policyValid(h.policy,v => this.rootIs(root, v),h.revision)
       || !Array.isArray(h.parts) || h.parts.length>256 || !h.parts.every(partValid)
       || !Array.isArray(h.retire) || h.retire.length>3) refuse("capsule_invalid");
     if (!same(h.parts.slice(0,b.parts.length),b.parts)) refuse("capsule_cut_changed");
@@ -870,9 +962,9 @@ export class PairingTrustOwner {
       if(i) fullDigest.update(","); fullDigest.update(bytes.subarray(1,-1));
       if(i<b.parts.length){if(i)cutDigest.update(",");cutDigest.update(bytes.subarray(1,-1));}
       for(const value of values){
-        if(!rowValid(value,rowCount+1,root.id) || (ids ? ids.has(value[0]) : Object.hasOwn(outcomes,value[0]))) refuse("capsule_outcome_invalid");
+        if(!rowValid(value,rowCount+1,v => this.rootIs(root, v)) || (ids ? ids.has(value[0]) : Object.hasOwn(outcomes,value[0]))) refuse("capsule_outcome_invalid");
         const row=value; rowCount++; lastRow=row; if(materialize)rows.push(row); else ids!.add(row[0]); charge+=row[6];
-        if(row[2]==="manage") {if(policy)refuse("managed_downgrade");policy={revision:row[1],marker:row[7]!};}
+        if(row[2]==="manage") {if(policy)refuse("managed_downgrade");policy={revision:row[1],marker:this.normMarker(root,row[7],"capsule_outcome_invalid")};}
         if(row[1]<=b.revision){cutCharge+=row[6];cutPolicy=policy;}
         if(materialize)Object.defineProperty(outcomes,row[0],{value:{request:row[5],outcome:outcome(row)},enumerable:true});
       }
@@ -882,16 +974,19 @@ export class PairingTrustOwner {
       || b.parts.reduce((n,p)=>n+p.count,0)!==b.revision || fullDigest.update("]").digest("hex")!==h.outcomesDigest
       || cutDigest.update("]").digest("hex")!==b.outcomesDigest) refuse("capsule_outcomes_invalid");
     // Permanent policy is derived from all retained records, not a head flag.
-    if(!same(policy,h.policy) || !same(cutPolicy,b.policy)) refuse("managed_downgrade");
+    // Records may mix legacy and v2 root ids. Compare normalized policies.
+    const headPolicy=this.normPolicy(root,h.policy,"capsule_invalid"), barrierPolicy=this.normPolicy(root,b.policy,"capsule_barrier_invalid");
+    if(!same(policy,headPolicy) || !same(cutPolicy,barrierPolicy)) refuse("managed_downgrade");
     if(h.revision===b.revision){
       if(h.previousLogicalHead!==b.logicalHead || h.previousPhysicalHead!==cutHash || h.logicalHead!==b.logicalHead || h.logicalPeersHash!==b.logicalPeersHash || h.checkpointPeersHash!==b.checkpointPeersHash
         || h.projectionHash!==b.projectionHash || h.outcomesDigest!==b.outcomesDigest) refuse("capsule_cut_changed");
     } else if(h.logicalPeersHash!==h.checkpointPeersHash || h.projectionHash!==h.checkpointPeersHash
-      || h.logicalHead!==logicalHead(root.id,h.revision,h.previousLogicalHead,h.logicalPeersHash,h.policy,lastRow!,h.adoption,h.outcomesDigest)) refuse("capsule_logical_head_invalid");
+      // The digest covers the root id and policy exactly as the head's writer stored them.
+      || h.logicalHead!==logicalHead(h.rootId,h.revision,h.previousLogicalHead,h.logicalPeersHash,h.policy,lastRow!,h.adoption,h.outcomesDigest)) refuse("capsule_logical_head_invalid");
     this.capsulePolicy(root,policy);
     const slots=this.capsuleSlots(root,inventory);
     if(h.slot!==null && (!record(h.slot) || !integer(h.slot.index,0,7) || !token(h.slot.token)
-      || typeof h.slot.identity!=="string" || !/^\d+:\d+$/.test(h.slot.identity))) refuse("capsule_slot_invalid");
+      || !identityFormat(h.slot.identity))) refuse("capsule_slot_invalid");
     if(h.slot===null && (h.serial!==1 || h.revision!==b.revision)) refuse("capsule_slot_invalid");
     const stat=lstatSync(join(root.path,name));owned(stat,false,false,true);
     const pending=stat.nlink===2;
@@ -915,7 +1010,7 @@ export class PairingTrustOwner {
     const retiredNames=new Set<string>();
     if(serial===1 && h.retire.length)refuse("capsule_retirement_invalid");
     for(const r of h.retire){
-      if(!record(r) || typeof r.name!=="string" || !hex(r.sha256) || typeof r.identity!=="string" || !/^\d+:\d+$/.test(r.identity)
+      if(!record(r) || typeof r.name!=="string" || !hex(r.sha256) || !identityFormat(r.identity)
         || retiredNames.has(r.name) || uniqueParts.has(r.name)
         || !(r.name===commitName(serial-1) && r.sha256===h.previousPhysicalHead || r.name===doneName(serial-1)
           || /^trusted-peers\.v2\.data\.[a-f0-9-]{36}\.json$/.test(r.name))) refuse("capsule_retirement_invalid");
@@ -926,7 +1021,7 @@ export class PairingTrustOwner {
     const receiptBytes=this.readFile(root,doneName(serial),false);
     if(receiptBytes){const receipt=unpack<Record<string,unknown>>(receiptBytes,"receipt",refuse);
       if(authorityBytes+receiptBytes.length>TOTAL_LIMIT)refuse("capacity");
-      if(receipt.schema!=="scout.pairing-collected/v2" || receipt.rootId!==root.id || receipt.serial!==serial || receipt.physicalHash!==physicalHash)refuse("capsule_receipt_invalid");
+      if(receipt.schema!=="scout.pairing-collected/v2" || !this.rootIs(root,receipt.rootId) || receipt.serial!==serial || receipt.physicalHash!==physicalHash)refuse("capsule_receipt_invalid");
       if(h.retire.some(r=>names.includes(r.name)))refuse("capsule_retired_reappeared");
     }
     const ownSlotExists=!!(h.slot && same(slots.claims.get(h.slot.token),h.slot));
@@ -938,23 +1033,23 @@ export class PairingTrustOwner {
     return {revision:h.revision,peers,hash:h.logicalHead,peersHash:h.logicalPeersHash,managed,outcomes,bytes:charge,
       projectionHash,adoption,pendingStage:pending&&h.slot?join(root.path,stageName(h.slot.token,"commit")):null,
       projectionStage:h.slot?stageName(h.slot.token,"peers"):null,
-      capsule:{barrier:b,barrierName:barriers[0]!,cutHash,head:h,physicalHash,rows,partData,needsRecovery,pending}};
+      capsule:{barrier:{...b,policy:barrierPolicy},barrierName:barriers[0]!,cutHash,head:{...h,policy:headPolicy},physicalHash,rows,partData,needsRecovery,pending}};
   }
   /** The descriptor must stay open for the entire check/use interval. */
-  private slotMatches(root: PairingRootIdentity, slot: CapsuleSlot, fd: number): boolean {
+  private slotMatches(root: Root, slot: CapsuleSlot, fd: number): boolean {
     const stat=fstatSync(fd);owned(stat,true);
-    if(id(stat)!==slot.identity)return false;
+    if(!this.objectIs(root,slot.identity,stat))return false;
     const directory=join(root.path,slotName(slot.index));
     try {
       if(id(lstatSync(directory))!==id(stat))return false;
       const bytes=this.readFile(root,`${slotName(slot.index)}/${slot.token}.json`,false);
       if(!bytes)return false; // Includes a newer mkdir before its token write.
       const claim=unpack<Record<string,unknown>>(bytes,"claim",refuse);
-      if(!same(claim,{rootId:root.id,...slot}))refuse("capsule_slot_invalid");
+      if(!this.rootIs(root,claim.rootId) || !same(claim,{rootId:claim.rootId,...slot}))refuse("capsule_slot_invalid");
       return id(lstatSync(directory))===id(stat);
     } catch(e) {if((e as NodeJS.ErrnoException).code==="ENOENT")return false;throw e;}
   }
-  private syncSlot(root: PairingRootIdentity, slot: CapsuleSlot) {
+  private syncSlot(root: Root, slot: CapsuleSlot) {
     this.check(root);const path=join(root.path,slotName(slot.index));
     const fd=openSync(path,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
     try {
@@ -966,7 +1061,7 @@ export class PairingTrustOwner {
   /** A candidate carries only its small claim file, never staged payloads.
    * It is outside the authority inventory until its atomic directory rename.
    * Only an empty canonical slot can be replaced; live claims stay nonempty. */
-  private claimCapsuleSlot(root: PairingRootIdentity): CapsuleSlot {
+  private claimCapsuleSlot(root: Root): CapsuleSlot {
     for(let index=0;index<8;index++){
       this.check(root);
       const candidate=`.pairing-claim-${randomUUID()}`,source=join(root.path,candidate);
@@ -975,7 +1070,7 @@ export class PairingTrustOwner {
       try {
         const stat=fstatSync(fd);
         owned(stat,true);
-        const slot={index,token:randomUUID(),identity:id(stat)},child=`${slot.token}.json`;
+        const slot={index,token:randomUUID(),identity:this.objectId(root,stat)},child=`${slot.token}.json`;
         let renamed=false;
         try {
           this.writeNew(root,`${candidate}/${child}`,pack("claim",{rootId:root.id,...slot}));
@@ -1012,7 +1107,7 @@ export class PairingTrustOwner {
     }
     return refuse("capsule_staging_capacity");
   }
-  private releaseCapsuleSlot(root: PairingRootIdentity, slot: CapsuleSlot) {
+  private releaseCapsuleSlot(root: Root, slot: CapsuleSlot) {
     this.check(root);const directory=join(root.path,slotName(slot.index));
     let fd:number;
     try{fd=openSync(directory,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);}
@@ -1033,14 +1128,14 @@ export class PairingTrustOwner {
     } finally {closeSync(fd);}
     this.syncDirectory(root);
   }
-  private capsuleFileIdentity(root: PairingRootIdentity, name: string): RetiredFile {
+  private capsuleFileIdentity(root: Root, name: string): RetiredFile {
     const bytes=this.readFile(root,name,false);if(!bytes)refuse("revision_conflict");
     const stat=lstatSync(join(root.path,name));owned(stat);
-    return {name,sha256:hash(bytes),identity:id(stat)};
+    return {name,sha256:hash(bytes),identity:this.objectId(root,stat)};
   }
-  private completeCapsule(root: PairingRootIdentity, snapshot: State) {
-    if(completing.has(root.id))refuse("publication_incomplete");
-    completing.add(root.id);
+  private completeCapsule(root: Root, snapshot: State) {
+    if(completing.has(root.fs))refuse("publication_incomplete");
+    completing.add(root.fs);
     try {
       let state=this.state(root,true), cap=state.capsule!;
       if(!cap || cap.head.serial!==snapshot.capsule!.head.serial)return;
@@ -1051,7 +1146,7 @@ export class PairingTrustOwner {
         if(h.policy){
           const markerSource=stageName(slot.token,"marker"), staged=this.readFile(root,markerSource,false);
           if(staged){
-            if(!same(JSON.parse(staged.toString()),h.policy.marker))refuse("publication_incomplete");
+            if(!same(this.normMarker(root,JSON.parse(staged.toString()),"publication_incomplete"),h.policy.marker))refuse("publication_incomplete");
             try{renameSync(join(root.path,markerSource),join(root.path,MARKER));}
             catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
           }
@@ -1081,7 +1176,7 @@ export class PairingTrustOwner {
             const bytes=this.readFile(root,retired.name,false);
             if(!bytes)continue;
             const stat=lstatSync(join(root.path,retired.name));owned(stat);
-            if(id(stat)!==retired.identity || hash(bytes)!==retired.sha256)refuse("capsule_retirement_changed");
+            if(!this.objectIs(root,retired.identity,stat) || hash(bytes)!==retired.sha256)refuse("capsule_retirement_changed");
             this.check(root);
             try{unlinkSync(join(root.path,retired.name));}catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
           }
@@ -1090,7 +1185,7 @@ export class PairingTrustOwner {
           const receiptSource=stageName(slot.token,"done"), receipt=this.readFile(root,receiptSource,false);
           if(receipt){
             const r=unpack<Record<string,unknown>>(receipt,"receipt",refuse);
-            if(r.rootId!==root.id || r.serial!==h.serial || r.physicalHash!==cap.physicalHash || r.schema!=="scout.pairing-collected/v2")refuse("capsule_receipt_invalid");
+            if(!this.rootIs(root,r.rootId) || r.serial!==h.serial || r.physicalHash!==cap.physicalHash || r.schema!=="scout.pairing-collected/v2")refuse("capsule_receipt_invalid");
             try{renameSync(join(root.path,receiptSource),join(root.path,doneName(h.serial)));}
             catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
           }
@@ -1103,9 +1198,9 @@ export class PairingTrustOwner {
       }
       if(slot)this.releaseCapsuleSlot(root,slot);
     } catch(e){if(e instanceof PairingTrustError)throw e;refuse("publication_incomplete");}
-    finally{completing.delete(root.id);}
+    finally{completing.delete(root.fs);}
   }
-  private publishCapsule(root: PairingRootIdentity, state: State, peers: TrustedPeer[], managed: Marker|null,
+  private publishCapsule(root: Root, state: State, peers: TrustedPeer[], managed: Marker|null,
     request: string, result: TrustOutcome, invocation?: Invocation, beforePublish?:()=>void): TrustOutcome {
     const prior=state.capsule!, old=prior.head;
     if(old.serial>=Number.MAX_SAFE_INTEGER)refuse("capacity");
@@ -1192,15 +1287,15 @@ export class PairingTrustOwner {
       }
     }
   }
-  private validateInvocation(invocation: Invocation, root: PairingRootIdentity) {
+  private validateInvocation(invocation: Invocation, root: Root) {
     if (!invocation.active || invocations.getStore() !== invocation || invocation.owner !== this
-      || invocation.root.id !== root.id || adapters.get(root.id) !== invocation.adapter
+      || invocation.root.fs !== root.fs || adapters.get(root.fs) !== invocation.adapter
       || invocation.adapter.currentHolder(root) !== invocation.holder) refuse("invalid_context");
   }
   /** One callback invocation; a context permits at most one publication.
    * Reads can repeat. Capturing an object does not capture gate ownership. */
   withInvocation<T>(body: (context: PairingTrustContext) => T): T {
-    const root = this.root(true)!; const adapter = adapters.get(root.id);
+    const root = this.root(true)!; const adapter = adapters.get(root.fs);
     if (!adapter) refuse("managed_adapter_required");
     return adapter.withGate(root, holder => {
       const invocation: Invocation = {owner: this, root, adapter, holder, active: true, used: false};
@@ -1219,14 +1314,14 @@ export class PairingTrustOwner {
       });
     });
   }
-  private operation<T>(context: PairingTrustContext | undefined, body: (root: PairingRootIdentity | null, invocation?: Invocation) => T): T {
+  private operation<T>(context: PairingTrustContext | undefined, body: (root: Root | null, invocation?: Invocation) => T): T {
     const root = this.root();
     if (context !== undefined) {
       const invocation = contexts.get(context as object);
       if (!root || !invocation) refuse("invalid_context");
       this.validateInvocation(invocation, root); return body(root, invocation);
     }
-    if (root && adapters.has(root.id)) return this.withInvocation(ctx => this.operation(ctx, body));
+    if (root && adapters.has(root.fs)) return this.withInvocation(ctx => this.operation(ctx, body));
     return body(root);
   }
   read(context?: PairingTrustContext): TrustSnapshot {
@@ -1273,7 +1368,7 @@ export class PairingTrustOwner {
     this.root(true);
     return this.operation(undefined, root => this.pairingOpportunityStamp(root!, this.readyState(root!)));
   }
-  private pairingOpportunityStamp(root: PairingRootIdentity, state: State): string {
+  private pairingOpportunityStamp(root: Root, state: State): string {
     return hash(JSON.stringify([root.id, state.revision, state.hash, state.projectionHash, state.managed]));
   }
   /** Trusted local workflow only. Opening a window does not write authority.
@@ -1283,7 +1378,7 @@ export class PairingTrustOwner {
     if (typeof room !== "string" || !room || room.length > 256 || !Number.isFinite(expiresAt) || expiresAt <= Date.now()
       || expiresAt - Date.now() > 300_000) refuse("invalid_pairing_opportunity");
     this.root(true);
-    const stamp = (root: PairingRootIdentity, state: State) => this.pairingOpportunityStamp(root, state);
+    const stamp = (root: Root, state: State) => this.pairingOpportunityStamp(root, state);
     const baseline = this.operation(undefined, root => stamp(root!, this.readyState(root!)));
     if (expectedAuthorityStamp !== undefined && expectedAuthorityStamp !== baseline) refuse("pairing_opportunity_closed");
     const deadline = performance.now() + (expiresAt - Date.now());
@@ -1437,13 +1532,14 @@ export class PairingTrustOwner {
     const root = this.root(true)!;
     if (!adapter || !/^[a-z0-9.-]{1,64}$/.test(adapter.id) || typeof adapter.withGate !== "function"
       || typeof adapter.currentHolder !== "function") refuse("invalid_adapter");
-    if (adapters.has(root.id)) refuse("adapter_already_registered");
-    adapters.set(root.id, adapter);
-    return () => { if (adapters.get(root.id) === adapter) adapters.delete(root.id); };
+    if (adapters.has(root.fs)) refuse("adapter_already_registered");
+    adapters.set(root.fs, adapter);
+    return () => { if (adapters.get(root.fs) === adapter) adapters.delete(root.fs); };
   }
 }
-export function pairingTrustOwner(path = resolveOpenScoutPairingHome()): PairingTrustOwner {
+/** One owner per canonical root. Options apply when the owner is first made. */
+export function pairingTrustOwner(path = resolveOpenScoutPairingHome(), options?: PairingTrustOwnerOptions): PairingTrustOwner {
   const root = canonical(path); let owner = owners.get(root);
-  if (!owner) { owner = new PairingTrustOwner(root); owners.set(root, owner); }
+  if (!owner) { owner = new PairingTrustOwner(root, options); owners.set(root, owner); }
   return owner;
 }

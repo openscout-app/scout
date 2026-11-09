@@ -8,8 +8,8 @@ const project=fileURLToPath(new URL("..",import.meta.url)),explicit=process.argv
 const output=explicit??mkdtempSync(join(tmpdir(),"pairing-quiescent-controls-"));mkdirSync(output,{recursive:true});
 const owner=readFileSync(join(project,"packages/runtime/src/pairing-security/trust-owner.ts"),"utf8");
 const engine=readFileSync(join(project,"packages/runtime/src/pairing-security/trust-reclamation.ts"),"utf8");
-const guards='if (adapter?.currentHolder(observed) || [...liveInvocations].some(i => i.active && i.root.id === observed.id)) refuse("reclamation_holder_active");';
-const tokenCheck='if(!c || c.rootId!==root.id || !integer(c.index,0,7) || !token(c.token) || c.identity!==dirId\n    || !same(c,{rootId:root.id,index:c.index,token:c.token,identity:dirId}))fail("reclamation_token_invalid");';
+const guards='if (adapter?.currentHolder(observed) || [...liveInvocations].some(i => i.active && i.root.fs === observed.fs)) refuse("reclamation_holder_active");';
+const tokenCheck='if(!c || !hooks.rootIs(c.rootId) || !integer(c.index,0,7) || !token(c.token) || !identityFormat(c.identity)\n    || (dir && !hooks.objectIs(c.identity,dir))\n    || !same(c,{rootId:c.rootId,index:c.index,token:c.token,identity:c.identity}))fail("reclamation_token_invalid");';
 const reference='if(a.tokens.has(g.claim.token)||a.references.has(g.source)||payloads(g.claim.token).some(n=>a.references.has(n)))fail("reclamation_referenced");';
 const controls=[
  {id:"parent-store-predicate",subject:"engine",test:"a group-writable parent",needle:'const parent=openSync(dirname(root.path),constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);\n   try{fsyncSync(parent);}finally{closeSync(parent);}',replacement:'const parent=pin(dirname(root.path));try{sync(parent);}finally{closeSync(parent.fd);}'},

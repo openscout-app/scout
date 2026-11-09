@@ -20,12 +20,17 @@ type Group={kind:"candidate"|"claim";source:string;claim:Claim;claimFile:FilePro
 type Plan={schema:"scout.pairing-staging-reclamation/v1";reclamationId:string;rootId:string;
   authority:{revision:number;logicalHead:string;physicalHead:string;cutHash:string};groups:Group[];
   retained:{source:string;why:string}[]};
-type Hooks={check():void;authority():ReclamationAuthority;fail(code:string):never};
+/** objectId/objectIs/rootIs come from the owner: persisted ids are keyed by the
+ * host identity, and legacy dev:ino ids match by inode. */
+type Hooks={check():void;authority():ReclamationAuthority;fail(code:string):never;
+  objectId(s:Stats):string;objectIs(value:unknown,s:Stats):boolean;rootIs(value:unknown):boolean};
 const LIMIT=1024*1024,WHY="verified full token; unreferenced by completed authority";
+// Same-boot pin identity only. Never persisted.
 const identity=(s:Stats)=>`${s.dev}:${s.ino}`;
 const digest=(b:Buffer|string)=>createHash("sha256").update(b).digest("hex");
 const candidates=/^\.pairing-claim-[a-f0-9-]{36}$/;
 const slots=/^\.pairing-v2-slot-[0-7]$/;
+const identityFormat=(v:unknown)=>typeof v==="string"&&/^(?:o2:[a-f0-9]{64}|\d+:\d+)$/.test(v);
 const payloads=(t:string)=>[dataName(t),...(["peers","commit","marker","done"] as const).map(r=>stageName(t,r))];
 /** Exported only for the canonical owner. All proof callbacks are lexically
  * supplied there, never selected by an application, wire field or environment. */
@@ -47,7 +52,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   const fd=openSync(join(p.path,name),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try{const s=fstatSync(fd);owned(s);if(s.size>LIMIT||identity(lstatSync(join(p.path,name)))!==identity(s))fail("reclamation_file_changed");
    const bytes=readFileSync(fd);if(bytes.length!==s.size||identity(lstatSync(join(p.path,name)))!==identity(s))fail("reclamation_file_changed");
-   check(p);return {bytes,proof:{source:name,identity:identity(s),bytes:bytes.length,sha256:digest(bytes)}};
+   check(p);return {bytes,proof:{source:name,identity:hooks.objectId(s),bytes:bytes.length,sha256:digest(bytes)}};
   }finally{closeSync(fd);}
  };
  const write=(p:Pin,name:string,bytes:string)=>{
@@ -56,9 +61,12 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   const fd=openSync(join(p.path,name),constants.O_RDONLY|constants.O_NOFOLLOW);
   try{owned(fstatSync(fd));fsyncSync(fd);}finally{closeSync(fd);}sync(p);
  };
- const claimValid=(c:Claim,dirId:string)=>{
-  if(!c || c.rootId!==root.id || !integer(c.index,0,7) || !token(c.token) || c.identity!==dirId
-    || !same(c,{rootId:root.id,index:c.index,token:c.token,identity:dirId}))fail("reclamation_token_invalid");
+ // With a directory stat, the claim must name that directory. Without one,
+ // only its shape is checked (a claim copied into the plan).
+ const claimValid=(c:Claim,dir?:Stats)=>{
+  if(!c || !hooks.rootIs(c.rootId) || !integer(c.index,0,7) || !token(c.token) || !identityFormat(c.identity)
+    || (dir && !hooks.objectIs(c.identity,dir))
+    || !same(c,{rootId:c.rootId,index:c.index,token:c.token,identity:c.identity}))fail("reclamation_token_invalid");
  };
  const rootPin=pin(root.path);
  let base:Pin|undefined,op:Pin|undefined;
@@ -76,7 +84,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
      if(!children.length){retained.push({source:name,why:"empty directory has no full token; left for structural reclamation or reviewed repair"});continue;}
      if(children.length!==1||!/^([a-f0-9-]{36})\.json$/.test(children[0]!))fail("reclamation_token_invalid");
      const child=children[0]!,file=read(dir,child),claim=unpack<Claim>(file.bytes,"claim",fail);
-     claimValid(claim,dir.id);
+     claimValid(claim,fstatSync(dir.fd));
      if(child!==`${claim.token}.json`||(slots.test(name)&&name!==`.pairing-v2-slot-${claim.index}`)||seen.has(claim.token))fail("reclamation_token_invalid");
      seen.add(claim.token);
      const g:Group={kind:slots.test(name)?"claim":"candidate",source:name,claim,claimFile:file.proof,payloads:[]};
@@ -111,13 +119,13 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
     authority:{revision:initial.revision,logicalHead:initial.logicalHead,physicalHead:initial.physicalHead,cutHash:initial.cutHash},...found};
    const bytes=pack("reclamation",plan);write(op,"plan.json",bytes);planHash=digest(bytes);
   }
-  if(plan.schema!=="scout.pairing-staging-reclamation/v1"||plan.rootId!==root.id||plan.reclamationId!==reclamationId
+  if(plan.schema!=="scout.pairing-staging-reclamation/v1"||!hooks.rootIs(plan.rootId)||plan.reclamationId!==reclamationId
     ||!Array.isArray(plan.groups)||plan.groups.length>1024||!Array.isArray(plan.retained)
     ||!integer(plan.authority?.revision,0,65536)||![plan.authority?.logicalHead,plan.authority?.physicalHead,plan.authority?.cutHash].every(hex))fail("reclamation_invalid_plan");
   const sourceNames=new Set<string>(),tokens=new Set<string>();
-  const fileValid=(p:FileProof)=>typeof p?.source==="string"&&typeof p.identity==="string"&&/^\d+:\d+$/.test(p.identity)&&integer(p.bytes,0,LIMIT)&&hex(p.sha256);
+  const fileValid=(p:FileProof)=>typeof p?.source==="string"&&typeof p.identity==="string"&&identityFormat(p.identity)&&integer(p.bytes,0,LIMIT)&&hex(p.sha256);
   for(const g of plan.groups){
-   claimValid(g.claim,g.claim?.identity);
+   claimValid(g.claim);
    if(!["candidate","claim"].includes(g.kind)||typeof g.source!=="string"||!(g.kind==="candidate"?candidates.test(g.source):g.source===`.pairing-v2-slot-${g.claim.index}`)
      ||tokens.has(g.claim.token)||!fileValid(g.claimFile)||g.claimFile.source!==`${g.claim.token}.json`||!Array.isArray(g.payloads)
      ||g.payloads.length>5||(g.kind==="candidate"&&g.payloads.length))fail("reclamation_invalid_plan");
@@ -128,7 +136,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   if(plan.retained.some(p=>typeof p.source!=="string"||(!candidates.test(p.source)&&!slots.test(p.source))||typeof p.why!=="string"))fail("reclamation_invalid_plan");
   const syncFile=(p:Pin,name:string)=>{
    const proof=read(p,name).proof,fd=openSync(join(p.path,name),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-   try{owned(fstatSync(fd));if(identity(fstatSync(fd))!==proof.identity)fail("reclamation_resource_changed");
+   try{owned(fstatSync(fd));if(!hooks.objectIs(proof.identity,fstatSync(fd)))fail("reclamation_resource_changed");
     fsyncSync(fd);if(identity(lstatSync(join(p.path,name)))!==identity(fstatSync(fd)))fail("reclamation_resource_changed");
    }finally{closeSync(fd);}check(p);
   };
@@ -140,8 +148,8 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   const verifyFile=(where:Pin,p:FileProof)=>{if(!same(read(where,p.source).proof,p))fail("reclamation_resource_changed");};
   const verifyGroup=(g:Group)=>{
    const where=locate(g.source),dir=pin(join(where.path,g.source));
-   try{const c=read(dir,g.claimFile.source);claimValid(unpack<Claim>(c.bytes,"claim",fail),dir.id);
-    if(dir.id!==g.claim.identity||!same(readdirSync(dir.path),[g.claimFile.source])||!same(c.proof,g.claimFile)
+   try{const c=read(dir,g.claimFile.source);claimValid(unpack<Claim>(c.bytes,"claim",fail),fstatSync(dir.fd));
+    if(!hooks.objectIs(g.claim.identity,fstatSync(dir.fd))||!same(readdirSync(dir.path),[g.claimFile.source])||!same(c.proof,g.claimFile)
       ||!same(unpack<Claim>(c.bytes,"claim",fail),g.claim))fail("reclamation_token_invalid");check(dir);
    }finally{closeSync(dir.fd);}
    for(const p of g.payloads)verifyFile(locate(p.source),p);
@@ -152,7 +160,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   // Retry validates all retained artifacts and current authority, not an old positive.
   if(exists(join(op.path,"receipt.json"))){
    const receipt=unpack<CapsuleReclamationReceipt>(read(op,"receipt.json").bytes,"receipt",fail);
-   if(receipt.schema!=="scout.pairing-staging-reclaimed/v1"||receipt.reclamationId!==reclamationId||receipt.rootId!==root.id
+   if(receipt.schema!=="scout.pairing-staging-reclaimed/v1"||receipt.reclamationId!==reclamationId||!hooks.rootIs(receipt.rootId)
     ||receipt.planHash!==planHash||receipt.evidenceDirectory!==op.path
     ||!integer(receipt.verified?.revision,0,65536)||!hex(receipt.verified?.logicalHead)||!hex(receipt.verified?.physicalHead)||!same(receipt.moved,moved)||!same(receipt.retained,plan.retained))fail("reclamation_invalid_receipt");
    for(const g of plan.groups){verifyGroup(g);if(locate(g.source)!==op||g.payloads.some(p=>locate(p.source)!==op))fail("reclamation_invalid_receipt");}
@@ -173,7 +181,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
       const proof=p.source===g.source?g.claimFile:g.payloads.find(f=>f.source===p.source)!;
       fileFd=openSync(fileName,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
       owned(fstatSync(fileFd));
-      if(identity(fstatSync(fileFd))!==proof.identity)fail("reclamation_resource_changed");
+      if(!hooks.objectIs(proof.identity,fstatSync(fileFd)))fail("reclamation_resource_changed");
       fsyncSync(fileFd); // Retain interrupted, possibly unsynced payload bytes too.
       if(identity(lstatSync(fileName))!==identity(fstatSync(fileFd)))fail("reclamation_resource_changed");
       renameSync(join(root.path,p.source),join(op.path,p.source));

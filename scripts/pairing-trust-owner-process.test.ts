@@ -5,11 +5,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pairingTrustOwner, type PairingTrustAdapter } from "../packages/runtime/src/pairing-security/trust-owner.ts";
 import {capsuleFixture} from "./fixtures/pairing-capsule.ts";
+import {writeTestIdentity} from "./fixtures/pairing-identity.ts";
 
 const project = fileURLToPath(new URL("..", import.meta.url)), worker = join(project, "scripts/pairing-trust-owner-worker.ts");
 const roots: string[] = [], cleanups: Array<() => void> = [];
 const key = "a".repeat(64), peer = {publicKey: key, pairedAt: "2026-01-01T00:00:00Z"};
-function fixture() { const root = mkdtempSync(join(tmpdir(), "pairing-owner-process-")); roots.push(root); const data = join(root,"data"), coordination = join(root,"coordination"); mkdirSync(data, {mode: 0o700}); mkdirSync(coordination); return {root, data, coordination}; }
+function fixture() { const root = mkdtempSync(join(tmpdir(), "pairing-owner-process-")); roots.push(root); const data = join(root,"data"), coordination = join(root,"coordination"); mkdirSync(data, {mode: 0o700}); writeTestIdentity(data); mkdirSync(coordination); return {root, data, coordination}; }
 function launch(mode: string, data: string, coordination: string, detail = "", extra: Record<string,string> = {}) {
   return Bun.spawn([process.execPath, "--no-install", worker, mode, data, coordination, detail], {
     cwd: project, env: {...process.env, HOME: dirname(data), OPENSCOUT_HOME: join(dirname(data),"home"), OPENSCOUT_CONTROL_HOME: join(dirname(data),"control"), OPENSCOUT_PAIRING_HOME: data, ...extra}, stdout: "pipe", stderr: "pipe",
@@ -261,6 +262,8 @@ describe("pairing owner real cross-process and I/O paths", () => {
     for (const spelling of ["OPENSCOUT_PAIRING_HOME","SCOUT_PAIRING_HOME","OPENSCOUT_PAIRING_DIR","OPENSCOUT_SCOUT_HOME"]) {
       const fixtureRoot = fixture(), coordination = fixtureRoot.coordination;
       const data = spelling === "OPENSCOUT_SCOUT_HOME" ? join(fixtureRoot.data,"pairing") : fixtureRoot.data;
+      // The pairing home holds the host identity that keys the trust store.
+      if (data !== fixtureRoot.data) { mkdirSync(data, {mode: 0o700}); writeTestIdentity(data); }
       const extra: Record<string,string> = {OPENSCOUT_PAIRING_HOME:"",SCOUT_PAIRING_HOME:"",OPENSCOUT_PAIRING_DIR:"",OPENSCOUT_SCOUT_HOME:"",[spelling]:fixtureRoot.data};
       const output = await result(launch("binding",data,coordination,"",extra));
       expect(output.code).toBe(0); expect(output.value).toMatchObject({ok:true, keys:[key,"b".repeat(64)]});

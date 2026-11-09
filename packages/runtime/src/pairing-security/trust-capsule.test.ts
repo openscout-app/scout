@@ -3,6 +3,7 @@ import {mkdtempSync,rmSync,readFileSync,writeFileSync,readdirSync,unlinkSync,mkd
 import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {pairingTrustOwner,PairingTrustOwner,type PairingTrustAdapter} from "./trust-owner.ts";
+import {testRootKey} from "../../../../scripts/fixtures/pairing-identity.ts";
 import {capsuleFixture} from "../../../../scripts/fixtures/pairing-capsule.ts";
 import {randomUUID} from "node:crypto";
 import {pack,digest,commitName,doneName,slotName,dataName,stageName,CUTOVER,type CapsuleHead,type CapsuleRow} from "./trust-capsule.ts";
@@ -19,7 +20,7 @@ test("v2 first-cut stamp uses the exact logical v1 head, never the physical caps
   for(const projection of [undefined,"[]",null," [ ] \n"]){const f=fixture({projection});expect(f.owner.pairingAuthorityStamp()).toBe(f.stamp);}
 });
 test("v1 remains the default writer and missing-root reads create nothing",()=>{
-  const p=mkdtempSync(join(tmpdir(),"pairing-capsule-unit-"));roots.push(p);const root=join(p,"missing"),o=pairingTrustOwner(root);
+  const p=mkdtempSync(join(tmpdir(),"pairing-capsule-unit-"));roots.push(p);const root=join(p,"missing"),o=pairingTrustOwner(root,{rootKey:testRootKey()});
   expect(o.read()).toEqual({revision:0,peers:[]});expect(readdirSync(p)).toEqual([]);
   o.mutate(0,"v1",{type:"grant",peer});expect(readdirSync(root).filter(n=>n.startsWith("trusted-peers.v2."))).toEqual([]);
 });
