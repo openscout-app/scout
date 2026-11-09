@@ -207,8 +207,9 @@ export function createBrokerDaemonTestHarness() {
       [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
-        // Like tmux, take client flags before the command: the session read
-        // runs `tmux -u list-sessions`.
+        // Like tmux, take client flags before the command: the session and
+        // client reads run `tmux -u list-sessions` and `tmux -u list-clients`.
+        // list-clients prints nothing here, which reads as no clients.
         "while [ $# -gt 0 ]; do",
         "  case \"$1\" in",
         "    -u) shift ;;",

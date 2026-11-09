@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { resetScoutdProbeClientForTests } from "./scoutd-client.ts";
 import {
+  invalidateTmuxSessions,
   parseTmuxSessionList,
   parseZellijSessionList,
+  readTmuxSessionsWithClients,
   reportedTmuxPaneTitle,
   TMUX_SESSION_LIST_FORMAT,
 } from "./tmux.ts";
@@ -119,6 +126,65 @@ test("keeps a title that only mentions the host name", () => {
   expect(reportedTmuxPaneTitle("boxer.local", "box.local")).toBe("boxer.local");
   expect(reportedTmuxPaneTitle("ssh box.local", "box.local")).toBe("ssh box.local");
   expect(reportedTmuxPaneTitle("box.local", undefined)).toBe("box.local");
+});
+
+/**
+ * A tmux that lists two sessions and no clients. Like tmux without a UTF-8
+ * locale, it prints each tab as "_" unless the client passed -u.
+ */
+function writeFakeTmux(directory: string): string {
+  const path = join(directory, "tmux");
+  writeFileSync(path, [
+    "#!/bin/sh",
+    "utf8=0",
+    "if [ \"$1\" = \"-u\" ]; then utf8=1; shift; fi",
+    "if [ \"$1\" = \"-S\" ]; then shift 2; fi",
+    "case \"$1\" in",
+    "  list-sessions)",
+    "    rows='alpha\\t1\\t0\\t1710000000\\t1710003600\\tclaude\\t/workspace/alpha\\teditor\\tbox.local\\tclaude | fix tests\\nbeta\\t1\\t0\\t\\t\\tzsh\\t/workspace/beta\\tzsh\\tbox.local\\tbox.local\\n'",
+    "    if [ \"$utf8\" = 1 ]; then printf \"$rows\"; else printf \"$rows\" | tr '\\t' '_'; fi",
+    "    ;;",
+    "  list-clients) ;;",
+    "  *) exit 64 ;;",
+    "esac",
+  ].join("\n") + "\n", "utf8");
+  chmodSync(path, 0o755);
+  return path;
+}
+
+test("keeps the window name and pane title when it adds each session's clients", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "tmux-clients-"));
+  const socketPath = join(directory, "tmux.sock");
+  const previous = {
+    OPENSCOUT_TMUX_BIN: process.env.OPENSCOUT_TMUX_BIN,
+    OPENSCOUT_PROBES_SOCKET: process.env.OPENSCOUT_PROBES_SOCKET,
+  };
+  process.env.OPENSCOUT_TMUX_BIN = writeFakeTmux(directory);
+  // Read locally: a running scoutd would answer with this host's own sessions.
+  process.env.OPENSCOUT_PROBES_SOCKET = join(directory, "missing-probes.sock");
+  resetScoutdProbeClientForTests();
+  invalidateTmuxSessions({ socketPath });
+  try {
+    const snapshot = await readTmuxSessionsWithClients({ env: {}, socketPath, maxAgeMs: 0 });
+    expect(snapshot.value?.map((session) => ({
+      name: session.name,
+      windowName: session.windowName,
+      paneTitle: session.paneTitle,
+      clients: session.clients,
+      apps: session.apps,
+    }))).toEqual([
+      { name: "alpha", windowName: "editor", paneTitle: "claude | fix tests", clients: 0, apps: [] },
+      { name: "beta", windowName: "zsh", paneTitle: null, clients: 0, apps: [] },
+    ]);
+  } finally {
+    invalidateTmuxSessions({ socketPath });
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    resetScoutdProbeClientForTests();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("parses colorized zellij session inventory", () => {
