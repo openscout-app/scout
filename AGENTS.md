@@ -77,6 +77,9 @@ person whose machine it is.
 
 ## Commits and pull requests
 
+- Do not create or comment on GitHub issues unless the operator explicitly
+  asks. Report internal failures in the handoff or through private Scout
+  feedback when authorized. Public issues are not an agent work queue.
 - Follow the [branching policy](CONTRIBUTING.md#branch-from-canonical-main).
   Local `main` tracks canonical `upstream/main`; fork `origin/main` is a
   fast-forward mirror. Make changes in topic worktrees and target canonical
