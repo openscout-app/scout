@@ -40,8 +40,8 @@ const controls = [
     ['if ([...liveInvocations].some(active => active.active && active.root.id === root.id\n      && active !== invocations.getStore())) refuse("migration_holder_active");', ''],
   ]},
   {id: "root-barriers-omitted", test: "the full 320 MiB reservation", edits: [[
-    'if (id(fstatSync(fd)) !== root.id) refuse("root_replaced"); fsyncSync(fd); this.check(root);',
-    'if (id(fstatSync(fd)) !== root.id) refuse("root_replaced"); void fd; this.check(root);',
+    'if (id(fstatSync(fd)) !== this.physicalRootId) refuse("root_replaced"); fsyncSync(fd); this.check(root);',
+    'if (id(fstatSync(fd)) !== this.physicalRootId) refuse("root_replaced"); void fd; this.check(root);',
   ]]},
   {id: "cleanup-false-positive", test: "failed post-receipt cleanup refuses", edits: [['!existsSync(join(root.path, CUT_DIRECTORY)) && this.cutReceipt(root, barrier, cutHash)', 'this.cutReceipt(root, barrier, cutHash)']]},
   {id: "half-reservation", test: "the full 320 MiB reservation", edits: [
