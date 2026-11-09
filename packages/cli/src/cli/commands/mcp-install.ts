@@ -61,7 +61,7 @@ function isExecutable(filePath: string | undefined | null): filePath is string {
   }
 }
 
-function resolveExecutableFromSearchPath(
+export function resolveExecutableFromSearchPath(
   names: string[],
   env: NodeJS.ProcessEnv,
 ): string | null {

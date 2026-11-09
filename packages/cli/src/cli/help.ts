@@ -122,6 +122,7 @@ export function renderScoutHelp(version = "0.2.19", detail = false, extensions: 
     "macOS app:",
     "  scout install         # download + install Scout.app from the latest signed release",
     "  scout install --check # compare the installed app against the latest release",
+    "  scout uninstall --dry-run  # what removing Scout would take out (data is kept)",
     "",
     "Lifecycle:",
     '  scout ask --fyi --to hudson "branch pushed"         # FYI only; never creates work',
