@@ -58,12 +58,27 @@ describe("callback sandbox", () => {
   });
 
   test("loops, promises that never settle and oversized allocations are stopped", async () => {
-    expect(await run(`() => { for (;;) {} }`, {}, 300)).toMatchObject({ ok: false, error: "InternalError: interrupted" });
-    expect(await runModule(`for (;;) {}\nexport default () => 1;`, {}, 300)).toMatchObject({ ok: false, error: "InternalError: interrupted" });
+    const computing = "the callback computed for more than 100 ms without awaiting";
+    expect(await run(`() => { for (;;) {} }`, {}, 300)).toMatchObject({ ok: false, error: computing });
+    expect(await runModule(`for (;;) {}\nexport default () => 1;`, {}, 300)).toMatchObject({ ok: false, error: computing });
     expect(await run(`() => new Promise(() => {})`, {}, 300)).toMatchObject({ ok: false, error: "the callback did not finish within 0.3s" });
     expect(await runModule(`await new Promise(() => {});\nexport default () => 1;`, {}, 300))
       .toMatchObject({ ok: false, error: "the callback did not finish within 0.3s" });
     expect(await run(`() => new ArrayBuffer(256 * 1024 * 1024)`)).toMatchObject({ ok: false, error: "InternalError: out of memory" });
+  });
+
+  test("a loop holds the event loop for one slice, not the whole budget", async () => {
+    const started = performance.now();
+    expect(await run(`() => { for (;;) {} }`, {}, 10_000))
+      .toMatchObject({ ok: false, error: "the callback computed for more than 100 ms without awaiting" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  test("work split by awaits may take longer than one slice in total", async () => {
+    const tick = async () => undefined;
+    const spin = `const until = Date.now() + 60; while (Date.now() < until) {}`;
+    expect(await run(`async ({ scout }) => { for (let i = 0; i < 4; i++) { ${spin} await scout.tick(); } console.log("ok"); }`, { tick }))
+      .toEqual({ ok: true, logs: ["ok"] });
   });
 
   test("log output is capped", async () => {

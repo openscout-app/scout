@@ -1,6 +1,5 @@
 import {
   newQuickJSWASMModuleFromVariant,
-  shouldInterruptAfterDeadline,
   type QuickJSContext,
   type QuickJSHandle,
   type QuickJSRuntime,
@@ -20,6 +19,11 @@ export type SandboxLimits = {
   stackBytes: number;
   /** Wall-clock budget for the whole run, including time spent awaiting host functions. */
   timeoutMs: number;
+  /**
+   * The longest the guest may compute without awaiting. Guest code runs on the
+   * runtime's event loop, so this bounds how long one callback can stall it.
+   */
+  sliceMs: number;
   logLines: number;
   logLineChars: number;
 };
@@ -28,6 +32,7 @@ export const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
   memoryBytes: 32 * 1024 * 1024,
   stackBytes: 512 * 1024,
   timeoutMs: 10_000,
+  sliceMs: 100,
   logLines: 20,
   logLineChars: 500,
 };
@@ -59,8 +64,9 @@ function toGuest(context: QuickJSContext, value: unknown): QuickJSHandle {
   }
 }
 
-function drainJobs(runtime: QuickJSRuntime): void {
+function drainJobs(runtime: QuickJSRuntime, enter: () => void): void {
   if (!runtime.alive) return;
+  enter();
   const result = runtime.executePendingJobs();
   if (result.error) result.error.dispose();
 }
@@ -85,7 +91,20 @@ export async function runSandboxedFunction(input: {
   const runtime = quickjs.newRuntime();
   runtime.setMemoryLimit(limits.memoryBytes);
   runtime.setMaxStackSize(limits.stackBytes);
-  runtime.setInterruptHandler(shouldInterruptAfterDeadline(deadline));
+  // Every synchronous entry into the guest starts a slice. The interrupt
+  // handler ends the run when a slice or the whole budget runs out.
+  let sliceStartedAt = Date.now();
+  let slicedOut = false;
+  const enter = () => { sliceStartedAt = Date.now(); };
+  runtime.setInterruptHandler(() => {
+    const now = Date.now();
+    if (now > deadline) return true;
+    if (now - sliceStartedAt > limits.sliceMs) {
+      slicedOut = true;
+      return true;
+    }
+    return false;
+  });
   const context = runtime.newContext();
   const inFlight = new Set<Promise<void>>();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -104,6 +123,7 @@ export async function runSandboxedFunction(input: {
     context.setProp(context.global, "console", consoleObject);
     consoleObject.dispose();
 
+    enter();
     const argument = toGuest(context, input.data);
     const scoutObject = context.newObject();
     for (const [name, fn] of Object.entries(input.scout)) {
@@ -115,6 +135,7 @@ export async function runSandboxedFunction(input: {
           .then(
             (value) => {
               if (!context.alive) return;
+              enter();
               const result = toGuest(context, value);
               deferred.resolve(result);
               if (result !== context.undefined) result.dispose();
@@ -128,7 +149,7 @@ export async function runSandboxedFunction(input: {
           )
           .finally(() => {
             inFlight.delete(call);
-            drainJobs(runtime);
+            drainJobs(runtime, enter);
           });
         inFlight.add(call);
         return deferred.handle;
@@ -143,12 +164,16 @@ export async function runSandboxedFunction(input: {
       timer = setTimeout(() => resolve("timeout"), Math.max(0, deadline - Date.now()));
     });
     const tooLong = `the callback did not finish within ${limits.timeoutMs / 1000}s`;
+    const guestError = (handle: QuickJSHandle) => slicedOut
+      ? `the callback computed for more than ${limits.sliceMs} ms without awaiting`
+      : describeGuestError(context, handle);
 
     // The callback file is an ES module whose default export is the function.
     // No module loader is set, so an import fails.
+    enter();
     const evaluated = context.evalCode(input.code, "callback.js", { type: "module" });
     if (evaluated.error) {
-      const error = describeGuestError(context, evaluated.error);
+      const error = guestError(evaluated.error);
       evaluated.error.dispose();
       argument.dispose();
       return { ok: false, error, logs };
@@ -156,14 +181,14 @@ export async function runSandboxedFunction(input: {
     // Evaluation returns the module's exports, or a promise for them.
     const loading = context.resolvePromise(evaluated.value);
     evaluated.value.dispose();
-    drainJobs(runtime);
+    drainJobs(runtime, enter);
     const loaded = await Promise.race([loading, timedOut]);
     if (loaded === "timeout") {
       argument.dispose();
       return { ok: false, error: tooLong, logs };
     }
     if (loaded.error) {
-      const error = describeGuestError(context, loaded.error);
+      const error = guestError(loaded.error);
       loaded.error.dispose();
       argument.dispose();
       return { ok: false, error, logs };
@@ -175,18 +200,19 @@ export async function runSandboxedFunction(input: {
       argument.dispose();
       return { ok: false, error: "the callback file must export a default function", logs };
     }
+    enter();
     const called = context.callFunction(fn, context.undefined, argument);
     fn.dispose();
     argument.dispose();
     if (called.error) {
-      const error = describeGuestError(context, called.error);
+      const error = guestError(called.error);
       called.error.dispose();
       return { ok: false, error, logs };
     }
     const returned = called.value;
     const settled = context.resolvePromise(returned);
     returned.dispose();
-    drainJobs(runtime);
+    drainJobs(runtime, enter);
     const outcome = await Promise.race([settled, timedOut]);
     if (outcome === "timeout") return { ok: false, error: tooLong, logs };
     // Calls the code started but did not await still count toward the run.
@@ -198,7 +224,7 @@ export async function runSandboxedFunction(input: {
       }
     }
     if (outcome.error) {
-      const error = describeGuestError(context, outcome.error);
+      const error = guestError(outcome.error);
       outcome.error.dispose();
       return { ok: false, error, logs };
     }
