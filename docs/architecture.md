@@ -182,6 +182,34 @@ it starts and restarts broker, web, edge, and menu children. This distinction is
 why the Rust binary is named `scoutd`, while the Bun orchestrator keeps the
 `scout-base` process name.
 
+### Apps On Top Of The Service
+
+The service runs without any app, and any number of Scout.app builds can run on
+top of it: the installed one and development builds from a checkout. Quitting,
+rebuilding or relaunching an app does not touch the service, and a service
+restart does not quit an app.
+
+The `apps` section of `settings.json` names the defaults the service uses:
+
+```json
+{
+  "apps": {
+    "scoutAppPath": "/Applications/Scout.app",
+    "menu": { "enabled": true, "bundlePath": null }
+  }
+}
+```
+
+`scoutAppPath` is the host's Scout.app. A null value means
+`/Applications/Scout.app`. `menu.bundlePath` is the menu bar helper that
+`scout-base` keeps running. A null value means the helper inside `scoutAppPath`.
+Paths must be absolute. `scout-base` never opens the helper by bundle
+identifier, because every build shares that identifier. It leaves the helpers of
+other bundles alone. A helper that crashes comes back with backoff. A helper
+that quits stays down until it is opened again or the service restarts.
+`OPENSCOUT_BASE_MENU_ENABLED=0` turns supervision off, and
+`OPENSCOUT_MENU_BUNDLE_PATH` overrides the bundle for one process.
+
 ### CLI
 
 The operator's main interface. It sends route intent such as `--to hudson` or `--channel triage` to the runtime and renders broker receipts, remediation actions, and orientation views. Target metadata belongs in structured command fields, not in the message body.

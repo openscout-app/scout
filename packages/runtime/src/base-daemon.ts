@@ -4,7 +4,7 @@ import { createRoomListeningSupervisor } from "./room-listening-supervisor.js";
 import { webStartRequestHeaders } from "./web-start-context.js";
 import type { RuntimeErrnoError } from "./portable-types.js";
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, writeFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, realpathSync, writeFileSync, statSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,7 +69,16 @@ import {
 import { openScoutNetworkServiceEnvironment } from "./open-scout-network.js";
 import { readTailscaleSelfWebHosts } from "./tailscale.js";
 import { createBaseEdgeRefresh } from "./base-edge-refresh.js";
-import { resolveOpenScoutLocalEdgeDirectory } from "./support-paths.js";
+import { resolveOpenScoutLocalEdgeDirectory, resolveOpenScoutSupportPaths } from "./support-paths.js";
+import { createAppsSettingsReader } from "./apps-settings.js";
+import {
+  MENU_HELPER_RECONCILE_INTERVAL_MS,
+  MenuHelperSupervisor,
+  hasMenuHelperCrashReport,
+  openMenuHelperBundle,
+  resolveMenuHelperDesiredState,
+} from "./menu-helper-supervisor.js";
+import { readAllProcessCommandRows } from "./system-probes/ps.js";
 import { selectInstanceAwareEntrypoint } from "./instance.js";
 
 import { loadOpenScoutRuntimeBuildIdentity } from "./build-info.js";
@@ -93,7 +102,6 @@ const MESH_BRIDGE_UNCONFIGURED_RETRY_MS = 5 * 60_000;
 // Backoff resets only after the bridge has stayed up this long, so a bridge
 // that crashes every few seconds keeps backing off.
 const MESH_BRIDGE_STABLE_AFTER_MS = 60_000;
-const MENU_BUNDLE_ID = "app.openscout.scout.menu";
 const PROCESS_NAME = "scout-base";
 // openscout-runtime.mjs runs broker-daemon in-process (no second bun child),
 // so the process spawned here IS the broker; name it accordingly for ps/doctor.
@@ -125,6 +133,7 @@ let webStartInFlight = false;
 let parentWatcher: ReturnType<typeof setInterval> | null = null;
 let pairingProcess: ChildProcess | null = null;
 let pairingReconcileTimer: NodeJS.Timeout | null = null;
+let menuHelperReconcileTimer: NodeJS.Timeout | null = null;
 let pairingReconcileInFlight = false;
 let pairingRestartGeneration: number | null = null;
 let pairingRestartDelayMs = RESTART_MIN_DELAY_MS;
@@ -654,46 +663,52 @@ function scheduleWebStartRetry(): void {
   webStartRetryTimer.unref();
 }
 
-function findRepoMenuBundle(): string | null {
-  let current = dirname(fileURLToPath(import.meta.url));
-  while (true) {
-    const distRoot = resolve(current, "apps", "macos", "dist");
-    const candidates = [
-      resolve(distRoot, "Scout.app", "Contents", "Library", "LoginItems", "ScoutMenu.app"),
-      // Backward compatibility for older builds that emitted a standalone
-      // helper. Current builds embed the helper in Scout.app, so prefer that
-      // artifact and never launch a stale sibling when both happen to exist.
-      resolve(distRoot, "ScoutMenu.app"),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate;
+// The menu bar helper is supervised here, apart from any Scout.app: quitting or
+// rebuilding an app leaves it running, and a helper that crashes comes back.
+// settings.json `apps` names the bundle; see menu-helper-supervisor.ts.
+function startMenuHelperSupervision(): void {
+  const readAppsSettings = createAppsSettingsReader(resolveOpenScoutSupportPaths().settingsPath);
+  const bundlePathAliases = (bundlePath: string): string[] => {
+    try {
+      const real = realpathSync(bundlePath);
+      return real === bundlePath ? [] : [real];
+    } catch {
+      return [];
     }
-    const parent = dirname(current);
-    if (parent === current) {
-      return null;
-    }
-    current = parent;
-  }
-}
-
-function startMenuBarApp(): void {
-  if (process.env.OPENSCOUT_BASE_MENU_ENABLED === "0" || process.platform !== "darwin") {
-    return;
-  }
-
-  const explicitBundle = process.env.OPENSCOUT_MENU_BUNDLE_PATH?.trim();
-  const repoBundle = explicitBundle && existsSync(explicitBundle) ? explicitBundle : findRepoMenuBundle();
-  const args = repoBundle ? [repoBundle] : ["-b", MENU_BUNDLE_ID];
-  const child = spawn("open", args, {
-    stdio: ["ignore", logFile("menu.stdout.log"), logFile("menu.stderr.log")],
+  };
+  const supervisor = new MenuHelperSupervisor({
+    desiredState: () => resolveMenuHelperDesiredState({
+      settings: readAppsSettings(),
+      env: process.env,
+      platform: process.platform,
+      isProd: openScoutInstanceBootstrap.layout.isProd,
+      exists: existsSync,
+    }),
+    bundlePathAliases,
+    listProcesses: () => readAllProcessCommandRows(),
+    isAlive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return (error as RuntimeErrnoError).code === "EPERM";
+      }
+    },
+    crashed: (helper) => hasMenuHelperCrashReport(helper),
+    open: (bundlePath) => openMenuHelperBundle(bundlePath),
+    now: () => Date.now(),
+    log,
+    warn,
   });
-  child.once("exit", (code) => {
-    if (code === 0) {
-      log("menu bar app launch requested", { target: repoBundle ?? MENU_BUNDLE_ID });
-      return;
-    }
-    warn("menu bar app launch failed", { target: repoBundle ?? MENU_BUNDLE_ID, code });
-  });
+  const tick = () => {
+    if (shuttingDown) return;
+    void supervisor.reconcile().catch((error) => {
+      warn("menu helper reconcile failed", { error: error instanceof Error ? error.message : String(error) });
+    });
+  };
+  tick();
+  menuHelperReconcileTimer = setInterval(tick, MENU_HELPER_RECONCILE_INTERVAL_MS);
+  menuHelperReconcileTimer.unref();
 }
 type PairingControllerCommand = {
   command: string;
@@ -1213,8 +1228,13 @@ async function shutdown(exitCode = 0): Promise<void> {
     clearInterval(meshBridgeReconcileTimer);
     meshBridgeReconcileTimer = null;
   }
-  // Broker owns scout-web; base owns pairing, the mesh bridge and the edge children. Scout.app
-  // owns only its embedded helper through LaunchServices.
+  // The helper keeps running: it is the host's menu, not part of this process.
+  if (menuHelperReconcileTimer) {
+    clearInterval(menuHelperReconcileTimer);
+    menuHelperReconcileTimer = null;
+  }
+  // Broker owns scout-web; base owns pairing, the mesh bridge and the edge children. Base
+  // supervises the menu helper, but LaunchServices owns that process, so it is left running.
   const activeCaddyProcess = caddyProcess;
   stopEdgeProcesses();
   await Promise.all([
@@ -1304,5 +1324,5 @@ roomListeningSupervisor.start();
 await startLocalEdge();
 startPairingSupervision();
 startMeshBridgeSupervision();
-startMenuBarApp();
+startMenuHelperSupervision();
 void startWebWhenBrokerIsReady();
