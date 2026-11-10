@@ -832,6 +832,27 @@ describe("explicit completion ask options", () => {
   });
 });
 
+describe("ask --callback", () => {
+  test("takes a file, resolved now and read when the ask is sent", () => {
+    const parsed = parseAskCommandOptions(["--to", "researcher", "--callback", "open-page.js", "Write the study"], "/tmp/work");
+    expect(parsed).toMatchObject({ callbackFile: "/tmp/work/open-page.js", targetLabel: "researcher", message: "Write the study" });
+    expect(parsed.task).not.toHaveProperty("callback");
+    expect(parseAskCommandOptions(["--project", ".", "--callback=/hooks/open-page.js", "Run the suite"], "/tmp"))
+      .toMatchObject({ callbackFile: "/hooks/open-page.js", message: "Run the suite" });
+  });
+
+  test("refuses an empty, repeated or misplaced callback", () => {
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "", "hi"], "/tmp")).toThrow();
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "a.js", "--callback", "b.js", "hi"], "/tmp"))
+      .toThrow("--callback may appear only once");
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback-file", "a.js", "hi"], "/tmp")).toThrow();
+    expect(() => parseAskCommandOptions(["--ref", "task-1", "--callback", "a.js", "hi"], "/tmp"))
+      .toThrow("--callback belongs");
+    expect(() => parseAskCommandOptions(["--operator", "--callback", "a.js", "hi"], "/tmp"))
+      .toThrow("--callback belongs");
+  });
+});
+
 
 test("positional route rewrites preserve flags and shell-quote literal payload", () => {
   expect(() => parseAskCommandOptions(["--as", "sender", "@worker", "--fyi", "--image", "shot.png", "news $HOME"], "/repo"))

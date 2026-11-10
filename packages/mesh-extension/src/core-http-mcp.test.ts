@@ -141,3 +141,11 @@ test('HTTP ask preserves the caller traceparent without asserting origin authori
   expect(request.origin).toBeUndefined();
   expect(request.invocationMetadata.completionRelation).toBeUndefined();
 });
+
+test('HTTP ask refuses a callback file path, which is host-local', async () => {
+  const f = fixture();
+  const before = f.calls.length;
+  await expect(f.adapter.call('ask', { to: 'id:target', body: 'write the study', callback: './open-page.js' }))
+    .rejects.toThrow('callback paths are host-local');
+  expect(f.calls).toHaveLength(before);
+});

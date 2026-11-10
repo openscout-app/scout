@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { taskNotificationPolicy, validateTaskAsk, validateTaskReply, type ScoutTaskAsk } from "./tasks.js";
 
 const task = (patch: Partial<ScoutTaskAsk> = {}): ScoutTaskAsk => ({ version: 1, ...patch });
+const CALLBACK = "export default ({ result, scout }) => scout.open(result.files[0]);";
 test.each([
   [{}, {}, "exactly one"],
   [{ operator: true }, { to: "worker" }, "exactly one"],
@@ -23,6 +24,14 @@ test.each([
   [{ operator: true, window: 10 }, {}, "--default-action"],
   [{ operator: true, window: 0 }, {}, "--window"],
   [{ operator: true, window: NaN }, {}, "--window"],
+  [{ callback: { code: "  " } }, { to: "worker" }, "--callback takes a JavaScript module file"],
+  [{ callback: "open" as never }, { to: "worker" }, "--callback takes a JavaScript module file"],
+  [{ callback: { code: "x".repeat(16_001) } }, { to: "worker" }, "up to 16000 characters"],
+  [{ callback: { code: CALLBACK }, fyi: true }, { to: "worker" }, "--callback belongs"],
+  [{ callback: { code: CALLBACK }, ref: "task" }, {}, "--callback belongs"],
+  [{ callback: { code: CALLBACK }, ref: "task", cancel: true }, {}, "--callback belongs"],
+  [{ callback: { code: CALLBACK }, operator: true }, {}, "--callback belongs"],
+  [{ callback: { code: CALLBACK }, fyi: true }, { channel: "shared" }, "--callback belongs"],
 ] as const)("invalid ask %# fails before effects", (patch, route, error) => {
   expect(() => validateTaskAsk(task(patch), route)).toThrow(error);
 });
@@ -36,6 +45,9 @@ test.each([
   [{ operator: true, defaultAction: "yes", options: ["yes", "no"] }, {}],
   [{ operator: true, fyi: true, notify: true }, {}],
   [{ fyi: true }, { channel: "shared" }],
+  [{ callback: { code: CALLBACK } }, { to: "worker" }],
+  [{ callback: { code: CALLBACK } }, { capability: true }],
+  [{ callback: { code: CALLBACK }, continue: "task" }, { execution: true }],
 ] as const)("valid ask %#", (patch, route) => {
   expect(() => validateTaskAsk(task(patch), route)).not.toThrow();
 });
