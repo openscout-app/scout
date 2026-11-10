@@ -102,6 +102,9 @@ describe("ask --callback", () => {
     const acked = flight({ metadata: { dispatchAck: { nodeId: "node-remote" } } });
     expect(callbackRunsHere(acked, unnamed, "node-home", localAgent)).toBe(false);
     expect(callbackRunsHere(acked, unnamed, "node-remote")).toBe(true);
+    // A session target with an endpoint and no agent card, ended before dispatch.
+    expect(callbackRunsHere(flight(), unnamed, "node-home", undefined, "node-home")).toBe(true);
+    expect(callbackRunsHere(flight(), unnamed, "node-home", undefined, "node-remote")).toBe(false);
     expect(callbackRunsHere(flight(), invocation({ metadata: {} }), "node-home")).toBe(false);
     expect(callbackRunsHere(flight(), invocation(), "")).toBe(false);
   });

@@ -1564,7 +1564,13 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
       .catch((error) => console.error("[openscout-runtime] external result delivery failed", error));
     // `ask --callback`: the asker's sandboxed function, run only on the
     // worker's runtime, once per terminal transition.
-    if (invocation) void runTaskCallback({ flight, invocation, nodeId, targetAgent: runtime.agent(invocation.targetAgentId) })
+    if (invocation) void runTaskCallback({
+      flight,
+      invocation,
+      nodeId,
+      targetAgent: runtime.agent(invocation.targetAgentId),
+      targetEndpointNodeId: homeEndpointForAgent(runtime.snapshot(), invocation.targetAgentId)?.nodeId,
+    })
       .then((run) => { if (run) for (const line of describeTaskCallbackRun(invocation.id, run)) console.log(line); })
       .catch((error) => console.error("[openscout-runtime] task callback failed", error));
     // Role lifecycle (orchestrator post_ask_summary, etc.). Best-effort; never

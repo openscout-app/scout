@@ -64,12 +64,8 @@ function toGuest(context: QuickJSContext, value: unknown): QuickJSHandle {
   }
 }
 
-function drainJobs(runtime: QuickJSRuntime, enter: () => void): void {
-  if (!runtime.alive) return;
-  enter();
-  const result = runtime.executePendingJobs();
-  if (result.error) result.error.dispose();
-}
+/** Jobs run per turn of the host event loop, so a guest job chain cannot starve it. */
+const JOB_BATCH = 256;
 
 /**
  * Evaluates `code` as an ES module and calls its default export with `data`
@@ -93,18 +89,42 @@ export async function runSandboxedFunction(input: {
   runtime.setMaxStackSize(limits.stackBytes);
   // Every synchronous entry into the guest starts a slice. The interrupt
   // handler ends the run when a slice or the whole budget runs out.
+  // An overrun ends the run for good: guest code that catches the interrupt
+  // is not resumed, and the run settles through `stopped`.
   let sliceStartedAt = Date.now();
   let slicedOut = false;
+  let halted = false;
+  let stop: (reason: "slice" | "timeout") => void = () => {};
+  const stopped = new Promise<"slice" | "timeout">((resolve) => { stop = resolve; });
+  const halt = (reason: "slice" | "timeout") => {
+    if (!halted) {
+      halted = true;
+      if (reason === "slice") slicedOut = true;
+      stop(reason);
+    }
+    return true;
+  };
   const enter = () => { sliceStartedAt = Date.now(); };
   runtime.setInterruptHandler(() => {
+    if (halted) return true;
     const now = Date.now();
-    if (now > deadline) return true;
-    if (now - sliceStartedAt > limits.sliceMs) {
-      slicedOut = true;
-      return true;
-    }
+    if (now > deadline) return halt("timeout");
+    if (now - sliceStartedAt > limits.sliceMs) return halt("slice");
     return false;
   });
+  let drainScheduled = false;
+  const drainJobs = (): void => {
+    if (halted || !runtime.alive) return;
+    enter();
+    const result = runtime.executePendingJobs(JOB_BATCH);
+    if (result.error) {
+      result.error.dispose();
+    } else if (result.value >= JOB_BATCH && !drainScheduled) {
+      // More jobs may be queued: finish them on a later turn.
+      drainScheduled = true;
+      setImmediate(() => { drainScheduled = false; drainJobs(); });
+    }
+  };
   const context = runtime.newContext();
   const inFlight = new Set<Promise<void>>();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -134,22 +154,26 @@ export async function runSandboxedFunction(input: {
           .then(() => fn(...args))
           .then(
             (value) => {
-              if (!context.alive) return;
+              if (halted || !context.alive) return;
               enter();
               const result = toGuest(context, value);
               deferred.resolve(result);
               if (result !== context.undefined) result.dispose();
             },
             (error: unknown) => {
-              if (!context.alive) return;
+              if (halted || !context.alive) return;
+              enter();
               const guestError = context.newError(error instanceof Error ? error.message : String(error));
               deferred.reject(guestError);
               guestError.dispose();
             },
           )
+          // Settling into a halted guest can throw; the run reports through
+          // `stopped`, and nothing here may reject unhandled.
+          .catch(() => {})
           .finally(() => {
             inFlight.delete(call);
-            drainJobs(runtime, enter);
+            drainJobs();
           });
         inFlight.add(call);
         return deferred.handle;
@@ -161,12 +185,13 @@ export async function runSandboxedFunction(input: {
     scoutObject.dispose();
 
     const timedOut = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), Math.max(0, deadline - Date.now()));
+      timer = setTimeout(() => { halt("timeout"); resolve("timeout"); }, Math.max(0, deadline - Date.now()));
     });
+    const slice = `the callback computed for more than ${limits.sliceMs} ms without awaiting`;
+    const ended = stopped.then((reason) => reason === "slice" ? "slice" as const : "timeout" as const);
     const tooLong = `the callback did not finish within ${limits.timeoutMs / 1000}s`;
-    const guestError = (handle: QuickJSHandle) => slicedOut
-      ? `the callback computed for more than ${limits.sliceMs} ms without awaiting`
-      : describeGuestError(context, handle);
+    const guestError = (handle: QuickJSHandle) => slicedOut ? slice : describeGuestError(context, handle);
+    const stoppedError = (reason: "slice" | "timeout") => reason === "slice" ? slice : tooLong;
 
     // The callback file is an ES module whose default export is the function.
     // No module loader is set, so an import fails.
@@ -181,11 +206,11 @@ export async function runSandboxedFunction(input: {
     // Evaluation returns the module's exports, or a promise for them.
     const loading = context.resolvePromise(evaluated.value);
     evaluated.value.dispose();
-    drainJobs(runtime, enter);
-    const loaded = await Promise.race([loading, timedOut]);
-    if (loaded === "timeout") {
+    drainJobs();
+    const loaded = await Promise.race([loading, timedOut, ended]);
+    if (loaded === "timeout" || loaded === "slice") {
       argument.dispose();
-      return { ok: false, error: tooLong, logs };
+      return { ok: false, error: stoppedError(loaded), logs };
     }
     if (loaded.error) {
       const error = guestError(loaded.error);
@@ -212,16 +237,22 @@ export async function runSandboxedFunction(input: {
     const returned = called.value;
     const settled = context.resolvePromise(returned);
     returned.dispose();
-    drainJobs(runtime, enter);
-    const outcome = await Promise.race([settled, timedOut]);
-    if (outcome === "timeout") return { ok: false, error: tooLong, logs };
+    drainJobs();
+    const outcome = await Promise.race([settled, timedOut, ended]);
+    if (outcome === "timeout" || outcome === "slice") return { ok: false, error: stoppedError(outcome), logs };
     // Calls the code started but did not await still count toward the run.
     while (inFlight.size > 0) {
-      if (await Promise.race([Promise.allSettled([...inFlight]), timedOut]) === "timeout") {
+      const waited = await Promise.race([Promise.allSettled([...inFlight]), timedOut, ended]);
+      if (waited === "timeout" || waited === "slice") {
         if (!outcome.error) outcome.value.dispose();
         else outcome.error.dispose();
-        return { ok: false, error: tooLong, logs };
+        return { ok: false, error: stoppedError(waited), logs };
       }
+    }
+    if (halted) {
+      if (!outcome.error) outcome.value.dispose();
+      else outcome.error.dispose();
+      return { ok: false, error: slicedOut ? slice : tooLong, logs };
     }
     if (outcome.error) {
       const error = guestError(outcome.error);
@@ -231,6 +262,7 @@ export async function runSandboxedFunction(input: {
     outcome.value.dispose();
     return { ok: true, logs };
   } finally {
+    halted = true;
     if (timer) clearTimeout(timer);
     // A run that timed out may still hold promise handles; the wasm instance
     // is discarded with this run, so a failed teardown is not an error.

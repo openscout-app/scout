@@ -74,6 +74,20 @@ describe("callback sandbox", () => {
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
+  test("guest code that catches its own interrupt is not resumed", async () => {
+    const started = performance.now();
+    const respin = `() => new Promise(() => { const spin = () => { (async () => { for (;;) {} })().catch(spin); }; spin(); })`;
+    expect(await run(respin, {}, 1_500))
+      .toMatchObject({ ok: false, error: "the callback computed for more than 100 ms without awaiting" });
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
+  test("a host call that fails after a long wait still settles the run", async () => {
+    const slow = async () => { await new Promise((resolve) => setTimeout(resolve, 150)); throw new Error("no such file"); };
+    expect(await run(`async ({ scout }) => { try { await scout.slow(); } catch (error) { console.log(error.message); } }`, { slow }))
+      .toEqual({ ok: true, logs: ["no such file"] });
+  });
+
   test("work split by awaits may take longer than one slice in total", async () => {
     const tick = async () => undefined;
     const spin = `const until = Date.now() + 60; while (Date.now() < until) {}`;
