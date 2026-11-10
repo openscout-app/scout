@@ -197,6 +197,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/collaboration/events": "local",
   "POST /v1/collaboration/records": "local",
   "POST /v1/collaboration/records/:id/invoke": "local",
+  "POST /v1/work/claim": "local",
   "POST /v1/work/lifecycles": "local",
   "POST /v1/work/move": "local",
   "POST /v1/work/review": "local",

@@ -44,6 +44,11 @@ export type DurableCommitOptions = {
   enqueueProjection?: boolean;
 };
 
+export type CollaborationWriteOptions = DurableCommitOptions & {
+  /** Rewrite or refuse the record against the stored one, under the writer. */
+  reconcile?: (existing: CollaborationRecord | undefined, incoming: CollaborationRecord) => CollaborationRecord;
+};
+
 type DurableStore = {
   runWrite<T>(work: () => Promise<T>): Promise<T>;
   commitEntries(
@@ -599,16 +604,18 @@ export class BrokerDurableRecordStore {
 
   readonly recordCollaboration = async (
     record: CollaborationRecord,
-    options: DurableCommitOptions = {},
+    options: CollaborationWriteOptions = {},
   ): Promise<BrokerJournalEntry[]> => {
     assertValidCollaborationRecord(record);
+    const { reconcile, ...commitOptions } = options;
     return this.options.durableStore.runWrite(async () => {
+      const next = reconcile ? reconcile(this.options.runtime.collaborationRecord(record.id), record) : record;
       return this.options.durableStore.commitEntries(
-        { kind: "collaboration.record", record },
+        { kind: "collaboration.record", record: next },
         async () => {
-          await this.options.runtime.upsertCollaboration(record);
+          await this.options.runtime.upsertCollaboration(next);
         },
-        options,
+        commitOptions,
       );
     });
   };

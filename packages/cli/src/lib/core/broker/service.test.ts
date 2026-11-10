@@ -51,6 +51,7 @@ import {
   sendScoutMessage,
   sendScoutMessageToAgentIds,
   updateScoutWorkItem,
+  ScoutWorkClaimConflictError,
   waitForScoutFlight,
   watchScoutMessages,
 } from "./service.ts";
@@ -2450,6 +2451,68 @@ describe("updateScoutWorkItem", () => {
     expect(typeof captured.postedRecord?.reviewRequestedAt).toBe("number");
     expect(captured.postedEvent?.kind).toBe("review_requested");
     expect(captured.postedEvent?.summary).toBe("Ready for operator review");
+  });
+});
+
+describe("updateScoutWorkItem claims", () => {
+  function claimBroker(claimResponse: { status: number; body: unknown }) {
+    const calls: string[] = [];
+    const claimBodies: unknown[] = [];
+    const snapshot = {
+      actors: {}, agents: {}, endpoints: {}, conversations: {}, messages: {}, flights: {},
+      collaborationRecords: {
+        "work-1": {
+          id: "work-1", kind: "work_item", title: "Fix the race", state: "open", acceptanceState: "none",
+          createdById: "operator", ownerId: "planner", nextMoveOwnerId: "planner", createdAt: 100, updatedAt: 100,
+        },
+      } as Record<string, Record<string, unknown>>,
+    };
+    globalThis.fetch = (async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/health") return jsonResponse({ ok: true, nodeId: "node-1", meshId: "mesh-1" });
+      if (request.method === "GET" && url.pathname === "/v1/node") return jsonResponse({ id: "node-1", capabilities: [] });
+      if (request.method === "GET" && url.pathname === "/v1/snapshot") return jsonResponse(snapshot);
+      if (request.method === "POST") calls.push(url.pathname);
+      if (request.method === "POST" && url.pathname === "/v1/work/claim") {
+        claimBodies.push(await request.json());
+        return jsonResponse(claimResponse.body, claimResponse.status);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/collaboration/records") return jsonResponse({ ok: true, recordId: "work-1" });
+      if (request.method === "POST" && url.pathname === "/v1/collaboration/events") return jsonResponse({ ok: true, eventId: "evt-1" });
+      return jsonResponse({ error: "not found" }, 404);
+    }) as typeof fetch;
+    return { calls, claimBodies };
+  }
+
+  test("taking an item claims it on the runtime before writing", async () => {
+    useIsolatedOpenScoutHome();
+    const claim = { claimantId: "agent-a", sessionAddress: "sess.aaaaaaaaaaaa", leaseGeneration: 1, claimedAt: 1, renewedAt: 1, leaseExpiresAt: 2 };
+    const { calls, claimBodies } = claimBroker({ status: 200, body: { workId: "work-1", action: "claim", claim, ownerId: "agent-a" } });
+    const updated = await updateScoutWorkItem({ workId: "work-1", actorId: "agent-a", ownerId: "agent-a", state: "working", sessionAddress: "sess.aaaaaaaaaaaa" });
+    expect(updated?.ownerId).toBe("agent-a");
+    expect(calls).toEqual(["/v1/work/claim", "/v1/collaboration/records", "/v1/collaboration/events"]);
+    expect(claimBodies[0]).toMatchObject({ workId: "work-1", action: "claim", actorId: "agent-a", sessionAddress: "sess.aaaaaaaaaaaa" });
+  });
+
+  test("a lost claim throws the runtime's conflict and writes nothing", async () => {
+    useIsolatedOpenScoutHome();
+    const conflict = {
+      error: "Claim refused: work-1 is claimed by agent-b for 14m more. Pick other work, ask agent-b to release it, or claim it after the lease ends.",
+      code: "work_claim_held", workId: "work-1", hint: "Pick other work, ask agent-b to release it, or claim it after the lease ends.",
+      holder: { claimantId: "agent-b", leaseGeneration: 1, claimedAt: 1, renewedAt: 1, leaseExpiresAt: 2 }, retryAfterMs: 840_000,
+    };
+    const { calls } = claimBroker({ status: 409, body: conflict });
+    let caught: unknown;
+    try {
+      await updateScoutWorkItem({ workId: "work-1", actorId: "agent-a", ownerId: "agent-a", state: "working" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ScoutWorkClaimConflictError);
+    expect((caught as Error).message).toBe(conflict.error);
+    expect((caught as ScoutWorkClaimConflictError).conflict.holder?.claimantId).toBe("agent-b");
+    expect(calls).toEqual(["/v1/work/claim"]);
   });
 });
 

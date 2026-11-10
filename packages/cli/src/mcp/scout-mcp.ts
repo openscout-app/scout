@@ -5628,10 +5628,12 @@ export function createScoutMcpServer(options: {
         resolvedCurrentDirectory,
         env,
       );
+      const sessionAddress = claimedSessionId(env);
       const workItem = await deps.updateWorkItem({
         ...work,
         actorId: resolvedSenderId,
         source: "scout-mcp",
+        ...(sessionAddress ? { sessionAddress } : {}),
       });
       const structuredContent = {
         currentDirectory: resolvedCurrentDirectory,
@@ -5679,7 +5681,7 @@ export function createScoutMcpServer(options: {
           targetId: z.string().optional(),
         }).optional().describe("What the item waits on. Required for waiting stations."),
         evidence: z.array(z.object({ kind: z.string(), ref: z.string() })).optional().describe("Links that back the move, for example a PR or a test run."),
-        claim: z.boolean().optional().describe("Become the owner before the checks run."),
+        claim: z.boolean().optional().describe("Claim the item before the checks run: you become the owner under a lease. Fails with a conflict naming the holder when someone else holds an active claim."),
         dryRun: z.boolean().optional(),
       }),
       outputSchema: workMoveResultSchema,
@@ -5688,8 +5690,10 @@ export function createScoutMcpServer(options: {
     async ({ currentDirectory, senderId, workId, to, note, waitingOn, evidence, claim, dryRun }) => {
       const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
       const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const sessionAddress = claim ? claimedSessionId(env) : undefined;
       const result = await (deps.moveWorkItem ?? moveScoutWorkItem)({
         workId, to, note, waitingOn, evidence, claim, dryRun, actorId: resolvedSenderId,
+        ...(sessionAddress ? { sessionAddress } : {}),
       });
       const structuredContent = {
         senderId: resolvedSenderId,

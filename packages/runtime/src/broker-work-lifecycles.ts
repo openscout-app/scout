@@ -41,9 +41,13 @@ import {
   type WorkReviewRequest,
   type WorkReviewResponse,
   type WorkStationId,
+  type WorkClaim,
+  type WorkClaimRequest,
+  type WorkClaimResponse,
 } from "@openscout/protocol";
 
 import type { BrokerJournalEntry } from "./broker-journal.js";
+import { applyWorkClaim, dropClaimWhenTerminal, planWorkClaim } from "./broker-work-claims.js";
 
 export interface WorkItemPosition {
   workId: string;
@@ -196,7 +200,7 @@ function placeRecord(
   };
   if (!next.waitingOn) delete next.waitingOn;
   if (next.completedAt === undefined) delete next.completedAt;
-  return { record: next, placement };
+  return { record: dropClaimWhenTerminal(next), placement };
 }
 
 export interface PlannedWorkMove {
@@ -210,10 +214,11 @@ export function planWorkMove(
   machine: CompiledWorkLifecycle,
   record: WorkItemRecord,
   request: WorkMoveRequest & { actorId: string },
-  context: { now: number; moveId: string; children?: WorkItemRecord[] },
+  context: { now: number; moveId: string; children?: WorkItemRecord[]; claim?: WorkClaim },
 ): PlannedWorkMove {
   const claimed = Boolean(request.claim) && record.ownerId !== request.actorId;
-  const base: WorkItemRecord = claimed ? { ...record, ownerId: request.actorId, nextMoveOwnerId: request.actorId } : record;
+  let base: WorkItemRecord = claimed ? { ...record, ownerId: request.actorId, nextMoveOwnerId: request.actorId } : record;
+  if (context.claim) base = { ...base, metadata: { ...(base.metadata ?? {}), workClaim: context.claim } };
   const decision = decideWorkMove(machine, {
     item: { ...base, placement: workPlacementOf(base) },
     to: request.to,
@@ -287,7 +292,7 @@ export function placeRuntimeChange(
     lifecycleId: machine.id, lifecycleVersion: machine.version, station: to,
     revision: (previous?.revision ?? 0) + 1, movedAt: context.now, ...(reviewPending ? { reviewPending: true } : {}),
   };
-  const record: WorkItemRecord = { ...after, metadata: { ...(after.metadata ?? {}), workPlacement: placement } };
+  const record: WorkItemRecord = dropClaimWhenTerminal({ ...after, metadata: { ...(after.metadata ?? {}), workPlacement: placement } });
   const move: WorkMoveRecord = {
     id: context.moveId, itemId: after.id, lifecycleId: machine.id, lifecycleVersion: machine.version,
     from, to, moverId: context.actorId, verdict: decision.verdict, decision: { ...decision, review: reviewPending ? "pending" : "not_needed" },
@@ -408,16 +413,17 @@ export class BrokerWorkLifecycleService {
     return record;
   }
 
-  private async commit(record: WorkItemRecord | undefined, event: CollaborationEvent): Promise<void> {
+  private async commit(record: WorkItemRecord | undefined, event: CollaborationEvent | undefined): Promise<void> {
     if (record) assertValidCollaborationRecord(record);
-    assertValidCollaborationEvent(event, record ?? this.options.runtime.collaborationRecord(event.recordId));
+    if (event) assertValidCollaborationEvent(event, record ?? this.options.runtime.collaborationRecord(event.recordId));
     const entries: BrokerJournalEntry[] = [
       ...(record ? [{ kind: "collaboration.record" as const, record }] : []),
-      { kind: "collaboration.event.record", event },
+      ...(event ? [{ kind: "collaboration.event.record" as const, event }] : []),
     ];
+    if (!entries.length) return;
     await this.options.durableStore.commitEntries(entries, async () => {
       if (record) await this.options.runtime.upsertCollaboration(record);
-      await this.options.runtime.appendCollaborationEvent(event);
+      if (event) await this.options.runtime.appendCollaborationEvent(event);
     });
   }
 
@@ -477,9 +483,30 @@ export class BrokerWorkLifecycleService {
       const machine = this.options.registry.forRecord(record);
       const children = this.options.childrenOf(record.id).filter((c): c is WorkItemRecord => c.kind === "work_item");
       const actorId = request.actorId?.trim() || this.options.operatorActorId;
-      const plan = planWorkMove(machine, record, { ...request, actorId }, { now: this.now(), moveId: this.options.createId("move"), children });
+      const now = this.now();
+      // A claiming move takes the lease first; a contended claim stops the move with a conflict.
+      const claim = request.claim
+        ? applyWorkClaim(record, { actorId, sessionAddress: request.sessionAddress, leaseMs: request.leaseMs }, now).claim
+        : undefined;
+      const plan = planWorkMove(machine, record, { ...request, actorId }, { now, moveId: this.options.createId("move"), children, claim });
       if (plan.event) await this.commit(plan.record, plan.event);
       return { decision: plan.decision, ...(plan.event && plan.move ? { move: plan.move } : {}), applied: Boolean(plan.record) };
+    });
+
+  /** Claim, renew or release an item's lease as one compare-and-set under the writer. */
+  readonly claim = (request: WorkClaimRequest): Promise<WorkClaimResponse> =>
+    this.options.durableStore.runWrite(async () => {
+      if (!request.workId?.trim()) throw new WorkLifecycleError(400, "workId is required.");
+      if (request.action !== undefined && !["claim", "renew", "release"].includes(request.action)) {
+        throw new WorkLifecycleError(400, "action is claim, renew or release.");
+      }
+      const record = this.workItem(request.workId.trim());
+      const actorId = request.actorId?.trim() || this.options.operatorActorId;
+      const plan = planWorkClaim(record, { ...request, actorId }, {
+        now: this.now(), eventId: this.options.createId("claim"), operatorActorId: this.options.operatorActorId,
+      });
+      await this.commit(plan.record, plan.event);
+      return plan.response;
     });
 
   readonly review = (request: WorkReviewRequest): Promise<WorkReviewResponse> =>

@@ -241,6 +241,7 @@ const expectedRouteInventory = [
   "POST /v1/trust/revoke",
   "POST /v1/web/restart",
   "POST /v1/web/start",
+  "POST /v1/work/claim",
   "POST /v1/work/lifecycles",
   "POST /v1/work/move",
   "POST /v1/work/review",
