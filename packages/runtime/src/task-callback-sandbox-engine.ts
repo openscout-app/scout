@@ -20,20 +20,28 @@ export type SandboxFunction = (...args: unknown[]) => Promise<unknown>;
 
 export type SandboxLimits = {
   memoryBytes: number;
+  /**
+   * QuickJS's own stack limit. It must stay under what the worker thread's
+   * native stack allows, or deep recursion overflows the host stack inside the
+   * wasm before QuickJS can throw a catchable error.
+   */
   stackBytes: number;
   /** Wall-clock budget for the whole run, including time spent awaiting host functions. */
   timeoutMs: number;
   /** The longest the guest may compute without awaiting before the run fails. */
   sliceMs: number;
+  /** Host function calls one run may make, awaited or not. */
+  hostCalls: number;
   logLines: number;
   logLineChars: number;
 };
 
 export const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
   memoryBytes: 32 * 1024 * 1024,
-  stackBytes: 512 * 1024,
+  stackBytes: 256 * 1024,
   timeoutMs: 10_000,
   sliceMs: 100,
+  hostCalls: 100,
   logLines: 20,
   logLineChars: 500,
 };
@@ -154,6 +162,7 @@ export async function runInQuickJS(input: {
   const slice = sliceError(limits);
   const tooLong = timeoutError(limits);
   const context = runtime.newContext();
+  let hostCallCount = 0;
   const inFlight = new Set<Promise<void>>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -178,6 +187,9 @@ export async function runInQuickJS(input: {
     const scoutObject = context.newObject();
     for (const [name, fn] of Object.entries(input.scout)) {
       const handle = context.newFunction(name, (...argHandles) => {
+        if (++hostCallCount > limits.hostCalls) {
+          return { error: context.newError(`a callback may call scout functions at most ${limits.hostCalls} times`) };
+        }
         const args = argHandles.map((arg) => context.dump(arg));
         const deferred = context.newPromise();
         const call: Promise<void> = Promise.resolve()
@@ -186,7 +198,16 @@ export async function runInQuickJS(input: {
             (value) => {
               if (halted || !context.alive) return;
               enter();
-              const result = toGuest(context, value);
+              let result: QuickJSHandle;
+              try {
+                result = toGuest(context, value);
+              } catch {
+                // A value JSON cannot carry (a BigInt, a cycle) rejects the call.
+                const guestError = context.newError(`scout.${name} returned a value the callback cannot receive`);
+                deferred.reject(guestError);
+                guestError.dispose();
+                return;
+              }
               deferred.resolve(result);
               if (result !== context.undefined) result.dispose();
             },

@@ -57,7 +57,13 @@ export function runSandboxedFunction(input: {
     const fail = (error: string) => finish({ ok: false, error, logs: [...logs] });
     const timer = setTimeout(() => fail(timeoutError(limits)), limits.timeoutMs + REPORT_GRACE_MS);
     const send = (message: SandboxHostMessage) => {
-      if (!finished) worker.postMessage(message);
+      if (finished) return;
+      try {
+        worker.postMessage(message);
+      } catch (error) {
+        // Data or a host result the worker cannot be sent fails the run.
+        fail(`the callback sandbox could not be sent its input: ${error instanceof Error ? error.message : String(error)}`);
+      }
     };
 
     worker.on("message", (message: SandboxWorkerMessage) => {

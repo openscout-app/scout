@@ -127,6 +127,30 @@ describe("callback sandbox", () => {
       .toEqual({ ok: true, logs: ["ok"] });
   });
 
+  test("unbounded recursion throws a stack overflow the code can catch", async () => {
+    expect(await run(`() => { const f = () => f(); try { f(); } catch (e) { console.log(String(e)); } }`))
+      .toEqual({ ok: true, logs: ["InternalError: stack overflow"] });
+  });
+
+  test("data the worker cannot be sent fails the run", async () => {
+    const result = await runSandboxedFunction({ code: "export default () => 1;", data: { f: () => 1 }, scout: {} });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("could not be sent its input") });
+  });
+
+  test("a host result the guest cannot receive rejects that call", async () => {
+    const big = async () => 1n;
+    expect(await run(`async ({ scout }) => { try { await scout.big(); } catch (e) { console.log(e.message); } }`, { big }))
+      .toEqual({ ok: true, logs: ["scout.big returned a value the callback cannot receive"] });
+  });
+
+  test("host calls are capped per run", async () => {
+    let calls = 0;
+    const tick = async () => { calls += 1; };
+    expect(await run(`({ scout }) => { for (let i = 0; i < 1000; i++) scout.tick(); }`, { tick }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("at most 100 times") });
+    expect(calls).toBe(100);
+  });
+
   test("log output is capped", async () => {
     const result = await run(`() => { for (let i = 0; i < 50; i++) console.log("x".repeat(600)) }`);
     expect(result.logs).toHaveLength(20);
