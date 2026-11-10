@@ -162,7 +162,12 @@ describe("work claims", () => {
     expect(workClaimOf(item())).toBeDefined();
     expect((await service.claim({ workId: "work-1", actorId: "agent-a", action: "release", leaseGeneration: 1 })).claim).toBeNull();
 
-    await service.claim({ workId: "work-1", actorId: "agent-a", leaseMs: 60_000 });
+    // A claim after a release gets a new generation, so the released attempt's
+    // generation cannot act on it.
+    const second = await service.claim({ workId: "work-1", actorId: "agent-a", leaseMs: 60_000 });
+    expect(second.claim!.leaseGeneration).toBe(2);
+    const released = await conflictOf(service.claim({ workId: "work-1", actorId: "agent-a", action: "renew", leaseGeneration: 1 }));
+    expect(released.conflict.code).toBe("work_claim_stale_generation");
     const operatorStale = await conflictOf(service.claim({ workId: "work-1", actorId: "operator", action: "release", leaseGeneration: 7 }));
     expect(operatorStale.conflict.code).toBe("work_claim_stale_generation");
     expect((await service.claim({ workId: "work-1", actorId: "operator", action: "release" })).claim).toBeNull();

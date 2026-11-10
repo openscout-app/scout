@@ -77,8 +77,22 @@ function holds(claim: WorkClaim, actorId: string, sessionAddress: string | undef
   return !sessionAddress || !claim.sessionAddress || claim.sessionAddress === sessionAddress;
 }
 
+/**
+ * The highest lease generation an item has issued. It outlives the claim, so a
+ * claim after a release or a reopen gets a new generation, and a stale attempt
+ * cannot match it.
+ */
+const WORK_CLAIM_GENERATION_METADATA_KEY = "workClaimGeneration";
+
+function lastClaimGeneration(record: CollaborationRecord | undefined): number {
+  const stored = record?.metadata?.[WORK_CLAIM_GENERATION_METADATA_KEY];
+  const held = record?.kind === "work_item" ? workClaimOf(record)?.leaseGeneration : undefined;
+  return Math.max(typeof stored === "number" && Number.isFinite(stored) ? stored : 0, held ?? 0);
+}
+
 function withClaim(record: WorkItemRecord, claim: WorkClaim | undefined, now: number): WorkItemRecord {
   const metadata = { ...(record.metadata ?? {}) };
+  metadata[WORK_CLAIM_GENERATION_METADATA_KEY] = Math.max(lastClaimGeneration(record), claim?.leaseGeneration ?? 0);
   if (claim) metadata[WORK_CLAIM_METADATA_KEY] = claim;
   else delete metadata[WORK_CLAIM_METADATA_KEY];
   return { ...record, updatedAt: Math.max(now, record.updatedAt), metadata };
@@ -131,7 +145,7 @@ export function applyWorkClaim(
   const claim: WorkClaim = {
     claimantId: input.actorId,
     ...(sessionAddress ? { sessionAddress } : {}),
-    leaseGeneration: (current?.leaseGeneration ?? 0) + 1,
+    leaseGeneration: lastClaimGeneration(record) + 1,
     claimedAt: now,
     renewedAt: now,
     leaseExpiresAt: now + leaseMs,
@@ -238,6 +252,7 @@ export function planWorkClaim(
 export function dropClaimWhenTerminal<T extends CollaborationRecord>(record: T): T {
   if (record.kind !== "work_item" || !isWorkItemTerminalState(record.state) || !workClaimOf(record)) return record;
   const metadata = { ...(record.metadata ?? {}) };
+  metadata[WORK_CLAIM_GENERATION_METADATA_KEY] = lastClaimGeneration(record);
   delete metadata[WORK_CLAIM_METADATA_KEY];
   return { ...record, metadata };
 }
@@ -273,8 +288,18 @@ export function reconcileWorkClaimOnWrite(
     // The lease ended and the owner moved on: the old claim no longer applies.
     claim = undefined;
   }
-  if (!claim && !(incoming.metadata && WORK_CLAIM_METADATA_KEY in incoming.metadata)) return incoming;
+  // The generation counter belongs to the runtime too: a client write cannot
+  // lower it.
+  const generation = lastClaimGeneration(existing);
+  const incomingGeneration = incoming.metadata?.[WORK_CLAIM_GENERATION_METADATA_KEY];
+  if (
+    !claim
+    && !(incoming.metadata && WORK_CLAIM_METADATA_KEY in incoming.metadata)
+    && (generation === 0 ? incomingGeneration === undefined : incomingGeneration === generation)
+  ) return incoming;
   const metadata = { ...(incoming.metadata ?? {}) };
+  if (generation > 0) metadata[WORK_CLAIM_GENERATION_METADATA_KEY] = generation;
+  else delete metadata[WORK_CLAIM_GENERATION_METADATA_KEY];
   if (claim) metadata[WORK_CLAIM_METADATA_KEY] = claim;
   else delete metadata[WORK_CLAIM_METADATA_KEY];
   return dropClaimWhenTerminal({ ...incoming, metadata });
