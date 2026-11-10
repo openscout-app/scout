@@ -117,6 +117,10 @@ const RATE_CARDS: Record<string, AdapterCostRateCard> = {
   "anthropic:claude-sonnet-5.5": { provider: "anthropic", model: "claude-sonnet-5.5", inputPerM: 2, cachedInputPerM: 0.2, cacheWritePerM: 2.5, outputPerM: 10, webSearchPer1K: 10 },
   // Haiku 5.5 bills prompts above 100K tokens at $0.50/$2.50; this card holds the base tier.
   "anthropic:claude-haiku-5.5": { provider: "anthropic", model: "claude-haiku-5.5", inputPerM: 0.1, cachedInputPerM: 0.01, cacheWritePerM: 0.125, outputPerM: 0.5, webSearchPer1K: 10 },
+  "anthropic:claude-opus-5": { provider: "anthropic", model: "claude-opus-5", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
+  "anthropic:claude-sonnet-5": { provider: "anthropic", model: "claude-sonnet-5", inputPerM: 2, cachedInputPerM: 0.2, cacheWritePerM: 2.5, outputPerM: 10, webSearchPer1K: 10 },
+  "anthropic:claude-opus-4.8": { provider: "anthropic", model: "claude-opus-4.8", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
+  "anthropic:claude-opus-4.7": { provider: "anthropic", model: "claude-opus-4.7", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
   "anthropic:claude-opus-4.6": { provider: "anthropic", model: "claude-opus-4.6", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
   "anthropic:claude-opus-4.5": { provider: "anthropic", model: "claude-opus-4.5", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
   "anthropic:claude-opus-4.1": { provider: "anthropic", model: "claude-opus-4.1", inputPerM: 15, cachedInputPerM: 1.5, cacheWritePerM: 18.75, outputPerM: 75, webSearchPer1K: 10 },
@@ -128,19 +132,46 @@ const RATE_CARDS: Record<string, AdapterCostRateCard> = {
   "anthropic:claude-haiku-4.5": { provider: "anthropic", model: "claude-haiku-4.5", inputPerM: 1, cachedInputPerM: 0.1, cacheWritePerM: 1.25, outputPerM: 5, webSearchPer1K: 10 },
 };
 
-const EXACT_MODEL_ALIASES: Record<string, string> = {
-  "claude-sonnet-4-5": "anthropic:claude-sonnet-4.5",
-  "claude-sonnet-4-6": "anthropic:claude-sonnet-4.6",
-  "claude-opus-4-5": "anthropic:claude-opus-4.5",
-  "claude-opus-4-6": "anthropic:claude-opus-4.6",
-  "claude-haiku-4-5": "anthropic:claude-haiku-4.5",
-  "claude-fable-5-2": "anthropic:claude-fable-5.2",
-  "claude-fable-5-1": "anthropic:claude-fable-5.1",
-  "claude-fable-5": "anthropic:claude-fable-5",
-  "claude-opus-5-5": "anthropic:claude-opus-5.5",
-  "claude-sonnet-5-5": "anthropic:claude-sonnet-5.5",
-  "claude-haiku-5-5": "anthropic:claude-haiku-5.5",
+/**
+ * Two layers, both explicit. Layer 1 maps each string a harness or API
+ * reports to one card key: a card answers to its own `model` name plus the
+ * extra spellings listed here. Layer 2 is RATE_CARDS, which holds the
+ * provider and prices. A string in neither layer is not priced. Add new ids
+ * and snapshots here rather than matching names by pattern.
+ */
+const CARD_MODEL_IDS: Record<string, readonly string[]> = {
+  "anthropic:claude-fable-5.2": ["claude-fable-5-2"],
+  "anthropic:claude-fable-5.1": ["claude-fable-5-1"],
+  "anthropic:claude-fable-5": ["claude-fable-5"],
+  "anthropic:claude-opus-5.5": ["claude-opus-5-5"],
+  "anthropic:claude-sonnet-5.5": ["claude-sonnet-5-5"],
+  "anthropic:claude-haiku-5.5": ["claude-haiku-5-5"],
+  "anthropic:claude-opus-5": ["claude-opus-5"],
+  "anthropic:claude-sonnet-5": ["claude-sonnet-5"],
+  "anthropic:claude-opus-4.8": ["claude-opus-4-8"],
+  "anthropic:claude-opus-4.7": ["claude-opus-4-7"],
+  "anthropic:claude-opus-4.6": ["claude-opus-4-6"],
+  "anthropic:claude-opus-4.5": ["claude-opus-4-5", "claude-opus-4-5-20251101"],
+  "anthropic:claude-opus-4.1": ["claude-opus-4-1", "claude-opus-4-1-20250805"],
+  "anthropic:claude-opus-4": ["claude-opus-4-0", "claude-opus-4-20250514"],
+  "anthropic:claude-sonnet-4.6": ["claude-sonnet-4-6"],
+  "anthropic:claude-sonnet-4.5": ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"],
+  "anthropic:claude-sonnet-4": ["claude-sonnet-4-0", "claude-sonnet-4-20250514"],
+  "anthropic:claude-3-7-sonnet": ["claude-3-7-sonnet-latest", "claude-3-7-sonnet-20250219"],
+  "anthropic:claude-haiku-4.5": ["claude-haiku-4-5", "claude-haiku-4-5-20251001"],
 };
+
+/** Layer 1: reported model string -> card key. */
+const MODEL_ID_CARDS = new Map<string, string>([
+  ...Object.entries(RATE_CARDS).map(([key, card]) => [card.model, key] as const),
+  ...Object.entries(CARD_MODEL_IDS).flatMap(([key, ids]) => ids.map((id) => [id, key] as const)),
+]);
+
+/** The card a reported model string names, if any. */
+function cardForModel(model: string | null): AdapterCostRateCard | null {
+  const key = model ? MODEL_ID_CARDS.get(model) : undefined;
+  return key ? RATE_CARDS[key] ?? null : null;
+}
 
 export function normalizeAdapterCostProvider(input: {
   provider?: string | null;
@@ -157,23 +188,15 @@ export function normalizeAdapterCostProvider(input: {
   if (haystack.some((value) => ANTHROPIC_PROVIDER_HINTS.some((hint) => value.includes(hint)))) {
     return "anthropic";
   }
-  if (model.startsWith("gpt-") || model.startsWith("o") || model.includes("codex")) {
-    return "openai";
-  }
-  if (model.startsWith("claude-")) {
-    return "anthropic";
-  }
-  return "unknown";
+  // Otherwise the provider is the one on the model's card.
+  return cardForModel(model)?.provider ?? "unknown";
 }
 
 export function normalizeAdapterCostModel(model: string | null | undefined): string | null {
   if (!model) return null;
-  return model
-    .trim()
-    .toLowerCase()
-    .replace(/^(openai|anthropic)\//, "")
-    .replace(/_/g, "-")
-    .replace(/-\d{8}$/, "");
+  // The id as the provider reports it. Other spellings are listed in
+  // CARD_MODEL_IDS, never rewritten here.
+  return model.trim().toLowerCase();
 }
 
 export function adapterTokenBreakdown(usage: AdapterCostUsage | null | undefined): AdapterTokenBreakdown {
@@ -261,21 +284,11 @@ function resolveRateCard(
   provider: AdapterCostProvider,
   model: string | null,
 ): { rateCard: AdapterCostRateCard | null; source: AdapterCostEstimate["rateCardSource"] } {
-  if (provider === "unknown") return { rateCard: null, source: "unknown" };
-  const exactKey = model ? `${provider}:${model}` : null;
-  if (exactKey && RATE_CARDS[exactKey]) {
-    return { rateCard: RATE_CARDS[exactKey], source: "exact" };
-  }
-  const aliasKey = model ? EXACT_MODEL_ALIASES[model] : null;
-  if (aliasKey && RATE_CARDS[aliasKey]) {
-    return { rateCard: RATE_CARDS[aliasKey], source: "alias" };
-  }
-  if (provider === "anthropic") {
-    if (model?.includes("opus")) return { rateCard: RATE_CARDS["anthropic:claude-opus-4.5"], source: "provider-default" };
-    if (model?.includes("haiku")) return { rateCard: RATE_CARDS["anthropic:claude-haiku-4.5"], source: "provider-default" };
-    if (model?.includes("sonnet") || !model) return { rateCard: RATE_CARDS["anthropic:claude-sonnet-4.5"], source: "provider-default" };
-  }
-  return { rateCard: null, source: "unknown" };
+  const card = cardForModel(model);
+  // No card, or a card from another provider: no price. Never an older
+  // model's rates guessed from the name.
+  if (!card || card.provider !== provider) return { rateCard: null, source: "unknown" };
+  return { rateCard: card, source: card.model === model ? "exact" : "alias" };
 }
 
 function tokenLine(
