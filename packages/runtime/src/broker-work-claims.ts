@@ -170,7 +170,24 @@ export function planWorkClaim(
 
   const current = workClaimOf(record);
   const status = workClaimStatus(current, now);
-  const generationMatches = request.leaseGeneration === undefined || request.leaseGeneration === current?.leaseGeneration;
+  // A holder proves which attempt it is with the lease generation. A request
+  // that omits it cannot tell a stale attempt from the current one, so it is
+  // refused whenever the claim has a generation. The operator may release
+  // without one.
+  const generationMatches = (mayOmit: boolean) =>
+    request.leaseGeneration === undefined
+      ? mayOmit || current?.leaseGeneration === undefined
+      : request.leaseGeneration === current?.leaseGeneration;
+  const generationRefusal = (verb: "Renew" | "Release", hint: string) => conflict(
+    "work_claim_stale_generation",
+    record,
+    request.leaseGeneration === undefined
+      ? `${verb} refused: ${record.id} is at lease generation ${current?.leaseGeneration}; the request names none.`
+      : `${verb} refused: lease generation ${request.leaseGeneration} is stale; ${record.id} is at generation ${current?.leaseGeneration}.`,
+    request.leaseGeneration === undefined ? "Pass the lease generation from your claim." : hint,
+    now,
+    current,
+  );
 
   if (action === "renew") {
     if (!current || status !== "active" || !holds(current, request.actorId, sessionAddress)) {
@@ -184,14 +201,10 @@ export function planWorkClaim(
         current,
       );
     }
-    if (!generationMatches) {
-      throw conflict(
-        "work_claim_stale_generation",
-        record,
-        `Renew refused: lease generation ${request.leaseGeneration} is stale; ${record.id} is at generation ${current.leaseGeneration}.`,
+    if (!generationMatches(false)) {
+      throw generationRefusal(
+        "Renew",
         "Another attempt holds this claim now. Stop work on this attempt, or read the item and use its current generation.",
-        now,
-        current,
       );
     }
     const applied = applyWorkClaim(record, { actorId: request.actorId, sessionAddress, leaseMs: request.leaseMs }, now);
@@ -203,17 +216,11 @@ export function planWorkClaim(
   }
   if (!current) return { response: { workId: record.id, action, claim: null, ...(record.ownerId ? { ownerId: record.ownerId } : {}) } };
   if (status === "active") {
-    const mayRelease = holds(current, request.actorId, sessionAddress) || request.actorId === context.operatorActorId;
+    const isOperator = request.actorId === context.operatorActorId;
+    const mayRelease = holds(current, request.actorId, sessionAddress) || isOperator;
     if (!mayRelease) throw heldConflict(record, current, now, "Release refused");
-    if (!generationMatches) {
-      throw conflict(
-        "work_claim_stale_generation",
-        record,
-        `Release refused: lease generation ${request.leaseGeneration} is stale; ${record.id} is at generation ${current.leaseGeneration}.`,
-        "Another attempt holds this claim now; leave it to that attempt.",
-        now,
-        current,
-      );
+    if (!generationMatches(isOperator)) {
+      throw generationRefusal("Release", "Another attempt holds this claim now; leave it to that attempt.");
     }
   }
   const released = withClaim(record, undefined, now);

@@ -143,10 +143,29 @@ describe("work claims", () => {
     expect(otherSession.conflict.code).toBe("work_claim_held");
     const stale = await conflictOf(service.claim({ workId: "work-1", actorId: "agent-a", action: "renew", leaseGeneration: 7 }));
     expect(stale.conflict.code).toBe("work_claim_stale_generation");
+    const unnamed = await conflictOf(service.claim({ workId: "work-1", actorId: "agent-a", action: "renew" }));
+    expect(unnamed.conflict.code).toBe("work_claim_stale_generation");
+    expect(unnamed.conflict.hint).toContain("Pass the lease generation");
 
     const renewed = await service.claim({ workId: "work-1", actorId: "agent-a", action: "renew", leaseGeneration: 1, leaseMs: 120_000 });
     expect(renewed.claim!.leaseExpiresAt).toBe(clock.now + 120_000);
     expect(workClaimOf(item())!.leaseExpiresAt).toBe(clock.now + 120_000);
+  });
+
+  test("the holder releases only with its lease generation; the operator needs none", async () => {
+    const { service, item } = await setup();
+    await service.claim({ workId: "work-1", actorId: "agent-a", leaseMs: 60_000 });
+    const unnamed = await conflictOf(service.claim({ workId: "work-1", actorId: "agent-a", action: "release" }));
+    expect(unnamed.conflict.code).toBe("work_claim_stale_generation");
+    const stale = await conflictOf(service.claim({ workId: "work-1", actorId: "agent-a", action: "release", leaseGeneration: 7 }));
+    expect(stale.conflict.code).toBe("work_claim_stale_generation");
+    expect(workClaimOf(item())).toBeDefined();
+    expect((await service.claim({ workId: "work-1", actorId: "agent-a", action: "release", leaseGeneration: 1 })).claim).toBeNull();
+
+    await service.claim({ workId: "work-1", actorId: "agent-a", leaseMs: 60_000 });
+    const operatorStale = await conflictOf(service.claim({ workId: "work-1", actorId: "operator", action: "release", leaseGeneration: 7 }));
+    expect(operatorStale.conflict.code).toBe("work_claim_stale_generation");
+    expect((await service.claim({ workId: "work-1", actorId: "operator", action: "release" })).claim).toBeNull();
   });
 
   test("expectedOwnerId makes the claim a compare-and-set on the owner", async () => {
