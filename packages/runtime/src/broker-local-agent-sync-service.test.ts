@@ -644,4 +644,146 @@ describe("BrokerLocalAgentSyncService", () => {
     expect(harness.upsertedAgents).toContainEqual(core.agent);
     expect(harness.persistedEndpoints).toContainEqual(core.endpoint);
   });
+
+  function relayTmuxEndpoint(input: Partial<AgentEndpoint> = {}): AgentEndpoint {
+    return endpoint({
+      id: "endpoint.session-card.ws.node-1.tmux",
+      agentId: "session-card.ws.node",
+      harness: "claude",
+      transport: "tmux",
+      state: "idle",
+      sessionId: "session-card",
+      metadata: {
+        source: "relay-agent-registry",
+        agentName: "session-card",
+        tmuxSession: "session-card",
+        runtimeInstanceId: "session-card",
+        terminalSurface: { backend: "tmux", sessionName: "session-card", paneId: "session-card" },
+      },
+      ...input,
+    });
+  }
+
+  function observedMetadata(sessionId: string, observedAt: number, extra: Record<string, unknown> = {}) {
+    return {
+      externalSessionId: sessionId,
+      threadId: null,
+      nativeSessionId: null,
+      pendingExternalSession: false,
+      observedSessionId: sessionId,
+      observedSessionEvidence: {
+        source: "claude-session-record",
+        tmuxSession: "session-card",
+        tmuxPane: "%1",
+        pid: 4242,
+        observedAt,
+        ...extra,
+      },
+      observedRuntimeAt: observedAt,
+    };
+  }
+
+  test("gives a relay tmux binding the observation of the card that runs in its session", async () => {
+    const card = endpoint({
+      id: "endpoint.session-card.node-1.tmux",
+      agentId: "session-card",
+      harness: "claude",
+      transport: "tmux",
+      sessionId: "session-card",
+      metadata: { source: "scout-cardless-session", cardless: true, ...observedMetadata("claude-session-1", 2_000) },
+    });
+    const relay = binding({
+      agent: agent({ id: "session-card.ws.node", definitionId: "session-card" }),
+      endpoint: relayTmuxEndpoint(),
+    });
+    const harness = createHarness({
+      snapshot: snapshot({ endpoints: { [card.id]: card } }),
+      bindings: [relay],
+      aliveSessionIds: ["session-card"],
+    });
+
+    await harness.service.sync();
+
+    const persisted = harness.persistedEndpoints.find((candidate) => candidate.id === relay.endpoint.id);
+    expect(persisted?.metadata?.observedSessionId).toBe("claude-session-1");
+    expect(persisted?.metadata?.observedSessionEvidence).toMatchObject({
+      source: "claude-session-record",
+      tmuxSession: "session-card",
+      mirroredFromEndpointId: card.id,
+    });
+    expect(persisted?.metadata?.externalSessionId).toBeUndefined();
+    expect(persisted?.metadata?.runtimeInstanceId).toBe("session-card");
+  });
+
+  test("keeps a relay tmux binding's own observation when the registry rebuilds it", async () => {
+    const previous = relayTmuxEndpoint({
+      metadata: {
+        ...relayTmuxEndpoint().metadata,
+        observedSessionId: "claude-session-1",
+        observedSessionEvidence: observedMetadata("claude-session-1", 2_000).observedSessionEvidence,
+      },
+    });
+    const relay = binding({
+      agent: agent({ id: "session-card.ws.node", definitionId: "session-card" }),
+      endpoint: relayTmuxEndpoint(),
+    });
+    const harness = createHarness({
+      snapshot: snapshot({ endpoints: { [previous.id]: previous } }),
+      bindings: [relay],
+      aliveSessionIds: ["session-card"],
+    });
+
+    await harness.service.sync();
+
+    const persisted = harness.persistedEndpoints.find((candidate) => candidate.id === relay.endpoint.id);
+    expect(persisted?.metadata?.observedSessionId).toBe("claude-session-1");
+    expect(persisted?.metadata?.observedSessionEvidence).not.toHaveProperty("mirroredFromEndpointId");
+  });
+
+  test("leaves a relay tmux binding without identity when nothing observed its session", async () => {
+    const pendingCard = endpoint({
+      id: "endpoint.session-card.node-1.tmux",
+      agentId: "session-card",
+      harness: "claude",
+      transport: "tmux",
+      sessionId: "session-card",
+      metadata: { source: "scout-cardless-session", cardless: true, pendingExternalSession: true },
+    });
+    const relay = binding({
+      agent: agent({ id: "session-card.ws.node", definitionId: "session-card" }),
+      endpoint: relayTmuxEndpoint(),
+    });
+    const harness = createHarness({
+      snapshot: snapshot({ endpoints: { [pendingCard.id]: pendingCard } }),
+      bindings: [relay],
+      aliveSessionIds: ["session-card"],
+    });
+
+    await harness.service.sync();
+
+    expect(harness.persistedEndpoints.find((candidate) => candidate.id === relay.endpoint.id)).toEqual(relay.endpoint);
+  });
+
+  test("warms a core relay tmux agent with its known observation", async () => {
+    const previous = relayTmuxEndpoint({
+      metadata: {
+        ...relayTmuxEndpoint().metadata,
+        observedSessionId: "claude-session-1",
+        observedSessionEvidence: observedMetadata("claude-session-1", 2_000).observedSessionEvidence,
+      },
+    });
+    const core = binding({
+      agent: agent({ id: "session-card.ws.node", definitionId: "session-card" }),
+      endpoint: relayTmuxEndpoint(),
+    });
+    const harness = createHarness({
+      snapshot: snapshot({ endpoints: { [previous.id]: previous } }),
+      configuredCoreAgentIds: ["session-card"],
+      coreBindings: [core],
+    });
+
+    await harness.service.ensureCoreLocalAgentsOnline();
+
+    expect(harness.persistedEndpoints.at(-1)?.metadata?.observedSessionId).toBe("claude-session-1");
+  });
 });

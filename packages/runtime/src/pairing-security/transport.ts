@@ -185,10 +185,8 @@ export class SecureTransport {
   }
 
   private completeHandshake(): void {
-    this.session = this.handshake.finalize();
-    this.ready = true;
-
-    const remotePublicKeyHex = bytesToHex(this.session.remoteStaticKey);
+    const session = this.handshake.finalize();
+    const remotePublicKeyHex = bytesToHex(session.remoteStaticKey);
     const trustedPeers = loadTrustedPeers();
     const existingPeer = trustedPeers.get(remotePublicKeyHex);
     const wasTrustedPeer = Boolean(existingPeer);
@@ -200,7 +198,11 @@ export class SecureTransport {
       else saveTrustedPeer({ publicKey: remotePublicKeyHex, pairedAt: now, lastSeen: now });
     }
 
-    this.events.onReady?.(this.session.remoteStaticKey, {
+    // Authority failure must leave no usable session, even if the caller only
+    // logs onError. Crypto completion alone cannot admit application traffic.
+    this.session = session;
+    this.ready = true;
+    this.events.onReady?.(session.remoteStaticKey, {
       remotePublicKeyHex,
       wasTrustedPeer,
       trustedPeer,
@@ -213,7 +215,7 @@ export class SecureTransport {
   // ---------------------------------------------------------------------------
 
   private handleTransportMessage(ciphertext: Uint8Array): void {
-    if (!this.session) {
+    if (!this.ready || !this.session) {
       this.events.onError?.(new Error("SecureTransport: received transport message before handshake"));
       return;
     }

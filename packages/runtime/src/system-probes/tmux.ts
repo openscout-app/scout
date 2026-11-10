@@ -2,9 +2,12 @@ import type { RuntimeEnv } from "../portable-types.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { defineProbeFamily, type ProbeCtx } from "./registry.js";
+import type { TerminalSessionClients } from "@openscout/protocol";
+
+import { defineProbeFamily, type ProbeCtx, type ProbeSnapshot } from "./registry.js";
 import { execProbeFile, ProbeCommandError } from "./exec.js";
 import { runWithScoutdFallback } from "./scoutd-client.js";
+import { readClientProcessTable, readMacAppIndex, summarizeTerminalClients, type TerminalClientRef } from "./terminal-clients.js";
 import { resolveOpenScoutHomeForEnv } from "../support-paths.js";
 
 const TMUX_TTL_MS = 5_000;
@@ -19,6 +22,16 @@ export type TmuxSessionInfo = {
   activityAt: number | null;
   currentCommand: string | null;
   currentPath: string | null;
+  /**
+   * The active window's name. With tmux's automatic-rename on, this follows the
+   * running command; a name a harness or person set stays put.
+   */
+  windowName?: string | null;
+  /**
+   * The active pane's title, as a harness or person set it. Null when nobody
+   * set one: tmux titles a new pane with the host name, and that is not a title.
+   */
+  paneTitle?: string | null;
 };
 
 export type ZellijSessionInfo = {
@@ -117,15 +130,61 @@ export function zellijSocketKey(input?: string | { env?: RuntimeEnv; socketDir?:
   return input?.socketDir?.trim() || zellijSocketDirFromEnv(input?.env ?? process.env);
 }
 
+/**
+ * One `list-sessions` row per session, tab-delimited because a window name or
+ * pane title can hold "|". The pane title is last, so a tab inside it folds
+ * back into it. `#{host}` is read only to recognize tmux's default pane title
+ * and is never reported. Run it with `-u`: without a UTF-8 locale tmux prints
+ * each tab as "_".
+ */
+export const TMUX_SESSION_LIST_FORMAT = [
+  "#{session_name}",
+  "#{session_windows}",
+  "#{session_attached}",
+  "#{session_created}",
+  "#{session_activity}",
+  "#{pane_current_command}",
+  "#{pane_current_path}",
+  "#{window_name}",
+  "#{host}",
+  "#{pane_title}",
+].join("\t");
+
+const TMUX_SESSION_FIELD_COUNT = 10;
+/** Rows from before window names and titles: seven "|"-delimited fields. */
+const LEGACY_TMUX_SESSION_FIELD_COUNT = 7;
+
+function firstHostLabel(value: string): string {
+  return value.split(".")[0] ?? value;
+}
+
+/**
+ * The pane title to report, or null when it is tmux's default. tmux titles a
+ * new pane with the host name at the time, so the match ignores case and the
+ * domain suffix: a pane titled "box.local" still matches a host that is now
+ * "box.lan".
+ */
+export function reportedTmuxPaneTitle(title: string | undefined, host: string | undefined): string | null {
+  const cleaned = cleanOptionalString(title);
+  if (!cleaned) return null;
+  const hostName = cleanOptionalString(host)?.toLowerCase();
+  if (!hostName) return cleaned;
+  const lowered = cleaned.toLowerCase();
+  if (lowered === hostName) return null;
+  const isBareHostName = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/u.test(lowered);
+  return isBareHostName && firstHostLabel(lowered) === firstHostLabel(hostName) ? null : cleaned;
+}
+
 export function parseTmuxSessionList(output: string): TmuxSessionInfo[] {
   return output
     .split(/\r?\n/gu)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
-      const [name, windows, attached, createdAt, activityAt, currentCommand, currentPath] = line.includes("|")
-        ? splitDelimitedLine(line, "|", 7)
-        : splitDelimitedLine(line, "\t", 7);
+    .map((line): TmuxSessionInfo | null => {
+      // A tab row is never split on "|": its window name or title may hold one.
+      const [name, windows, attached, createdAt, activityAt, currentCommand, currentPath, windowName, host, paneTitle] = line.includes("\t")
+        ? splitDelimitedLine(line, "\t", TMUX_SESSION_FIELD_COUNT)
+        : splitDelimitedLine(line, "|", LEGACY_TMUX_SESSION_FIELD_COUNT);
       if (!name) return null;
       return {
         name,
@@ -135,6 +194,8 @@ export function parseTmuxSessionList(output: string): TmuxSessionInfo[] {
         activityAt: activityAt ? Number.parseInt(activityAt, 10) || null : null,
         currentCommand: cleanOptionalString(currentCommand),
         currentPath: cleanOptionalString(currentPath),
+        windowName: cleanOptionalString(windowName),
+        paneTitle: reportedTmuxPaneTitle(paneTitle, host),
       };
     })
     .filter((session): session is TmuxSessionInfo => Boolean(session));
@@ -164,10 +225,11 @@ export function parseZellijSessionList(output: string): ZellijSessionInfo[] {
 async function readTmuxSessionsLocal(key: string, ctx: ProbeCtx): Promise<TmuxSessionInfo[]> {
   try {
     const { stdout } = await execProbeFile(ctx, tmuxBin(), [
+      "-u", // keep the tabs in the format: tmux prints them as "_" without a UTF-8 locale
       ...tmuxSocketArgs(key),
       "list-sessions",
       "-F",
-      "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}|#{pane_current_command}|#{pane_current_path}",
+      TMUX_SESSION_LIST_FORMAT,
     ], {
       maxStdoutBytes: 512 * 1024,
       maxStderrBytes: 64 * 1024,
@@ -323,6 +385,96 @@ export function readTmuxSessionExistsSnapshot(sessionName: string, options: { en
 
 export function invalidateTmuxSessions(options: { env?: RuntimeEnv; socketPath?: string | null; reason?: string } = {}): void {
   tmuxSessionsProbe.invalidate({ env: options.env, socketPath: options.socketPath }, options.reason);
+  tmuxClientsProbe.invalidate({ env: options.env, socketPath: options.socketPath }, options.reason);
+}
+
+/** Parse `tmux list-clients -F "#{client_pid}\t#{session_name}"`. */
+export function parseTmuxClientList(output: string): TerminalClientRef[] {
+  const clients: TerminalClientRef[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    const pidText = line.slice(0, tab).trim();
+    const session = line.slice(tab + 1).trim();
+    const pid = /^\d+$/u.test(pidText) ? Number.parseInt(pidText, 10) : 0;
+    if (pid > 0 && session) clients.push({ pid, session });
+  }
+  return clients;
+}
+
+async function readTmuxClientsLocal(key: string, ctx: ProbeCtx): Promise<TerminalClientRef[]> {
+  try {
+    const { stdout } = await execProbeFile(ctx, tmuxBin(), [
+      "-u", // keep the tab: tmux prints it as "_" without a UTF-8 locale
+      ...tmuxSocketArgs(key),
+      "list-clients",
+      "-F",
+      "#{client_pid}\t#{session_name}",
+    ], {
+      maxStdoutBytes: 256 * 1024,
+      maxStderrBytes: 64 * 1024,
+    });
+    return parseTmuxClientList(stdout);
+  } catch (error) {
+    // No server on this socket is an ordinary state: no clients.
+    if (isUnavailable(error)) return [];
+    throw error;
+  }
+}
+
+/** Client pids per tmux socket. scoutd does not serve this; it runs locally. */
+export const tmuxClientsProbe = defineProbeFamily<string | { env?: RuntimeEnv; socketPath?: string | null }, TerminalClientRef[]>({
+  id: "tmux.clients",
+  ttlMs: TMUX_TTL_MS,
+  timeoutMs: TMUX_TIMEOUT_MS,
+  maxKeys: 16,
+  idleKeyTtlMs: 5 * 60_000,
+  maxConcurrentKeys: 2,
+  normalizeKey: tmuxSocketKey,
+  run: (key, ctx) => readTmuxClientsLocal(key, ctx),
+});
+
+/**
+ * Clients attached to each tmux session on one socket, and the apps they run
+ * in. Null when the client list or the process table could not be read.
+ */
+export async function readTmuxSessionClients(
+  options: { env?: RuntimeEnv; socketPath?: string | null; maxAgeMs?: number } = {},
+): Promise<Map<string, TerminalSessionClients> | null> {
+  const snapshot = await tmuxClientsProbe.for({ env: options.env, socketPath: options.socketPath })
+    .fresh({ maxAgeMs: options.maxAgeMs ?? TMUX_TTL_MS });
+  if (!snapshot.value || snapshot.at === null) return null;
+  const refs = snapshot.value;
+  const sessions = [...new Set(refs.map((ref) => ref.session))];
+  if (sessions.length === 0) return new Map();
+  const processes = await readClientProcessTable();
+  if (!processes) return null;
+  const summaries = new Map<string, TerminalSessionClients>();
+  for (const session of sessions) {
+    summaries.set(session, await summarizeTerminalClients(refs, session, { table: processes.table, apps: readMacAppIndex }));
+  }
+  return summaries;
+}
+
+export type TmuxSessionWithClients = TmuxSessionInfo & Partial<TerminalSessionClients>;
+
+/**
+ * The tmux session list with each session's clients and their apps. Sessions
+ * keep `attached` as tmux reports it; `clients` and `apps` are absent when the
+ * client read failed, and a session with no client reads as zero and [].
+ */
+export async function readTmuxSessionsWithClients(
+  options: { env?: RuntimeEnv; socketPath?: string | null; maxAgeMs?: number } = {},
+): Promise<ProbeSnapshot<TmuxSessionWithClients[]>> {
+  const [snapshot, clients] = await Promise.all([
+    tmuxSessionsProbe.for({ env: options.env, socketPath: options.socketPath }).fresh({ maxAgeMs: options.maxAgeMs ?? TMUX_TTL_MS }),
+    readTmuxSessionClients(options).catch(() => null),
+  ]);
+  if (!snapshot.value || !clients) return snapshot;
+  return {
+    ...snapshot,
+    value: snapshot.value.map((session) => ({ ...session, ...(clients.get(session.name) ?? { clients: 0, apps: [] }) })),
+  };
 }
 
 export async function readZellijSessionExists(sessionName: string, options: { env?: RuntimeEnv; socketDir?: string | null; maxAgeMs?: number } = {}): Promise<boolean> {

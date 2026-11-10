@@ -3430,6 +3430,22 @@ export function createScoutMcpServer(options: {
     },
   });
 
+  server.registerTool("show", {
+    title: "Show Your Work",
+    description: "Put a screenshot of what you built, a short screen recording, or a finished document/file on the operator's project canvas with an optional caption. Use this when you have something worth looking at, not just a status message. The runtime keeps an immutable copy; showing the same path again creates a new version. Local workspace files only; never show credentials, secrets, or harness transcripts. No conversation, hooks, or setup needed.",
+    inputSchema: z.object({ path: z.string().min(1), caption: z.string().max(4000).optional() }),
+    annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+  }, async input => {
+    const currentDirectory = resolveToolCurrentDirectory(undefined, options.defaultCurrentDirectory);
+    const caller = await aliasToolCaller(undefined, currentDirectory);
+    const result = await aliasBrokerRequest("/v1/shows", { method: "POST", body: JSON.stringify({
+      ...input, caller: { ...caller, metadata: { ...caller.metadata,
+        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : undefined,
+      } },
+    }) });
+    return { content: createTextContent(result) };
+  });
+
   const EXTERNAL_SESSION_TOOL_TITLES = {
     attach: "Attach External Session",
     get: "Get External Session",
@@ -5426,8 +5442,12 @@ export function createScoutMcpServer(options: {
         currentDirectory,
         options.defaultCurrentDirectory,
       );
-      const trimmedFlightId = flightId.trim();
+      const requestedId = flightId.trim();
       const brokerUrl = deps.resolveBrokerUrl();
+      // Accept an invocation id too: getFlight resolves it to its flight.
+      const trimmedFlightId = requestedId.startsWith("inv-")
+        ? (await deps.getFlight(brokerUrl, requestedId))?.id ?? requestedId
+        : requestedId;
       let flight: ScoutFlightRecord | null = null;
       let waitStatus: "completed" | "terminal" | "pending" = "pending";
 
@@ -5632,10 +5652,12 @@ export function createScoutMcpServer(options: {
         resolvedCurrentDirectory,
         env,
       );
+      const sessionAddress = claimedSessionId(env);
       const workItem = await deps.updateWorkItem({
         ...work,
         actorId: resolvedSenderId,
         source: "scout-mcp",
+        ...(sessionAddress ? { sessionAddress } : {}),
       });
       const structuredContent = {
         currentDirectory: resolvedCurrentDirectory,
@@ -5683,7 +5705,7 @@ export function createScoutMcpServer(options: {
           targetId: z.string().optional(),
         }).optional().describe("What the item waits on. Required for waiting stations."),
         evidence: z.array(z.object({ kind: z.string(), ref: z.string() })).optional().describe("Links that back the move, for example a PR or a test run."),
-        claim: z.boolean().optional().describe("Become the owner before the checks run."),
+        claim: z.boolean().optional().describe("Claim the item before the checks run: you become the owner under a lease. Fails with a conflict naming the holder when someone else holds an active claim."),
         dryRun: z.boolean().optional(),
       }),
       outputSchema: workMoveResultSchema,
@@ -5692,8 +5714,10 @@ export function createScoutMcpServer(options: {
     async ({ currentDirectory, senderId, workId, to, note, waitingOn, evidence, claim, dryRun }) => {
       const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
       const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const sessionAddress = claim ? claimedSessionId(env) : undefined;
       const result = await (deps.moveWorkItem ?? moveScoutWorkItem)({
         workId, to, note, waitingOn, evidence, claim, dryRun, actorId: resolvedSenderId,
+        ...(sessionAddress ? { sessionAddress } : {}),
       });
       const structuredContent = {
         senderId: resolvedSenderId,

@@ -8,7 +8,7 @@ export class PermissionRequestEndedError extends Error {
 }
 
 export type PermissionReattachment = { prompt?: ManagedPermissionPrompt; sessionOpen: boolean };
-type PermissionRequest = { sessionId: string; projectRoot: string; version: string; invocationId?: string; nodeId?: string };
+type PermissionRequest = { sessionId: string; projectRoot: string; version: string; invocationId?: string; nodeId?: string; native?: Record<string, unknown> };
 type Pending = { invocationId: string; prompt: ManagedPermissionPrompt; busy: boolean; done: boolean; adopted?: boolean; error?: Error };
 
 const ENDED_FLIGHT_STATES = ["cancelled", "failed", "completed"];
@@ -18,6 +18,7 @@ export class BrokerPermissionService {
   private readonly adopting = new Map<string, Promise<Pending>>();
   private reconciling?: Promise<{ adopted: string[]; closed: string[]; failed: string[] }>;
   constructor(private readonly deps: {
+    conversationForSession?: (sessionId: string) => string | null;
     operatorId: string;
     nodeId: string;
     createId: () => string;
@@ -29,7 +30,7 @@ export class BrokerPermissionService {
     /** Whether this runtime ran the invocation. Places records written before they carried a node. */
     localInvocation: (invocationId: string) => boolean;
     /** Finds the prompt a session still shows for a record whose waiter was lost. */
-    reattach: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>;
+    reattach: (request: { sessionId: string; projectRoot: string; text: string; native?: Record<string, unknown> }) => Promise<PermissionReattachment>;
     transition: (invocationId: string, state: "waiting" | "running", requestId: string | null) => Promise<unknown>;
     notify: (invocation: InvocationRequest, record: QuestionRecord, prompt: ManagedPermissionPrompt) => void;
     sleep?: (ms: number) => Promise<void>;
@@ -71,6 +72,53 @@ export class BrokerPermissionService {
       if (!pending.done) await this.close(id, "Permission wait ended without a decision", "declined");
       throw error;
     } finally { this.pending.delete(id); }
+  }
+
+  /**
+   * Opens a request no flight follows: a native session's harness asked
+   * through its own permission hook. The caller holds the hook and ends the
+   * request with `withdraw` when the session stops waiting; `decide` answers
+   * it through `prompt.answer`, as any other request. Resolves its id.
+   */
+  async raise(input: { prompt: ManagedPermissionPrompt; actorId: string; native: Record<string, unknown> }): Promise<string> {
+    const { prompt } = input;
+    const conversationId = this.deps.conversationForSession?.(prompt.sessionId) ?? null;
+    const id = this.deps.createId();
+    const record: QuestionRecord = {
+      id, kind: "question", state: "open", acceptanceState: "none",
+      title: "Permission request", summary: prompt.text,
+      createdById: input.actorId, askedById: input.actorId,
+      ...(conversationId ? { conversationId } : {}),
+      ownerId: this.deps.operatorId, nextMoveOwnerId: this.deps.operatorId,
+      createdAt: Date.now(), updatedAt: Date.now(),
+      metadata: { permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
+        version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels, native: input.native } },
+    };
+    const pending: Pending = { invocationId: "", prompt, busy: false, done: false, adopted: true };
+    this.pending.set(id, pending);
+    try {
+      await this.deps.record(record);
+    } catch (error) {
+      this.pending.delete(id);
+      throw error;
+    }
+    return id;
+  }
+
+  /**
+   * The session stopped waiting on a raised request (answered at its terminal,
+   * or its hook went away): settle the record. A decision being delivered
+   * right now wins; its own close settles the record.
+   */
+  async withdraw(id: string, answer: string): Promise<void> {
+    const pending = this.pending.get(id);
+    if (pending?.busy) return;
+    if (pending) {
+      pending.done = true;
+      this.pending.delete(id);
+    }
+    const record = this.deps.read(id);
+    if (record?.state === "open") await this.close(id, answer, "closed");
   }
 
   async decide(id: string, version: string, decision: PermissionDecision): Promise<void> {
@@ -170,7 +218,8 @@ export class BrokerPermissionService {
     // Keys may already have reached the harness. Never rebind and send again.
     if (actuationAttempted(record)) return this.settle(record.id, "A decision may already have been sent. Check the session.", true);
     // A failed lookup is not evidence that the prompt is gone. It throws, and the record stays for the next pass.
-    const found = await this.deps.reattach({ sessionId: request.sessionId, projectRoot: request.projectRoot, text: record.summary ?? "" });
+    const found = await this.deps.reattach({ sessionId: request.sessionId, projectRoot: request.projectRoot, text: record.summary ?? "",
+      ...(request.native ? { native: request.native } : {}) });
     const current = this.deps.read(record.id);
     if (!current || current.state !== "open") throw new PermissionRequestEndedError("Permission request is already settled.", found.sessionOpen);
     const live = this.pending.get(record.id);

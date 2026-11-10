@@ -278,7 +278,7 @@ describe("session attention projection", () => {
       expect.objectContaining({
         id: "session-native:session-1:confirm-1",
         kind: "native_attention",
-        title: "Native session needs input",
+        title: "Waiting on your answer",
         summary: "Codex needs a decision before continuing.",
         turnId: "native-turn",
         updatedAt: 1_700_000_009_000,
@@ -331,4 +331,15 @@ describe("session attention projection", () => {
       expect(projectSessionAttention(snapshot, { now: 10_000 })).toEqual([]);
     }
   });
+});
+
+test("approval and question context comes from preceding text, not later text", () => {
+  const turn = makeTurn({ id: "turn-context", blocks: [
+    textBlock("turn-context"),
+    commandBlock({ turnId: "turn-context", status: "awaiting_approval" }),
+    questionBlock({ turnId: "turn-context" }),
+    { ...textBlock("turn-context"), block: { ...textBlock("turn-context").block, id: "later", text: "Later text" } as TextBlock },
+  ] });
+  const items = projectSessionAttention(makeSnapshot([turn]));
+  for (const kind of ["approval", "question"]) expect(items.find(item => item.kind === kind)?.context).toEqual({ text: "All clear.", source: "assistant", at: 1000 });
 });

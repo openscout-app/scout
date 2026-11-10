@@ -10,7 +10,10 @@ if (!output) throw Error("usage: bun scripts/pairing-trust-owner-controls.ts <ev
 mkdirSync(output,{recursive:true});
 const original = readFileSync(join(root,"packages/runtime/src/pairing-security/trust-owner.ts"),"utf8");
 const relocate=(source:string)=>source
-  .replace('"../support-paths.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/support-paths.ts")).href))
+  .replaceAll('"../node-identity.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/node-identity.ts")).href))
+      .replaceAll('"../instance.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/instance.ts")).href))
+      .replaceAll('"./host-binding.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/host-binding.ts")).href))
+      .replace('"../support-paths.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/support-paths.ts")).href))
   .replace('"./trust-capsule.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-capsule.ts")).href))
   .replace('"./trust-cutover.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-cutover.ts")).href))
       .replaceAll('"./trust-reclamation.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-reclamation.ts")).href));

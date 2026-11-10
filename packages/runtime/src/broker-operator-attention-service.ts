@@ -1,7 +1,9 @@
-import type {
-  ConversationDefinition,
-  MessageRecord,
-  ScoutOperatorSignal,
+import {
+  nativeActorName,
+  type AgentNotificationView,
+  type ConversationDefinition,
+  type MessageRecord,
+  type ScoutOperatorSignal,
 } from "@openscout/protocol";
 
 import { basename } from "node:path";
@@ -48,6 +50,8 @@ export type PermissionRequestInput = {
   requestId: string;
   /** The dialog as the harness shows it. Only ever travels sealed. */
   text: string;
+  /** What the dialog asks, when it is known as data (a native hook); `text` is not parsed then. */
+  view?: AgentNotificationView;
   /** The agent whose session shows the dialog. */
   agentId: string;
   requesterNodeId: string;
@@ -127,6 +131,7 @@ export class BrokerOperatorAttentionService {
     const notification = agentNotificationForPermissionRequest({
       requestId: input.requestId,
       text: input.text,
+      ...(input.view ? { view: input.view } : {}),
       agentName: this.agentName(input.agentId),
       agentId: input.agentId,
       project: input.projectRoot ? basename(input.projectRoot) : null,
@@ -327,7 +332,8 @@ export class BrokerOperatorAttentionService {
   }
 
   private agentName(actorId: string): string {
-    return this.options.agentDisplayName?.(actorId)?.trim() || actorId;
+    // Never a raw id on the lock screen: a native session reads as its harness.
+    return this.options.agentDisplayName?.(actorId)?.trim() || nativeActorName(actorId) || actorId;
   }
 
   private now(): number {

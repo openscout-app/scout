@@ -17,6 +17,7 @@ export * from "./channel-membership.js";
 export * from "./channel-reception.js";
 export * from "./collaboration.js";
 export * from "./work-lifecycle.js";
+export * from "./work-claims.js";
 export * from "./assigned-roles.js";
 export * from "./orchestrator-prompt.js";
 export * from "./orchestration-provider-map.js";
@@ -90,3 +91,5 @@ export type { ObservedSessionMaterialFile, ObservedSessionMaterials } from "./se
 
 export * from "./host-attention.js";
 export * from "./tasks.js";
+
+export * from "./shows.js";

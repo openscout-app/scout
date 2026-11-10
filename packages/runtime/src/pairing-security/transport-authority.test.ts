@@ -1,0 +1,24 @@
+import {afterEach,expect,test} from "bun:test";
+import {mkdirSync,mkdtempSync,readFileSync,writeFileSync,unlinkSync,rmSync} from "node:fs";
+import {join} from "node:path";import {tmpdir} from "node:os";
+import {loadOrCreateNodeIdentity} from "../node-identity.ts";
+import {pairingTrustOwner} from "./trust-owner.ts";
+import {generateKeyPair} from "./noise.ts";
+import {SecureTransport} from "./transport.ts";
+const roots:string[]=[],saved={...process.env};
+afterEach(()=>{for(const key of ['OPENSCOUT_PAIRING_HOME','OPENSCOUT_SUPPORT_DIRECTORY','OPENSCOUT_INSTANCE']){if(saved[key]===undefined)delete process.env[key];else process.env[key]=saved[key];}for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});
+for(const failure of ['read','grant'] as const)test(`authority ${failure} failure cannot publish a ready transport or deliver application messages`,()=>{
+ const root=mkdtempSync(join(tmpdir(),'pairing-transport-authority-'));roots.push(root);const store=join(root,'pairing'),support=join(root,'support');mkdirSync(store,{mode:0o700});
+ process.env.OPENSCOUT_PAIRING_HOME=store;process.env.OPENSCOUT_SUPPORT_DIRECTORY=support;process.env.OPENSCOUT_INSTANCE='transport-authority-test';
+ loadOrCreateNodeIdentity(support);pairingTrustOwner().pairingAuthorityStamp();
+ const binding=join(store,'trusted-peers.host-binding.json'),bytes=readFileSync(binding);
+ const queue:Array<{to:'server'|'client';data:string|Uint8Array}>=[],errors:Error[]=[],messages:string[]=[];let ready=0;
+ const server=new SecureTransport({send:data=>queue.push({to:'client',data})},'responder',generateKeyPair(),{onReady:()=>ready++,onError:e=>errors.push(e),onMessage:m=>messages.push(m)},{trustOnComplete:failure==='grant',skipTrustWrite:()=>{unlinkSync(binding);return false;}});
+ const client=new SecureTransport({send:data=>queue.push({to:'server',data})},'initiator',generateKeyPair(),{onError:e=>errors.push(e)},{trustOnComplete:false,skipTrustWrite:()=>true});
+ let next=queue.shift()!;server.receive(next.data);next=queue.shift()!;client.receive(next.data);expect(client.isReady()).toBe(true);
+ if(failure==='read')unlinkSync(binding);
+ next=queue.shift()!;server.receive(next.data);
+ expect(errors.some(e=>e.message.includes('host_binding'))).toBe(true);expect(server.isReady()).toBe(false);expect(ready).toBe(0);
+ expect(()=>server.send('blocked')).toThrow('not ready');client.send('must not be delivered');while(queue.length)server.receive(queue.shift()!.data);expect(messages).toEqual([]);
+ writeFileSync(binding,bytes,{mode:0o600});client.send('still not admitted');while(queue.length)server.receive(queue.shift()!.data);expect(messages).toEqual([]);expect(server.isReady()).toBe(false);
+});

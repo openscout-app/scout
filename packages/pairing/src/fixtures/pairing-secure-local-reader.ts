@@ -1,3 +1,5 @@
+import {loadOrCreateNodeIdentity} from "@openscout/runtime/mesh/node-identity";
+import {PairingTrustOwner} from "@openscout/runtime/pairing-security/trust-owner";
 import { createPendingPairRequestStore, pairRequestStatePath } from "../pairing-pair-requests.ts";
 import { localConfigHome } from "@openscout/runtime/local-config";
 // Run with HOME pointed at a scratch directory: pairing identity paths are
@@ -11,6 +13,7 @@ import { bytesToHex, generateKeyPair, loadOrCreateIdentity, SecureTransport } fr
 import type { Bridge } from "../core/pairing/runtime/bridge/bridge.ts";
 import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
 
+loadOrCreateNodeIdentity();
 const identity = loadOrCreateIdentity();
 const bridge = {
   listSessions: () => [],
@@ -68,7 +71,10 @@ const trustedPeersWritten = existsSync(join(resolveOpenScoutPairingHome(), "trus
 // Even when this key is already on the paired list, neither side rewrites it.
 const peersFile = join(resolveOpenScoutPairingHome(), "trusted-peers.json");
 const seeded = JSON.stringify([{ publicKey: bytesToHex(identity.publicKey), pairedAt: "2026-01-01T00:00:00.000Z" }]);
-writeFileSync(peersFile, seeded);
+writeFileSync(peersFile, seeded, {mode:0o600});
+// The fixture deliberately imports legacy bytes under quiescent maintenance.
+// Local readers still leave those bytes and paired-device membership untouched.
+new PairingTrustOwner(resolveOpenScoutPairingHome()).bindToHost("secure-reader-fixture",{quiescent:true});
 const seededServer = startBridgeServerTRPC({ bridge, port, secure: true, identity });
 const seededClient = await createScoutPairingBridgeClient(port);
 await seededClient.query("bridgeStatus");

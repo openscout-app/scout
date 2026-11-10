@@ -20,7 +20,7 @@ type Group={kind:"candidate"|"claim";source:string;claim:Claim;claimFile:FilePro
 type Plan={schema:"scout.pairing-staging-reclamation/v1";reclamationId:string;rootId:string;
   authority:{revision:number;logicalHead:string;physicalHead:string;cutHash:string};groups:Group[];
   retained:{source:string;why:string}[]};
-type Hooks={check():void;authority():ReclamationAuthority;fail(code:string):never};
+type Hooks={check():void;authority():ReclamationAuthority;fail(code:string):never;persistentIdentity?(stat:Stats):string};
 const LIMIT=1024*1024,WHY="verified full token; unreferenced by completed authority";
 const identity=(s:Stats)=>`${s.dev}:${s.ino}`;
 const digest=(b:Buffer|string)=>createHash("sha256").update(b).digest("hex");
@@ -30,7 +30,7 @@ const payloads=(t:string)=>[dataName(t),...(["peers","commit","marker","done"] a
 /** Exported only for the canonical owner. All proof callbacks are lexically
  * supplied there, never selected by an application, wire field or environment. */
 export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:string,hooks:Hooks):CapsuleReclamationReceipt {
- const fail=hooks.fail;
+ const fail=hooks.fail, persistentIdentity=hooks.persistentIdentity??identity;
  const owned=(s:Stats,directory=false)=>{
   if(s.isSymbolicLink() || (directory?!s.isDirectory():!s.isFile()) || s.uid!==process.getuid?.()
     || (s.mode&0o022)!==0 || (!directory&&((s.mode&0o077)!==0||s.nlink!==1)))fail("reclamation_unsafe_path");
@@ -47,7 +47,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   const fd=openSync(join(p.path,name),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try{const s=fstatSync(fd);owned(s);if(s.size>LIMIT||identity(lstatSync(join(p.path,name)))!==identity(s))fail("reclamation_file_changed");
    const bytes=readFileSync(fd);if(bytes.length!==s.size||identity(lstatSync(join(p.path,name)))!==identity(s))fail("reclamation_file_changed");
-   check(p);return {bytes,proof:{source:name,identity:identity(s),bytes:bytes.length,sha256:digest(bytes)}};
+   check(p);return {bytes,proof:{source:name,identity:persistentIdentity(s),bytes:bytes.length,sha256:digest(bytes)}};
   }finally{closeSync(fd);}
  };
  const write=(p:Pin,name:string,bytes:string)=>{
@@ -76,7 +76,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
      if(!children.length){retained.push({source:name,why:"empty directory has no full token; left for structural reclamation or reviewed repair"});continue;}
      if(children.length!==1||!/^([a-f0-9-]{36})\.json$/.test(children[0]!))fail("reclamation_token_invalid");
      const child=children[0]!,file=read(dir,child),claim=unpack<Claim>(file.bytes,"claim",fail);
-     claimValid(claim,dir.id);
+     claimValid(claim,persistentIdentity(fstatSync(dir.fd)));
      if(child!==`${claim.token}.json`||(slots.test(name)&&name!==`.pairing-v2-slot-${claim.index}`)||seen.has(claim.token))fail("reclamation_token_invalid");
      seen.add(claim.token);
      const g:Group={kind:slots.test(name)?"claim":"candidate",source:name,claim,claimFile:file.proof,payloads:[]};
@@ -128,7 +128,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   if(plan.retained.some(p=>typeof p.source!=="string"||(!candidates.test(p.source)&&!slots.test(p.source))||typeof p.why!=="string"))fail("reclamation_invalid_plan");
   const syncFile=(p:Pin,name:string)=>{
    const proof=read(p,name).proof,fd=openSync(join(p.path,name),constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-   try{owned(fstatSync(fd));if(identity(fstatSync(fd))!==proof.identity)fail("reclamation_resource_changed");
+   try{owned(fstatSync(fd));if(persistentIdentity(fstatSync(fd))!==proof.identity)fail("reclamation_resource_changed");
     fsyncSync(fd);if(identity(lstatSync(join(p.path,name)))!==identity(fstatSync(fd)))fail("reclamation_resource_changed");
    }finally{closeSync(fd);}check(p);
   };
@@ -140,8 +140,8 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
   const verifyFile=(where:Pin,p:FileProof)=>{if(!same(read(where,p.source).proof,p))fail("reclamation_resource_changed");};
   const verifyGroup=(g:Group)=>{
    const where=locate(g.source),dir=pin(join(where.path,g.source));
-   try{const c=read(dir,g.claimFile.source);claimValid(unpack<Claim>(c.bytes,"claim",fail),dir.id);
-    if(dir.id!==g.claim.identity||!same(readdirSync(dir.path),[g.claimFile.source])||!same(c.proof,g.claimFile)
+   try{const c=read(dir,g.claimFile.source);claimValid(unpack<Claim>(c.bytes,"claim",fail),persistentIdentity(fstatSync(dir.fd)));
+    if(persistentIdentity(fstatSync(dir.fd))!==g.claim.identity||!same(readdirSync(dir.path),[g.claimFile.source])||!same(c.proof,g.claimFile)
       ||!same(unpack<Claim>(c.bytes,"claim",fail),g.claim))fail("reclamation_token_invalid");check(dir);
    }finally{closeSync(dir.fd);}
    for(const p of g.payloads)verifyFile(locate(p.source),p);
@@ -173,7 +173,7 @@ export function reclaimCapsuleStaging(root:PairingRootIdentity,reclamationId:str
       const proof=p.source===g.source?g.claimFile:g.payloads.find(f=>f.source===p.source)!;
       fileFd=openSync(fileName,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
       owned(fstatSync(fileFd));
-      if(identity(fstatSync(fileFd))!==proof.identity)fail("reclamation_resource_changed");
+      if(persistentIdentity(fstatSync(fileFd))!==proof.identity)fail("reclamation_resource_changed");
       fsyncSync(fileFd); // Retain interrupted, possibly unsynced payload bytes too.
       if(identity(lstatSync(fileName))!==identity(fstatSync(fileFd)))fail("reclamation_resource_changed");
       renameSync(join(root.path,p.source),join(op.path,p.source));

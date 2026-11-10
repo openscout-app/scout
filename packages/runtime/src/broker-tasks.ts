@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { flightCompletion, flightSessionTrace, SCOUT_TASKS_CAPABILITY, validateTaskReply,
-  type FlightRecord, type InvocationRequest, type MessageRecord, type ScoutDeliverRequest,
+import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, SCOUT_TASKS_CAPABILITY, validateTaskReply,
+  type AgentHarness, type FlightRecord, type InvocationRequest, type MessageRecord, type ScoutDeliverRequest,
   type ScoutDeliverResponse, type ScoutTaskReply } from "@openscout/protocol";
 import { readMessageRecord } from "./broker-message-records.js";
+import { endpointStronglyMatchesSession } from "./broker-endpoint-selection.js";
 import type { RuntimeRegistrySnapshot } from "./registry.js";
 import { resolveBrokerMessageRefAsync, messageVisibilityForConversation } from "./broker-conversation-helpers.js";
 
@@ -13,6 +14,7 @@ export function finishedTaskError(id: string): Error {
 }
 
 type Task = { invocation: InvocationRequest; flight: FlightRecord };
+
 export type BrokerTaskServiceOptions = {
   nodeId: string;
   operatorActorId: string;
@@ -37,6 +39,12 @@ export class BrokerTaskService {
   async resolve(raw: string): Promise<Task> {
     const ref = raw.replace(/^ref:/, "");
     const snapshot = this.options.snapshot();
+    // A session route is parsed before flight-suffix matching, so `session:`
+    // cannot be swallowed by an unrelated flight id that happens to end the same way.
+    const sessionRoute = ref.startsWith("session:") ? parseScoutComposerRouteTarget(ref) : null;
+    if (sessionRoute?.kind === "session_id") {
+      return this.taskForInvocation(raw, this.invocationForSession(snapshot, raw, sessionRoute.sessionId, sessionRoute.harness));
+    }
     let invocation = this.options.invocation(ref) ?? (ref.startsWith("msg-request-") ? this.options.invocation(ref.replace(/^msg-request-/, "inv-request-")) : undefined);
     const directFlight = this.options.flight(ref);
     if (!invocation && directFlight) invocation = this.options.invocation(directFlight.invocationId);
@@ -47,10 +55,51 @@ export class BrokerTaskService {
     if (!invocation && candidates.length > 0) invocation = this.options.invocation(candidates[0]!.invocationId);
     const message = !invocation ? await resolveBrokerMessageRefAsync(snapshot, ref) : null;
     if (message) invocation = Object.values(snapshot.invocations).find(item => item.messageId === message.id);
-    if (!invocation) throw new Error(message ? "an FYI has no task; use --to with a new ask" : `unknown task ${raw}; use an invocation, flight, task message or retained binding ref`);
+    if (!invocation && message) throw new Error("an FYI has no task; use --to with a new ask");
+    if (!invocation) invocation = this.invocationForWork(snapshot, raw, ref) ?? this.invocationForSession(snapshot, raw, ref);
+    return this.taskForInvocation(raw, invocation);
+  }
+  private taskForInvocation(raw: string, invocation: InvocationRequest | undefined): Task {
+    if (!invocation) throw new Error(`unknown task ${raw}; use an invocation, flight, work item, task message, binding ref, or session id`);
     const flight = this.options.currentFlight(invocation.id);
     if (!flight) throw new Error(`task ${invocation.id} has no current execution record`);
     return { invocation, flight };
+  }
+  private selectInvocation(raw: string, matches: InvocationRequest[]): InvocationRequest | undefined {
+    const unique = [...new Map(matches.map(item => {
+      const loaded = this.options.invocation(item.id) ?? item;
+      return [loaded.id, loaded] as const;
+    })).values()];
+    if (unique.length === 0) return undefined;
+    const open = unique.filter(item => {
+      const flight = this.options.currentFlight(item.id);
+      return Boolean(flight && !taskTerminal(flight));
+    });
+    const pool = open.length > 0 ? open : unique;
+    if (pool.length > 1) throw new Error(`ambiguous task ${raw}; use the full invocation or flight ID`);
+    return pool[0];
+  }
+  private invocationForWork(snapshot: RuntimeRegistrySnapshot, raw: string, ref: string): InvocationRequest | undefined {
+    const record = snapshot.collaborationRecords[ref];
+    // A question or other collaboration record is not a work handle, even when
+    // an invocation points at it. A missing record still counts: the invocation
+    // link is enough.
+    if (record && record.kind !== "work_item") return undefined;
+    const matches = Object.values(snapshot.invocations).filter(item => item.collaborationRecordId === ref
+      || item.metadata?.collaborationRecordId === ref || item.metadata?.workId === ref);
+    if (!record && matches.length === 0) return undefined;
+    return this.selectInvocation(raw, matches);
+  }
+  private invocationForSession(snapshot: RuntimeRegistrySnapshot, raw: string, sessionId: string, harness?: AgentHarness): InvocationRequest | undefined {
+    const agentIds = new Set<string>();
+    for (const endpoint of Object.values(snapshot.endpoints)) {
+      if (endpointStronglyMatchesSession(endpoint, sessionId, harness)) agentIds.add(endpoint.agentId);
+    }
+    if (!harness && snapshot.agents[sessionId]) agentIds.add(sessionId);
+    const matches = Object.values(snapshot.invocations).filter(item => agentIds.has(item.targetAgentId)
+      || (!harness && item.execution?.targetSessionId === sessionId));
+    if (matches.length === 0) return undefined;
+    return this.selectInvocation(raw, matches);
   }
   private home(task: Task): string {
     return (task.invocation.metadata?.taskHomeNodeId as string | undefined)

@@ -1,6 +1,8 @@
 import { BrokerAssistantClaims, protectAssistantService, ASSISTANT_CLAIM_HEADER } from "./broker-assistant-claims.js";
 import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsConfig } from "./mesh-approvals.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
+import { NativePermissionAskError } from "./native-permission.js";
+import { HarnessHooksError } from "./harness-hooks.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1469,7 +1471,7 @@ describe("createBrokerHttpRouter", () => {
 describe("integration setup HTTP boundaries", () => {
   test("rejects remote setup and status even when SQLite is unavailable", async () => {
     const harness = createHarness();
-    for (const [method, path] of [["POST", "/v1/integrations/setup"], ["GET", "/v1/integrations/setup/op"], ["POST", "/v1/integrations/setup/op/credentials"], ["GET", "/v1/integrations/setup/op/manifest"], ["POST", "/v1/integrations/setup/op/lifecycle"], ["POST", "/v1/integrations/setup/op/worker"], ["POST", "/v1/integrations/setup/op/deliver"], ["POST", "/v1/integrations/setup/op/events"], ["POST", "/v1/integrations/setup/op/verify"], ["POST", "/v1/integrations/setup/op/rebind"]]) {
+    for (const [method, path] of [["POST", "/v1/integrations/setup"], ["GET", "/v1/integrations/setup"], ["GET", "/v1/integrations/setup/op"], ["POST", "/v1/integrations/setup/op/credentials"], ["GET", "/v1/integrations/setup/op/manifest"], ["POST", "/v1/integrations/setup/op/lifecycle"], ["POST", "/v1/integrations/setup/op/worker"], ["POST", "/v1/integrations/setup/op/deliver"], ["POST", "/v1/integrations/setup/op/events"], ["POST", "/v1/integrations/setup/op/verify"], ["POST", "/v1/integrations/setup/op/rebind"]]) {
       const result = await requestRouter(harness, method!, path!, { transportContext: { transport: "remote" } });
       expect(result.response.status).toBe(403);
     }
@@ -1502,6 +1504,30 @@ describe("integration setup HTTP boundaries", () => {
       const advanced = await requestRouter(harness, "POST", `/v1/integrations/setup/${id}/resume`, { body: { action: "choose_workspace", expectedRevision: 1, workspaceId: "T123" } });
       expect(advanced.response.status).toBe(200);
       expect((advanced.body as { operation: { state: string } }).operation.state).toBe("awaiting_authority");
+    } finally { database.close(); }
+  });
+  test("lists every setup operation as a receipt", async () => {
+    const database = new Database(":memory:");
+    migrateControlPlaneDatabaseSchema(database);
+    try {
+      const integrationSetupService = new BrokerIntegrationSetupService({
+        database, ownerRealmId: "mesh-1", nodeId: "node-1",
+        snapshot: () => ({ agents: { alpha: { id: "alpha", definitionId: "alpha", displayName: "Alpha", homeNodeId: "node-1", authorityNodeId: "node-1", metadata: { projectRoot: "/work/alpha" } } }, endpoints: {} }) as never,
+      });
+      const harness = createHarness({ integrationSetupService });
+      const empty = await requestRouter(harness, "GET", "/v1/integrations/setup");
+      expect(empty.response.status).toBe(200);
+      expect(empty.body).toEqual({ integrations: [] });
+      const created = await requestRouter(harness, "POST", "/v1/integrations/setup", { body: { provider: "slack", mode: "project_agent", projectPath: "/work/alpha" } });
+      expect(created.response.status).toBe(200);
+      const id = (created.body as { operation: { id: string } }).operation.id;
+      const listed = await requestRouter(harness, "GET", "/v1/integrations/setup");
+      expect(listed.response.status).toBe(200);
+      const integrations = (listed.body as { integrations: Array<{ operation: { id: string }; readiness: string }> }).integrations;
+      expect(integrations).toHaveLength(1);
+      expect(integrations[0]!.operation.id).toBe(id);
+      expect(integrations[0]!.readiness).toBe("not_connected");
+      expect(integrations[0]).toEqual(created.body as never);
     } finally { database.close(); }
   });
 });
@@ -1906,4 +1932,65 @@ test("pre-origin invocation receipts replay unchanged after upgrade and changing
     }
     expect(harness.invocationCalls).toHaveLength(0);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("native permission requests are opened and waited on only from this machine", async () => {
+  const calls: unknown[][] = [];
+  const nativePermissions = {
+    open: async (ask: { sessionId?: string }) => {
+      calls.push(["open", ask]);
+      if (!ask.sessionId) throw new NativePermissionAskError("sessionId is required");
+      return { requestId: "permission-1" };
+    },
+    wait: async (requestId: string, waitMs: number) => { calls.push(["wait", requestId, waitMs]); return { state: "decided" as const, decision: "allow" as const }; },
+  } as unknown as NonNullable<BrokerHttpRouterDeps["nativePermissions"]>;
+  const harness = createHarness({ nativePermissions });
+  const ask = { harness: "claude", sessionId: "s", cwd: "/tmp/project", toolName: "Bash", toolInput: { command: "ls" } };
+  const opened = await requestRouter(harness, "POST", "/v1/permissions/native", { body: ask });
+  expect(opened.response.status).toBe(200); expect(opened.body).toEqual({ requestId: "permission-1" });
+  const waited = await requestRouter(harness, "POST", "/v1/permissions/native/wait", { body: { requestId: "permission-1", waitMs: 8000 } });
+  expect(waited.body).toEqual({ state: "decided", decision: "allow" });
+  expect(calls).toEqual([["open", ask], ["wait", "permission-1", 8000]]);
+  const invalid = await requestRouter(harness, "POST", "/v1/permissions/native", { body: { ...ask, sessionId: "" } });
+  expect(invalid.response.status).toBe(400);
+  for (const options of [
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { transport: "loopback" as const, guest: true } },
+    { headers: { origin: "http://localhost:43120" } },
+    { headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    for (const path of ["/v1/permissions/native", "/v1/permissions/native/wait"]) {
+      expect((await requestRouter(harness, "POST", path, { ...options, body: ask })).response.status).toBe(403);
+    }
+  }
+  expect(calls).toHaveLength(3);
+});
+
+test("harness hooks are read, applied and removed only from this machine", async () => {
+  const calls: string[] = [];
+  const status = [{ harness: "claude", hook: "permission-request", state: "absent" }];
+  const harnessHooks = {
+    status: async () => { calls.push("status"); return status; },
+    apply: async () => { calls.push("apply"); return { action: "apply", outcome: "changed", hooks: status }; },
+    remove: async () => { calls.push("remove"); throw new HarnessHooksError("settings.json is not valid JSON", "settings-unreadable"); },
+  } as unknown as NonNullable<BrokerHttpRouterDeps["harnessHooks"]>;
+  const harness = createHarness({ harnessHooks });
+  expect((await requestRouter(harness, "GET", "/v1/hooks")).body).toEqual({ hooks: status });
+  expect((await requestRouter(harness, "POST", "/v1/hooks/apply", { body: {} })).body).toMatchObject({ action: "apply", outcome: "changed" });
+  const refused = await requestRouter(harness, "POST", "/v1/hooks/remove", { body: {} });
+  expect(refused.response.status).toBe(409);
+  expect(refused.body).toMatchObject({ code: "settings-unreadable" });
+  expect(calls).toEqual(["status", "apply", "remove"]);
+  for (const options of [
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { transport: "loopback" as const, guest: true } },
+    { headers: { origin: "http://localhost:43120" } },
+    { headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    expect((await requestRouter(harness, "GET", "/v1/hooks", options)).response.status).toBe(403);
+    for (const path of ["/v1/hooks/apply", "/v1/hooks/remove"]) {
+      expect((await requestRouter(harness, "POST", path, { ...options, body: {} })).response.status).toBe(403);
+    }
+  }
+  expect(calls).toHaveLength(3);
 });

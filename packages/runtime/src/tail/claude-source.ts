@@ -208,7 +208,7 @@ function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
     if (typeof value === "string" && value.trim()) titles[key] = value.trim();
   };
   const head = readFileHead(file.path);
-  let cwd: string | null = null;
+  let cwd: string | null = cached && cached.size <= file.size ? cached.cwd : null;
   let sessionId: string | null = null;
   for (const line of head.split(/\r?\n/)) {
     const record = parseJsonRecord(line.trim());
@@ -230,7 +230,11 @@ function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
   if (!tail.startsAtBeginning) tailLines.shift();
   for (const line of tailLines) {
     const record = parseJsonRecord(line.trim());
-    if (record) captureTitle(record);
+    if (record) {
+      captureTitle(record);
+      // Header-only transcripts may acquire cwd beyond the bounded head read.
+      cwd ??= typeof record.cwd === "string" && record.cwd.trim() ? record.cwd : null;
+    }
   }
   let lastEventAt: number | null = null;
   for (let index = tailLines.length - 1; index >= 0; index -= 1) {
@@ -259,7 +263,12 @@ function projectDirNameForPath(filePath: string): string | null {
 
 function fallbackCwdForPath(filePath: string): string | null {
   const dirName = projectDirNameForPath(filePath);
-  return dirName ? decodeProjectDir(dirName) : null;
+  const guessed = dirName ? decodeProjectDir(dirName) : null;
+  try {
+    return guessed && statSync(guessed).isDirectory() ? guessed : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -526,6 +535,15 @@ function parseClaudeLine(line: string, ctx: TailContext): TailEvent | null {
     return null;
   }
 
+  // A transcript discovered from its header records alone has no cwd yet: take
+  // the first one recorded, even from a record without a timestamp. Later
+  // records follow each `cd`, so they never move it. The watcher and discovery
+  // share this descriptor until the next refresh.
+  if (!ctx.transcript.cwd && typeof obj.cwd === "string" && obj.cwd.trim()) {
+    ctx.transcript.cwd = obj.cwd;
+    ctx.transcript.project = basename(obj.cwd);
+  }
+
   const rawType = typeof obj.type === "string" ? obj.type : "other";
   const message = obj.message as Record<string, unknown> | undefined;
   const blocks = message?.content ?? obj.content;
@@ -590,6 +608,7 @@ export const ClaudeSource: TranscriptSource = {
 
 function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscript {
   const meta = readClaudeMetadata(file);
+  // A child agent's file.cwd is its parent's; it keeps that folder.
   const cwd = file.cwd ?? meta.cwd ?? fallbackCwdForPath(file.path);
   const sessionId = file.subagentId
     ?? meta.sessionId
@@ -602,6 +621,9 @@ function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscri
     subagentId: file.subagentId ?? null,
     workflowRunId: file.workflowRunId ?? null,
     title: meta.title ?? null,
+    customTitle: meta.customTitle ?? null,
+    agentName: meta.agentName ?? null,
+    aiTitle: meta.aiTitle ?? null,
     cwd,
     project: cwd ? basename(cwd) : projectDirNameForPath(file.path) ?? "(unknown)",
     harness: "unattributed",

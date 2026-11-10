@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { registerSecretValue, resetSecretRegistryForTests } from "../../secret-redaction.js";
-import { describeClaudeToolCall, findClaudePendingToolCall } from "./pending-tool-call.js";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { findClaudePendingToolContext, readClaudePendingToolContext, describeClaudeToolCall, findClaudePendingToolCall } from "./pending-tool-call.js";
 
 const at = "2026-11-02T10:00:00.000Z";
 const assistant = (...blocks: unknown[]) => JSON.stringify({ type: "assistant", timestamp: at, message: { role: "assistant", content: blocks } });
@@ -74,5 +77,46 @@ describe("describeClaudeToolCall", () => {
   test("long subjects are cut", () => {
     const command = "echo " + "x".repeat(5000);
     expect(describeClaudeToolCall("Bash", { command }).subject!.length).toBeLessThanOrEqual(2000);
+  });
+});
+
+describe("permission context", () => {
+  test("keeps the last non-sidechain assistant text before the pending tool", () => {
+    const tail = jsonl(
+      prompt("Create an isolated workspace."),
+      assistant({ type: "text", text: "Earlier paragraph.\n\nI will create a worktree before making changes." }),
+      JSON.stringify({ type: "assistant", isSidechain: true, message: { content: [{ type: "text", text: "Child text" }] } }),
+      assistant(toolUse("pending", "EnterWorktree", {}), { type: "text", text: "Not before the call" }),
+    );
+    expect(findClaudePendingToolContext(tail, "EnterWorktree")).toEqual({
+      text: "I will create a worktree before making changes.", source: "assistant", at: Date.parse(at),
+    });
+    expect(findClaudePendingToolContext(tail, "Bash")).toBeNull();
+    expect(findClaudePendingToolContext(tail + result("pending"), "EnterWorktree")).toBeNull();
+  });
+
+  test("stops at the last typed prompt, ignores tool results and meta prompts", () => {
+    const tail = jsonl(assistant({ type: "text", text: "Old task" }), prompt("New task"),
+      JSON.stringify({ type: "user", isMeta: true, message: { content: "Internal reminder" } }),
+      result("previous"), assistant(toolUse("pending", "Bash", {})));
+    expect(findClaudePendingToolContext(tail, "Bash")).toEqual({ text: "New task", source: "prompt", at: null });
+    expect(findClaudePendingToolContext(tail + "\n" + prompt("Interrupt"), "Bash")).toBeNull();
+  });
+
+  test("reads a hook-time on-disk fixture using only the bounded tail", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "permission-context-"));
+    try {
+      const path = join(dir, "invented-session.jsonl");
+      // Fixture captures the hook boundary: assistant text and tool_use have
+      // been flushed; no tool_result exists until the permission is decided.
+      await writeFile(path, "x".repeat(300 * 1024) + "\n" + jsonl(prompt("Isolate changes."),
+        assistant({ type: "text", text: "Creating an isolated worktree." }),
+        assistant(toolUse("pending", "EnterWorktree", {}))));
+      expect(await readClaudePendingToolContext(path, "EnterWorktree")).toEqual({
+        text: "Creating an isolated worktree.", source: "assistant", at: Date.parse(at),
+      });
+      expect(await readClaudePendingToolContext(path, "Bash")).toBeNull();
+      expect(await readClaudePendingToolContext(join(dir, "missing.jsonl"), "Bash")).toBeNull();
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

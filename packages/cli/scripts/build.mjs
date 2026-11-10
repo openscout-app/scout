@@ -314,6 +314,18 @@ if ((pairingRuntimeControllerResult.status ?? 1) !== 0) {
   process.exit(pairingRuntimeControllerResult.status ?? 1);
 }
 
+// The mobile reader is a sibling of each bundle that can serve phone reads.
+for (const directory of [outputDirectory, nodeOutputDirectory]) {
+  const result = spawnSync("bun", ["build",
+    resolve(repoRoot, "packages/pairing/src/db/mobile-read-worker-entry.ts"),
+    "--target=bun", "--format=esm", "--outfile",
+    resolve(directory, "mobile-read-worker-entry.js"), REFLECT_METADATA_BANNER,
+  ], { cwd: packageDirectory, stdio: "inherit" });
+  if ((result.status ?? 1) !== 0 || !verifyBundleStaticChecks(resolve(directory, "mobile-read-worker-entry.js"))) {
+    process.exit(result.status || 1);
+  }
+}
+
 // bun names the entry output after the source file (main.js); rename to main.mjs
 const bunOutput = resolve(outputDirectory, "main.js");
 if (existsSync(bunOutput) && bunOutput !== outputFile) {

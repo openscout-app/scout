@@ -11,11 +11,14 @@ import {
   listMobilePushRegistrations,
   syncMobilePushRegistration,
 } from "./mobile-push.ts";
+import {loadOrCreateNodeIdentity} from "./node-identity.ts";
+import {pairingTrustOwner} from "./pairing-security/trust-owner.ts";
 import { openPushContent } from "./mobile-push-seal.ts";
 import { SQLiteControlPlaneStore } from "./sqlite-store.ts";
 
 const tempRoots = new Set<string>();
 const originalControlHome = process.env.OPENSCOUT_CONTROL_HOME;
+const originalSupportDirectory = process.env.OPENSCOUT_SUPPORT_DIRECTORY;
 const originalFetch = globalThis.fetch;
 const originalPairingDir = process.env.OPENSCOUT_PAIRING_DIR;
 const originalRelayUrl = process.env.OPENSCOUT_PUSH_RELAY_URL;
@@ -36,6 +39,7 @@ afterEach(() => {
   }
   for (const [key, value] of [
     ["OPENSCOUT_PAIRING_DIR", originalPairingDir],
+    ["OPENSCOUT_SUPPORT_DIRECTORY", originalSupportDirectory],
     ["OPENSCOUT_PUSH_RELAY_URL", originalRelayUrl],
     ["OPENSCOUT_PUSH_RELAY_SESSION", originalRelaySession],
     ["OPENSCOUT_PUSH_RELAY_MESH_ID", originalRelayMeshId],
@@ -230,9 +234,9 @@ describe("mobile push relay", () => {
       publicKey: mac.publicKey.toString("hex"),
       privateKey: mac.privateKey.toString("hex"),
     }));
-    writeFileSync(join(root, ".scout", "pairing", "trusted-peers.json"), JSON.stringify([
-      { publicKey: phoneHex, pairedAt: "2026-09-24" },
-    ]));
+    process.env.OPENSCOUT_SUPPORT_DIRECTORY = join(root,"support");
+    loadOrCreateNodeIdentity(process.env.OPENSCOUT_SUPPORT_DIRECTORY);
+    pairingTrustOwner().mutate(0,"paired-phone-fixture",{type:"grant",peer:{publicKey:phoneHex,pairedAt:"2026-09-24"}});
     for (const [deviceId, token] of [[phoneHex.slice(0, 16), "aa11"], ["unpaired-device", "bb22"]] as const) {
       syncMobilePushRegistration({
         deviceId,

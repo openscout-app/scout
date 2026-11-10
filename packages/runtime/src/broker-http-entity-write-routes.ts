@@ -17,6 +17,7 @@ import type {
 } from "@openscout/protocol";
 
 import type { ActiveScoutBrokerService } from "./broker-api.js";
+import { WorkClaimConflictError } from "./broker-work-claims.js";
 import {
   badRequest,
   json,
@@ -168,7 +169,8 @@ export async function handleBrokerHttpEntityWriteRoute(
       });
       json(response, 200, result);
     } catch (error) {
-      badRequest(response, error);
+      if (error instanceof WorkClaimConflictError) json(response, error.status, error.conflict);
+      else badRequest(response, error);
     }
     return true;
   }

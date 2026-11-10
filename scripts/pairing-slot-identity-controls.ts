@@ -22,7 +22,10 @@ try{
     try{
       for(const [kind,source] of [["healthy",original],["bypass",original.replace(control.needle,control.replacement)]]){
         const module=join(scratch,`${kind}.ts`),file=join(scratch,`${kind}.test.ts`);
-        writeFileSync(module,source!.replace('"../support-paths.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/support-paths.ts")).href))
+        writeFileSync(module,source!.replaceAll('"../node-identity.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/node-identity.ts")).href))
+      .replaceAll('"../instance.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/instance.ts")).href))
+      .replaceAll('"./host-binding.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/host-binding.ts")).href))
+      .replace('"../support-paths.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/support-paths.ts")).href))
           .replace('"./trust-capsule.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-capsule.ts")).href))
           .replace('"./trust-cutover.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-cutover.ts")).href))
           .replaceAll('"./trust-reclamation.js"',JSON.stringify(pathToFileURL(join(root,"packages/runtime/src/pairing-security/trust-reclamation.ts")).href)));

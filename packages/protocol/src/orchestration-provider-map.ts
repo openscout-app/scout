@@ -154,137 +154,184 @@ type RolePolicy = {
   candidates: RuntimeCandidate[];
 };
 
-// The Opus role follows the catalog's newest Opus instead of pinning a release.
-const OPUS = latestClaudeModel("Opus", { id: "claude-opus-5-5", label: "Opus 5.5" });
+// Each slot follows the catalog: the newest enabled model in its family (or
+// Codex tier), so a catalog update moves routing without editing this file.
+// The fallback applies only when the catalog has no match.
+type CatalogPick = { id: string; label: string };
 
-function latestClaudeModel(family: string, fallback: { id: string; label: string }): { id: string; label: string } {
+function catalogModel(
+  harness: string,
+  matches: (model: { id: string; family?: string; label: string }) => boolean,
+  fallback: CatalogPick,
+  label: (model: { id: string; label: string; version?: string }) => string = (model) => model.label,
+): CatalogPick {
+  const models = (scoutRuntimeHarness(harness)?.models ?? []).filter((model) => model.enabled && matches(model));
+  const model = models.find((entry) => entry.default) ?? models[0];
+  return model ? { id: model.id, label: label(model) } : fallback;
+}
+
+function claudeFamily(family: string, fallback: CatalogPick): CatalogPick {
   const id = scoutRuntimeLatestModelInFamily("claude", family);
   const model = scoutRuntimeHarness("claude")?.models.find((entry) => entry.id === id);
   return model ? { id: model.id, label: model.label } : fallback;
 }
 
+/** Codex tiers share the GPT family; the id suffix names the tier. Catalog order is newest first. */
+function codexTier(tier: string, fallback: CatalogPick): CatalogPick {
+  return catalogModel(
+    "codex",
+    (model) => model.id.endsWith(`-${tier}`),
+    fallback,
+    (model) => `GPT-${model.version ?? model.label}`,
+  );
+}
+
+function familyModel(harness: string, family: string, fallback: CatalogPick): CatalogPick {
+  return catalogModel(harness, (model) => model.family === family, fallback);
+}
+
+const FABLE = claudeFamily("Fable", { id: "claude-fable-5", label: "Fable 5" });
+const OPUS = claudeFamily("Opus", { id: "claude-opus-5-5", label: "Opus 5.5" });
+const SONNET = claudeFamily("Sonnet", { id: "claude-sonnet-4-6", label: "Sonnet 4.6" });
+const HAIKU = claudeFamily("Haiku", { id: "claude-haiku-4-5", label: "Haiku 4.5" });
+const ASTRA = codexTier("astra", { id: "gpt-6-astra", label: "GPT-6 Astra" });
+const SOL = codexTier("sol", { id: "gpt-6.1-sol", label: "GPT-6.1 Sol" });
+const LUNA = codexTier("luna", { id: "gpt-6-luna", label: "GPT-6 Luna" });
+const GROK = familyModel("grok", "Grok", { id: "grok-4.6", label: "Grok 4.6" });
+const GLM = familyModel("opencode", "GLM", { id: "opencode-go/glm-5.2", label: "GLM-5.2" });
+const MINIMAX = familyModel("opencode", "MiniMax", { id: "opencode-go/minimax-m3", label: "MiniMax M3" });
+const DEEPSEEK = familyModel("opencode", "DeepSeek", { id: "opencode-go/deepseek-v4-pro", label: "DeepSeek V4 Pro" });
+const DEVIN = familyModel("devin", "SWE", { id: "swe-2-high", label: "SWE-2 High" });
+
 const RUNTIMES = {
   fable: runtimeDefinition(
-    "Fable 5", "claude", "claude", "claude-fable-5", "max", "Fable",
-    "Premium product taste, rapid design iterations, and premise-level critique.",
-    "Uses the premium shared Claude allowance; do not spend it on routine mechanical work.",
+    FABLE.label, "claude", "claude", FABLE.id, "max", "Fable",
+    "Product taste, design iteration, and premise-level critique.",
+    "Spends the premium shared Claude allowance; keep it off routine mechanical work.",
+  ),
+  opus: runtimeDefinition(
+    OPUS.label, "claude", "claude", OPUS.id, "high", "Opus",
+    "Long-context synthesis, architecture, and coherent product reasoning.",
+    "Premium shared Claude quota; avoid routine scans and repeated verification.",
+  ),
+  sonnet: runtimeDefinition(
+    SONNET.label, "claude", "claude", SONNET.id, "high", null,
+    "Strong generalist implementation with fast turns.",
+    "Shares Claude's allowance; a poor pick while that pool is guarded.",
+  ),
+  haiku: runtimeDefinition(
+    HAIKU.label, "claude", "claude", HAIKU.id, "low", null,
+    "Fast narrow scans and classification inside the Claude harness.",
+    "Light reasoning; a poor fit for broad synthesis.",
+  ),
+  astra: runtimeDefinition(
+    ASTRA.label, "codex", "codex", ASTRA.id, "high", null,
+    "Codex's most capable tier: hard reasoning, review, and research.",
+    "The costliest Codex tier; use Sol for routine implementation.",
   ),
   sol: runtimeDefinition(
-    "GPT-5.6 Sol", "codex", "codex", "gpt-5.6-sol", "xhigh", null,
-    "Load-bearing coding, debugging, integration, and technically grounded judgment.",
-    "Highest Codex tier; reserve deep turns for work where failure is expensive.",
+    SOL.label, "codex", "codex", SOL.id, "xhigh", null,
+    "Load-bearing coding, multi-file refactors, debugging, and integration.",
+    "Deep turns spend Codex quota quickly; keep them for work where failure is expensive.",
+  ),
+  luna: runtimeDefinition(
+    LUNA.label, "codex", "codex", LUNA.id, "medium", null,
+    "Inexpensive source mapping, test enumeration, and repeatable audit work.",
+    "Keep it out of sole high-stakes judgment and final acceptance.",
   ),
   grok: runtimeDefinition(
-    "Grok 4.6", "grok", "grok", "grok-4.6", null, "Grok",
+    GROK.label, "grok", "grok", GROK.id, null, "Grok",
     "Independent assumption checking, deletion pressure, and adversarial critique.",
-    "Do not make it the sole implementation authority; verify conclusions against repository evidence.",
+    "Not the sole implementation authority; check conclusions against the repository.",
   ),
   kimi: runtimeDefinition(
     "Kimi Code", "kimi", "kimi", null, null, "Kimi",
     "Dense repository and study synthesis through the native Kimi harness.",
-    "The harness owns the concrete model and quota telemetry can be stale; probe before large fan-out.",
-  ),
-  opus: runtimeDefinition(
-    OPUS.label, "claude", "claude", OPUS.id, "high", "Opus",
-    "Long-context synthesis, nuanced architecture, and coherent product reasoning.",
-    "Premium shared Claude quota; avoid routine scans and repetitive verification.",
+    "The harness picks the model and quota telemetry can be stale; probe before a large fan-out.",
   ),
   glm: runtimeDefinition(
-    "GLM-5.2", "opencode", "opencode", "opencode-go/glm-5.2", null, "OpenCode",
+    GLM.label, "opencode", "opencode", GLM.id, null, "OpenCode",
     "Independent broad-context synthesis through OpenCode.",
-    "OpenCode quota is not visible in Scout; use a bounded canary before scaling.",
-  ),
-  terra: runtimeDefinition(
-    "GPT-5.6 Terra", "codex", "codex", "gpt-5.6-terra", "high", null,
-    "Balanced implementation, correctness review, and technical critique.",
-    "Prefer Sol for the hardest integration boundary when its additional spend is justified.",
+    "OpenCode quota is not visible in Scout; start with a bounded canary.",
   ),
   minimax: runtimeDefinition(
-    "MiniMax M3", "minimax", "opencode", "opencode-go/minimax-m3", null, "OpenCode",
+    MINIMAX.label, "minimax", "opencode", MINIMAX.id, null, "OpenCode",
     "Cost-effective structured evidence collection and comparison.",
-    "Verify load-bearing conclusions with a stronger reviewer before acceptance.",
-  ),
-  luna: runtimeDefinition(
-    "GPT-5.6 Luna", "codex", "codex", "gpt-5.6-luna", "medium", null,
-    "Inexpensive source mapping, test enumeration, and mechanical audit work.",
-    "Keep it out of sole high-stakes product judgment and final acceptance.",
-  ),
-  haiku: runtimeDefinition(
-    "Haiku 4.5", "claude", "claude", "claude-haiku-4-5", "low", null,
-    "Fast narrow scans and classification inside the Claude harness.",
-    "Lighter reasoning and a smaller context window make broad synthesis a poor fit.",
-  ),
-  sonnet: runtimeDefinition(
-    "Sonnet 4.6", "claude", "claude", "claude-sonnet-4-6", "high", null,
-    "Strong generalist implementation with a large context window.",
-    "Shares Claude's provider allowance and can become a poor choice when that pool is guarded.",
+    "Verify load-bearing conclusions with a stronger reviewer.",
   ),
   deepseek: runtimeDefinition(
-    "DeepSeek V4 Pro", "opencode", "opencode", "opencode-go/deepseek-v4-pro", null, "OpenCode",
-    "Code-centric review through an independent model lineage.",
-    "Quota is opaque and findings should not be the sole acceptance authority.",
+    DEEPSEEK.label, "opencode", "opencode", DEEPSEEK.id, null, "OpenCode",
+    "Code-level review from an independent model lineage.",
+    "Quota is opaque; not the sole acceptance authority.",
+  ),
+  devin: runtimeDefinition(
+    `Devin ${DEVIN.label}`, "devin", "devin", DEVIN.id, null, null,
+    "Autonomous implementation in its own environment.",
+    "Devin quota is not visible in Scout; review its changes before they land.",
   ),
 } as const;
 
+// Each role's candidates come from three different provider pools, so a
+// quota failover always lands on a fresh allowance and a different lineage.
 const ROLE_POLICIES: Record<OrchestrationRoleId, RolePolicy> = {
   product_judgment: {
     label: "Product judgment",
     objective: "Strategic tradeoffs, UX prioritization, scope shaping, and high-level product decisions.",
-    strategy: "Select models with high nuanced taste, product-level synthesis, and clear communication of architectural tradeoffs.",
+    strategy: "Prefer models with product taste and clear tradeoff reasoning.",
     candidates: [
-      roleCandidate("fable", 100, "Unmatched product taste, rapid design iteration synthesis, and high-fidelity UX direction."),
-      roleCandidate("sol", 87, "Technically grounded product decisions with strong execution realism."),
-      roleCandidate("grok", 82, "Unfiltered perspective on feature bloat and aggressive scope reduction."),
+      roleCandidate("fable", 100, "Product taste, fast design iteration, and clear UX direction."),
+      roleCandidate("astra", 92, "Technically grounded product decisions with execution realism."),
+      roleCandidate("grok", 82, "An unfiltered view of feature bloat and scope."),
     ],
   },
   large_context_synthesis: {
     label: "Large-context synthesis",
-    objective: "Repository-wide investigations, deep architectural archaeology, and multi-file code synthesis.",
-    strategy: "Select models with expansive effective context windows and high-density information compression.",
+    objective: "Repository-wide investigations, architectural archaeology, and multi-file synthesis.",
+    strategy: "Prefer large effective context windows, and keep premium pools for work that needs them.",
     candidates: [
-      roleCandidate("kimi", 100, "Native long-context retrieval and dense codebase relationship synthesis."),
-      roleCandidate("opus", 91, "Deep structural understanding across complex multi-package repositories."),
-      roleCandidate("glm", 84, "Independent wide-window scanning and structural cross-referencing."),
+      roleCandidate("kimi", 100, "Native long-context retrieval on its own allowance."),
+      roleCandidate("opus", 96, "Deep structural understanding across multi-package repositories."),
+      roleCandidate("astra", 90, "A very large window with strong reasoning over it."),
     ],
   },
   adversarial_critique: {
     label: "Adversarial critique",
-    objective: "Challenging design assumptions, rapid design iteration critique, identifying UX/logic gaps, and applying deletion pressure.",
-    strategy: "Select high-taste and contrarian model lineages that stress-test design iterations and probe corner cases without sycophantic approval.",
+    objective: "Challenging design assumptions, finding UX and logic gaps, and applying deletion pressure.",
+    strategy: "Prefer a lineage other than the authors', so critique is independent rather than agreeable.",
     candidates: [
-      roleCandidate("fable", 100, "High-fidelity design critique, rapid UX/visual iteration stress-testing, and premise challenge."),
-      roleCandidate("grok", 91, "Contrarian perspective, uncompromising edge-case discovery, and aggressive premise challenge."),
-      roleCandidate("terra", 84, "Rigorous technical inspection of code correctness and runtime invariants."),
+      roleCandidate("grok", 100, "A contrarian lineage, edge-case discovery, and premise challenge."),
+      roleCandidate("fable", 94, "Design critique and UX stress-testing."),
+      roleCandidate("deepseek", 84, "A third lineage for a second opinion."),
     ],
   },
   evidence_inventory: {
     label: "Evidence inventory",
     objective: "Grep and AST inventory, reference tracing, log audit, and structured fact collection.",
-    strategy: "Select fast, cost-effective models with high precision on structured evidence gathering.",
+    strategy: "Prefer fast, inexpensive models with precise structured output.",
     candidates: [
-      roleCandidate("minimax", 100, "Fast, cost-effective structured evidence indexing and pattern enumeration."),
-      roleCandidate("luna", 95, "Low-latency source tracing, test inventory, and reference mapping."),
-      roleCandidate("haiku", 87, "Rapid mechanical file scans and categorization."),
+      roleCandidate("luna", 100, "Low-cost source tracing, test inventory, and reference mapping."),
+      roleCandidate("haiku", 94, "Fast mechanical scans and categorization."),
+      roleCandidate("minimax", 90, "Cost-effective evidence indexing and pattern enumeration."),
     ],
   },
   implementation: {
     label: "Implementation",
-    objective: "Code creation, refactoring, type checking, unit test writing, and bug fixing.",
-    strategy: "Select code-generation champions with high instruction following and strong language typing skills.",
+    objective: "Code creation, refactoring, type checking, unit tests, and bug fixing.",
+    strategy: "Prefer strong coding models with high instruction following.",
     candidates: [
-      roleCandidate("sol", 100, "Deep technical accuracy, robust multi-file refactors, and complex logic execution."),
-      roleCandidate("terra", 91, "Reliable structured implementation with strong type-system adherence."),
-      roleCandidate("sonnet", 87, "Strong generalist coding with fast turn times and clear explanations."),
+      roleCandidate("sol", 100, "Accurate multi-file refactors and complex logic."),
+      roleCandidate("sonnet", 92, "Strong generalist coding with fast turns."),
+      roleCandidate("devin", 84, "Autonomous implementation in a separate environment."),
     ],
   },
   code_review: {
     label: "Code review",
     objective: "Diff analysis, security audit, regression detection, and style conformity.",
-    strategy: "Select models with high sensitivity to subtle bugs, invariant violations, and edge-case behaviors.",
+    strategy: "Prefer a reviewer from a different lineage than the implementer, sensitive to subtle bugs.",
     candidates: [
-      roleCandidate("terra", 100, "Strict invariant checking, subtle logic flaw detection, and boundary test coverage."),
-      roleCandidate("opus", 96, "High-level architectural consistency and API surface evolution review."),
-      roleCandidate("deepseek", 87, "Independent second-opinion review focused on code-level edge cases."),
+      roleCandidate("opus", 100, "Architectural consistency and subtle invariant violations, from outside the Codex lineage."),
+      roleCandidate("astra", 95, "Rigorous logic and boundary checking."),
+      roleCandidate("deepseek", 87, "An independent second opinion on code-level edge cases."),
     ],
   },
 };

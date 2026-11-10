@@ -110,6 +110,13 @@ const RATE_CARDS: Record<string, AdapterCostRateCard> = {
   "openai:gpt-4.1-nano": { provider: "openai", model: "gpt-4.1-nano", inputPerM: 0.1, cachedInputPerM: 0.025, cacheWritePerM: null, outputPerM: 0.4, webSearchPer1K: 10 },
   "openai:gpt-4o": { provider: "openai", model: "gpt-4o", inputPerM: 2.5, cachedInputPerM: 1.25, cacheWritePerM: null, outputPerM: 10, webSearchPer1K: 10 },
   "openai:gpt-4o-mini": { provider: "openai", model: "gpt-4o-mini", inputPerM: 0.15, cachedInputPerM: 0.075, cacheWritePerM: null, outputPerM: 0.6, webSearchPer1K: 10 },
+  "anthropic:claude-fable-5.2": { provider: "anthropic", model: "claude-fable-5.2", inputPerM: 8, cachedInputPerM: 0.8, cacheWritePerM: 10, outputPerM: 40, webSearchPer1K: 10 },
+  "anthropic:claude-fable-5.1": { provider: "anthropic", model: "claude-fable-5.1", inputPerM: 10, cachedInputPerM: 1, cacheWritePerM: 12.5, outputPerM: 50, webSearchPer1K: 10 },
+  "anthropic:claude-fable-5": { provider: "anthropic", model: "claude-fable-5", inputPerM: 10, cachedInputPerM: 1, cacheWritePerM: 12.5, outputPerM: 50, webSearchPer1K: 10 },
+  "anthropic:claude-opus-5.5": { provider: "anthropic", model: "claude-opus-5.5", inputPerM: 4, cachedInputPerM: 0.4, cacheWritePerM: 5, outputPerM: 20, webSearchPer1K: 10 },
+  "anthropic:claude-sonnet-5.5": { provider: "anthropic", model: "claude-sonnet-5.5", inputPerM: 2, cachedInputPerM: 0.2, cacheWritePerM: 2.5, outputPerM: 10, webSearchPer1K: 10 },
+  // Haiku 5.5 bills prompts above 100K tokens at $0.50/$2.50; this card holds the base tier.
+  "anthropic:claude-haiku-5.5": { provider: "anthropic", model: "claude-haiku-5.5", inputPerM: 0.1, cachedInputPerM: 0.01, cacheWritePerM: 0.125, outputPerM: 0.5, webSearchPer1K: 10 },
   "anthropic:claude-opus-4.6": { provider: "anthropic", model: "claude-opus-4.6", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
   "anthropic:claude-opus-4.5": { provider: "anthropic", model: "claude-opus-4.5", inputPerM: 5, cachedInputPerM: 0.5, cacheWritePerM: 6.25, outputPerM: 25, webSearchPer1K: 10 },
   "anthropic:claude-opus-4.1": { provider: "anthropic", model: "claude-opus-4.1", inputPerM: 15, cachedInputPerM: 1.5, cacheWritePerM: 18.75, outputPerM: 75, webSearchPer1K: 10 },
@@ -127,6 +134,12 @@ const EXACT_MODEL_ALIASES: Record<string, string> = {
   "claude-opus-4-5": "anthropic:claude-opus-4.5",
   "claude-opus-4-6": "anthropic:claude-opus-4.6",
   "claude-haiku-4-5": "anthropic:claude-haiku-4.5",
+  "claude-fable-5-2": "anthropic:claude-fable-5.2",
+  "claude-fable-5-1": "anthropic:claude-fable-5.1",
+  "claude-fable-5": "anthropic:claude-fable-5",
+  "claude-opus-5-5": "anthropic:claude-opus-5.5",
+  "claude-sonnet-5-5": "anthropic:claude-sonnet-5.5",
+  "claude-haiku-5-5": "anthropic:claude-haiku-5.5",
 };
 
 export function normalizeAdapterCostProvider(input: {

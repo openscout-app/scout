@@ -239,7 +239,7 @@ describe("BrokerCommandService", () => {
     });
 
     expect(harness.recordedCollaborations).toEqual([
-      { record, options: { enqueueProjection: false } },
+      { record, options: { enqueueProjection: false, reconcile: expect.any(Function) } },
     ]);
     expect(harness.appliedEntries).toEqual([
       [expect.objectContaining({ kind: "collaboration.record" })],

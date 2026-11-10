@@ -40,6 +40,22 @@ function fixture(deliveryMode?: "cloud_cli") {
   return { service, options, setup, sent, endpoints, deliveries, flights, messages, invocations, address, taskAddress, fail: (error: Error) => { failure = error; } };
 }
 describe("external session attachment", () => {
+  test("a Scout-managed session id gets an actionable diagnostic, not a bare not-found", () => {
+    const f = fixture();
+    f.endpoints.set("endpoint.session-grok.local.grok_acp", {
+      id: "endpoint.session-grok.local.grok_acp", agentId: "session-grok", nodeId: "local", harness: "grok-acp",
+      transport: "grok_acp", state: "active", sessionId: "session-grok",
+      metadata: { externalSessionId: "01a1c133-native" },
+    } as AgentEndpoint);
+
+    for (const sessionId of ["session-grok", "grok-acp:session-grok", "01a1c133-native"]) {
+      expect(() => f.service.get({ ownerId: "remote-owner", sessionId }))
+        .toThrow(/^external_session_not_found: .* is a Scout-managed grok-acp session \(active\).*invocations_get/);
+    }
+    expect(() => f.service.get({ ownerId: "remote-owner", sessionId: "no-such-session" }))
+      .toThrow(/^external_session_not_found$/);
+  });
+
   test("cancellation racing durable delivery preparation fences provider submission", async () => {
     const f = fixture();
     const { invocation, endpoint } = await f.setup();

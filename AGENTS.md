@@ -77,12 +77,22 @@ person whose machine it is.
 
 ## Commits and pull requests
 
-- Commit subjects use gitmoji: `🐛 Fix session route resolution`,
-  `📝 Clarify runtime ownership`.
+- Do not create or comment on GitHub issues unless the operator explicitly
+  asks. Report internal failures in the handoff or through private Scout
+  feedback when authorized. Public issues are not an agent work queue.
+- Follow [branches and promotion](CONTRIBUTING.md#branches-and-promotion).
+  Start topic worktrees from fork `origin/main` and open pull requests against
+  `arach/scout:main`. Drafts, reviews and fixes stay on the fork. When a fork
+  pull request merges, promote it the same day with a pull request from
+  `arach:main` into `openscout-app/scout:main`, then fast-forward fork `main`.
+  Never push topic branches or open topic pull requests on
+  `openscout-app/scout`. Historical integration branches are not PR or
+  release bases.
+- Commit subjects are plain sentences: `Fix session route resolution`,
+  `Clarify runtime ownership`.
 - Do not add AI co-author trailers or "Generated with" lines.
-- Push a topic branch to your fork and open the pull request against
-  `openscout-app/scout`. [CONTRIBUTING.md](CONTRIBUTING.md) lists what the
-  description must contain.
+- [CONTRIBUTING.md](CONTRIBUTING.md) lists what a pull request description
+  must contain.
 - This repository is public. Do not commit local paths, host names,
   credentials, or private source.
 - Do not run the `release`, `ship`, `publish`, or `bump` scripts unless a

@@ -427,3 +427,44 @@ export function planZedScoutContextServer(
   }
   return { action: "write", text: next, replaced };
 }
+
+/**
+ * Plan the change that takes `context_servers.scout` out of a settings file,
+ * leaving every other byte where it was. `scout uninstall` uses it.
+ */
+export function planZedScoutContextServerRemoval(text: string): { action: "absent" } | { action: "write"; text: string } {
+  const root = parseSettings(text);
+  if (root?.type !== "object") return { action: "absent" };
+  const servers = findProperty(root, "context_servers");
+  if (servers?.value.type !== "object") return { action: "absent" };
+  const properties = servers.value.properties;
+  const index = properties.findIndex((property) => property.key === "scout");
+  if (index < 0) return { action: "absent" };
+  const scout = properties[index]!;
+
+  const lineStart = text.lastIndexOf("\n", scout.keyStart - 1) + 1;
+  const start = /^[ \t]*$/.test(text.slice(lineStart, scout.keyStart)) ? lineStart : scout.keyStart;
+  let end = scout.commaEnd ?? scout.value.end;
+  const newline = text.indexOf("\n", end);
+  const restOfLine = text.slice(end, newline === -1 ? text.length : newline);
+  if (start === lineStart && /^[ \t]*$/.test(restOfLine)) end = newline === -1 ? text.length : newline + 1;
+  else if (start !== lineStart) while (text[end] === " " || text[end] === "\t") end += 1;
+
+  const edits: TextEdit[] = [{ start, end, text: "" }];
+  // The last property has no comma of its own; the one before it loses its comma.
+  const previous = properties[index - 1];
+  if (scout.commaEnd === undefined && index === properties.length - 1 && previous?.commaEnd !== undefined) {
+    edits.push({ start: previous.commaEnd - 1, end: previous.commaEnd, text: "" });
+  }
+  const next = applyEdits(text, edits);
+  let check: JsonNode | null;
+  try {
+    check = parseSettings(next);
+  } catch {
+    check = null;
+  }
+  if (check?.type !== "object" || readZedScoutContextServer(next) !== undefined) {
+    throw new ScoutCliError("Scout could not edit Zed settings safely; the file was left unchanged.");
+  }
+  return { action: "write", text: next };
+}

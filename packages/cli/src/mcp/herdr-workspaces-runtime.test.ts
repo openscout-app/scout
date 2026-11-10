@@ -88,6 +88,24 @@ test("actual maximum distinct-directory groups fit even when most panes were omi
   expect(result.truncated).toBe(true);
 });
 
+test("attached clients, their apps and pane branches pass validation and survive the read", async () => {
+  const live = topology();
+  live.clients = 2; live.apps = ["Example Term"];
+  live.workspaces[0]!.tabs[0]!.panes[0]!.gitBranch = "main";
+  const v = value({ digests: [{ ...digestHerdrTopology(live), availability: "available" }] });
+  const result = await read(Response.json(v));
+  expect(result).toEqual(v);
+  expect(result.digests[0]).toMatchObject({ clients: 2, apps: ["Example Term"] });
+  expect(result.digests[0]!.needsYou[0]!.gitBranch).toBe("main");
+  const d = v.digests[0]!;
+  const saved = { ...digestHerdrTopology({ ...topology(), running: false, savedAt: 90, unavailable: "not_running" }), availability: "partial" as const };
+  await expect(read(Response.json({ ...v, availability: "partial", digests: [saved] }))).resolves.toBeDefined();
+  for (const bad of [{ ...d, apps: undefined }, { ...d, clients: undefined }, { ...d, clients: -1 },
+    { ...d, apps: [1] }, { ...saved, clients: 1, apps: [] }]) {
+    await expect(read(Response.json({ ...v, availability: "partial", digests: [bad] }))).rejects.toMatchObject({ code: "invalid_herdr_workspaces_response" });
+  }
+});
+
 test("non-JSON denial preserves status without reflecting raw server text", async () => {
   await expect(read(new Response("SECRET", { status: 403 }))).rejects.toMatchObject({ status: 403, code: "herdr_workspaces_unavailable" });
 });

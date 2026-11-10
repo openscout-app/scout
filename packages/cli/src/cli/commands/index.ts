@@ -4,13 +4,16 @@ import type { ScoutCommandContext } from "../context.ts";
 export type ScoutCommandHandler = (context: ScoutCommandContext, args: string[]) => Promise<void>;
 
 export type ScoutCommandName =
-  | "app"
+    | "permission-hook"
+| "app"
   | "status"
   | "quarantine"
+  | "hooks"
   | "notify"
   | "operator"
   | "ask"
   | "reply"
+  | "show"
   | "alias"
   | "roster"
   | "broadcast"
@@ -63,6 +66,7 @@ export type ScoutCommandName =
   | "tell"
   | "tui"
   | "up"
+  | "uninstall"
   | "update"
   | "wait"
   | "watch"
@@ -80,12 +84,16 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./app.ts")).runAppCommand;
     case "quarantine":
       return (await import("./quarantine.ts")).runQuarantineCommand;
+    case "hooks":
+      return (await import("./hooks.ts")).runHooksCommand;
     case "status":
       return (await import("./status.ts")).runStatusCommand;
     case "reply":
       return (await import("./reply.ts")).runReplyCommand;
     case "ask":
       return (await import("./ask.ts")).runAskCommand;
+    case "show":
+      return (await import("./show.ts")).runShowCommand;
     case "alias":
       return (await import("./alias.ts")).runAliasCommand;
     case "roster":
@@ -167,6 +175,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./voice.ts")).runVoiceCommand;
     case "statusline":
       return (await import("./statusline.ts")).runStatuslineCommand;
+    case "permission-hook":
+      return (await import("./permission-hook.ts")).runPermissionHookCommand;
     case "web":
       return (await import("./web.ts")).runWebCommand;
     case "auth":
@@ -179,6 +189,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./up.ts")).runUpCommand;
     case "update":
       return (await import("./update.ts")).runUpdateCommand;
+    case "uninstall":
+      return (await import("./uninstall.ts")).runUninstallCommand;
     case "wait":
       return (await import("./wait.ts")).runWaitCommand;
     case "watch":

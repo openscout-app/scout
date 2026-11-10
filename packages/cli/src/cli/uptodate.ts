@@ -3,7 +3,7 @@ export function normalizeCliBinaryMtimeMs(value: number): number {
 }
 
 export function shouldEnsureBrokerUptodateForCommand(command: string | null, args: string[] = []): boolean {
-  if (!command || command === "doctor" || command === "quarantine" || args.includes("--help") || args.includes("-h")) return false;
+  if (!command || command === "doctor" || command === "quarantine" || command === "hooks" || command === "uninstall" || args.includes("--help") || args.includes("-h")) return false;
   // Read-only roster/live inspection must not restart what it is observing.
   if (command === "who" || command === "check" || command === "recent" || command === "where" || command === "locate" || command === "route" || command === "hosts" || command === "whoami" || command === "extensions") return false;
   // scout-base supervises the mesh bridge; a bridge (re)start that restarts the
@@ -14,7 +14,7 @@ export function shouldEnsureBrokerUptodateForCommand(command: string | null, arg
   // download commands only restart the web server, never the broker. Signing
   // in only talks to the download host.
   if (command === "web" || command === "auth") return false;
-  return command !== "chat" && command !== "status" && command !== "report" && command !== "feedback" && command !== "mcp" && command !== "statusline" && command !== "search";
+  return command !== "chat" && command !== "status" && command !== "report" && command !== "feedback" && command !== "mcp" && command !== "statusline" && command !== "permission-hook" && command !== "search";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,3 +1,4 @@
+import { attentionContextBeforeBlock, type AttentionContext } from "@openscout/agent-sessions";
 import { normalizeApprovalRequest } from "@openscout/agent-sessions/protocol/approval-normalization";
 import type {
   ActionBlock,
@@ -34,6 +35,7 @@ export type SessionAttentionItem = {
   sourceLabel: string;
   actionKind?: ActionBlock["action"]["kind"];
   approval?: NormalizedApprovalRequest;
+  context?: AttentionContext | null;
 };
 
 export type ProjectSessionAttentionOptions = {
@@ -202,6 +204,7 @@ function questionAttentionItem(
   return {
     id: `session-question:${snapshot.session.id}:${turn.id}:${block.id}`,
     kind: "question",
+    context: attentionContextBeforeBlock(turn, block.id),
     title: block.header?.trim() || "Session needs input",
     summary: compactAttentionSummary(block.question),
     detail: options ? `Options: ${options}` : null,
@@ -231,6 +234,7 @@ function approvalAttentionItem(
       approval.version,
     ),
     kind: "approval",
+    context: attentionContextBeforeBlock(turn, approval.blockId),
     title: approval.title,
     summary: compactAttentionSummary(approval.description),
     detail: approval.detail,
@@ -334,7 +338,8 @@ function nativeAttentionItem(
     }`,
     kind: "native_attention",
     title: candidate.title ?? nativeAttentionTitle(candidate.status),
-    summary: candidate.summary ?? "Native session reports that it needs operator attention.",
+    // The title says it; a stock line under it only repeated the title.
+    summary: candidate.summary ?? "",
     detail: candidate.detail,
     sessionId: snapshot.session.id,
     sessionName: sessionLabel(snapshot),
@@ -413,12 +418,12 @@ function sessionErrorSummary(snapshot: SessionState): string {
 function nativeAttentionTitle(status: string): string {
   const normalized = status.replace(/[-_]+/g, " ").trim().toLowerCase();
   if (normalized.includes("approval")) {
-    return "Native session awaits approval";
+    return "Waiting on your approval";
   }
   if (normalized.includes("input") || normalized.includes("answer")) {
-    return "Native session needs input";
+    return "Waiting on your answer";
   }
-  return "Native session needs attention";
+  return "Waiting on you";
 }
 
 function nativeAttentionCandidate(

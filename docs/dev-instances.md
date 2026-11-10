@@ -42,6 +42,10 @@ installed ("prod") one. One knob, `OPENSCOUT_INSTANCE`, derives everything;
   node identity, and lists why.
 - A dev instance never claims the Claude statusline in `~/.claude/settings.json`;
   that stays with prod (`OPENSCOUT_STATUSLINE_INSTANCE=<name>` to override).
+- A named instance runs a menu bar helper only when its own `settings.json`
+  (`apps.scoutAppPath` or `apps.menu.bundlePath`) or
+  `OPENSCOUT_MENU_BUNDLE_PATH` names one. It never starts the installed app's
+  helper.
 - Named instances do not start the shared Caddy edge or publish its mDNS names,
   even with `OPENSCOUT_BASE_EDGE_ENABLED=1`. Use the instance's web port (for
   example, `http://localhost:24410` for `dev`). The production edge owns ports

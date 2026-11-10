@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { basename, dirname } from "node:path";
 
 import { StateTracker, type SessionState } from "./state.js";
@@ -78,18 +79,49 @@ function decodeClaudeProjectsSlug(name: string): string | null {
   return `/${tail.replace(/-/g, "/")}`;
 }
 
-function inferClaudeHistoryCwd(path: string): string | null {
-  const parent = basename(dirname(path));
-  return decodeClaudeProjectsSlug(parent);
+/** The first folder a transcript's records hold, found without splitting the whole transcript. */
+function firstRecordedCwd(content: string): string | null {
+  let from = 0;
+  for (;;) {
+    const at = content.indexOf('"cwd"', from);
+    if (at < 0) return null;
+    const end = content.indexOf("\n", at);
+    const line = content.slice(content.lastIndexOf("\n", at) + 1, end < 0 ? content.length : end);
+    try {
+      const cwd = (JSON.parse(line) as { cwd?: unknown } | null)?.cwd;
+      if (typeof cwd === "string" && cwd.trim()) return cwd.trim();
+    } catch {
+      // a partial last line
+    }
+    // a "cwd" in a message or a nested object is not the record's folder
+    if (end < 0) return null;
+    from = end + 1;
+  }
 }
 
-function deriveHistoryName(path: string): string {
-  const claudeCwd = inferClaudeHistoryCwd(path);
-  if (claudeCwd) {
-    return basename(claudeCwd) || claudeCwd;
+/**
+ * A Claude transcript's decoded project folder name, only when that folder
+ * exists: the name turns "/", ".", "_" and "-" all into "-", so a guess such
+ * as my/project for my-project must never become a session's folder.
+ */
+function inferClaudeHistoryCwd(path: string): string | null {
+  const decoded = decodeClaudeProjectsSlug(basename(dirname(path)));
+  if (!decoded) return null;
+  try {
+    return statSync(decoded).isDirectory() ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A label, so the lossy decode of the project folder name is good enough when no folder is known. */
+function deriveHistoryName(path: string, cwd: string | null): string {
+  const parent = basename(dirname(path));
+  const named = cwd ?? decodeClaudeProjectsSlug(parent);
+  if (named) {
+    return basename(named) || named;
   }
 
-  const parent = basename(dirname(path));
   return parent || basename(path) || "History Session";
 }
 
@@ -326,11 +358,16 @@ export function supportsHistorySessionSnapshot(adapterType: string | null | unde
 }
 
 function buildBaseHistorySession(input: HistorySessionSnapshotInput, adapterType: HistoryAdapterType): Session {
-  const cwd = input.cwd?.trim() || inferClaudeHistoryCwd(input.path) || undefined;
+  // Claude and pi records hold their folder; the pi parser sets it from its session record.
+  const recorded = adapterType === "codex" ? null : firstRecordedCwd(input.content);
+  // A recorded folder beats a decoded project folder name, even one that exists.
+  const cwd = input.cwd?.trim()
+    || (adapterType === "claude-code" ? recorded ?? inferClaudeHistoryCwd(input.path) : null)
+    || undefined;
 
   return {
     id: input.sessionId?.trim() || `history:${input.path}`,
-    name: input.name?.trim() || deriveHistoryName(input.path),
+    name: input.name?.trim() || deriveHistoryName(input.path, cwd ?? recorded),
     adapterType,
     status: "idle",
     ...(cwd ? { cwd } : {}),

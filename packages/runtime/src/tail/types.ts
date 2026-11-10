@@ -79,6 +79,14 @@ export type TailPendingToolCall = {
 export type DiscoveredTranscript = {
   /** Harness-native title (custom title > agent name > AI title; newest of each wins). */
   title?: string | null;
+  /**
+   * Claude only: the parts `title` is merged from, so a client can pass over a
+   * generated custom title and use Claude's own. Each is the newest value of its
+   * kind in the bounded head and tail read, trimmed; null when there is none.
+   */
+  customTitle?: string | null;
+  agentName?: string | null;
+  aiTitle?: string | null;
   /** Claude registry values, without inferred busy/idle semantics. */
   status?: "busy" | "idle" | "shell" | "waiting" | null;
   statusUpdatedAt?: number | null;

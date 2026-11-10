@@ -39,9 +39,13 @@ export function buildObservedSessionInventory(deps: ObservedSessionReadDeps, lim
       if (!Object.hasOwn(endpoints, id)) continue;
       if (++count > 2_000) { truncated = true; break; }
       const endpoint = endpoints[id];
-      if (endpoint.nodeId !== deps.nodeId || !valid(endpoint.sessionId) || !valid(endpoint.agentId)) continue;
-      const row = sessions.get(observedSessionKey({ nodeId: deps.nodeId, harness: observedHarness(endpoint.harness), nativeSessionId: endpoint.sessionId }));
-      if (row && !row.links.some(link => link.id === endpoint.agentId && link.kind === "agent")) {
+      if (endpoint.nodeId !== deps.nodeId || !valid(endpoint.agentId)) continue;
+      // A session Scout resumed keeps the harness's own id in metadata, so
+      // match every id the endpoint answers to, not only its sessionId.
+      const nativeIds = new Set([endpoint.sessionId, endpoint.metadata?.nativeSessionId, endpoint.metadata?.externalSessionId].filter(valid));
+      for (const nativeSessionId of nativeIds) {
+        const row = sessions.get(observedSessionKey({ nodeId: deps.nodeId, harness: observedHarness(endpoint.harness), nativeSessionId }));
+        if (!row || row.links.some(link => link.id === endpoint.agentId && link.kind === "agent")) continue;
         if (row.links.length >= 8) { truncated = true; continue; }
         row.links.push({ kind: "agent", id: endpoint.agentId });
       }

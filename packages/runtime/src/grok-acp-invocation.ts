@@ -9,6 +9,8 @@ export interface GrokAcpInvocationOptions {
   resumeSessionId?: string;
   cwd: string;
   prompt: string;
+  /** Provider-native ACP session id, reported as soon as the session exists. */
+  onNativeSession?: (nativeSessionId: string) => Promise<void> | void;
   name?: string;
   timeoutMs?: number;
   hardCeilingMs?: number;
@@ -24,5 +26,7 @@ export async function invokeGrokAcpAgent(
     ...options,
     adapterType: "grok-acp",
     label: "Grok ACP",
+    // Interactive. A session/request_permission is raised to the operator and
+    // answered with the ACP result. Kimi and Devin pass auto_approve instead.
   });
 }

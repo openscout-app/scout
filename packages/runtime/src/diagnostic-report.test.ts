@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { collectDiagnosticReport, submitDiagnosticReport, diagnosticLogLines, redactDiagnosticText, reporterHarness } from "./diagnostic-report";
+import { collectDiagnosticReport, submitDiagnosticReport, submitPreparedDiagnosticReport, diagnosticLogLines, redactDiagnosticText, reporterHarness } from "./diagnostic-report";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 async function fixture() {
@@ -62,6 +62,38 @@ test("only matching server acknowledgement reports success", async () => {
   expect((await submitDiagnosticReport({ ...opts, diagnostics: false, fetch: fake })).status).toBe("uploaded");
   const wrong = (async () => Response.json({ success: true, id: "wrong" })) as typeof fetch;
   expect((await submitDiagnosticReport({ ...opts, diagnostics: false, fetch: wrong })).status).toBe("saved");
+});
+test("sends the exact prepared preview and retries its private copy without recollecting", async () => {
+  const opts = await fixture();
+  const report = await collectDiagnosticReport({ ...opts, client: "web", diagnostics: false, message: "api_key=secret feedback" });
+  delete report.apps.collector!.pid;
+  const preview = JSON.stringify(report, null, 2);
+  let calls = 0;
+  const send = (async (_url, init) => {
+    expect(init?.body).toBe(preview);
+    expect(String(init?.body)).not.toContain("secret");
+    expect(String(init?.body)).not.toContain('"pid"');
+    if (++calls === 1) throw new Error("offline");
+    return Response.json({ success: true, id: report.id });
+  }) as typeof fetch;
+  const first = await submitPreparedDiagnosticReport(report, { ...opts, fetch: send });
+  expect(first.status).toBe("saved");
+  await writeFile(join(opts.supportDirectory, "logs/base/broker.stderr.log"), "TypeError: NEW PRIVATE LOG\n");
+  const second = await submitPreparedDiagnosticReport(report, { ...opts, fetch: send });
+  expect(second.status).toBe("uploaded");
+  expect(second.localPath).toBe(first.localPath);
+  expect(await readFile(second.localPath, "utf8")).toBe(preview);
+  expect((await stat(second.localPath)).mode & 0o777).toBe(0o600);
+});
+test("prepared submissions refuse unsafe IDs and changed saved copies before upload", async () => {
+  const opts = await fixture();
+  const report = await collectDiagnosticReport({ ...opts, diagnostics: false });
+  const never = (() => { throw new Error("must not upload"); }) as typeof fetch;
+  await expect(submitPreparedDiagnosticReport({ ...report, id: "../outside" }, { ...opts, fetch: never })).rejects.toThrow("Invalid diagnostic report ID");
+  const saved = await submitPreparedDiagnosticReport(report, { ...opts, localOnly: true });
+  await writeFile(saved.localPath, "changed");
+  await expect(submitPreparedDiagnosticReport(report, { ...opts, fetch: never })).rejects.toThrow("does not match");
+  expect(await readFile(saved.localPath, "utf8")).toBe("changed");
 });
 test("local-only and note-only never read logs or upload", async () => {
   const opts = await fixture();

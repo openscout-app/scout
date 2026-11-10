@@ -502,6 +502,74 @@ describe("broker local invocation helpers", () => {
     })).toBeNull();
   });
 
+  test("a replayed active endpoint stays open only when its worker outlives the runtime", () => {
+    const working = testFlight({
+      id: "working",
+      invocationId: "invocation-1",
+      targetAgentId: "agent-1",
+      state: "running",
+      startedAt: 900,
+      metadata: { dispatchAck: { endpointId: "replayed" } },
+    });
+    const reasonFor = (transport: AgentEndpoint["transport"]) => {
+      const snapshot = createInMemoryControlRuntime({
+        agents: { "agent-1": testAgent() },
+        endpoints: {
+          replayed: testEndpoint({
+            id: "replayed",
+            transport,
+            state: "active",
+            metadata: { lastInvocationId: "invocation-1", lastStartedAt: 1_000 },
+          }),
+        },
+        flights: { working },
+      }, { localNodeId: "node-1" }).snapshot();
+      return staleWorkingFlightReason(snapshot, working, { isInvocationActive: () => false });
+    };
+
+    // Runtime-owned children die with the runtime: their reply cannot arrive.
+    for (const transport of ["grok_acp", "claude_stream_json", "codex_app_server"] as const) {
+      expect(reasonFor(transport)).toBe("endpoint replayed was replayed active for invocation invocation-1 without a live broker task");
+    }
+    // A tmux worker keeps running across the restart and can still reply.
+    expect(reasonFor("tmux")).toBeNull();
+  });
+
+  test("a requester timeout keeps a runtime-owned turn open only within the process that started it", () => {
+    const timedOut = testFlight({
+      id: "timed-out",
+      invocationId: "invocation-1",
+      targetAgentId: "agent-1",
+      state: "running",
+      startedAt: 900,
+      metadata: { requesterTimedOut: true, dispatchAck: { endpointId: "replayed" } },
+    });
+    const reasonFor = (transport: AgentEndpoint["transport"], bootedAt: number | undefined) => {
+      const snapshot = createInMemoryControlRuntime({
+        agents: { "agent-1": testAgent() },
+        endpoints: {
+          replayed: testEndpoint({
+            id: "replayed",
+            transport,
+            state: "active",
+            metadata: { lastInvocationId: "invocation-1", lastStartedAt: 1_000 },
+          }),
+        },
+        flights: { timedOut },
+      }, { localNodeId: "node-1" }).snapshot();
+      return staleWorkingFlightReason(snapshot, timedOut, { isInvocationActive: () => false, bootedAt });
+    };
+
+    // Same process: the child is still working and its reply will complete the flight.
+    expect(reasonFor("claude_stream_json", 500)).toBeNull();
+    expect(reasonFor("claude_stream_json", undefined)).toBeNull();
+    // The turn began before this process booted: its child died with the old runtime.
+    expect(reasonFor("claude_stream_json", 5_000))
+      .toBe("endpoint replayed was replayed active for invocation invocation-1 without a live broker task");
+    // A tmux worker outlives the runtime either way.
+    expect(reasonFor("tmux", 5_000)).toBeNull();
+  });
+
   test("newer work on another session cannot supersede a flight for the same agent", () => {
     const active = testFlight({
       state: "running",

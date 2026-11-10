@@ -218,6 +218,13 @@
       "when": 1793987883033,
       "tag": "0031_agent_roster",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1794174623365,
+      "tag": "0032_fleet_recovery_index",
+      "breakpoints": true
     }
   ]
 }

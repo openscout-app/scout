@@ -43,6 +43,14 @@ const PS_DISCOVERY_ID: &str = "ps.discovery";
 const PS_CWD_ID: &str = "ps.cwd";
 const NET_LISTENERS_ID: &str = "net.listeners";
 const TMUX_SESSIONS_ID: &str = "tmux.sessions";
+/// One `list-sessions` row per session, tab-delimited because a window name or
+/// pane title can hold "|". The pane title is last, so a tab inside it folds
+/// back into it. `#{host}` is read only to recognize tmux's default pane title
+/// and is never reported. Mirrors `TMUX_SESSION_LIST_FORMAT` in the runtime.
+const TMUX_SESSION_LIST_FORMAT: &str = "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}\t#{pane_current_command}\t#{pane_current_path}\t#{window_name}\t#{host}\t#{pane_title}";
+const TMUX_SESSION_FIELD_COUNT: usize = 10;
+/// Rows from before window names and titles: seven "|"-delimited fields.
+const LEGACY_TMUX_SESSION_FIELD_COUNT: usize = 7;
 const TMUX_PANES_ID: &str = "tmux.panes";
 const ZELLIJ_SESSIONS_ID: &str = "zellij.sessions";
 const TAILSCALE_STATUS_TTL_MS: u64 = 30_000;
@@ -1449,14 +1457,13 @@ impl ProbeEngine {
         op_timeout_ms: Option<u64>,
     ) -> Result<Value, ProbeFailure> {
         let timeout = effective_probe_timeout(self.options.tmux_probe_timeout, op_timeout_ms);
-        let args = tmux_socket_args(
+        // `-u` keeps the tabs in the format: tmux prints them as "_" without a
+        // UTF-8 locale, and a daemon can run without one.
+        let mut args = vec!["-u".to_string()];
+        args.extend(tmux_socket_args(
             socket_path,
-            &[
-                "list-sessions",
-                "-F",
-                "#{session_name}|#{session_windows}|#{session_attached}|#{session_created}|#{session_activity}|#{pane_current_command}|#{pane_current_path}",
-            ],
-        );
+            &["list-sessions", "-F", TMUX_SESSION_LIST_FORMAT],
+        ));
         match run_capped_command_with_input(
             &self.options.tmux_bin,
             &args,
@@ -1517,7 +1524,10 @@ impl ProbeEngine {
         op_timeout_ms: Option<u64>,
     ) -> Result<Value, ProbeFailure> {
         let timeout = effective_probe_timeout(self.options.tmux_probe_timeout, op_timeout_ms);
-        let args = tmux_socket_args(
+        // `-u` keeps the tabs in the format: tmux prints them as "_" without a
+        // UTF-8 locale, and a daemon can run without one.
+        let mut args = vec!["-u".to_string()];
+        args.extend(tmux_socket_args(
             &parsed.socket_path,
             &[
                 "display-message",
@@ -1526,7 +1536,7 @@ impl ProbeEngine {
                 parsed.target.as_str(),
                 "#{pane_pid}\t#{pane_tty}\t#{pane_current_path}",
             ],
-        );
+        ));
         match run_capped_command_with_input(
             &self.options.tmux_bin,
             &args,
@@ -2349,7 +2359,7 @@ fn served_capabilities() -> Vec<ProbeCapability> {
         },
         ProbeCapability {
             probe_id: TMUX_SESSIONS_ID.to_string(),
-            schema_version: 2,
+            schema_version: 3,
             ttl_ms: TMUX_TTL_MS,
         },
         ProbeCapability {
@@ -3163,6 +3173,47 @@ fn optional_trimmed_string(value: Option<&String>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn first_host_label(value: &str) -> &str {
+    value.split('.').next().unwrap_or(value)
+}
+
+fn is_bare_host_name(value: &str) -> bool {
+    value.split('.').all(|label| {
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    })
+}
+
+/// The pane title to report, or null when it is tmux's default. tmux titles a
+/// new pane with the host name at the time, so the match ignores case and the
+/// domain suffix: a pane titled "box.local" still matches a host that is now
+/// "box.lan". Mirrors `reportedTmuxPaneTitle` in the runtime.
+fn reported_tmux_pane_title(title: Option<&String>, host: Option<&String>) -> Value {
+    let Some(cleaned) = title
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Value::Null;
+    };
+    let reported = Value::String(cleaned.to_string());
+    let Some(host_name) = host
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+    else {
+        return reported;
+    };
+    let lowered = cleaned.to_lowercase();
+    if lowered == host_name {
+        return Value::Null;
+    }
+    if is_bare_host_name(&lowered) && first_host_label(&lowered) == first_host_label(&host_name) {
+        return Value::Null;
+    }
+    reported
+}
+
 fn parse_tmux_session_list(output: &str) -> Vec<Value> {
     output
         .lines()
@@ -3171,10 +3222,11 @@ fn parse_tmux_session_list(output: &str) -> Vec<Value> {
             if line.is_empty() {
                 return None;
             }
-            let fields = if line.contains('|') {
-                split_delimited_line(line, '|', 7)
+            // A tab row is never split on "|": its window name or title may hold one.
+            let fields = if line.contains('\t') {
+                split_delimited_line(line, '\t', TMUX_SESSION_FIELD_COUNT)
             } else {
-                split_delimited_line(line, '\t', 7)
+                split_delimited_line(line, '|', LEGACY_TMUX_SESSION_FIELD_COUNT)
             };
             let name = fields.first()?.to_string();
             if name.is_empty() {
@@ -3200,6 +3252,8 @@ fn parse_tmux_session_list(output: &str) -> Vec<Value> {
                 "activityAt": activity_at,
                 "currentCommand": optional_trimmed_string(fields.get(5)),
                 "currentPath": optional_trimmed_string(fields.get(6)),
+                "windowName": optional_trimmed_string(fields.get(7)),
+                "paneTitle": reported_tmux_pane_title(fields.get(9), fields.get(8)),
             }))
         })
         .collect()
@@ -4343,6 +4397,93 @@ mod tests {
     #[test]
     fn native_read_artifact_polling_defaults_to_one_second() {
         assert_eq!(DEFAULT_NATIVE_READ_POLL_INTERVAL, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn tmux_session_list_reports_window_name_and_set_pane_title() {
+        let rows = super::parse_tmux_session_list(concat!(
+            "work\t3\t1\t1710000000\t1710003600\tnode\t/workspace/app\teditor\tbox.local\tclaude | fix tests\n",
+            "idle\t1\t0\t\t\tzsh\t/workspace\tzsh\tbox.local\tbox.local\n",
+            "moved\t1\t0\t\t\tzsh\t/workspace\tzsh\tbox.lan\tBOX.local\n",
+            "named\t1\t0\t\t\tzsh\t/workspace\tzsh\tbox.local\tbox build\n",
+            "legacy|2|1|100|200|zsh|/workspace/foo|bar\n",
+        ));
+        let summary = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["name"].as_str().unwrap().to_string(),
+                    row["windowName"].clone(),
+                    row["paneTitle"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    "work".to_string(),
+                    json!("editor"),
+                    json!("claude | fix tests")
+                ),
+                ("idle".to_string(), json!("zsh"), Value::Null),
+                ("moved".to_string(), json!("zsh"), Value::Null),
+                ("named".to_string(), json!("zsh"), json!("box build")),
+                ("legacy".to_string(), Value::Null, Value::Null),
+            ]
+        );
+        assert_eq!(rows[0]["currentPath"], json!("/workspace/app"));
+        assert_eq!(rows[4]["currentPath"], json!("/workspace/foo|bar"));
+        assert!(rows.iter().all(|row| row.get("host").is_none()));
+    }
+
+    #[test]
+    fn tmux_pane_detail_passes_utf8_flag_so_tabs_survive() {
+        let dir = unique_temp_dir("scoutd-tmux-pane-detail");
+        let argv_path = dir.join("argv.txt");
+        let tmux = dir.join("tmux");
+        // Like tmux for a client without a UTF-8 locale: the tabs in the
+        // format print as "_" unless -u was passed.
+        write_executable(
+            &tmux,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > {}
+row='4242\t/dev/ttys004\t/workspace/app\n'
+if [ "$1" = "-u" ]; then
+  printf "$row"
+else
+  printf "$row" | tr '\t' '_'
+fi
+"#,
+                shell_quote(&argv_path.to_string_lossy())
+            ),
+        );
+        let mut options = base_options(dir.join("probes.sock"));
+        options.tmux_bin = tmux.to_string_lossy().to_string();
+        let engine = ProbeEngine::new(options);
+
+        let snapshot = engine.snapshot(
+            super::TMUX_PANES_ID,
+            Some(r#"{"kind":"detail","socketPath":"default","target":"%1"}"#.to_string()),
+            Some(0),
+            Some(2_000),
+        );
+
+        assert!(snapshot.error.is_none(), "error={:?}", snapshot.error);
+        assert_eq!(
+            snapshot.value,
+            json!({
+                "panePid": 4242,
+                "paneTty": "ttys004",
+                "paneCurrentPath": "/workspace/app",
+            })
+        );
+        assert_eq!(
+            fs::read_to_string(&argv_path).unwrap(),
+            "-u\ndisplay-message\n-p\n-t\n%1\n#{pane_pid}\t#{pane_tty}\t#{pane_current_path}\n"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

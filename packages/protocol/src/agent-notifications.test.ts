@@ -4,6 +4,7 @@ import {
   agentNotificationActions,
   clampAgentNotification,
   collapseAgentNotification,
+  nativeActorName,
   notificationPlainLine,
   sealedAgentNotification,
   type AgentNotification,
@@ -30,7 +31,7 @@ describe("agent notifications", () => {
     };
     expect(collapseAgentNotification(n)).toEqual({
       title: "machiavelli wants to run a command",
-      subtitle: "openscout",
+      subtitle: "openscout on studio",
       body: "Ship the iOS build",
       headline: "Wants to run a command",
       category: "scout.approval",
@@ -38,6 +39,25 @@ describe("agent notifications", () => {
       level: "active",
     });
     expect(agentNotificationActions(n)).toEqual(["approve", "deny"]);
+  });
+
+  test("a session started outside Scout reads as its harness, never its raw id", () => {
+    const n: AgentNotification = {
+      ...base,
+      sender: { name: "native:claude:d158a9ca-2f1e-4c1a-9b7e-0c4b1f2a3d4e", agentId: "native:claude:d158a9ca-2f1e-4c1a-9b7e-0c4b1f2a3d4e" },
+      view: "turn.approve.command",
+      command: "rm -rf dist",
+    };
+    expect(collapseAgentNotification(n).title).toBe("Claude wants to run a command");
+    expect(nativeActorName("native:codex:abc")).toBe("Codex");
+    expect(nativeActorName("agent.machiavelli")).toBeNull();
+  });
+
+  test("the subtitle says where: the project on its host, or whichever is known", () => {
+    const n: AgentNotification = { ...base, view: "turn.approve.command", command: "ls" };
+    expect(collapseAgentNotification(n).subtitle).toBe("openscout on studio");
+    expect(collapseAgentNotification({ ...n, host: undefined }).subtitle).toBe("openscout");
+    expect(collapseAgentNotification({ ...n, project: undefined }).subtitle).toBe("studio");
   });
 
   test("a command without a description shows the command", () => {
@@ -101,7 +121,7 @@ describe("agent notifications", () => {
     expect(collapsed.body).toBe("Fix how pushes read");
   });
 
-  test("a failure is one plain line and the subtitle drops a missing project", () => {
+  test("a failure is one plain line and the subtitle keeps the host when the project is missing", () => {
     const n: AgentNotification = {
       ...base,
       sender: { name: "pike" },
@@ -112,7 +132,7 @@ describe("agent notifications", () => {
     };
     const collapsed = collapseAgentNotification(n);
     expect(collapsed.title).toBe("pike stopped on an error");
-    expect(collapsed.subtitle).toBe("");
+    expect(collapsed.subtitle).toBe("studio");
     expect(collapsed.threadId).toBe("scout.agent.pike");
     expect(collapsed.body).toBe("the operation timed out");
   });
@@ -172,4 +192,11 @@ describe("notificationPlainLine", () => {
     expect(cut.endsWith("…")).toBe(true);
     expect(cut.length).toBeLessThanOrEqual(30);
   });
+});
+
+test("tool approval why is the lock-screen body, old summary still works", () => {
+  const notification: AgentNotification = { ...base, view: "turn.approve.tool", tool: "EnterWorktree", summary: "target", why: "Creating an isolated workspace." };
+  expect(sealedAgentNotification(notification).lockScreen.body).toBe("Creating an isolated workspace.");
+  expect(collapseAgentNotification({ ...notification, why: undefined }).body).toBe("target");
+  expect((clampAgentNotification({ ...notification, why: "x".repeat(1000) }) as typeof notification).why!.length).toBeLessThanOrEqual(240);
 });

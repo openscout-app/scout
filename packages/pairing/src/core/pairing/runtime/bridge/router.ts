@@ -1,3 +1,4 @@
+import { mobileReadWorker } from "../../../../db/mobile-read.ts";
 import { resolveLegacyWebEntry } from "@openscout/runtime/web-full-client";
 // tRPC v11 router for the Bridge server.
 // Reserved transport path: web.admission is answered by the account relay
@@ -15,6 +16,8 @@ import { hostname as osHostname } from "node:os";
 import { initTRPC, tracked, TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
+  attentionContextBeforeBlock,
+  type AttentionContext,
   createHistorySessionSnapshot,
   inferHistorySessionAdapterType,
   isSessionRegistryError,
@@ -27,7 +30,9 @@ import {
   type SessionState,
 } from "@openscout/agent-sessions";
 import {
+  conversationIdForSession,
   projectSessionAttention,
+  type NativePermissionDisplay,
   type SessionAttentionItem,
 } from "@openscout/runtime";
 import {
@@ -78,6 +83,10 @@ import { toSessionUpdate } from "../../../../models/screens/agents/agents-feed-a
 import { pendingOperatorNeeds } from "../../../attention/operator-needs.ts";
 import { collectHerdrHostAttention } from "../../../attention/herdr-host-attention.ts";
 import { answerHerdrPermission } from "../../../attention/herdr-permission-answer.ts";
+import {
+  decideMobilePermission,
+  queryPermissionInboxItems,
+} from "../../../attention/runtime-permissions.ts";
 import { resolveOperatorName } from "@openscout/runtime/user-config";
 import {
   provisionMobileTerminalAccess,
@@ -85,10 +94,6 @@ import {
 } from "./mobile-terminal-provision.ts";
 import { InvalidMobileTerminalSessionError } from "./mobile-terminal-session.ts";
 import { syncMobilePushRegistrationWithRelay } from "@openscout/runtime/mobile-push";
-import {
-  queryHeartrate,
-  queryMobileAgentDetail,
-} from "../../../../db-queries.ts";
 import {
   connectCodexDeckThread,
   getCodexDeckThreadSnapshot,
@@ -661,13 +666,23 @@ export type MobileInboxItemKind =
   | "native_attention"
   // A declared `scout need`: answered by replying in its conversation, so
   // sessionId carries the conversation id and the phone offers "Open chat".
-  | "ask";
+  | "ask"
+  // A permission request the runtime holds (native Claude Code, managed
+  // tmux/Codex). `id` is the request id, as the push names it; the phone
+  // answers it with `mobile.decidePermission`.
+  | "permission";
 
 export type MobileInboxItem = {
   id: string;
   kind: MobileInboxItemKind;
   createdAt: number;
   sessionId: string;
+  /** Scout chat navigation; never substitute a native harness id here. */
+  conversationId?: string | null;
+  /** Set for harness session ids; sessionId stays intact for deduplication. */
+  harness?: string | null;
+  /** Observed words before the request, not a generated explanation. */
+  context?: AttentionContext | null;
   sessionName: string;
   adapterType: string;
   turnId: string | null;
@@ -681,6 +696,8 @@ export type MobileInboxItem = {
   actionStatus?: ActionBlock["action"]["status"];
   /** Discrete answers a declared ask offers; the phone sends one as a reply. */
   options?: string[];
+  /** A runtime permission request: what it asks, laid out, and the answers it takes. */
+  permission?: { display?: NativePermissionDisplay; decisions: Array<"approve" | "deny"> };
 };
 
 function approvalInboxItemId(
@@ -712,6 +729,9 @@ function projectApprovalInboxItem(
     kind: "approval",
     createdAt: turn.startedAt,
     sessionId: normalized.sessionId,
+    conversationId: null,
+    harness: normalized.adapterType,
+    context: attentionContextBeforeBlock(turn, block.id),
     sessionName: normalized.sessionName,
     adapterType: normalized.adapterType,
     turnId: normalized.turnId,
@@ -746,6 +766,9 @@ function mobileInboxItemFromSessionAttention(item: SessionAttentionItem): Mobile
     kind: item.kind,
     createdAt: item.updatedAt,
     sessionId: item.sessionId,
+    conversationId: null,
+    harness: item.adapterType,
+    context: item.context ?? null,
     sessionName: item.sessionName,
     adapterType: item.adapterType,
     turnId: item.turnId,
@@ -872,6 +895,8 @@ async function queryOperatorNeedInboxItems(): Promise<MobileInboxItem[]> {
       kind: "ask" as const,
       createdAt: need.createdAt,
       sessionId: need.conversationId,
+      conversationId: need.conversationId,
+      harness: null,
       sessionName: name,
       adapterType: "agent",
       turnId: null,
@@ -901,6 +926,7 @@ async function queryHerdrInboxItems(): Promise<MobileInboxItem[]> {
     sessionId: item.sessionId,
     sessionName: item.sessionName,
     adapterType: item.harness,
+    harness: item.harness,
     turnId: null,
     blockId: null,
     version: item.version,
@@ -1069,13 +1095,28 @@ const mobileRouter = t.router({
     .query(({ input }) => getMobileMeshNodes(undefined, input)),
 
   inbox: procedure
-    .query(async ({ ctx }) => ({
-      items: [
-        ...(await queryOperatorNeedInboxItems()),
-        ...(await queryHerdrInboxItems()),
-        ...queryMobileInboxItems(ctx.bridge),
-      ],
-    })),
+    .query(async ({ ctx }) => {
+      const [needs, permissions, herdr, broker] = await Promise.all([
+        queryOperatorNeedInboxItems(),
+        queryPermissionInboxItems(),
+        queryHerdrInboxItems(),
+        loadScoutBrokerContext(undefined, { scope: "conversations", signal: AbortSignal.timeout(2_000) }).catch(() => null),
+      ]);
+      // A session the runtime holds a permission request for is answered
+      // there; its Herdr pane would only repeat the same prompt.
+      const permissionSessions = new Set(permissions.map((item) => item.sessionId));
+      return {
+        items: [
+          ...needs,
+          ...permissions,
+          ...herdr.filter((item) => !permissionSessions.has(item.sessionId)),
+          ...queryMobileInboxItems(ctx.bridge),
+        ].map(item => ({
+          ...item,
+          conversationId: item.conversationId ?? (broker ? conversationIdForSession(broker.snapshot, item.sessionId) : null),
+        })),
+      };
+    }),
 
   pushSync: procedure
     .input(z.object({
@@ -1414,7 +1455,7 @@ const mobileRouter = t.router({
   // Mac Home draw from /api/heartrate. The phone draws it small in its feed.
   heartrate: procedure
     .input(z.object({}).optional())
-    .query(() => queryHeartrate()),
+    .query(() => mobileReadWorker.read("heartrate")),
 
   // Recent terminal sessions. No params; the phone just asks for the recent
   // sessions and gets one flat row per registry record (most recent first).
@@ -1488,10 +1529,22 @@ const mobileRouter = t.router({
       return answerHerdrPermission(input);
     }),
 
+  // Approve / Deny a permission request the runtime holds (an inbox item of
+  // kind "permission"). Approve is allow-once. Expected refusals return
+  // { ok: false, code }, not errors.
+  decidePermission: procedure
+    .input(z.object({
+      requestId: z.string(),
+      decision: z.enum(["approve", "deny"]),
+    }))
+    .mutation(async ({ input }) => {
+      return decideMobilePermission(input);
+    }),
+
   agentDetail: procedure
     .input(z.object({ agentId: z.string() }))
     .query(async ({ input }) => {
-      return queryMobileAgentDetail(input.agentId);
+      return mobileReadWorker.read("agentDetail", input.agentId);
     }),
 
   agentRestart: procedure

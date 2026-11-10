@@ -36,6 +36,11 @@ export const TRPC_UPGRADE_ROUTE = "GET /trpc";
  * TRPC_UPGRADE_ROUTE allowlist entry, which the inventory test exempts).
  */
 const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
+  "GET /v1/shows": "local",
+  "GET /v1/shows/capability": "local",
+  "GET /v1/shows/events": "local",
+  "GET /v1/shows/:id/bytes": "local",
+  "POST /v1/shows": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
   "POST /v1/access/admin": "local",
@@ -137,8 +142,13 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/events": "local",
   "GET /v1/events/stream": "local",
   "GET /v1/home": "local",
+  // Harness settings on this login; the handler also refuses remote transport.
+  "GET /v1/hooks": "local",
+  "POST /v1/hooks/apply": "local",
+  "POST /v1/hooks/remove": "local",
   "GET /v1/inbox": "local",
   "GET /v1/inbox/stream": "local",
+  "GET /v1/integrations/setup": "local",
   "GET /v1/invocations/:id": "local",
   "GET /v1/invocations/:id/lifecycle": "local",
   "GET /v1/invocations/:id/stream": "local",
@@ -193,6 +203,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/collaboration/events": "local",
   "POST /v1/collaboration/records": "local",
   "POST /v1/collaboration/records/:id/invoke": "local",
+  "POST /v1/work/claim": "local",
   "POST /v1/work/lifecycles": "local",
   "POST /v1/work/move": "local",
   "POST /v1/work/review": "local",
@@ -238,6 +249,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/pairing/detach": "local",
   // Operator authorization; the handler also refuses remote transport.
   "POST /v1/permissions/decide": "local",
+  "POST /v1/permissions/native": "local",
+  "POST /v1/permissions/native/wait": "local",
   "POST /v1/rendezvous/match": "local",
   "POST /v1/repo-watch/warm": "local",
   "POST /v1/roles/assignments": "local",

@@ -6,6 +6,7 @@ import {
 } from "@openscout/agent-sessions/local";
 
 import type { RuntimeTimer } from "./portable-types.js";
+import { bindManagedPermissionRequester } from "./managed-permission.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
 export interface AcpAgentInvocationOptions {
@@ -23,6 +24,12 @@ export interface AcpAgentInvocationOptions {
   timeoutMs?: number;
   hardCeilingMs?: number;
   adapterOptions?: Record<string, unknown>;
+  /**
+   * Called with the provider-native ACP session id as soon as the session
+   * exists, before the prompt runs. Without it the id is only known when the
+   * turn returns, so a long turn has no native identity while it works.
+   */
+  onNativeSession?: (nativeSessionId: string) => Promise<void> | void;
 }
 
 export interface AcpAgentInvocationResult {
@@ -180,11 +187,43 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
 export async function invokeAcpAgent(
   options: AcpAgentInvocationOptions,
 ): Promise<AcpAgentInvocationResult> {
+  // Bind now. The permission answer arrives later, outside this async context.
+  const requestPermission = bindManagedPermissionRequester();
   const key = resolvedPoolKey(options);
   const entry = await entryForInvocation(options);
+  const onNativeSession = options.onNativeSession;
   const turn = entry.client.turn({
     input: options.prompt,
     timeoutMs: acpTurnCeilingMs(options),
+    onPermission: async (request) => {
+      let open = true;
+      let decision: "approve" | "deny" = "deny";
+      const accepted = await requestPermission({
+        sessionId: options.sessionId,
+        projectRoot: options.cwd,
+        text: `${options.label} asks permission: ${request.description}`,
+        version: `${request.turnId}:${request.blockId}:${request.version}`,
+        decisions: ["once", "deny"],
+        decisionLabels: { once: "Allow once", deny: "Deny" },
+        isCurrent: async () => open,
+        answer: async (choice) => {
+          open = false;
+          decision = choice === "deny" ? "deny" : "approve";
+        },
+      });
+      if (!accepted) {
+        throw new Error(`${options.label} has no permission surface for this request.`);
+      }
+      return decision;
+    },
+    ...(onNativeSession ? {
+      onSessionReady: (session: { nativeId?: string }) => {
+        const nativeSessionId = session.nativeId?.trim();
+        if (!nativeSessionId) return;
+        entry.nativeSessionId = nativeSessionId;
+        void Promise.resolve().then(() => onNativeSession(nativeSessionId)).catch(() => undefined);
+      },
+    } : {}),
   }).then((result) => {
     const nativeSessionId = result.session.nativeId?.trim()
       || entry.nativeSessionId

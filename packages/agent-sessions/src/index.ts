@@ -84,6 +84,8 @@ export type {
 export {
   describeClaudeToolCall,
   findClaudePendingToolCall,
+  findClaudePendingToolContext,
+  readClaudePendingToolContext,
 } from "./adapters/claude-code/pending-tool-call.js";
 export type {
   ClaudePendingToolCall,
@@ -142,3 +144,6 @@ export {
 } from "./secret-redaction.js";
 
 export { createAdapter as createOpenclawAcpAdapter } from "./adapters/openclaw-acp/index.js";
+
+export { shapeAttentionContext, attentionContextBeforeBlock } from "./attention-context.js";
+export type { AttentionContext } from "./attention-context.js";

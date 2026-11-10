@@ -15,6 +15,7 @@ import {
   subscribeTail,
   subscribeTailInternal,
 } from "./service.js";
+import { ClaudeSource } from "./claude-source.js";
 import type {
   DiscoveredProcess,
   DiscoveredTranscript,
@@ -158,6 +159,22 @@ describe("tail quiet event coalescing", () => {
 });
 
 describe("internal tail subscribers", () => {
+  test("Claude watcher learns cwd appended after header-only attachment without rediscovery", async () => {
+    const path = await transcriptFile();
+    await writeFile(path, JSON.stringify({ type: "last-prompt", lastPrompt: "hello" }) + "\n");
+    const transcript = { ...testTranscript(path, "late-cwd"), source: "claude", cwd: null };
+    const key = await __testing.installWatcher({ source: ClaudeSource, process: { ...testProcess, cwd: "" }, transcript });
+    const cwd = "/example/worktrees/my-project";
+    await appendFile(path, JSON.stringify({
+      type: "user", sessionId: "late-cwd", cwd,
+      timestamp: "2026-04-27T15:00:00Z", message: { content: "hello" },
+    }) + "\n");
+    await __testing.pumpWatcher(key);
+    expect(transcript.cwd).toBe(cwd);
+    expect(__testing.snapshotSessionEvents("late-cwd", "claude", 10).at(-1)?.cwd).toBe(cwd);
+  });
+
+
   test("uses relaxed background defaults without changing tiered watcher cadence", () => {
     expect(__testing.defaultLoopCadence).toEqual({
       pumpIntervalMs: 10_000,

@@ -67,6 +67,12 @@
       "types": "./dist/core/pairing/runtime/bridge/artifact-presentation.d.ts",
       "import": "./dist/core/pairing/runtime/bridge/artifact-presentation.js",
       "default": "./dist/core/pairing/runtime/bridge/artifact-presentation.js"
+    },
+    "./answerer-claim": {
+      "bun": "./src/scoutbot/answerer-claim.ts",
+      "types": "./dist/scoutbot/answerer-claim.d.ts",
+      "import": "./dist/scoutbot/answerer-claim.js",
+      "default": "./dist/scoutbot/answerer-claim.js"
     }
   },
   "scripts": {

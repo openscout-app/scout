@@ -17,6 +17,7 @@ import {
 import { SUPPORTED_SCOUT_HARNESSES } from "./local-agents.js";
 import { executionForBrokerRuntimeProfile } from "./broker-runtime-profiles.js";
 import {
+  bareRouteSessionId,
   resolveBrokerRouteTarget,
   type BrokerLabelResolution,
   type BrokerRouteTargetInput,
@@ -221,7 +222,7 @@ export function exactSessionRouteTarget(input: BrokerRouteTargetInput): {
       label: host ? `${base}@${host}` : base,
     };
   }
-  const bare = input.targetSessionId?.trim();
+  const bare = bareRouteSessionId(input);
   if (bare) {
     const harness = input.execution?.harness;
     return {

@@ -82,6 +82,8 @@ export const herdrTerminalHost: TerminalHostAdapter = {
       return {
         name: session.name,
         state: session.running ? "live" : "detached",
+        // Counted on this host from its process table; absent when unread.
+        ...(topology?.clients !== undefined ? { attachedClients: topology.clients } : {}),
         // The last-known pane cwd stands in for a live one: a stopped session
         // has no current directory, but "where was this" is what the row needs.
         ...(cwd ? { cwd } : {}),
@@ -89,6 +91,7 @@ export const herdrTerminalHost: TerminalHostAdapter = {
           isDefault: session.isDefault,
           running: session.running,
           ...(lastKnown ? { lastKnownLayout: lastKnown } : {}),
+          ...(topology?.apps ? { apps: topology.apps } : {}),
         },
       };
     }));

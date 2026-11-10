@@ -2,7 +2,7 @@ import {
   captureTmuxPane,
   execSystemFile,
   invalidateTmuxSessions,
-  tmuxSessionsProbe,
+  readTmuxSessionsWithClients,
 } from "@openscout/runtime/system-probes";
 import { formatTerminalSurfaceId } from "@openscout/protocol";
 import type { TerminalSurface } from "@openscout/protocol";
@@ -44,17 +44,21 @@ export const tmuxTerminalHost: TerminalHostAdapter = {
   },
 
   async list(context = {}) {
-    const snapshot = await tmuxSessionsProbe.for({ env: context.env ?? process.env }).fresh();
+    const snapshot = await readTmuxSessionsWithClients({ env: context.env ?? process.env });
     return (snapshot.value ?? []).map((session): TerminalHostSession => ({
       name: session.name,
       state: "live",
       attachedClients: session.attached,
       cwd: session.currentPath,
       currentCommand: session.currentCommand,
+      windowName: session.windowName ?? null,
+      paneTitle: session.paneTitle ?? null,
       metadata: {
         windows: session.windows,
         ...(session.createdAt ? { startedAt: session.createdAt * 1000 } : {}),
         ...(session.activityAt ? { activityAt: session.activityAt * 1000 } : {}),
+        // The macOS apps this host's clients run in; absent when unread.
+        ...(session.apps ? { apps: session.apps } : {}),
       },
     }));
   },

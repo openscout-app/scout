@@ -185,7 +185,12 @@ function projectDirNameForPath(filePath: string): string | null {
 
 function fallbackCwdForPath(filePath: string): string | null {
   const dirName = projectDirNameForPath(filePath);
-  return dirName ? decodePiProjectDir(dirName) : null;
+  const guessed = dirName ? decodePiProjectDir(dirName) : null;
+  try {
+    return guessed && statSync(guessed).isDirectory() ? guessed : null;
+  } catch {
+    return null;
+  }
 }
 
 function listRecentPiProjectTranscripts(

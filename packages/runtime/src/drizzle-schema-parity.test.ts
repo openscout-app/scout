@@ -34,6 +34,7 @@ import { WEB_READ_INDEXES_SQL } from "./web-read-indexes.js";
 // every comma. We drop the mangled statement and apply the escape-hatch DDL.
 const EXPRESSION_INDEX_NAME = "idx_durable_actions_kind_due_at_updated_at";
 const REQUESTER_RECENCY_INDEX_NAME = "idx_invocations_requester_recency";
+const RECOVERY_INDEX_NAME = "idx_invocations_completed_recovery";
 
 /**
  * Lowercase everything outside single-quoted string literals so SQL keywords
@@ -237,7 +238,8 @@ beforeAll(async () => {
   const indexStmts = generatedStatements.filter(
     (s) => !/CREATE TABLE/i.test(s)
       && !s.includes(EXPRESSION_INDEX_NAME)
-      && !s.includes(REQUESTER_RECENCY_INDEX_NAME),
+      && !s.includes(REQUESTER_RECENCY_INDEX_NAME)
+      && !s.includes(RECOVERY_INDEX_NAME),
   );
   for (const stmt of tableStmts) drizzleDb.exec(stmt);
   for (const stmt of indexStmts) drizzleDb.exec(stmt);
@@ -247,6 +249,11 @@ beforeAll(async () => {
   // separate column names. Render this index from the declarative snapshot,
   // not the raw-schema constant, so the strict parity comparisons still catch
   // expression, column, uniqueness, predicate, and ordering drift.
+  const recovery = current.tables.invocations!.indexes[RECOVERY_INDEX_NAME]!;
+  expect(recovery.columns).toHaveLength(3);
+  drizzleDb.exec(`CREATE ${recovery.isUnique ? "UNIQUE " : ""}INDEX ${RECOVERY_INDEX_NAME}
+    ON invocations ("${recovery.columns[0]}", ${recovery.columns[1]}, ${recovery.columns[2]})
+    WHERE ${recovery.where};`);
   const recency = current.tables.invocations!.indexes[REQUESTER_RECENCY_INDEX_NAME]!;
   expect(recency.columns).toHaveLength(2);
   const requesterColumn = recency.columns[0]!.replaceAll('"', '""');

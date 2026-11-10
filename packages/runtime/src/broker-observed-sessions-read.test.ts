@@ -43,6 +43,15 @@ test("native identities stay case-sensitive, typed agent links never replace the
   expect(readObservedSessions(deps(), url(exact.replace("node-1", "other-node")), true).status).toBe(404);
 });
 
+test("a session Scout resumed links its agent by the harness id it keeps in metadata", () => {
+  const resumed = { id: "ep-resumed", agentId: "flat-codex-Native-1", nodeId: "node-1", harness: "codex", sessionId: "flat-codex-Native-1",
+    metadata: { externalSessionId: "Native-1", nativeSessionId: "Native-1" } } as unknown as AgentEndpoint;
+  const pending = { id: "ep-pending", agentId: "flat-pending", nodeId: "node-1", harness: "codex", metadata: { externalSessionId: "Native-1" } } as unknown as AgentEndpoint;
+  const elsewhere = { ...resumed, id: "ep-elsewhere", agentId: "other-node-agent", nodeId: "node-2" } as AgentEndpoint;
+  const result = buildObservedSessionInventory({ ...deps(), readEndpoints: () => ({ ...endpoints, resumed, pending, elsewhere }) });
+  expect(result.sessions[0].links).toEqual([{ kind: "agent", id: "agent-1" }, { kind: "agent", id: "flat-codex-Native-1" }, { kind: "agent", id: "flat-pending" }]);
+});
+
 test("unqualified collisions list unlike candidates instead of applying web precedence", () => {
   const value = cache([transcript(), transcript("claude", "Native-1", "/other")]);
   const result = readObservedSessions(deps(value), url("?ref=Native-1"), true);

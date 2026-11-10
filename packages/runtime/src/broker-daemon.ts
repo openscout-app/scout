@@ -1,5 +1,9 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerShowStore } from "./broker-show-store.js";
+import { shapeAttentionContext } from "@openscout/agent-sessions";
+import { permissionDialogView } from "./agent-notification-builders.js";
+import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskService } from "./broker-tasks.js";
 import { SCOUT_TASKS_CAPABILITY, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
@@ -18,7 +22,8 @@ import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
-import { deliverInPlace } from "./in-place/deliver.js";
+import { deliverInPlace, isScoutBackgroundCopy } from "./in-place/deliver.js";
+import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
@@ -113,6 +118,7 @@ import { BrokerRendezvousService } from "./broker-rendezvous-service.js";
 import { BrokerOperatorAttentionService } from "./broker-operator-attention-service.js";
 import { BrokerLocalAgentSyncService } from "./broker-local-agent-sync-service.js";
 import { createRelayAgentRegistrySignatureReader } from "./relay-agent-registry-signature.js";
+import { relayEndpointsTakingObservation } from "./relay-endpoint-session-observation.js";
 import {
   DEFAULT_CARDLESS_SESSION_IDLE_TTL_MS,
   idleCardlessSessionExpiryCandidates,
@@ -216,7 +222,8 @@ import {
   startMeshRendezvousPublisher,
   type MeshRendezvousPublisher,
 } from "./mesh-rendezvous.js";
-import { clearGitBranchCache, readRelayAgentOverrides, writeRelayAgentOverrides } from "./setup.js";
+import { clearGitBranchCache, readRelayAgentOverrides, resolveRuntimeScoutCliInvocation, writeRelayAgentOverrides } from "./setup.js";
+import { HarnessHooks } from "./harness-hooks.js";
 import { broadcastApnsAlertToActiveMobileDevices } from "./mobile-push.js";
 import { describeTaskCallbackRun, runTaskCallback } from "./task-callback.js";
 import {
@@ -270,6 +277,7 @@ import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
 import { BrokerRequestReceipts, RetryablePreEffectFailure } from "./broker-request-receipts.js";
+import { resolveSessionWorkspace } from "./agent-workspace.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
   closeServer,
@@ -916,7 +924,11 @@ const durableRecords: BrokerDurableRecordStore = new BrokerDurableRecordStore({
 const upsertNodeDurably = durableRecords.upsertNode;
 const upsertActorDurably = durableRecords.upsertActor;
 const upsertAgentDurably = durableRecords.upsertAgent;
-const upsertEndpointDurably = durableRecords.upsertEndpoint;
+const upsertEndpointRecordDurably = durableRecords.upsertEndpoint;
+async function upsertEndpointDurably(endpoint: AgentEndpoint): Promise<void> {
+  await upsertEndpointRecordDurably(endpoint);
+  await mirrorObservedTmuxSessionToRelayEndpoints(endpoint);
+}
 const deleteEndpointDurably = durableRecords.deleteEndpoint;
 const deleteAgentDurably = durableRecords.deleteAgent;
 const deleteActorDurably = durableRecords.deleteActor;
@@ -1540,6 +1552,7 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   }),
   deliverTerminalReport: (flightId) => terminalReportDeliveryService.deliver(flightId),
   maybeForwardFlightToAuthority: (flight) => meshForwardingService.maybeForwardFlightToAuthority(flight),
+  bootedAt: brokerBootedAt,
   isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
     || replyCompletionRecovery.isPending(invocationId)
     || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
@@ -1627,6 +1640,27 @@ async function transitionInvocation(
   // Recording can reject a stale patch after another writer completes/cancels
   // the invocation. Never return the uncommitted proposal to a side-effect caller.
   return runtime.flightForInvocation(invocationId)!;
+}
+
+/**
+ * A verified tmux observation is a fact about the tmux session. The
+ * relay-registry endpoint for the same session gets it too, so clients can map
+ * that agent to its transcript. Mirroring writes the record directly: it
+ * changes no state, so it must not trigger dispatch recovery, and a failure
+ * here must not fail the write that carried the observation.
+ */
+async function mirrorObservedTmuxSessionToRelayEndpoints(endpoint: AgentEndpoint): Promise<void> {
+  if (endpoint.nodeId !== nodeId) return;
+  try {
+    for (const target of relayEndpointsTakingObservation(endpoint, Object.values(runtime.peek().endpoints))) {
+      await upsertEndpointRecordDurably(target);
+    }
+  } catch (error) {
+    console.warn(
+      `[openscout-runtime] could not mirror the observed session of ${endpoint.id} to relay endpoints:`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 async function persistEndpoint(endpoint: AgentEndpoint): Promise<void> {
@@ -2366,6 +2400,7 @@ async function createCardlessProjectSessionForDelivery(input: {
   projectPath: string;
   execution?: InvocationRequest["execution"];
   projectAgent?: { handle?: string };
+  workspace?: "new_worktree";
   requesterId: string;
   createdAt: number;
 }) {
@@ -2411,6 +2446,17 @@ async function createCardlessProjectSessionForDelivery(input: {
       projectSessionIndex,
     ],
   });
+  // Runs before any record exists for this request, so a refusal is pre-effect.
+  let sessionWorkspace: Awaited<ReturnType<typeof resolveSessionWorkspace>>;
+  try {
+    sessionWorkspace = await resolveSessionWorkspace({
+      projectRoot,
+      agentName: provisionalName,
+      workspace: input.workspace,
+    });
+  } catch (error) {
+    throw new RetryablePreEffectFailure(error instanceof Error ? error.message : String(error));
+  }
   const registered = await registerCardlessSession({
     upsertActor: upsertActorDurably,
     upsertEndpoint: persistEndpoint,
@@ -2419,7 +2465,7 @@ async function createCardlessProjectSessionForDelivery(input: {
     handle: provisionalName,
     transport,
     harness,
-    cwd: projectRoot,
+    cwd: sessionWorkspace.cwd,
     projectRoot,
     nodeId,
     ...(input.execution?.model?.trim() ? { model: input.execution.model.trim() } : {}),
@@ -2527,6 +2573,14 @@ async function createProjectSessionForDelivery(
     if (isLocalDirectory(projectRoot)) {
       return createCardlessProjectSessionForDelivery(localInput);
     }
+  }
+  if (input.workspace === "new_worktree") {
+    // The mesh session-start request carries no workspace choice; refuse
+    // rather than start the peer session in its shared checkout.
+    throw new RetryablePreEffectFailure(
+      `workspace new_worktree is not supported for a session on another machine (${input.projectPath}).`
+      + " Ask without workspace new_worktree, or ask on the machine that holds the project.",
+    );
   }
   const execution = input.execution;
   const request: MeshProjectSessionStartInput = {
@@ -3048,6 +3102,7 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
 });
 
 const permissionService = new BrokerPermissionService({
+  conversationForSession: sessionId => conversationIdForSession(runtime.snapshot(), sessionId),
   operatorId: operatorActorId,
   nodeId,
   createId: () => createRuntimeId("permission"),
@@ -3060,7 +3115,8 @@ const permissionService = new BrokerPermissionService({
     const invocation = knownInvocations.get(id);
     return Boolean(invocation) && (invocation?.targetNodeId ?? nodeId) === nodeId;
   },
-  reattach: reattachTmuxPermission,
+  // A native session's request has no tmux pane to rebind: its hook went with the old runtime.
+  reattach: request => request.native ? Promise.resolve({ sessionOpen: false }) : reattachTmuxPermission(request),
   transition: (id, state, requestId) => transitionInvocation(id, {
     state, summary: requestId ? "Waiting on permission" : "Permission wait resolved; continuing live session.",
     metadata: { permissionRequestId: requestId, waitingOnPermission: Boolean(requestId), nextMoveOwnerId: requestId ? operatorActorId : null },
@@ -3069,7 +3125,14 @@ const permissionService = new BrokerPermissionService({
   // and rings as a permission request, and a tap opens the request.
   notify: (invocation, record, prompt) => {
     const flightId = runtime.flightForInvocation(invocation.id)?.id;
+    const context = shapeAttentionContext(invocation.task, "task");
+    const view = permissionDialogView(prompt.text);
+    if (context) {
+      if (view.view === "turn.approve.command" || view.view === "turn.approve.tool") view.why = context.text;
+      if (view.view === "turn.approve.edit") view.summary = context.text;
+    }
     operatorAttentionService.queuePermissionRequest({
+      view,
       requestId: record.id, text: prompt.text, agentId: invocation.targetAgentId, requesterNodeId: nodeId,
       projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: record.createdAt,
       ...(invocation.conversationId ? { conversationId: invocation.conversationId } : {}),
@@ -3080,6 +3143,19 @@ const permissionService = new BrokerPermissionService({
   },
 });
 configureManagedPermissionHandler((invocation, prompt) => permissionService.wait(invocation, prompt));
+
+/** Permission dialogs of Claude Code sessions the operator started, raised by their PermissionRequest hook. */
+const nativePermissions = new NativePermissionRequests({
+  permissions: permissionService,
+  launchedByScout: async (record) => isScoutBackgroundCopy(record)
+    || Boolean(record.tmux?.session && (await listScoutLaunchedTmuxSessions()).has(record.tmux.session)),
+  notify: ({ requestId, prompt, actorId, view }) => {
+    operatorAttentionService.queuePermissionRequest({
+      requestId, text: prompt.text, view, agentId: actorId, requesterNodeId: nodeId,
+      projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: Date.now(),
+    });
+  },
+});
 
 /** A restart loses every live permission waiter. Rebind each request to its session, or settle it. */
 function reconcilePermissionRequests(reason: "startup" | "periodic"): void {
@@ -3359,6 +3435,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   tasks: taskService,
+  shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
     service: attachmentService, nodeId,
     notifyOperator: createOperatorAttachmentNotifier({
@@ -3406,6 +3483,8 @@ const routeRequest = createBrokerHttpRouter({
     },
   }),
   permissionService,
+  nativePermissions,
+  harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
     supportDirectory,
     lifecycle: async (action, phase) => {
@@ -4154,6 +4233,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   storageMaintenance.stop();
   meshApprovalWatch.stop();
   meshApprovalShare.stop();
+  await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");

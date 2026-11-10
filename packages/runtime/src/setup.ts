@@ -33,6 +33,7 @@ import {
   writeClaudeStatuslineDelegate,
 } from "./claude-statusline.js";
 import { upsertManagedInstall } from "./managed-installs.js";
+import { defaultAppsSettings, normalizeAppsSettings, type OpenScoutAppsSettings } from "./apps-settings.js";
 import { readStableNodeQualifier } from "./node-identity.js";
 import {
   defaultOpenScoutNetworkSettings,
@@ -254,6 +255,8 @@ export type OpenScoutSettings = {
     scenes: Scene[];
     activeSceneIdBySurface: Partial<Record<SceneSurface, string | null>>;
   };
+  /** The host's Scout.app and the menu bar helper the service keeps running. */
+  apps: OpenScoutAppsSettings;
 };
 
 export type RelayAgentOverride = {
@@ -387,6 +390,10 @@ export type UpdateOpenScoutSettingsInput = {
   };
   phone?: Partial<OpenScoutSettings["phone"]>;
   voice?: Partial<OpenScoutSettings["voice"]>;
+  apps?: {
+    scoutAppPath?: string | null;
+    menu?: Partial<OpenScoutSettings["apps"]["menu"]>;
+  };
 };
 
 type LegacyRelayConfig = {
@@ -1286,6 +1293,7 @@ function defaultSettings(): OpenScoutSettings {
       scenes: [],
       activeSceneIdBySurface: {},
     },
+    apps: defaultAppsSettings(),
   };
 }
 
@@ -1851,6 +1859,7 @@ async function normalizeSettingsRecord(
         : base.voice.playback,
     },
     ui: normalizeUi(ui),
+    apps: normalizeAppsSettings(candidate.apps),
   };
 }
 
@@ -2075,6 +2084,15 @@ export async function writeOpenScoutSettings(settings: UpdateOpenScoutSettingsIn
       ...current.ui,
       ...(settings.ui ?? {}),
     },
+    apps: {
+      scoutAppPath: settings.apps && "scoutAppPath" in settings.apps
+        ? settings.apps.scoutAppPath ?? null
+        : current.apps.scoutAppPath,
+      menu: {
+        ...current.apps.menu,
+        ...(settings.apps?.menu ?? {}),
+      },
+    },
   } satisfies OpenScoutSettings;
 
   const normalized = await normalizeSettingsRecord(merged, {
@@ -2238,11 +2256,11 @@ function shellQuote(value: string): string {
 }
 
 /**
- * How the statusline wrapper reaches the Scout CLI, or null when nothing runnable
- * is found. A bare `scout` that isn't on PATH would wire Claude Code to a command
- * that exits 127 on every prompt: no statusline, and no quota capture.
+ * How a wrapper Claude Code runs (the statusline, a hook) reaches the Scout
+ * CLI, or null when nothing runnable is found. A bare `scout` that isn't on
+ * PATH would wire Claude Code to a command that exits 127 on every call.
  */
-function resolveScoutStatuslineInvocation(): string | null {
+export function resolveScoutCliInvocation(): string | null {
   const explicit = normalizeOptionalString(process.env.OPENSCOUT_SCOUT_COMMAND);
   if (explicit) return explicit;
 
@@ -2268,6 +2286,21 @@ function resolveScoutStatuslineInvocation(): string | null {
   if (sourceEntry && bun) return `${shellQuote(bun)} ${shellQuote(sourceEntry)}`;
 
   return null;
+}
+
+/**
+ * The CLI that ships with this runtime, for a hook that calls the runtime's
+ * own routes: a checkout's CLI comes before a global `scout`, which can be an
+ * older release that lacks the hook's command. An installed package has no
+ * source entry, and its global `scout` is the same release.
+ */
+export function resolveRuntimeScoutCliInvocation(): string | null {
+  const explicit = normalizeOptionalString(process.env.OPENSCOUT_SCOUT_COMMAND);
+  if (explicit) return explicit;
+  const sourceEntry = resolveScoutCliSourceEntry();
+  const bun = sourceEntry ? resolveBunExecutable() : null;
+  if (sourceEntry && bun) return `${shellQuote(bun)} ${shellQuote(sourceEntry)}`;
+  return resolveScoutCliInvocation();
 }
 
 /** packages/cli/src/main.ts beside this runtime, from either src/ or a built dist/. */
@@ -2328,7 +2361,7 @@ export async function installClaudeStatuslineTool(): Promise<ClaudeStatuslineIns
     };
   }
 
-  const scoutInvocation = resolveScoutStatuslineInvocation();
+  const scoutInvocation = resolveScoutCliInvocation();
   // Leave Claude's statusline alone rather than point it at a CLI that can't run.
   if (!scoutInvocation) {
     return {

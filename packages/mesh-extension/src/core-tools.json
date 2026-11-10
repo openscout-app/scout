@@ -1273,7 +1273,7 @@
           }
         },
         "claim": {
-          "description": "Become the owner before the checks run.",
+          "description": "Claim the item before the checks run: you become the owner under a lease. Fails with a conflict naming the holder when someone else holds an active claim.",
           "type": "boolean"
         },
         "dryRun": {

@@ -1,3 +1,4 @@
+import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
 import { readProviderQuotas } from "./broker-provider-quota-read.js";
@@ -12,6 +13,8 @@ import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
 import { TaskClosedError, completionReply } from "@openscout/protocol";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
+import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
+import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
 import { handleBrokerQuarantineRoute, type BrokerQuarantineQueries } from "./broker-quarantine-http-service.js";
@@ -113,7 +116,8 @@ import {
   throwIfAborted,
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
-import type { WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import { WorkClaimConflictError } from "./broker-work-claims.js";
+import type { WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -217,6 +221,7 @@ export type BrokerHttpRouterDeps = {
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
+  shows?: ShowHttpDeps;
   attachments?: AttachmentHttpDeps;
   readObservedSessionCache?: ObservedSessionReadDeps["readCache"];
   herdrWorkspaces?: Omit<HerdrWorkspacesReadDeps, "nodeId">;
@@ -239,6 +244,10 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
+  nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
+  /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
+  harnessHooks?: Pick<HarnessHooks, "status" | "apply" | "remove">;
   journal: BrokerHttpJournal;
   knownInvocations: Map<string, InvocationRequest>;
   brokerService: ActiveScoutBrokerService;
@@ -607,6 +616,49 @@ export function createBrokerHttpRouter(
     }
     return;
   }
+  if (method === "POST" && (url.pathname === "/v1/permissions/native" || url.pathname === "/v1/permissions/native/wait")) {
+    // Only a hook on this machine opens or waits on a native session's request.
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest || request.headers.origin || request.headers["x-openscout-forwarded-node-id"]) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    const native = deps.nativePermissions;
+    if (!native) { json(response, 404, { error: "native_permissions_unsupported" }); return; }
+    try {
+      if (url.pathname.endsWith("/wait")) {
+        const body = await readRequestBody<{ requestId?: unknown; waitMs?: unknown }>(request, { maxBytes: 1024 });
+        if (typeof body.requestId !== "string" || !body.requestId) throw new NativePermissionAskError("requestId is required");
+        const waitMs = typeof body.waitMs === "number" && Number.isFinite(body.waitMs) ? body.waitMs : 0;
+        json(response, 200, await native.wait(body.requestId, waitMs));
+      } else {
+        const body = await readRequestBody<NativePermissionAsk>(request, { maxBytes: 64 * 1024 });
+        json(response, 200, await native.open(body));
+      }
+    } catch (error) {
+      if (error instanceof NativePermissionAskError) badRequest(response, error);
+      else json(response, 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  if ((method === "GET" && url.pathname === "/v1/hooks")
+    || (method === "POST" && (url.pathname === "/v1/hooks/apply" || url.pathname === "/v1/hooks/remove"))) {
+    // Harness settings belong to this machine's login: only a local CLI edits them.
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest || request.transportContext?.scoped
+      || request.headers.origin || request.headers["x-openscout-forwarded-node-id"]) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    const hooks = deps.harnessHooks;
+    if (!hooks) { json(response, 404, { error: "harness_hooks_unsupported" }); return; }
+    try {
+      if (method === "GET") json(response, 200, { hooks: await hooks.status() });
+      else json(response, 200, url.pathname.endsWith("/apply") ? await hooks.apply() : await hooks.remove());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      json(response, error instanceof HarnessHooksError ? 409 : 500, {
+        error: message, ...(error instanceof HarnessHooksError ? { code: error.code } : {}),
+      });
+    }
+    return;
+  }
   if (method === "POST" && url.pathname === "/v1/operator-requests/dismiss") {
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
     try {
@@ -713,6 +765,7 @@ export function createBrokerHttpRouter(
       return;
     }
   }
+  if (await handleShowRoute(request, response, url, deps.shows ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
   if (await handleAttachmentRoute(request, response, url, deps.attachments ?? { nodeId, peerNode: () => undefined })) return;
   const aliasItemMatch = method === "PATCH" || method === "DELETE"
     ? url.pathname.match(/^\/v1\/aliases\/([^/]+)$/)
@@ -840,6 +893,8 @@ export function createBrokerHttpRouter(
       const match = /^\/v1\/integrations\/setup\/([^/]+)(\/(?:resume|credentials|manifest|verify|rebind|lifecycle|worker|deliver|events))?$/.exec(url.pathname);
       if (method === "POST" && url.pathname === "/v1/integrations/setup") {
         json(response, 200, integrationSetupService.setup(await readRequestBody(request)));
+      } else if (method === "GET" && url.pathname === "/v1/integrations/setup") {
+        json(response, 200, { integrations: integrationSetupService.list() });
       } else if (method === "GET" && match?.[2] === "/manifest") {
         json(response, 200, integrationSetupService.manifest(decodeURIComponent(match[1]!)));
       } else if (method === "GET" && match && !match[2]) {
@@ -1847,8 +1902,13 @@ export function createBrokerHttpRouter(
         json(response, 200, await work.review(await readRequestBody<WorkReviewRequest>(request, { maxBytes: 64 * 1024 })));
         return;
       }
+      if (method === "POST" && url.pathname === "/v1/work/claim") {
+        json(response, 200, await work.claim(await readRequestBody<WorkClaimRequest>(request, { maxBytes: 16 * 1024 })));
+        return;
+      }
     } catch (error) {
-      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      if (error instanceof WorkClaimConflictError) json(response, error.status, error.conflict);
+      else if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
       else badRequest(response, error);
       return;
     }

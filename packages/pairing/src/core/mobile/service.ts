@@ -1,4 +1,5 @@
-import { basename, join, resolve } from "node:path";
+import { mobileReadWorker } from "../../db/mobile-read.ts";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { statSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 
@@ -33,8 +34,7 @@ import {
 import { createAgentWorkspace } from "@openscout/runtime/agent-workspace";
 
 import { upScoutAgent } from "../agents/service.ts";
-import { queryAgents, queryFleet } from "../../db-queries.ts";
-import { queryTerminalSessions } from "../../db/terminal-sessions.ts";
+import type { queryFleet } from "../../db-queries.ts";
 import {
   loadServiceBudgets,
   type ServiceGauge,
@@ -147,6 +147,7 @@ export type ScoutMobileAgentSummary = {
   selector: string | null;
   defaultSelector: string | null;
   workspaceRoot: string | null;
+  repositoryRoot: string | null;
   harness: string | null;
   transport: string | null;
   state: "offline" | "available" | "working";
@@ -510,6 +511,40 @@ export async function readGitCheckout(root: string): Promise<{ branch: string | 
   }
 }
 
+/** Resolve checkout identity from Git metadata without spawning Git. */
+export async function readMobileRepositoryRoot(workspaceRoot: string): Promise<string | null> {
+  if (!isAbsolute(workspaceRoot)) return null;
+  let root = resolve(workspaceRoot);
+  const home = process.env.HOME ? resolve(process.env.HOME) : null;
+  try {
+    if (!(await stat(root)).isDirectory()) return null;
+    while (root !== home && dirname(root) !== root) {
+      const dotGit = join(root, ".git");
+      let info;
+      try {
+        info = await stat(dotGit);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+        root = dirname(root);
+        continue;
+      }
+      if (info.isDirectory()) return root;
+      if (!info.isFile()) return null;
+      const pointer = (await readFile(dotGit, "utf8")).match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+      if (!pointer) return null;
+      const gitDir = resolve(root, pointer);
+      const common = (await readFile(join(gitDir, "commondir"), "utf8")).trim();
+      if (!common) return null;
+      const commonDir = resolve(gitDir, common);
+      if (!(await stat(commonDir)).isDirectory()) return null;
+      return basename(commonDir) === ".git" ? dirname(commonDir) : null;
+    }
+  } catch {
+    // Missing, remote, or unreadable checkouts have no local repository identity.
+  }
+  return null;
+}
+
 function isDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
@@ -680,6 +715,7 @@ export function buildMobileAgentSummary(
   snapshot: ScoutBrokerSnapshot,
   agent: AgentDefinition,
   attention?: ReadonlyMap<string, AgentAttentionEntry>,
+  repositoryRoots?: ReadonlyMap<string, string | null>,
 ): ScoutMobileAgentSummary {
   const endpoints = endpointsForAgent(snapshot, agent.id);
   const endpoint = endpoints[0] ?? null;
@@ -713,6 +749,7 @@ export function buildMobileAgentSummary(
     selector: agent.selector ?? null,
     defaultSelector: agent.defaultSelector ?? null,
     workspaceRoot: endpoint?.projectRoot ?? endpoint?.cwd ?? null,
+    repositoryRoot: repositoryRoots?.get(endpoint?.projectRoot ?? endpoint?.cwd ?? "") ?? null,
     harness: endpoint?.harness ?? null,
     transport: endpoint?.transport ?? null,
     state,
@@ -888,14 +925,23 @@ async function loadMobileRelayState(): Promise<{
   const attention = await readMobileAgentAttentionIndex(broker);
 
   const snapshot = broker.snapshot;
-  const agents = Object.values(snapshot.agents)
+  const visibleAgents = Object.values(snapshot.agents)
     .filter((agent) => !isInactiveAgent(agent))
     .filter((agent) => {
       const endpoints = Object.values(snapshot.endpoints)
         .filter((endpoint) => endpoint.agentId === agent.id);
       return endpoints.length === 0 || endpoints.some((endpoint) => !isInactiveEndpoint(snapshot, endpoint));
-    })
-    .map((agent) => buildMobileAgentSummary(snapshot, agent, attention))
+    });
+  const workspaceRoots = new Set(visibleAgents.flatMap((agent) => {
+    const endpoint = endpointsForAgent(snapshot, agent.id)[0];
+    const root = endpoint?.projectRoot ?? endpoint?.cwd;
+    return root ? [root] : [];
+  }));
+  const repositoryRoots = new Map(await Promise.all(
+    [...workspaceRoots].map(async (root) => [root, await readMobileRepositoryRoot(root)] as const),
+  ));
+  const agents = visibleAgents
+    .map((agent) => buildMobileAgentSummary(snapshot, agent, attention, repositoryRoots))
     .sort((left, right) => (right.lastActiveAt ?? 0) - (left.lastActiveAt ?? 0) || left.title.localeCompare(right.title));
 
   return {
@@ -991,7 +1037,7 @@ export async function getScoutMobileSessions(
 export async function getScoutFleet(
   options?: Parameters<typeof queryFleet>[0],
 ): Promise<ReturnType<typeof queryFleet>> {
-  return queryFleet(options);
+  return mobileReadWorker.read("fleet", options);
 }
 
 /**
@@ -1289,6 +1335,7 @@ export async function createScoutSession(
     selector: brokerAgent?.selector ?? null,
     defaultSelector: brokerAgent?.defaultSelector ?? null,
     workspaceRoot: brokerEndpoint?.projectRoot ?? brokerEndpoint?.cwd ?? workspace.root,
+    repositoryRoot: null,
     harness: brokerEndpoint?.harness ?? localAgent.harness,
     transport: localAgent.transport,
     state: brokerEndpoint?.state === "offline" ? "offline" : "available",
@@ -1641,7 +1688,7 @@ export type ScoutMobileTerminal = {
 /// missing registry table; the try/catch is a defensive belt-and-braces.
 export async function getScoutMobileTerminals(): Promise<{ terminals: ScoutMobileTerminal[] }> {
   try {
-    const records = queryTerminalSessions({ limit: 12 });
+    const records = await mobileReadWorker.read("terminalSessions", { limit: 12 });
     const terminals: ScoutMobileTerminal[] = records.map((record) => ({
       id: record.id,
       sessionId: record.sourceSessionId,
