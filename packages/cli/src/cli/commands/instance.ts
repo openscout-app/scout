@@ -17,6 +17,11 @@ import {
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 
+/** The home the command reads, from its own environment first. */
+function commandHome(env: NodeJS.ProcessEnv): string {
+  return env.HOME?.trim() || homedir();
+}
+
 type InstanceRow = {
   name: string;
   portBase: number;
@@ -56,7 +61,7 @@ async function rows(env: NodeJS.ProcessEnv): Promise<{ rows: InstanceRow[]; corr
   const list = Object.entries(registry.instances)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, entry]) => {
-      const root = entry.root ?? join(homedir(), ".openscout", OPENSCOUT_INSTANCES_DIRECTORY, name);
+      const root = entry.root ?? join(commandHome(env), ".openscout", OPENSCOUT_INSTANCES_DIRECTORY, name);
       return {
         name,
         portBase: entry.portBase,
@@ -78,7 +83,7 @@ export async function runInstanceCommand(context: ScoutCommandContext, args: str
     return;
   }
   if (subcommand === "repair") {
-    const report = repairOpenScoutInstanceRegistry(context.env, homedir(), { force: rest.includes("--force") });
+    const report = repairOpenScoutInstanceRegistry(context.env, commandHome(context.env), { force: rest.includes("--force") });
     if (report.healthy) {
       context.output.writeValue(report, () =>
         "The instance registry is healthy; nothing to repair (use --force to re-check anyway).");

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,16 @@ mock.module("../../db/terminal-sessions.ts", () => ({ queryTerminalSessions: () 
 mock.module("../attention/build-agent-attention-index.ts", () => ({
   createAgentAttentionIndexReader: () => async () => new Map(),
 }));
+// The mobile SQLite reads run in a worker thread, where the mocks above do not
+// apply. Point its control home at an empty directory before it starts.
+const originalControlHome = process.env.OPENSCOUT_CONTROL_HOME;
+const emptyControlHome = mkdtempSync(join(tmpdir(), "scout-mobile-snapshot-control-"));
+process.env.OPENSCOUT_CONTROL_HOME = emptyControlHome;
+afterAll(() => {
+  if (originalControlHome === undefined) delete process.env.OPENSCOUT_CONTROL_HOME;
+  else process.env.OPENSCOUT_CONTROL_HOME = originalControlHome;
+  rmSync(emptyControlHome, { recursive: true, force: true });
+});
 
 const {
   getScoutMobileAgents,
