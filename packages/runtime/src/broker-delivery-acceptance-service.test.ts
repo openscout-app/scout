@@ -1716,6 +1716,16 @@ describe("two-verb acceptance", () => {
     expect(h.acceptedInvocations).toHaveLength(0); expect(h.recordedWorkItemPayloads).toHaveLength(0);
     expect(h.postedMessages[0]?.metadata?.notificationPolicy).toEqual({ requested: notify, priority: "interrupting" });
   });
+  test("an agent task stores its closing step on the invocation", async () => {
+    const h = createHarness();
+    await h.service.accept({ requestId: "callback", intent: "consult", body: "Write the study", requesterId: "operator",
+      task: { version: 1, callback: { code: "() => {}" } }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(h.acceptedInvocations[0]).toMatchObject({ metadata: { taskVersion: 1, callback: { code: "() => {}" } } });
+    const plain = createHarness();
+    await plain.service.accept({ requestId: "plain", intent: "consult", body: "Write the study", requesterId: "operator",
+      task: { version: 1 }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(plain.acceptedInvocations[0]?.metadata).not.toHaveProperty("callback");
+  });
   test("validation precedes receipt reservation and every routing effect", async () => {
     const h = createHarness();
     await expect(h.service.accept({ requestId: "bad", intent: "consult", body: "Please review",

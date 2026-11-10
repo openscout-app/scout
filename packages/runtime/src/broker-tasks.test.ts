@@ -213,6 +213,14 @@ test("successor launch overrides are separate from the predecessor route", async
     execution: { session: "new" }, invocationMetadata: { predecessorTaskId: "parent" } });
 });
 
+test("a successor keeps its own closing step", async () => {
+  const { ask, successors } = await taskFixture("completed");
+  await ask({ task: { version: 1, continue: "parent", callback: { code: "() => {}" } } });
+  expect(successors[0]?.task).toEqual({ version: 1, callback: { code: "() => {}" } });
+  await ask({ task: { version: 1, continue: "parent" } });
+  expect(successors[1]?.task).toEqual({ version: 1 });
+});
+
 
 test.each(["reply", "cancel"])("refused completion does not claim an external task; later %s succeeds", async outcome => {
   const h = await fixture({ authorize: (_task, message) => message.id.startsWith("external-reply-") });

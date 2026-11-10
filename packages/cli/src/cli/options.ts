@@ -58,6 +58,8 @@ export type ScoutAskCommandOptions = ContextRootOptions & {
   task?: ScoutTaskAsk;
   targets?: string[];
   image?: string;
+  /** `--callback <file>`: read into `task.callback` when the ask is sent. */
+  callbackFile?: string;
   agentName: string | null;
   requestId?: string;
   completion?: ScoutCompletionRequest;
@@ -916,6 +918,7 @@ export function parseAskCommandOptions(
   let replyMode: ScoutAskCommandOptions["replyMode"];
   let placement: ScoutAskCommandOptions["placement"];
   let promptFile: string | undefined;
+  let callbackFile: string | undefined;
   let aliasProject: string | undefined;
   let aliasHost: string | undefined;
   const labels: string[] = [];
@@ -927,7 +930,7 @@ export function parseAskCommandOptions(
     if (current === "--") { messageParts.push(...parsed.args.slice(index + 1)); break; }
     const taskBoolean = ({ "--operator": "operator", "--fyi": "fyi", "--notify": "notify", "--cancel": "cancel", "--permission": "permission" } as const)[current as "--operator"];
     if (taskBoolean) { task[taskBoolean] = true; continue; }
-    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--image"].find(flag => current === flag || current.startsWith(`${flag}=`));
+    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--callback", "--image"].find(flag => current === flag || current.startsWith(`${flag}=`));
     if (taskValue) {
       const value = parseAskFlagValue(parsed.args, index, taskValue);
       if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(taskValue);
@@ -936,6 +939,10 @@ export function parseAskCommandOptions(
       if (taskValue === "--window") task.window = Number(value.value);
       if (taskValue === "--option") (task.options ??= []).push(value.value);
       if (taskValue === "--because") task.because = value.value;
+      if (taskValue === "--callback") {
+        if (callbackFile) throw new ScoutCliError("--callback may appear only once");
+        callbackFile = resolveInputFilePath(parsed.currentDirectory, value.value);
+      }
       if (taskValue === "--image") image = resolveInputFilePath(parsed.currentDirectory, value.value);
       index = value.nextIndex; continue;
     }
@@ -1179,7 +1186,9 @@ export function parseAskCommandOptions(
       throw new ScoutCliError(`positional recipients were removed; use ${renderScoutCommand("ask", rewritten)}`);
     }
   }
-  validateTaskAsk(task, {
+  // A callback file is read when the ask is sent; until then a stand-in checks
+  // which flags it can be combined with.
+  validateTaskAsk(callbackFile ? { ...task, callback: { code: "export default () => {};" } } : task, {
     to: targetLabel ?? undefined, channel,
     capability: !task.continue && Boolean(projectPath || runtimeProfile),
     execution: Boolean(harness || model || reasoningEffort || onHost || projectPath || runtimeProfile || runtimeLiteral || session || placement),
@@ -1208,6 +1217,7 @@ export function parseAskCommandOptions(
     task,
     ...(targets.length ? { targets } : {}),
     ...(image ? { image } : {}),
+    ...(callbackFile ? { callbackFile } : {}),
     ...(targetLabel ? { targetLabel } : {}),
     ...(requestId ? { requestId } : {}),
     ...(completion ? { completion } : {}),

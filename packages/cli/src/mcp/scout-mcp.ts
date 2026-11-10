@@ -2,6 +2,7 @@ import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/send
 import { createHash, randomUUID } from "node:crypto";
 import { parseRosterAddress, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
+import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
@@ -4485,6 +4486,7 @@ export function createScoutMcpServer(options: {
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),
         defaultAction: z.string().min(1).optional(), options: z.array(z.string().min(1)).optional(),
         permission: z.boolean().optional(), because: z.string().min(1).optional(), window: z.number().positive().optional(),
+        callback: z.string().min(1).optional().describe("Local path of a JavaScript module file, e.g. open-page.js holding: export default ({ result, scout }) => scout.open(result.files[0]); The file is read here and sent with the task. The runtime on the worker's host runs it when the task ends, in a sandbox with no file, process or network access and no imports. Its default export gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only."),
         image: z.string().optional().describe("Local image path."),
         completion: completionRequestSchema.optional().describe("Require an explicit final reply; exact local id or session targets only, with a stable requestId."),
         relation: completionRelationSchema.optional().describe("Join child work or continue a parent flight; requires a stable requestId."),
@@ -4574,7 +4576,7 @@ export function createScoutMcpServer(options: {
     },
     async ({
       requestId,
-      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, image,
+      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image,
       completion,
       relation,
       to,
@@ -4650,7 +4652,9 @@ export function createScoutMcpServer(options: {
         : !operator && !ref && !predecessor && !channel && !targetTo && !profile && (runtime || resolvedHarness || resolvedModel || resolvedReasoningEffort)
           ? resolvedCurrentDirectory
         : undefined;
-      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window };
+      // The callback file is read on this side: the task may run on another host.
+      const taskCallback = callback ? await readTaskCallbackFile(resolve(resolvedCurrentDirectory, callback)) : undefined;
+      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, ...(taskCallback ? { callback: taskCallback } : {}) };
       validateTaskAsk(task, { to: targetTo, channel, capability: !predecessor && Boolean(targetProjectPath || profile),
         execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation) });
       const taskImage = image ? await readTaskImage(resolve(resolvedCurrentDirectory, image)) : undefined;
