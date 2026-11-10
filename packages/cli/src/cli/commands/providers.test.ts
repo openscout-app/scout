@@ -282,7 +282,7 @@ describe("providers command", () => {
         taskRationale: expect.stringContaining("long-context retrieval"),
         quotaRisk: false,
         quotaRiskMessage: null,
-        caution: expect.stringContaining("probe before large fan-out"),
+        caution: expect.stringContaining("probe before a large fan-out"),
         quota: {
           availability: "abundant",
           pacing: "on_track",
@@ -292,7 +292,7 @@ describe("providers command", () => {
         alternatives: [
           expect.objectContaining({
             label: expect.stringMatching(/^Opus 5/),
-            fit: 91,
+            fit: 96,
             taskRationale: expect.stringContaining("structural understanding"),
             quotaRisk: false,
             capability: expect.stringContaining("Long-context synthesis"),
@@ -304,7 +304,7 @@ describe("providers command", () => {
     expect(map.assignments.find((assignment) => assignment.role === "adversarial_critique"))
       .toMatchObject({ modelLabel: "Grok 4.6" });
     expect(map.assignments.find((assignment) => assignment.role === "implementation"))
-      .toMatchObject({ modelLabel: "GPT-5.6 Sol" });
+      .toMatchObject({ modelLabel: "GPT-6.1 Sol" });
     expect(map.models.find((model) => model.modelLabel === "Kimi Code")).toMatchObject({
       guidance: "use_now",
       quotaRisk: false,
@@ -374,7 +374,7 @@ describe("providers command", () => {
     expect(map.assignments).toHaveLength(1);
     expect(map.assignments[0]).toMatchObject({
       role: "product_judgment",
-      modelLabel: "GPT-5.6 Sol",
+      modelLabel: "GPT-6 Astra",
       route: { providerId: "codex" },
       quotaRisk: false,
       quotaRiskMessage: null,
@@ -428,20 +428,22 @@ describe("providers command", () => {
 
     const assignment = map.assignments[0]!;
     expect(assignment).toMatchObject({
-      modelLabel: "GPT-5.6 Sol",
-      quotaRisk: true,
-    });
-    expect(assignment.alternatives[0]).toMatchObject({
-      label: "Sonnet 4.6",
+      modelLabel: "Sonnet 4.6",
       route: { providerId: "claude" },
       quotaRisk: false,
     });
-    expect(assignment.alternatives[1]).toMatchObject({
-      label: "GPT-5.6 Terra",
+    expect(assignment.alternatives[0]).toMatchObject({
+      label: "GPT-6.1 Sol",
       route: { providerId: "codex" },
       quotaRisk: true,
     });
-    expect(map.models.find((model) => model.modelLabel === "GPT-5.6 Sol"))
+    expect(assignment.alternatives[1]).toMatchObject({
+      label: "Devin SWE-2 High",
+      route: { providerId: "devin" },
+      quotaRisk: false,
+      quota: { confidence: "unknown" },
+    });
+    expect(map.models.find((model) => model.modelLabel === "GPT-6.1 Sol"))
       .toMatchObject({ guidance: "conserve", quotaRisk: true });
   });
 
@@ -450,8 +452,8 @@ describe("providers command", () => {
       generatedAt: NOW,
       gauges: [
         {
-          id: "minimax",
-          label: "minimax",
+          id: "codex",
+          label: "codex",
           kind: "quota",
           fill: 0.8,
           windows: [{
@@ -460,7 +462,7 @@ describe("providers command", () => {
             windowMs: 7 * 24 * 60 * 60_000,
             resetAt: NOW + 60 * 60_000,
             capturedAt: NOW,
-            source: "MiniMax API",
+            source: "Codex local session",
           }],
         },
         {
@@ -486,18 +488,18 @@ describe("providers command", () => {
     });
 
     const assignment = map.assignments[0]!;
-    expect(assignment).toMatchObject({ modelLabel: "MiniMax M3", quotaRisk: true });
+    expect(assignment).toMatchObject({ modelLabel: "GPT-6 Luna", quotaRisk: true });
     expect(assignment.alternatives[0]).toMatchObject({
       label: "Haiku 4.5",
       quotaRisk: false,
       quota: { confidence: "fresh", minimumRemainingPercent: 50 },
     });
     expect(assignment.alternatives[1]).toMatchObject({
-      label: "GPT-5.6 Luna",
+      label: "MiniMax M3",
       quotaRisk: false,
       quota: { confidence: "unknown", minimumRemainingPercent: null },
     });
-    expect(map.models.find((model) => model.modelLabel === "GPT-5.6 Luna"))
+    expect(map.models.find((model) => model.modelLabel === "MiniMax M3"))
       .toMatchObject({ guidance: "probe_first", quotaRisk: false });
   });
 
