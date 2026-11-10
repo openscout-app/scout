@@ -65,7 +65,7 @@ export type FamilyTierPicks = {
 };
 
 /**
- * Verified against native-provider pricing pages and models.dev, 2026-08-08.
+ * Verified against native-provider pricing pages and models.dev, 2026-11-10.
  * `apple` has no catalog row: on-device Foundation Models are free and
  * private, which is why it exists here at all — it is the zero-cost tier.
  */
@@ -73,7 +73,7 @@ export const FAMILY_TIER_PICKS: Record<ModelFamilyId, FamilyTierPicks> = {
   anthropic: {
     family: "anthropic",
     label: "Claude",
-    inexpensive: "claude-haiku-4-5",
+    inexpensive: "claude-haiku-5-5",
   },
   openai: {
     family: "openai",
@@ -119,7 +119,7 @@ export const FAMILY_TIER_PICKS: Record<ModelFamilyId, FamilyTierPicks> = {
   moonshotai: {
     family: "moonshotai",
     label: "Kimi",
-    inexpensive: "kimi-k2.5",
+    inexpensive: "kimi-k2.6",
   },
   zai: {
     family: "zai",
