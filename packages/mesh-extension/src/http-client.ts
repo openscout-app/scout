@@ -1,5 +1,10 @@
 import { TaskClosedError, taskClosedRefusal } from '@openscout/protocol';
 
+/** Status only: callers can distinguish exact-read absence from unavailability. */
+export class RuntimeHttpError extends Error {
+  constructor(readonly status: number) { super(`runtime request refused (${status})`); }
+}
+
 /** A bounded HTTP client. No stores, runtime paths, sockets or key discovery. */
 export class RuntimeHttpClient {
   readonly origin: string;
@@ -41,7 +46,7 @@ export class RuntimeHttpClient {
         if (refusal) throw new TaskClosedError(refusal, refusal.reason === 'already_answered'
           ? 'task already has a final reply' : `task is already ${refusal.reason}`);
       }
-      throw new Error(`runtime request refused (${response.status})`);
+      throw new RuntimeHttpError(response.status);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
