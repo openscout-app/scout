@@ -1551,6 +1551,7 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   }),
   deliverTerminalReport: (flightId) => terminalReportDeliveryService.deliver(flightId),
   maybeForwardFlightToAuthority: (flight) => meshForwardingService.maybeForwardFlightToAuthority(flight),
+  bootedAt: brokerBootedAt,
   isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
     || replyCompletionRecovery.isPending(invocationId)
     || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
