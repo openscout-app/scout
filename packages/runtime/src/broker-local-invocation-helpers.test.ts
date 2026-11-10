@@ -495,11 +495,44 @@ describe("broker local invocation helpers", () => {
     })).toBe("target agent retired was retired from the fleet");
     expect(staleWorkingFlightReason(snapshot, snapshot.flights.working!, {
       isInvocationActive: () => false,
-    })).toBeNull();
+    })).toBe("endpoint replayed was replayed active for invocation invocation-1 without a live broker task");
     const timedOut = { ...snapshot.flights.working!, metadata: { ...snapshot.flights.working!.metadata, requesterTimedOut: true } };
     expect(staleWorkingFlightReason(snapshot, timedOut, {
       isInvocationActive: () => false,
     })).toBeNull();
+  });
+
+  test("a replayed active endpoint stays open only when its worker outlives the runtime", () => {
+    const working = testFlight({
+      id: "working",
+      invocationId: "invocation-1",
+      targetAgentId: "agent-1",
+      state: "running",
+      startedAt: 900,
+      metadata: { dispatchAck: { endpointId: "replayed" } },
+    });
+    const reasonFor = (transport: AgentEndpoint["transport"]) => {
+      const snapshot = createInMemoryControlRuntime({
+        agents: { "agent-1": testAgent() },
+        endpoints: {
+          replayed: testEndpoint({
+            id: "replayed",
+            transport,
+            state: "active",
+            metadata: { lastInvocationId: "invocation-1", lastStartedAt: 1_000 },
+          }),
+        },
+        flights: { working },
+      }, { localNodeId: "node-1" }).snapshot();
+      return staleWorkingFlightReason(snapshot, working, { isInvocationActive: () => false });
+    };
+
+    // Runtime-owned children die with the runtime: their reply cannot arrive.
+    for (const transport of ["grok_acp", "claude_stream_json", "codex_app_server"] as const) {
+      expect(reasonFor(transport)).toBe("endpoint replayed was replayed active for invocation invocation-1 without a live broker task");
+    }
+    // A tmux worker keeps running across the restart and can still reply.
+    expect(reasonFor("tmux")).toBeNull();
   });
 
   test("newer work on another session cannot supersede a flight for the same agent", () => {

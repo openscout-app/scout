@@ -568,7 +568,7 @@ describe("broker daemon reconciliation", () => {
     expect(deliveries[0]?.metadata?.reconciledReason).toContain("replacement agent is ranger.feature.test-node");
   }, 15_000);
 
-  test("keeps replayed active endpoints open for the same invocation after restart", async () => {
+  test("reconciles replayed active runtime-owned endpoints for the same invocation after restart", async () => {
     const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
     const firstHarness = await broker.startBroker({ controlHome });
     await broker.seedBasicConversation(firstHarness);
@@ -655,10 +655,11 @@ describe("broker daemon reconciliation", () => {
     }>(secondHarness.baseUrl, "/v1/snapshot"), (next) => Boolean(next.flights["flt-same-arc"]));
     const snapshot = await broker.waitFor(async () => broker.getJson<{
       flights: Record<string, { state: string; error?: string; completedAt?: number }>;
-    }>(secondHarness.baseUrl, "/v1/snapshot"), (next) => next.flights["flt-same-arc"]?.state === "running");
+    }>(secondHarness.baseUrl, "/v1/snapshot"), (next) => next.flights["flt-same-arc"]?.state === "failed");
 
-    expect(snapshot.flights["flt-same-arc"]?.state).toBe("running");
-    expect(snapshot.flights["flt-same-arc"]?.error).toBeUndefined();
-    expect(snapshot.flights["flt-same-arc"]?.completedAt).toBeUndefined();
+    // claude_stream_json runs as a child of the runtime, so it died with it.
+    expect(snapshot.flights["flt-same-arc"]?.state).toBe("failed");
+    expect(snapshot.flights["flt-same-arc"]?.error).toContain("without a live broker task");
+    expect(typeof snapshot.flights["flt-same-arc"]?.completedAt).toBe("number");
   }, 15_000);
 });
