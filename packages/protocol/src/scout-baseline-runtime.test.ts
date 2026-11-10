@@ -35,7 +35,7 @@ describe("Scout baseline runtime", () => {
   test("falls through to Haiku when only Claude is present", () => {
     expect(resolveScoutBaselineRuntime(["claude"])).toEqual({
       harness: "claude",
-      model: "claude-haiku-4-5",
+      model: "claude-haiku-5-5",
       effort: "low",
       label: "Haiku",
       purpose: SCOUT_BASELINE_PURPOSE,
