@@ -57,7 +57,7 @@ export function renderInstanceCommandHelp(): string {
 }
 
 async function rows(env: NodeJS.ProcessEnv): Promise<{ rows: InstanceRow[]; corruptClaims: string[]; pruned: string[] }> {
-  const registry = await listOpenScoutInstances(env);
+  const registry = await listOpenScoutInstances(env, commandHome(env));
   const list = Object.entries(registry.instances)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, entry]) => {
@@ -90,7 +90,7 @@ export async function runInstanceCommand(context: ScoutCommandContext, args: str
       return;
     }
     context.output.writeValue(report, (value) => [
-      `Repaired ${openScoutInstanceRegistryDir(context.env)}.`,
+      `Repaired ${openScoutInstanceRegistryDir(context.env, commandHome(context.env))}.`,
       ...value.migrated.imported.map((name) => `  imported ${name} from the legacy ledger`),
       ...(value.migrated.corrupt ? [`  legacy ledger was unreadable; kept at ${value.migrated.corrupt}`] : []),
       ...value.rebuilt.map((entry) => `  rebuilt claim ${entry.name}: block ${entry.portBase} (from ${entry.source})`),
@@ -122,7 +122,7 @@ export async function runInstanceCommand(context: ScoutCommandContext, args: str
     const purge = rest.includes("--purge");
     const current = (await rows(context.env)).rows.find((row) => row.name === name);
     if (!current) throw new ScoutCliError(`no claimed instance named "${name}" (see: scout instance list)`);
-    const live = await openScoutInstanceLiveness(name, current.entry);
+    const live = await openScoutInstanceLiveness(name, current.entry, commandHome(context.env));
     if (live.length > 0) {
       throw new ScoutCliError(`instance "${name}" is still running (${live.join(", ")}); stop it before releasing its block`);
     }
@@ -131,7 +131,7 @@ export async function runInstanceCommand(context: ScoutCommandContext, args: str
     // The tree is the registry dir (~/.openscout/instances, or
     // OPENSCOUT_INSTANCE_REGISTRY); canonicalPath resolves the deepest
     // existing ancestor, so a missing tail cannot hide a symlink above it.
-    const instancesDir = canonicalPath(openScoutInstanceRegistryDir(context.env));
+    const instancesDir = canonicalPath(openScoutInstanceRegistryDir(context.env, commandHome(context.env)));
     const target = canonicalPath(current.root);
     if (purge) {
       const rel = relative(instancesDir, target);
@@ -141,7 +141,7 @@ export async function runInstanceCommand(context: ScoutCommandContext, args: str
         );
       }
     }
-    const released = releaseOpenScoutInstance(name, context.env);
+    const released = releaseOpenScoutInstance(name, context.env, commandHome(context.env));
     if (!released) throw new ScoutCliError(`no claimed instance named "${name}" (see: scout instance list)`);
     let purged: string | null = null;
     if (purge && existsSync(target)) {
