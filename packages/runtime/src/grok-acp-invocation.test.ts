@@ -3,8 +3,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { InvocationRequest } from "@openscout/protocol";
+
 import { invokeGrokAcpAgent } from "./grok-acp-invocation.js";
 import { shutdownAllAcpAgentSessions } from "./acp-agent-invocation.js";
+import { configureManagedPermissionHandler, withManagedPermissionContext } from "./managed-permission.js";
 import { isRequesterWaitTimeoutError } from "./requester-timeout.js";
 
 const originalPath = process.env.PATH;
@@ -15,6 +18,7 @@ const originalGrokDelay = process.env.OPENSCOUT_TEST_GROK_DELAY_MS;
 const originalGrokLog = process.env.OPENSCOUT_TEST_GROK_LOG;
 const originalGrokExitAfterPrompt = process.env.OPENSCOUT_TEST_GROK_EXIT_AFTER_PROMPT;
 const originalGrokRejectModel = process.env.OPENSCOUT_TEST_GROK_REJECT_MODEL;
+const originalGrokPermission = process.env.OPENSCOUT_TEST_GROK_PERMISSION;
 const tempDirs = new Set<string>();
 
 function tempDir(): string {
@@ -40,7 +44,9 @@ const logPath = process.env.OPENSCOUT_TEST_GROK_LOG;
 const delayMs = Number(process.env.OPENSCOUT_TEST_GROK_DELAY_MS || "0");
 const exitAfterPrompt = process.env.OPENSCOUT_TEST_GROK_EXIT_AFTER_PROMPT === "1";
 const rejectModel = process.env.OPENSCOUT_TEST_GROK_REJECT_MODEL === "1";
+const askPermission = process.env.OPENSCOUT_TEST_GROK_PERMISSION === "1";
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let promptRequestId = null;
 
 function log(value) {
   if (logPath) appendFileSync(logPath, value + "\\n");
@@ -105,7 +111,42 @@ for await (const line of rl) {
     continue;
   }
 
+  if (id === "permission-1" && message.result) {
+    log("permission:" + JSON.stringify(message.result));
+    console.log(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: params.sessionId || "fake-grok-acp-session",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "grok-acp-ok" }
+        }
+      }
+    }));
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: promptRequestId, result: { stopReason: "end_turn" } }));
+    continue;
+  }
+
   if (method === "session/prompt") {
+    if (askPermission) {
+      promptRequestId = id;
+      console.log(JSON.stringify({
+        jsonrpc: "2.0",
+        id: "permission-1",
+        method: "session/request_permission",
+        params: {
+          sessionId: params.sessionId,
+          toolCall: { toolCallId: "call-perm", title: "Run protected action", kind: "execute", status: "pending" },
+          options: [
+            { optionId: "allow-always", name: "Always allow", kind: "allow_always" },
+            { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+            { optionId: "reject-once", name: "Reject", kind: "reject_once" }
+          ]
+        }
+      }));
+      continue;
+    }
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     console.log(JSON.stringify({
       jsonrpc: "2.0",
@@ -159,6 +200,9 @@ afterEach(async () => {
   else process.env.OPENSCOUT_TEST_GROK_EXIT_AFTER_PROMPT = originalGrokExitAfterPrompt;
   if (originalGrokRejectModel === undefined) delete process.env.OPENSCOUT_TEST_GROK_REJECT_MODEL;
   else process.env.OPENSCOUT_TEST_GROK_REJECT_MODEL = originalGrokRejectModel;
+  if (originalGrokPermission === undefined) delete process.env.OPENSCOUT_TEST_GROK_PERMISSION;
+  else process.env.OPENSCOUT_TEST_GROK_PERMISSION = originalGrokPermission;
+  configureManagedPermissionHandler(undefined);
   for (const directory of tempDirs) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -189,6 +233,55 @@ describe("invokeGrokAcpAgent", () => {
     expect(log).not.toContain("session/prompt:");
     expect(log).toContain("session/close:provider-existing-session");
     expect(log).toContain("process:sigterm");
+  });
+
+  test("raises an ACP permission and answers it with allow once", async () => {
+    const directory = tempDir();
+    const { binDir, grokPath, logPath } = writeFakeGrok(directory);
+    configureFakeGrok({ binDir, grokPath, logPath, delayMs: 0 });
+    process.env.OPENSCOUT_TEST_GROK_PERMISSION = "1";
+    const seen: string[] = [];
+    configureManagedPermissionHandler(async (_invocation, prompt) => {
+      seen.push(prompt.text);
+      expect(prompt.decisions).toEqual(["once", "deny"]);
+      expect(prompt.decisionLabels).toMatchObject({ once: "Allow once", deny: "Deny" });
+      expect(await prompt.isCurrent()).toBe(true);
+      await prompt.answer("once");
+      expect(await prompt.isCurrent()).toBe(false);
+    });
+
+    const result = await withManagedPermissionContext({ id: "inv-grok-permission" } as InvocationRequest, () => invokeGrokAcpAgent({
+      sessionId: "grok-permission",
+      cwd: directory,
+      prompt: "run it",
+      timeoutMs: 5_000,
+    }));
+
+    expect(result.output).toContain("grok-acp-ok");
+    expect(seen).toEqual(["Grok ACP asks permission: Run protected action"]);
+    const log = readFileSync(logPath, "utf8");
+    expect(log).toContain('permission:{"outcome":{"outcome":"selected","optionId":"allow-once"}}');
+  });
+
+  test("denies an ACP permission with the reject option", async () => {
+    const directory = tempDir();
+    const { binDir, grokPath, logPath } = writeFakeGrok(directory);
+    configureFakeGrok({ binDir, grokPath, logPath, delayMs: 0 });
+    process.env.OPENSCOUT_TEST_GROK_PERMISSION = "1";
+    configureManagedPermissionHandler(async (_invocation, prompt) => {
+      await prompt.answer("deny");
+    });
+
+    const result = await withManagedPermissionContext({ id: "inv-grok-permission-deny" } as InvocationRequest, () => invokeGrokAcpAgent({
+      sessionId: "grok-permission-deny",
+      cwd: directory,
+      prompt: "run it",
+      timeoutMs: 5_000,
+    }));
+
+    expect(result.output).toContain("grok-acp-ok");
+    const log = readFileSync(logPath, "utf8");
+    expect(log).toContain('permission:{"outcome":{"outcome":"selected","optionId":"reject-once"}}');
   });
 
   test("selects the requested model through ACP before the first prompt", async () => {

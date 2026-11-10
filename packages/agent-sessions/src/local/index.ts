@@ -144,12 +144,29 @@ export type CreateLocalAgentClientOptions = {
   signal?: AbortSignal;
 };
 
+export type LocalAgentPermissionDecision = "approve" | "deny";
+
+/** A live ACP `session/request_permission` the turn is waiting on. */
+export type LocalAgentPermissionRequest = {
+  sessionId: string;
+  turnId: string;
+  blockId: string;
+  description: string;
+  version: number;
+};
+
 export type LocalAgentClientTurnOptions = {
   input: string;
   systemPrompt?: string;
   model?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * Answer one permission while the turn is open. The result is the ACP
+   * JSON-RPC response on the process that asked. A throw denies it, so the
+   * process does not sit unanswered.
+   */
+  onPermission?: (request: LocalAgentPermissionRequest) => Promise<LocalAgentPermissionDecision>;
 };
 
 export type LocalAgentClient = {
@@ -333,8 +350,8 @@ function buildAdapterOptions(options: {
   }
 
   return {
-    // This convenience client has no permission consumer. Direct adapter users
-    // can opt into interactive approval and answer through decide().
+    // Interactive ACP waits for onPermission on the turn. auto_approve and
+    // safe_reject answer inside the adapter and never ask.
     ...(options.transport === "openclaw_acp" ? { permissionMode: "safe_reject" } : {}),
     ...(options.adapterOptions ?? {}),
     ...(options.reuseKey ? { sessionId: options.reuseKey, sessionMode: "auto" } : {}),
@@ -439,6 +456,7 @@ export async function waitForTurnEnd(options: {
   text: string;
   timeoutMs: number;
   signal?: AbortSignal;
+  onPermission?: LocalAgentClientTurnOptions["onPermission"];
 }): Promise<string | undefined> {
   const { registry, sessionId, text, signal } = options;
   if (signal?.aborted) {
@@ -480,7 +498,27 @@ export async function waitForTurnEnd(options: {
       }
 
       unsubscribe = registry.onEvent((entry: SequencedEvent) => {
-        const terminal = terminalTurnEvent(entry.event, sessionId);
+        const event = entry.event;
+        if (event.event === "block:action:approval" && event.sessionId === sessionId && options.onPermission) {
+          const request = {
+            sessionId,
+            turnId: event.turnId,
+            blockId: event.blockId,
+            description: event.approval.description?.trim() || "Permission requested",
+            version: event.approval.version,
+          };
+          const answer = (decision: LocalAgentPermissionDecision): void => {
+            try {
+              registry.decide({ ...request, decision });
+            } catch {
+              // The turn ended, or this version was already answered.
+            }
+          };
+          void options.onPermission(request).then(answer, () => answer("deny"));
+          return;
+        }
+
+        const terminal = terminalTurnEvent(event, sessionId);
         if (!terminal) {
           return;
         }
@@ -867,6 +905,7 @@ export async function createLocalAgentClient(
       text,
       timeoutMs: Math.max(1, turnOptions.timeoutMs ?? options.timeoutMs ?? DEFAULT_LOCAL_AGENT_TIMEOUT_MS),
       signal: turnOptions.signal ?? options.signal,
+      onPermission: turnOptions.onPermission,
     });
     turnCount += 1;
 
