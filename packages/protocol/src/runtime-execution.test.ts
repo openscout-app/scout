@@ -162,7 +162,7 @@ describe("runtime execution contracts", () => {
     expect(normalizeScoutRuntimeModel("claude", "fable")).toEqual({
       ok: true,
       requested: "fable",
-      resolved: "claude-fable-5",
+      resolved: "claude-fable-5-2",
     });
     // Family aliases follow the catalog's newest model, not a pinned release.
     expect(normalizeScoutRuntimeModel("claude", "opus")).toEqual({

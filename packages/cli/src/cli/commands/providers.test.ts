@@ -324,7 +324,7 @@ describe("providers command", () => {
     const capabilityBiasedMap = buildOrchestrationProviderMap(report, { now: NOW, bias: "capability" });
     expect(capabilityBiasedMap.bias).toBe("capability");
     expect(capabilityBiasedMap.assignments.find((assignment) => assignment.role === "product_judgment"))
-      .toMatchObject({ modelLabel: "Fable 5" });
+      .toMatchObject({ modelLabel: "Fable 5.2" });
     const rendered = renderOrchestrationProviderMap(map);
     expect(rendered).toContain("Orchestration map · quota-aware");
     expect(rendered).toContain("Large-context synthesis");
@@ -380,7 +380,7 @@ describe("providers command", () => {
       quotaRiskMessage: null,
       alternatives: expect.arrayContaining([
         expect.objectContaining({
-          label: "Fable 5",
+          label: "Fable 5.2",
           quotaRisk: true,
         }),
       ]),
@@ -428,7 +428,7 @@ describe("providers command", () => {
 
     const assignment = map.assignments[0]!;
     expect(assignment).toMatchObject({
-      modelLabel: "Sonnet 4.6",
+      modelLabel: "Sonnet 5.5",
       route: { providerId: "claude" },
       quotaRisk: false,
     });
@@ -490,7 +490,7 @@ describe("providers command", () => {
     const assignment = map.assignments[0]!;
     expect(assignment).toMatchObject({ modelLabel: "GPT-6 Luna", quotaRisk: true });
     expect(assignment.alternatives[0]).toMatchObject({
-      label: "Haiku 4.5",
+      label: "Haiku 5.5",
       quotaRisk: false,
       quota: { confidence: "fresh", minimumRemainingPercent: 50 },
     });
