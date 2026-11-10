@@ -84,6 +84,18 @@ describe("adapter cost estimates", () => {
     }
   });
 
+  test("the provider comes from the model's card when nothing else names it", () => {
+    const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000 };
+    const fromCard = estimateAdapterCost({ model: "claude-haiku-4-5-20251001", usage, capturedAt: 1 });
+    expect(fromCard.provider).toBe("anthropic");
+    expect(fromCard.totalUsd).toBeCloseTo(6, 6);
+    expect(estimateAdapterCost({ model: "gpt-5-mini", usage, capturedAt: 1 }).provider).toBe("openai");
+    // A name no card lists is not assigned a provider by its prefix.
+    expect(estimateAdapterCost({ model: "claude-haiku-6", usage, capturedAt: 1 }).provider).toBe("unknown");
+    // A card is used only for its own provider.
+    expect(estimateAdapterCost({ provider: "openai", model: "claude-haiku-4-5", usage, capturedAt: 1 }).totalUsd).toBeNull();
+  });
+
   test("marks subscription-covered usage down while preserving API-equivalent cost", () => {
     const estimate = estimateAdapterCost({
       provider: "openai",
