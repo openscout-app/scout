@@ -49,6 +49,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "ask", summary: "Create or follow up on a task; return on acceptance" },
   { name: "reply", summary: "Answer a task or send task progress" },
 
+  { name: "show", summary: "Show a screenshot, recording, or finished file on the project canvas" },
   { name: "alias", summary: "Manage scoped broker-owned route aliases" },
   { name: "roster", summary: "Roster codes (OS-003): list, set project codes, import, resolve" },
   { name: "wait", summary: "Wait for a task by invocation, flight, message, or ref" },

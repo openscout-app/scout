@@ -1,5 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
@@ -3406,6 +3407,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   tasks: taskService,
+  shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
     service: attachmentService, nodeId,
     notifyOperator: createOperatorAttachmentNotifier({

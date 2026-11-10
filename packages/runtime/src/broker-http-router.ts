@@ -1,3 +1,4 @@
+import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
 import { readProviderQuotas } from "./broker-provider-quota-read.js";
@@ -220,6 +221,7 @@ export type BrokerHttpRouterDeps = {
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
+  shows?: ShowHttpDeps;
   attachments?: AttachmentHttpDeps;
   readObservedSessionCache?: ObservedSessionReadDeps["readCache"];
   herdrWorkspaces?: Omit<HerdrWorkspacesReadDeps, "nodeId">;
@@ -763,6 +765,7 @@ export function createBrokerHttpRouter(
       return;
     }
   }
+  if (await handleShowRoute(request, response, url, deps.shows ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
   if (await handleAttachmentRoute(request, response, url, deps.attachments ?? { nodeId, peerNode: () => undefined })) return;
   const aliasItemMatch = method === "PATCH" || method === "DELETE"
     ? url.pathname.match(/^\/v1\/aliases\/([^/]+)$/)
