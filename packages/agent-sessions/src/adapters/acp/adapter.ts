@@ -1692,10 +1692,15 @@ export class AcpAdapter extends BaseAdapter {
   }
 
   private permissionOption(options: Record<string, unknown>[], kind: "allow" | "reject"): string | null {
-    const match = options.find((option) => {
-      const optionKind = stringValue(option.kind);
-      return optionKind?.startsWith(kind) ?? false;
-    }) ?? options.find((option) => {
+    const kindOf = (option: Record<string, unknown>) => stringValue(option.kind);
+    const matches = options.filter((option) => kindOf(option)?.startsWith(kind));
+    // Allow once is the decision the operator is offered. Do not pick
+    // allow_always just because the agent listed it first.
+    const once = matches.find((option) => {
+      const value = kindOf(option);
+      return value === `${kind}_once` || value === kind;
+    });
+    const match = once ?? matches[0] ?? options.find((option) => {
       const name = stringValue(option.name)?.toLowerCase();
       return name?.includes(kind === "allow" ? "allow" : "reject") ?? false;
     });
