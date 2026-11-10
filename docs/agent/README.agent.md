@@ -51,6 +51,8 @@ Start at [`INDEX.agent.md`](./INDEX.agent.md) for subsystem specs written for ag
 | scoutd / local services | `docs/agent/scoutd.agent.md` |
 | Instances (dev vs prod isolation) | `docs/agent/instances.agent.md` |
 
+Agent-selected screenshots, recordings and documents: [shows.agent.md](./shows.agent.md).
+
 ## Must-Read Docs
 
 | Need | Doc |

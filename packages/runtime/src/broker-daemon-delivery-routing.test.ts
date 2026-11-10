@@ -246,7 +246,7 @@ describe("broker daemon delivery routing", () => {
     expect(followup.receipt?.bindingRef).toBe(followup.bindingRef);
   }, 15_000);
 
-  test("replays broker-owned work and reconciles its lost executor after restart", async () => {
+  test("replays broker-owned work without failing its flight after restart", async () => {
     const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
     const firstHarness = await broker.startBroker({ controlHome });
 
@@ -323,7 +323,7 @@ describe("broker daemon delivery routing", () => {
       invocation: { id: string; targetAgentId: string } | null;
       flight: { id: string; invocationId: string; targetAgentId: string; state: string; error?: string } | null;
     }>(secondHarness.baseUrl, `/v1/invocations/${response.flight?.invocationId}`),
-      snapshot => snapshot.flight?.state === "failed");
+      snapshot => snapshot.flight?.state === "running");
 
     expect(invocationSnapshot.invocation).toEqual(expect.objectContaining({
       id: response.flight?.invocationId,
@@ -333,9 +333,9 @@ describe("broker daemon delivery routing", () => {
       id: response.flight?.id,
       invocationId: response.flight?.invocationId,
       targetAgentId: "durable-ghost",
-      state: "failed",
+      state: "running",
     }));
-    expect(invocationSnapshot.flight?.error).toContain("without a live broker task");
+    expect(invocationSnapshot.flight?.error).toBeUndefined();
 
     const lifecycle = await broker.getJson<{
       invocationId: string;
@@ -348,8 +348,8 @@ describe("broker daemon delivery routing", () => {
       targetAgentId: "durable-ghost",
     }));
 
-    // The flight commits before reconciliation writes its linked delivery.
-    // Wait for that durable outcome, not just the earlier flight transition.
+    // A restart is not execution failure evidence. Keep the linked request
+    // delivery open as well, without replaying submission.
     const deliveries = await broker.waitFor(
       () => broker.getJson<Array<{
         messageId: string; targetId: string; status: string;
@@ -357,15 +357,14 @@ describe("broker daemon delivery routing", () => {
       }>>(secondHarness.baseUrl,
         `/v1/deliveries?messageId=${encodeURIComponent(response.message?.id ?? "")}&targetId=durable-ghost`),
       rows => rows.some(delivery => delivery.messageId === response.message?.id
-        && delivery.targetId === "durable-ghost" && delivery.status === "failed"
+        && delivery.targetId === "durable-ghost" && delivery.status === "running"
         && delivery.metadata?.flightId === response.flight?.id
-        && delivery.metadata?.flightState === "failed"
-        && delivery.metadata?.failureDetail?.includes("without a live broker task")),
+        && delivery.metadata?.flightState === "running"),
     );
     expect(deliveries).toContainEqual(expect.objectContaining({
       messageId: response.message?.id,
       targetId: "durable-ghost",
-      status: "failed",
+      status: "running",
     }));
   }, 20_000);
 

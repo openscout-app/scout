@@ -1,5 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
@@ -275,6 +276,7 @@ import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
 import { BrokerRequestReceipts, RetryablePreEffectFailure } from "./broker-request-receipts.js";
+import { resolveSessionWorkspace } from "./agent-workspace.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
   closeServer,
@@ -2391,6 +2393,7 @@ async function createCardlessProjectSessionForDelivery(input: {
   projectPath: string;
   execution?: InvocationRequest["execution"];
   projectAgent?: { handle?: string };
+  workspace?: "new_worktree";
   requesterId: string;
   createdAt: number;
 }) {
@@ -2436,6 +2439,17 @@ async function createCardlessProjectSessionForDelivery(input: {
       projectSessionIndex,
     ],
   });
+  // Runs before any record exists for this request, so a refusal is pre-effect.
+  let sessionWorkspace: Awaited<ReturnType<typeof resolveSessionWorkspace>>;
+  try {
+    sessionWorkspace = await resolveSessionWorkspace({
+      projectRoot,
+      agentName: provisionalName,
+      workspace: input.workspace,
+    });
+  } catch (error) {
+    throw new RetryablePreEffectFailure(error instanceof Error ? error.message : String(error));
+  }
   const registered = await registerCardlessSession({
     upsertActor: upsertActorDurably,
     upsertEndpoint: persistEndpoint,
@@ -2444,7 +2458,7 @@ async function createCardlessProjectSessionForDelivery(input: {
     handle: provisionalName,
     transport,
     harness,
-    cwd: projectRoot,
+    cwd: sessionWorkspace.cwd,
     projectRoot,
     nodeId,
     ...(input.execution?.model?.trim() ? { model: input.execution.model.trim() } : {}),
@@ -2552,6 +2566,14 @@ async function createProjectSessionForDelivery(
     if (isLocalDirectory(projectRoot)) {
       return createCardlessProjectSessionForDelivery(localInput);
     }
+  }
+  if (input.workspace === "new_worktree") {
+    // The mesh session-start request carries no workspace choice; refuse
+    // rather than start the peer session in its shared checkout.
+    throw new RetryablePreEffectFailure(
+      `workspace new_worktree is not supported for a session on another machine (${input.projectPath}).`
+      + " Ask without workspace new_worktree, or ask on the machine that holds the project.",
+    );
   }
   const execution = input.execution;
   const request: MeshProjectSessionStartInput = {
@@ -3406,6 +3428,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   tasks: taskService,
+  shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
     service: attachmentService, nodeId,
     notifyOperator: createOperatorAttachmentNotifier({

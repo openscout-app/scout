@@ -1,6 +1,6 @@
 {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-10-05.1",
+  "revision": "2026-11-10.1",
   "harnesses": [
     {
       "id": "claude",
@@ -13,9 +13,13 @@
       "models": [
         { "id": "claude-opus-5-5", "label": "Opus 5.5", "enabled": true, "default": true, "family": "Opus", "version": "5.5", "contextWindowTokens": 1000000, "presentation": { "detail": "Latest" } },
         { "id": "claude-opus-5", "label": "Opus 5", "enabled": true, "family": "Opus", "version": "5", "presentation": { "detail": "Deepest" } },
+        { "id": "claude-fable-5-2", "label": "Fable 5.2", "enabled": true, "family": "Fable", "version": "5.2", "contextWindowTokens": 1000000 },
+        { "id": "claude-fable-5-1", "label": "Fable 5.1", "enabled": true, "family": "Fable", "version": "5.1", "contextWindowTokens": 1000000 },
         { "id": "claude-fable-5", "label": "Fable 5", "enabled": true, "family": "Fable", "version": "5" },
-        { "id": "claude-sonnet-4-6", "label": "Sonnet 4.6", "enabled": true, "family": "Sonnet", "version": "4.6", "presentation": { "detail": "Balanced" } },
-        { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "enabled": true, "family": "Haiku", "version": "4.5", "presentation": { "detail": "Fast" } },
+        { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "enabled": true, "family": "Sonnet", "version": "5.5", "contextWindowTokens": 1000000, "presentation": { "detail": "Balanced" } },
+        { "id": "claude-sonnet-4-6", "label": "Sonnet 4.6", "enabled": true, "family": "Sonnet", "version": "4.6" },
+        { "id": "claude-haiku-5-5", "label": "Haiku 5.5", "enabled": true, "family": "Haiku", "version": "5.5", "contextWindowTokens": 1000000, "presentation": { "detail": "Fast" } },
+        { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "enabled": true, "family": "Haiku", "version": "4.5" },
         { "id": "claude-opus-4-8", "label": "Opus 4.8", "enabled": true, "family": "Opus", "version": "4.8" },
         { "id": "claude-opus-4-7", "label": "Opus 4.7", "enabled": true, "family": "Opus", "version": "4.7" },
         { "id": "claude-sonnet-4-5", "label": "Sonnet 4.5", "enabled": true, "family": "Sonnet", "version": "4.5" }

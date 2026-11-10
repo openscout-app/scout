@@ -16,6 +16,7 @@ import {
 } from "@openscout/protocol";
 
 import { DEFAULT_BROKER_HOST, buildDefaultBrokerUrl } from "../broker-process-manager";
+import { OPENSCOUT_INSTANCE_PORT_BLOCK_SIZE, OPENSCOUT_PROD_PORTS } from "../instance.js";
 
 const runtimeDir = join(import.meta.dir, "..", "..");
 
@@ -124,11 +125,24 @@ export function createBrokerDaemonTestHarness() {
     env?: Record<string, string | undefined>;
     waitForMutationReady?: boolean;
     protectedLocal?: boolean;
+    /** Real named-instance isolation, with its registry confined to the fixture. */
+    devInstance?: boolean;
+    port?: number;
     preload?: string;
     startupTimeoutMs?: number;
   } = {}): Promise<BrokerHarness> {
-    const controlHome = input.controlHome ?? mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
-    const port = freePort();
+    const root = input.controlHome ?? mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
+    const controlHome = input.devInstance ? join(root, "control-plane") : root;
+    if (input.devInstance) {
+      mkdirSync(controlHome, { recursive: true });
+      temporaryDirectories.add(root);
+    }
+    let port = input.port ?? freePort();
+    // Named instances reserve a whole block, not just the broker listener.
+    while (input.devInstance && (port > 65_536 - OPENSCOUT_INSTANCE_PORT_BLOCK_SIZE
+      || Object.values(OPENSCOUT_PROD_PORTS).some(value => value >= port && value < port + OPENSCOUT_INSTANCE_PORT_BLOCK_SIZE))) {
+      port = freePort();
+    }
     const baseUrl = buildDefaultBrokerUrl(DEFAULT_BROKER_HOST, port);
     const localAdminKey = input.protectedLocal ? randomBytes(32).toString("hex") : undefined;
     const adminKeyFile = join(controlHome, "admin-key");
@@ -160,6 +174,13 @@ export function createBrokerDaemonTestHarness() {
         // broker run from this checkout would take the dev default.
         OPENSCOUT_INSTANCE: "prod",
         ...input.env,
+        ...(input.devInstance ? {
+          OPENSCOUT_INSTANCE: "dev-ask-restart-test",
+          OPENSCOUT_INSTANCE_ROOT: root,
+          OPENSCOUT_INSTANCE_REGISTRY: join(root, "instances"),
+          OPENSCOUT_INSTANCE_PORT_BASE: String(port),
+          OPENSCOUT_INSTANCE_MESH: "0",
+        } : {}),
         ...(localAdminKey ? { OPENSCOUT_LOCAL_ADMIN_KEY_FILE: adminKeyFile } : {}),
       },
       stdout: "pipe",

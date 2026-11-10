@@ -15,6 +15,7 @@ import {
   isRetiredLocalAgent,
   latestEndpointForAgent,
 } from "./broker-endpoint-selection.js";
+import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 
 export {
   ENDPOINT_SESSION_ALIAS_METADATA_KEYS,
@@ -375,21 +376,28 @@ export function staleWorkingFlightReason(
 
   const startedEndpointAt = endpointStartedAt(endpoint);
   const endpointInvocationId = endpointLastInvocationId(endpoint);
+  // A broker task is process-local. For a worker that outlives the runtime
+  // (a tmux or attached terminal session), its absence after restart says
+  // nothing about the agent's execution: leave the work open for its durable
+  // reply, and do not redispatch it, because submission may already have
+  // happened. A direct transport (app server, stream-json, RPC, ACP) runs as a
+  // child of the runtime and dies with it, so its reply can no longer arrive.
   if (
-    endpoint.state === "active"
+    isDirectLocalAgentTransport(endpoint.transport)
+    && endpoint.state === "active"
     && endpointInvocationId === flight.invocationId
     && !options.isInvocationActive(flight.invocationId)
     && startedEndpointAt >= startedAt
   ) {
     // A requester timeout ends the broker task on purpose while the agent keeps
-    // working. Its reply still completes the flight when it arrives, so an
-    // active endpoint is not evidence of a lost task. Offline, stale and
-    // superseded endpoints are still caught by the checks around this one.
+    // working. Its reply still completes the flight when it arrives.
     if (flight.metadata?.requesterTimedOut === true) {
       return null;
     }
     return `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task`;
   }
+  // Positive offline, stale or superseded endpoint evidence still reconciles
+  // every transport normally.
   if (
     endpoint.state === "active"
     && startedEndpointAt > startedAt

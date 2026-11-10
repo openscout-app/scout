@@ -13,6 +13,8 @@ import {
 } from "@openscout/protocol";
 
 import type { BrokerJournalEntry } from "./broker-journal.js";
+import type { CollaborationWriteOptions } from "./broker-durable-record-store.js";
+import { reconcileWorkClaimOnWrite } from "./broker-work-claims.js";
 import type {
   ChannelInviteCommandResult,
   ChannelInviteRedeemResult,
@@ -57,7 +59,7 @@ export type BrokerCommandServiceDeps = {
   upsertBinding: (binding: ConversationBinding) => Promise<void>;
   recordCollaboration: (
     record: CollaborationRecord,
-    options?: { enqueueProjection?: boolean },
+    options?: CollaborationWriteOptions,
   ) => Promise<BrokerJournalEntry[]>;
   appendCollaborationEvent: (
     event: CollaborationEvent,
@@ -74,6 +76,7 @@ export type BrokerCommandServiceDeps = {
     options: { includeOk: true; logAccepted: true },
   ) => Promise<unknown>;
   log?: (message: string) => void;
+  now?: () => number;
 };
 
 export class BrokerCommandService {
@@ -148,8 +151,10 @@ export class BrokerCommandService {
       }
     }
 
+    // A client write keeps the runtime's claim and cannot hand a claimed item to someone else.
     const entries = await this.deps.recordCollaboration(record, {
       enqueueProjection: false,
+      reconcile: (existing, incoming) => reconcileWorkClaimOnWrite(existing, incoming, this.deps.now?.() ?? Date.now()),
     });
     const mesh = record.conversationId
       ? { forwarded: [], failed: [] }

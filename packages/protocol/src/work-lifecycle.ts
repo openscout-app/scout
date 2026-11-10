@@ -436,8 +436,15 @@ export interface WorkMoveRequest {
   evidence?: WorkMoveEvidence[];
   /** A waiting reason, required by stations that map to `waiting`. */
   waitingOn?: { kind?: string; label: string; targetId?: string };
-  /** Make the mover the owner before the checks run. */
+  /**
+   * Claim the item before the checks run: the mover becomes the owner under a
+   * lease. Fails with a conflict when someone else holds an active claim.
+   */
   claim?: boolean;
+  /** The mover's session, recorded on the claim. */
+  sessionAddress?: string;
+  /** Lease length for the claim. */
+  leaseMs?: number;
   /** Decide without recording anything. */
   dryRun?: boolean;
 }

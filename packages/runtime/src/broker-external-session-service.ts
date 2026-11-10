@@ -99,7 +99,22 @@ export class BrokerExternalSessionService {
   }
   private ownedEndpoint(ownerId: string, sessionId: string) {
     const endpoint = this.deps.endpoints().find((e) => isExternalSessionEndpoint(e) && endpointMatchesTargetSession(e, sessionId) && e.metadata?.ownerId === ownerId);
-    if (!endpoint) throw new Error("external_session_not_found");
+    if (!endpoint) {
+      // These tools serve only sessions a caller attached. A Scout-managed
+      // session (a Grok worker the broker started, say) is live, not missing:
+      // say so instead of a bare "not found" that reads as a lost worker.
+      const managed = this.deps.endpoints().find((e) => !isExternalSessionEndpoint(e)
+        && (endpointMatchesTargetSession(e, sessionId)
+          || (sessionId.startsWith(`${e.harness}:`) && endpointMatchesTargetSession(e, sessionId.slice(e.harness.length + 1)))));
+      if (managed) {
+        throw new Error(
+          `external_session_not_found: ${sessionId} is a Scout-managed ${managed.harness} session (${managed.state}), not an attached external session.`
+          + " sessions_get, sessions_poll and sessions_ack serve only sessions attached with sessions_attach."
+          + " Follow its work with invocations_get using the flight id from the ask receipt.",
+        );
+      }
+      throw new Error("external_session_not_found");
+    }
     if (endpoint.transport !== "mcp_poll") this.connection(String(endpoint.metadata?.connectionId), ownerId);
     return endpoint;
   }

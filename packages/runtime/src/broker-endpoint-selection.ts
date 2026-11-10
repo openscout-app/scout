@@ -3,6 +3,7 @@ import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import type {
   AgentDefinition,
   AgentEndpoint,
+  AgentHarness,
   AgentState,
   ScoutCandidateEndpointState,
   ScoutDispatchUnavailableTarget,
@@ -23,6 +24,28 @@ export const ENDPOINT_SESSION_ALIAS_METADATA_KEYS = [
   "tmuxSession",
   "pairingSessionId",
 ] as const;
+
+/**
+ * Keys that prove an endpoint is the addressed session. The alias list above
+ * also contains transport coincidences (tmux, pairing, runtime). Those do not
+ * make two records the same session.
+ */
+export function endpointStronglyMatchesSession(endpoint: AgentEndpoint, sessionId: string, harness?: AgentHarness): boolean {
+  if (harness && endpoint.harness !== harness) return false;
+  const wanted = sessionId.trim();
+  if (!wanted) return false;
+  const metadata = endpoint.metadata;
+  const values = [
+    endpoint.sessionId,
+    endpoint.agentId,
+    metadata?.sessionId,
+    metadata?.nativeSessionId,
+    metadata?.externalSessionId,
+    metadata?.threadId,
+    metadata?.observedSessionId,
+  ];
+  return values.some((value) => typeof value === "string" && value.trim() === wanted);
+}
 
 function metadataStringValue(metadata: Record<string, unknown> | undefined, key: string): string | null {
   const value = metadata?.[key];

@@ -2794,3 +2794,21 @@ describe("two-verb MCP contract", () => {
     expect(calls).toBe(1);
   });
 });
+
+test("show MCP is discoverable and sends local path, caption and resolved caller", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ path: string; body: any }> = [];
+  try {
+    globalThis.fetch = (async (input, init) => {
+      requests.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });
+      return Response.json({ show: { id: "show-test" } }, { status: 201 });
+    }) as typeof fetch;
+    const { client } = await connectTestServer({ resolveSenderId: async () => "agent-test" });
+    const tools = await client.listTools();
+    const tool = tools.tools.find(t => t.name === "show");
+    expect(tool?.description).toContain("screenshot"); expect(tool?.description).toContain("finished document");
+    const result = await client.callTool({ name: "show", arguments: { path: "preview.mp4", caption: "The working flow" } });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toEqual([{ path: "/v1/shows", body: { path: "preview.mp4", caption: "The working flow", caller: { actorId: "agent-test", currentDirectory: "/tmp/openscout-test", metadata: { sessionId: "019ddb1b-test-thread", harness: "codex" } } } }]);
+  } finally { globalThis.fetch = originalFetch; }
+});

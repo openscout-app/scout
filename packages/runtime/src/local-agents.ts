@@ -6202,6 +6202,15 @@ export async function invokeLocalAgentEndpoint(
   const existing = endpoint.metadata?.isolatedExecution === true
     ? undefined
     : registry[agentRuntimeId];
+  // ACP harnesses report their native session id only when the turn returns.
+  // Bind it to the endpoint as soon as the session exists, so a long or
+  // interrupted turn can still be found by that id while it works.
+  const knownExternalSessionId = endpointMetadataString(endpoint, "externalSessionId");
+  const acpNativeSession = hooks.onSessionObserved
+    ? (nativeSessionId: string) => nativeSessionId === knownExternalSessionId
+      ? undefined
+      : hooks.onSessionObserved!({ externalSessionId: nativeSessionId })
+    : undefined;
   // invocation.timeoutMs is a caller wait budget. Local harness execution keeps
   // tracking until the agent produces a terminal result or broker-visible reply.
 
@@ -6270,6 +6279,7 @@ export async function invokeLocalAgentEndpoint(
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
+      ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Grok ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
@@ -6292,6 +6302,7 @@ export async function invokeLocalAgentEndpoint(
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
+      ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Kimi Code ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
@@ -6314,6 +6325,7 @@ export async function invokeLocalAgentEndpoint(
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
+      ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "OpenCode ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
@@ -6337,6 +6349,7 @@ export async function invokeLocalAgentEndpoint(
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
+      ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Devin ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
@@ -6359,6 +6372,7 @@ export async function invokeLocalAgentEndpoint(
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
+      ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Cursor ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
@@ -6501,6 +6515,7 @@ export async function invokeLocalAgentEndpoint(
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd: onlineRecord.cwd,
       prompt,
+      ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
       name: definitionId,
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,

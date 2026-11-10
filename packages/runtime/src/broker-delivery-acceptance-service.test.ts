@@ -28,7 +28,7 @@ import { brokerDeliverRequestSchema } from "./broker-command-boundary-schemas.js
 import { deliverScoutRequest, prepareScoutSessionReply } from "./delivery-client.js";
 import { createHash } from "node:crypto";
 import { canonicalRequest } from "./broker-request-receipts.js";
-import { BrokerDeliveryAcceptanceService, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
+import { BrokerDeliveryAcceptanceService, validateTaskDelivery, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
 import type { InvocationResolution } from "./broker-delivery-routing.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
@@ -157,6 +157,7 @@ function createHarness(input: {
     projectPath: string;
     execution?: InvocationRequest["execution"];
     projectAgent?: ScoutDeliverRequest["projectAgent"];
+    workspace?: "new_worktree";
     requesterId: string;
     createdAt: number;
   }> = [];
@@ -1137,6 +1138,42 @@ describe("BrokerDeliveryAcceptanceService", () => {
     }));
   });
 
+  test("project-path consult asking for new_worktree passes the workspace to session creation", async () => {
+    const harness = createHarness({ now: 20_700, cardlessEndpointHarness: "grok" });
+
+    const result = await harness.service.accept({
+      id: "deliver-grok-worktree",
+      body: "fix the bug",
+      intent: "consult",
+      target: { kind: "project_path", projectPath: "/tmp/openscout" },
+      execution: { harness: "grok", session: "new" },
+      caller: { actorId: "operator", nodeId: "node-1" },
+      messageMetadata: { askWorkspace: "new_worktree" },
+      invocationMetadata: { askWorkspace: "new_worktree" },
+    });
+
+    expect(result.kind).toBe("delivery");
+    expect(harness.cardlessProjectSessionCalls).toHaveLength(1);
+    expect(harness.cardlessProjectSessionCalls[0]?.workspace).toBe("new_worktree");
+  });
+
+  test("project-path consult without a workspace choice leaves the session in the project root", async () => {
+    const harness = createHarness({ now: 20_710 });
+
+    await harness.service.accept({
+      id: "deliver-same-workspace",
+      body: "fix the bug",
+      intent: "consult",
+      target: { kind: "project_path", projectPath: "/tmp/openscout" },
+      execution: { harness: "codex", session: "new" },
+      caller: { actorId: "operator", nodeId: "node-1" },
+      invocationMetadata: { askWorkspace: "same" },
+    });
+
+    expect(harness.cardlessProjectSessionCalls).toHaveLength(1);
+    expect(harness.cardlessProjectSessionCalls[0]).not.toHaveProperty("workspace");
+  });
+
   test("runtime-profile consult starts a cardless current-project session with broker-owned execution", async () => {
     const harness = createHarness({
       now: 20_750,
@@ -1746,4 +1783,23 @@ test.each([{ targetAgentId: "worker" }, { targetLabel: "worker" }, { targetSessi
   await expect(h.service.accept({ ...legacy, requestId: "conflict", intent: "consult", body: "context",
     task: { version: 1, ref: "parent" } })).rejects.toThrow("another recipient route");
   expect(h.localAgentSyncReasons).toHaveLength(0); expect(h.ensuredActors).toHaveLength(0);
+});
+
+test("a task ref may repeat itself as the rendered ref label", () => {
+  const followup = {
+    requestId: "followup-1",
+    intent: "consult" as const,
+    body: "more context",
+    target: { kind: "binding_ref" as const, ref: "abcd1234" },
+    task: { version: 1 as const, ref: "abcd1234" },
+  };
+  expect(() => validateTaskDelivery({ ...followup, targetLabel: "ref:abcd1234" })).not.toThrow();
+  expect(() => validateTaskDelivery({ ...followup, requestId: "followup-2", targetLabel: "REF:Abcd1234" })).not.toThrow();
+  expect(() => validateTaskDelivery({ ...followup, requestId: "followup-3", targetLabel: "worker" })).toThrow("another recipient route");
+  expect(() => validateTaskDelivery({
+    ...followup,
+    requestId: "followup-4",
+    target: { kind: "binding_ref", ref: "other-ref" },
+    targetLabel: "ref:abcd1234",
+  })).toThrow("another recipient route");
 });

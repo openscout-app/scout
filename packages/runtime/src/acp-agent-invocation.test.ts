@@ -172,3 +172,56 @@ for await (const line of rl) {
     else process.env.METHOD_LOG = originalEnv;
   }
 });
+
+test("reports the provider ACP session id while the turn is still running", async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "openscout-acp-native-early-"));
+  tempPaths.add(tempRoot);
+  const executable = join(tempRoot, "fake-acp");
+  const releasePath = join(tempRoot, "release");
+  // The prompt never answers until the release file exists, and only the
+  // onNativeSession callback writes it. So the turn can finish only if the
+  // native id was reported mid-turn, before any prompt result.
+  writeFileSync(executable, `#!/usr/bin/env bun
+import { existsSync } from "node:fs";
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of rl) {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: {} } }));
+  } else if (message.method === "session/new") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { sessionId: "grok-native-7" } }));
+  } else if (message.method === "session/prompt") {
+    while (!existsSync(${JSON.stringify(releasePath)})) await new Promise((resolve) => setTimeout(resolve, 20));
+    console.log(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "done" } } } }));
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } }));
+  }
+}
+`, "utf8");
+  chmodSync(executable, 0o755);
+
+  const reported: string[] = [];
+  const result = await invokeAcpAgent({
+    adapterType: "cursor-acp",
+    label: "ACP early identity test",
+    sessionId: "scout-session-early",
+    poolKey: "endpoint-early",
+    cwd: tempRoot,
+    prompt: "long task",
+    adapterOptions: {
+      command: executable,
+      args: [],
+      requireAuth: false,
+      startupTimeoutMs: 2_000,
+      requestTimeoutMs: 5_000,
+    },
+    onNativeSession: (nativeSessionId) => {
+      reported.push(nativeSessionId);
+      writeFileSync(releasePath, "go", "utf8");
+    },
+  });
+
+  expect(reported).toEqual(["grok-native-7"]);
+  expect(result.sessionId).toBe("grok-native-7");
+  expect(result.output).toBe("done");
+}, 15_000);

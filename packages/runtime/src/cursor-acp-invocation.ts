@@ -6,6 +6,8 @@ export interface CursorAcpInvocationOptions {
   resumeSessionId?: string;
   cwd: string;
   prompt: string;
+  /** Provider-native ACP session id, reported as soon as the session exists. */
+  onNativeSession?: (nativeSessionId: string) => Promise<void> | void;
   name?: string;
   timeoutMs?: number;
   hardCeilingMs?: number;

@@ -102,6 +102,7 @@ function makeEndpoint(input: {
   projectRoot?: string;
   state?: AgentEndpoint["state"];
   nodeId?: string;
+  transport?: AgentEndpoint["transport"];
   metadata?: Record<string, unknown>;
 }): AgentEndpoint {
   return {
@@ -109,7 +110,7 @@ function makeEndpoint(input: {
     agentId: input.agentId,
     nodeId: input.nodeId ?? "node.local",
     harness: input.harness,
-    transport: input.harness === "codex" ? "codex_app_server" : "claude_stream_json",
+    transport: input.transport ?? (input.harness === "codex" ? "codex_app_server" : "claude_stream_json"),
     state: input.state ?? "idle",
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.projectRoot ? { projectRoot: input.projectRoot, cwd: input.projectRoot } : {}),
@@ -897,6 +898,166 @@ describe("resolveBrokerRouteTarget", () => {
       ]);
       expect(result.detail).toContain("session:claude:native-first");
       expect(result.detail).toContain("session:claude:native-second");
+    }
+  });
+
+  test("collapses a relay copy of one scout session onto the endpoint that holds the native id", () => {
+    const scoutSessionId = "session-card";
+    const nativeId = "claude-session-1";
+    const live = makeAgent({ id: scoutSessionId, definitionId: "reviewer" });
+    const relay = makeAgent({ id: `${scoutSessionId}.relay`, definitionId: "reviewer" });
+    const snapshot = makeSnapshot(
+      [live, relay],
+      [
+        makeEndpoint({
+          id: "endpoint.live",
+          agentId: live.id,
+          harness: "claude",
+          transport: "http",
+          state: "idle",
+          sessionId: scoutSessionId,
+          metadata: {
+            externalSessionId: nativeId,
+            nativeSessionId: null,
+            observedSessionId: nativeId,
+          },
+        }),
+        makeEndpoint({
+          id: "endpoint.relay",
+          agentId: relay.id,
+          harness: "claude",
+          transport: "tmux",
+          state: "active",
+          sessionId: scoutSessionId,
+          metadata: {
+            source: "relay-agent-registry",
+            tmuxSession: scoutSessionId,
+            runtimeInstanceId: scoutSessionId,
+            observedSessionId: nativeId,
+          },
+        }),
+      ],
+    );
+
+    const bySession = resolveBrokerRouteTarget(snapshot, { targetSessionId: scoutSessionId }, { helpers });
+    expect(bySession.kind).toBe("resolved");
+    if (bySession.kind === "resolved") expect(bySession.agent.id).toBe(live.id);
+
+    const byNative = resolveBrokerRouteTarget(
+      snapshot,
+      {
+        target: {
+          kind: "session_id",
+          sessionId: nativeId,
+          harness: "claude",
+          value: `session:claude:${nativeId}`,
+        },
+      },
+      { helpers },
+    );
+    expect(byNative.kind).toBe("resolved");
+    if (byNative.kind === "resolved") expect(byNative.agent.id).toBe(live.id);
+  });
+
+  test("prefers the cardless endpoint that holds the native id over an active relay copy", () => {
+    const sessionId = "session-card";
+    const nativeId = "claude-session-1";
+    const snapshot = makeSnapshot(
+      [],
+      [
+        makeEndpoint({
+          id: "endpoint.live",
+          agentId: sessionId,
+          harness: "claude",
+          transport: "http",
+          state: "idle",
+          sessionId,
+          metadata: { externalSessionId: nativeId, observedSessionId: nativeId },
+        }),
+        makeEndpoint({
+          id: "endpoint.relay",
+          agentId: `${sessionId}-relay`,
+          harness: "claude",
+          transport: "tmux",
+          state: "active",
+          sessionId,
+          metadata: {
+            source: "relay-agent-registry",
+            tmuxSession: sessionId,
+            runtimeInstanceId: sessionId,
+            observedSessionId: nativeId,
+          },
+        }),
+      ],
+    );
+
+    const result = resolveBrokerRouteTarget(snapshot, { targetSessionId: sessionId }, { helpers });
+    expect(result.kind).toBe("resolved_session");
+    if (result.kind === "resolved_session") {
+      expect(result.session.actorId).toBe(sessionId);
+      expect(result.session.endpoint.id).toBe("endpoint.live");
+    }
+  });
+
+  test("keeps a shared transport alias ambiguous when one side has no native id", () => {
+    const first = makeAgent({ id: "reviewer.first", definitionId: "reviewer" });
+    const second = makeAgent({ id: "reviewer.second", definitionId: "reviewer" });
+    const snapshot = makeSnapshot(
+      [first, second],
+      [
+        makeEndpoint({
+          id: "endpoint.reviewer.first",
+          agentId: first.id,
+          harness: "claude",
+          state: "idle",
+          metadata: { tmuxSession: "work" },
+        }),
+        makeEndpoint({
+          id: "endpoint.reviewer.second",
+          agentId: second.id,
+          harness: "claude",
+          state: "active",
+          metadata: { nativeSessionId: "native-second", tmuxSession: "work" },
+        }),
+      ],
+    );
+
+    const result = resolveBrokerRouteTarget(snapshot, { targetSessionId: "work" }, { helpers });
+    expect(result.kind).toBe("ambiguous");
+    if (result.kind === "ambiguous") {
+      expect(result.detail).toContain("session:claude:native-second");
+    }
+  });
+
+  test("keeps one scout session ambiguous when its projections name different native ids", () => {
+    const scoutSessionId = "session-card";
+    const first = makeAgent({ id: "reviewer.first", definitionId: "reviewer" });
+    const second = makeAgent({ id: "reviewer.second", definitionId: "reviewer" });
+    const snapshot = makeSnapshot(
+      [first, second],
+      [
+        makeEndpoint({
+          id: "endpoint.reviewer.first",
+          agentId: first.id,
+          harness: "claude",
+          sessionId: scoutSessionId,
+          metadata: { externalSessionId: "native-a" },
+        }),
+        makeEndpoint({
+          id: "endpoint.reviewer.second",
+          agentId: second.id,
+          harness: "claude",
+          sessionId: scoutSessionId,
+          metadata: { externalSessionId: "native-b" },
+        }),
+      ],
+    );
+
+    const result = resolveBrokerRouteTarget(snapshot, { targetSessionId: scoutSessionId }, { helpers });
+    expect(result.kind).toBe("ambiguous");
+    if (result.kind === "ambiguous") {
+      expect(result.detail).toContain("session:claude:native-a");
+      expect(result.detail).toContain("session:claude:native-b");
     }
   });
 

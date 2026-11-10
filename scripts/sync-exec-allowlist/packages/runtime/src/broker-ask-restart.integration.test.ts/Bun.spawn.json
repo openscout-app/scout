@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/broker-ask-restart.integration.test.ts",
+  "symbol": "Bun.spawn",
+  "category": "test",
+  "reason": "A gated deterministic agent fixture outlives its owned development runtime during restart tests.",
+  "owner": "tests"
+}

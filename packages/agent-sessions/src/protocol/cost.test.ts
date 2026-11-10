@@ -39,6 +39,26 @@ describe("adapter cost estimates", () => {
     expect(estimate.totalUsd).toBeCloseTo(5.1, 6);
   });
 
+  test("prices the current Claude models from their own rate cards", () => {
+    const priced = (model: string) => estimateAdapterCost({
+      provider: "anthropic",
+      model,
+      usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+      capturedAt: 1,
+    });
+    for (const [model, total] of [
+      ["claude-fable-5-2", 48],
+      ["claude-fable-5-1", 60],
+      ["claude-opus-5-5", 24],
+      ["claude-sonnet-5-5", 12],
+      ["claude-haiku-5-5", 0.6],
+    ] as const) {
+      const estimate = priced(model);
+      expect(estimate.rateCardSource).toBe("alias");
+      expect(estimate.totalUsd).toBeCloseTo(total, 6);
+    }
+  });
+
   test("marks subscription-covered usage down while preserving API-equivalent cost", () => {
     const estimate = estimateAdapterCost({
       provider: "openai",

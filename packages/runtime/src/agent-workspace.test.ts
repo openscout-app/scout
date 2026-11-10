@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAgentWorkspace, SCOUT_WORKSPACES_DIRNAME } from "./agent-workspace.js";
+import { createAgentWorkspace, resolveSessionWorkspace, SCOUT_WORKSPACES_DIRNAME } from "./agent-workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -133,4 +133,28 @@ describe("createAgentWorkspace", () => {
     expect(existsSync(join(repo, ".openscout"))).toBe(false);
     expect(existsSync(join(repo, ".gitignore"))).toBe(false);
   }, 20_000);
+});
+
+describe("resolveSessionWorkspace", () => {
+  test("runs in the project root when no worktree is requested", async () => {
+    const root = makeGitRepo();
+    expect(await resolveSessionWorkspace({ projectRoot: root, agentName: "quill" })).toEqual({ cwd: root });
+    expect(await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "same" })).toEqual({ cwd: root });
+    expect(existsSync(join(root, SCOUT_WORKSPACES_DIRNAME))).toBe(false);
+  });
+
+  test("new_worktree runs the session in a git worktree, not the project root", async () => {
+    const root = makeGitRepo();
+    const workspace = await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" });
+
+    expect(workspace).toEqual({ cwd: join(root, SCOUT_WORKSPACES_DIRNAME, "quill"), branch: "scout/quill" });
+    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspace.cwd, encoding: "utf8" }).trim();
+    expect(branch).toBe("scout/quill");
+  });
+
+  test("new_worktree fails with a diagnostic instead of falling back to the project root", async () => {
+    const root = makeNonGitDir();
+    await expect(resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" }))
+      .rejects.toThrow(/workspace new_worktree: could not create a git worktree/);
+  });
 });

@@ -455,3 +455,29 @@ Claim checks that deadline under the broker writer; an inbox listing or stream
 event is only a candidate, not permission to execute. Deferred records without
 a deadline retain their legacy claimability. This rule applies to inbox claims;
 peer delivery keeps its separate retry and peer-online policy.
+
+## Work item claims
+
+A work item has one claim holder at a time, under a lease. Claim through
+`POST /v1/work/claim` with `action` set to `claim`, `renew`, or `release`, or
+through `POST /v1/work/move` with `claim: true`. The runtime decides each call
+as one compare-and-set under its writer. Two callers cannot both win.
+
+- A claim records `claimantId`, `sessionAddress`, `leaseGeneration`, and
+  `leaseExpiresAt` on the item (`metadata.workClaim`). The claimant becomes
+  the owner. The default lease is 15 minutes; `leaseMs` sets it, from
+  10 seconds to 24 hours.
+- A claim by the holder renews the lease. Echo `leaseGeneration` on `renew`
+  and `release`. A new claim, even by the same holder after expiry, advances
+  the generation.
+- `expectedOwnerId` makes the claim a compare-and-set on the owner as well.
+  `null` means the item must have no owner.
+- A lost claim returns 409 with a `WorkClaimConflict` body: `code`, `holder`,
+  `retryAfterMs`, and a `hint`. It never overwrites the holder and never
+  waits.
+- An expired lease frees the item. The next claim wins, and any caller may
+  release it. While a lease is active, only the holder or the operator can
+  release it.
+- A whole-record write through `POST /v1/collaboration/records` keeps the
+  stored claim. A write that gives an actively claimed item to another owner
+  returns the same 409. A done or cancelled item holds no claim.

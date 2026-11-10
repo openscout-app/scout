@@ -158,6 +158,8 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
     host?: string;
     execution?: InvocationRequest["execution"];
     projectAgent?: ScoutDeliverRequest["projectAgent"];
+    /** `new_worktree` gives the new session a fresh git worktree as its cwd. */
+    workspace?: "new_worktree";
     requesterId: string;
     createdAt: number;
   }) => Promise<Extract<InvocationResolution, { kind: "resolved_session" }>>;
@@ -1030,6 +1032,7 @@ export class BrokerDeliveryAcceptanceService {
           ...(projectHost ? { host: projectHost } : {}),
           execution,
           projectAgent: payload.projectAgent,
+          ...(askWorkspaceFromPayload(payload) === "new_worktree" ? { workspace: "new_worktree" as const } : {}),
           requesterId,
           createdAt,
         })
@@ -1429,7 +1432,10 @@ export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActor
     if (!imageMimes.has(upload.mediaType)) throw new Error("task evidence must be an image");
     validateAttachmentBytes(decodeAttachment(upload.data), upload.mediaType);
   }
-  if ((task.ref || task.continue) && (targetIsNotTaskRef(payload.target) || payload.targetAgentId || payload.targetLabel || payload.targetSessionId || payload.channel || payload.projectAgent))
+  // The ask client always sends the rendered label of this same ref (`ref:<id>`).
+  // That label is the route itself. A different label, agent, session, channel,
+  // or project is a second recipient and still fails.
+  if ((task.ref || task.continue) && (targetIsNotTaskRef(payload.target) || payload.targetAgentId || payload.targetSessionId || payload.channel || payload.projectAgent || !taskRefSharesItsRoute(payload)))
     throw new Error("--ref and --continue cannot be combined with another recipient route");
   if (task.operator && (!isOperatorDeliveryTarget(payload, operatorActorId)
     || (payload.targetAgentId && payload.targetAgentId !== operatorActorId)
@@ -1452,4 +1458,31 @@ export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActor
 
 function targetIsNotTaskRef(target: ScoutDeliverRequest["target"]): boolean {
   return Boolean(target && target.kind !== "binding_ref");
+}
+
+function sameTaskRef(taskRef: string, value: string): boolean {
+  const left = taskRef.trim().toLowerCase();
+  const right = value.trim().toLowerCase();
+  return right === left || right === `ref:${left}` || left === `ref:${right}`;
+}
+
+function taskRefSharesItsRoute(payload: ScoutDeliverRequest): boolean {
+  const taskRef = payload.task?.ref ?? payload.task?.continue ?? "";
+  if (!taskRef.trim()) return false;
+  if (payload.targetLabel && !sameTaskRef(taskRef, payload.targetLabel)) return false;
+  if (payload.target?.kind === "binding_ref" && !sameTaskRef(taskRef, payload.target.ref)) return false;
+  return true;
+}
+
+/**
+ * The ask's `workspace` choice. Ask clients carry it as `askWorkspace` in the
+ * invocation and message metadata; the deliver contract has no typed field.
+ */
+export function askWorkspaceFromPayload(
+  payload: Pick<ScoutDeliverRequest, "invocationMetadata" | "messageMetadata">,
+): "same" | "new_worktree" | undefined {
+  for (const value of [payload.invocationMetadata?.askWorkspace, payload.messageMetadata?.askWorkspace]) {
+    if (value === "same" || value === "new_worktree") return value;
+  }
+  return undefined;
 }

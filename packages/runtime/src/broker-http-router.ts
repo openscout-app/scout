@@ -1,3 +1,4 @@
+import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
 import { readProviderQuotas } from "./broker-provider-quota-read.js";
@@ -115,7 +116,8 @@ import {
   throwIfAborted,
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
-import type { WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import { WorkClaimConflictError } from "./broker-work-claims.js";
+import type { WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -219,6 +221,7 @@ export type BrokerHttpRouterDeps = {
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
+  shows?: ShowHttpDeps;
   attachments?: AttachmentHttpDeps;
   readObservedSessionCache?: ObservedSessionReadDeps["readCache"];
   herdrWorkspaces?: Omit<HerdrWorkspacesReadDeps, "nodeId">;
@@ -762,6 +765,7 @@ export function createBrokerHttpRouter(
       return;
     }
   }
+  if (await handleShowRoute(request, response, url, deps.shows ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
   if (await handleAttachmentRoute(request, response, url, deps.attachments ?? { nodeId, peerNode: () => undefined })) return;
   const aliasItemMatch = method === "PATCH" || method === "DELETE"
     ? url.pathname.match(/^\/v1\/aliases\/([^/]+)$/)
@@ -1898,8 +1902,13 @@ export function createBrokerHttpRouter(
         json(response, 200, await work.review(await readRequestBody<WorkReviewRequest>(request, { maxBytes: 64 * 1024 })));
         return;
       }
+      if (method === "POST" && url.pathname === "/v1/work/claim") {
+        json(response, 200, await work.claim(await readRequestBody<WorkClaimRequest>(request, { maxBytes: 16 * 1024 })));
+        return;
+      }
     } catch (error) {
-      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      if (error instanceof WorkClaimConflictError) json(response, error.status, error.conflict);
+      else if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
       else badRequest(response, error);
       return;
     }

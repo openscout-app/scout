@@ -88,3 +88,37 @@ export async function createAgentWorkspace(
     }
   }
 }
+
+export interface SessionWorkspace {
+  /** Directory the session runs in. */
+  cwd: string;
+  /** Branch of the worktree, when the session runs in one. */
+  branch?: string;
+}
+
+/**
+ * Pick the working directory for a new session. `same` (or no choice) runs in
+ * the project root. `new_worktree` runs in a git worktree, and fails with an
+ * actionable error instead of falling back to the project root: a caller that
+ * asked for isolation must not get a worker in the shared checkout.
+ */
+export async function resolveSessionWorkspace(input: {
+  projectRoot: string;
+  agentName: string;
+  workspace?: "same" | "new_worktree";
+  createWorkspace?: typeof createAgentWorkspace;
+}): Promise<SessionWorkspace> {
+  if (input.workspace !== "new_worktree") {
+    return { cwd: input.projectRoot };
+  }
+  const created = await (input.createWorkspace ?? createAgentWorkspace)(input.projectRoot, input.agentName);
+  if (!created) {
+    throw new Error(
+      `workspace new_worktree: could not create a git worktree for ${input.projectRoot}`
+      + ` (branch scout/${input.agentName} under ${SCOUT_WORKSPACES_DIRNAME}/).`
+      + " The folder must be a git repository with at least one commit."
+      + " Ask without workspace new_worktree to run in the project folder.",
+    );
+  }
+  return { cwd: created.path, branch: created.branch };
+}
