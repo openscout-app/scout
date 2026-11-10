@@ -4623,7 +4623,18 @@ export async function loadScoutFlight(
   baseUrl: string,
   flightId: string,
 ): Promise<ScoutFlightRecord | null> {
-  return loadBrokerFlight(baseUrl, flightId);
+  const flight = await loadBrokerFlight(baseUrl, flightId);
+  if (flight || !flightId.startsWith("inv-")) return flight;
+  // Receipts and journals name a task by its invocation id as often as by its
+  // flight id. Answering "not found" for a live task's invocation id reads as
+  // a lost task, so resolve the invocation to its flight.
+  try {
+    const snapshot = await loadScoutInvocationSnapshot(baseUrl, flightId);
+    return snapshot?.flight?.invocationId === flightId ? snapshot.flight : null;
+  } catch (error) {
+    if (error instanceof ScoutBrokerHttpError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 export async function loadScoutInvocationSnapshot(

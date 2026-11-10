@@ -2291,6 +2291,34 @@ describe("waitForScoutFlight", () => {
     expect(paths).toEqual(Array(3).fill("/v1/flights/flight%2Fencoded"));
   });
 
+  test("a flight read by invocation ID resolves the running task instead of reporting it missing", async () => {
+    useIsolatedOpenScoutHome();
+    const paths: string[] = [];
+    let invocationKnown = true;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      paths.push(path);
+      if (path.startsWith("/v1/flights/")) return jsonResponse({ error: "flight_not_found" }, 404);
+      return invocationKnown
+        ? jsonResponse({
+            invocationId: "inv-request-1",
+            invocation: { id: "inv-request-1" },
+            flight: { id: "flt-1", invocationId: "inv-request-1", state: "running" },
+            deliveries: [],
+            dispatches: [],
+          })
+        : jsonResponse({ error: "invocation_not_found" }, 404);
+    }) as typeof fetch;
+
+    const flight = await loadScoutFlight("http://broker.test", "inv-request-1");
+    expect(flight?.id).toBe("flt-1");
+    expect(flight?.state).toBe("running");
+    expect(paths.some((path) => path.includes("/v1/invocations/inv-request-1"))).toBe(true);
+
+    invocationKnown = false;
+    expect(await loadScoutFlight("http://broker.test", "inv-request-1")).toBeNull();
+  });
+
   test("a known invocation skips the registry and cancellation stops polling", async () => {
     useIsolatedOpenScoutHome();
     const controller = new AbortController();

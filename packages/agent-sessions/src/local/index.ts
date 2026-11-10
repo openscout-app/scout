@@ -167,6 +167,12 @@ export type LocalAgentClientTurnOptions = {
    * process does not sit unanswered.
    */
   onPermission?: (request: LocalAgentPermissionRequest) => Promise<LocalAgentPermissionDecision>;
+  /**
+   * Called once the harness session exists and before the prompt is sent,
+   * with its provider-native id when the harness has reported one. A long
+   * turn can then be tracked by that id while it runs, not only after it ends.
+   */
+  onSessionReady?: (session: { id: string; nativeId?: string }) => void;
 };
 
 export type LocalAgentClient = {
@@ -891,6 +897,16 @@ export async function createLocalAgentClient(
       throw new Error("OpenClaw ACP model is configured on the Gateway agent.");
     }
     const localSession = await ensureSession(turnOptions);
+    if (turnOptions.onSessionReady) {
+      try {
+        turnOptions.onSessionReady({
+          id: localSession.session.id,
+          nativeId: nativeSessionId(registry.getSessionSnapshot(localSession.session.id)),
+        });
+      } catch {
+        // Session tracking is evidence for observers; it never fails the turn.
+      }
+    }
     const warm = localSession.createdBeforeFirstTurn;
     const reused = turnCount > 0;
     const text = textForTurn({

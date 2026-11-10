@@ -157,6 +157,7 @@ function createHarness(input: {
     projectPath: string;
     execution?: InvocationRequest["execution"];
     projectAgent?: ScoutDeliverRequest["projectAgent"];
+    workspace?: "new_worktree";
     requesterId: string;
     createdAt: number;
   }> = [];
@@ -1135,6 +1136,42 @@ describe("BrokerDeliveryAcceptanceService", () => {
       execution: { session: "new", harness: "codex" },
       task: "start from this project context",
     }));
+  });
+
+  test("project-path consult asking for new_worktree passes the workspace to session creation", async () => {
+    const harness = createHarness({ now: 20_700, cardlessEndpointHarness: "grok" });
+
+    const result = await harness.service.accept({
+      id: "deliver-grok-worktree",
+      body: "fix the bug",
+      intent: "consult",
+      target: { kind: "project_path", projectPath: "/tmp/openscout" },
+      execution: { harness: "grok", session: "new" },
+      caller: { actorId: "operator", nodeId: "node-1" },
+      messageMetadata: { askWorkspace: "new_worktree" },
+      invocationMetadata: { askWorkspace: "new_worktree" },
+    });
+
+    expect(result.kind).toBe("delivery");
+    expect(harness.cardlessProjectSessionCalls).toHaveLength(1);
+    expect(harness.cardlessProjectSessionCalls[0]?.workspace).toBe("new_worktree");
+  });
+
+  test("project-path consult without a workspace choice leaves the session in the project root", async () => {
+    const harness = createHarness({ now: 20_710 });
+
+    await harness.service.accept({
+      id: "deliver-same-workspace",
+      body: "fix the bug",
+      intent: "consult",
+      target: { kind: "project_path", projectPath: "/tmp/openscout" },
+      execution: { harness: "codex", session: "new" },
+      caller: { actorId: "operator", nodeId: "node-1" },
+      invocationMetadata: { askWorkspace: "same" },
+    });
+
+    expect(harness.cardlessProjectSessionCalls).toHaveLength(1);
+    expect(harness.cardlessProjectSessionCalls[0]).not.toHaveProperty("workspace");
   });
 
   test("runtime-profile consult starts a cardless current-project session with broker-owned execution", async () => {
