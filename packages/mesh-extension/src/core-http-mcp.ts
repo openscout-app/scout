@@ -8,7 +8,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@model
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js';
 import { diagnoseAgentIdentity, parseAgentIdentity, namedChannelNaturalKey, systemChannelNaturalKey, stableChannelId, parseScoutComposerRouteTarget, parseScoutRuntimeSpec, SCOUT_MCP_CORE_TOOL_NAMES, type McpEventPrincipal } from '@openscout/protocol';
 import definitions from './core-tools.json';
-import { RuntimeHttpClient } from './http-client.ts';
+import { RuntimeHttpClient, RuntimeHttpError } from './http-client.ts';
 
 const tools = definitions as unknown as Tool[];
 const validators = new AjvJsonSchemaValidator();
@@ -66,7 +66,12 @@ export class CoreHttpAdapter {
       return { ...context, ...filter, limit: a.limit ?? 20, since: a.since ?? null, messages };
     }
     if (name === 'agents_search' || name === 'agents_resolve') {
-      const s = await snapshot();const agents = values(s.agents).map(agent => ({ ...agent, agentId: agent.id }));
+      // Discovery must not download conversation history to find an agent.
+      const [s, nodes] = await Promise.all([
+        request('/v1/snapshot?scope=agents'),
+        name === 'agents_search' ? request('/v1/mesh/nodes') : Promise.resolve({}),
+      ]);
+      const agents = values(s.agents).map(agent => ({ ...agent, agentId: agent.id }));
       const term = String(a.query ?? a.label ?? '').trim().replace(/^@/, '').toLowerCase();
       let candidates = agents.filter(v => [v.id,v.name,v.label,v.displayName,v.handle,v.selector].some(s => typeof s === 'string' && (name === 'agents_resolve' ? s.replace(/^@/,'').toLowerCase() === term : s.toLowerCase().includes(term))));
       let kind = candidates.length === 1 ? 'resolved' : candidates.length ? 'ambiguous' : 'unresolved';
@@ -81,20 +86,31 @@ export class CoreHttpAdapter {
           else if (diagnosis.kind === 'ambiguous') { candidates = diagnosis.candidates;kind = 'ambiguous'; }
         }
       }
-      candidates = candidates.slice(0, a.limit ?? 50);
-      return name === 'agents_search' ? { ...context, query: term, candidates } : { ...context, label: a.label, kind, candidate: kind === 'resolved' ? candidates[0] : null, candidates };
+      const total = candidates.length, limit = a.limit ?? 50;
+      candidates = candidates.slice(0, limit);
+      const machines = values(nodes).filter(n => n && typeof n.id === 'string')
+        .filter(n => !term || [n.id,n.name,n.hostName].some(v => typeof v === 'string' && v.toLowerCase().includes(term)))
+        .map(n => ({ nodeId: n.id, name: n.name ?? n.hostName ?? n.id, lastSeenAt: n.lastSeenAt ?? null,
+          supportsTasks: Array.isArray(n.capabilities) && n.capabilities.includes(SCOUT_TASKS_CAPABILITY) }));
+      return name === 'agents_search' ? { ...context, query: term, candidates, machines: machines.slice(0,limit),
+        coverage: { source: 'runtime_registry', liveReachabilityChecked: false, candidatesTotal: total, candidatesTruncated: total > limit, machinesTotal: machines.length, machinesTruncated: machines.length > limit } }
+        : { ...context, label: a.label, kind, candidate: kind === 'resolved' ? candidates[0] : null, candidates };
     }
 
     if (name === 'invocations_get' || name === 'invocations_wait') {
       const deadline = Date.now() + (name === 'invocations_wait' ? (a.timeoutSeconds ?? 30) * 1000 : 0);
       let flight: any, lifecycle: any;
       do {
-        const s = await snapshot();flight = values(s.flights).find(v => v.id === a.flightId);
+        try { flight = (await request(`/v1/flights/${encodeURIComponent(a.flightId)}`)).flight; }
+        catch (error) { if (error instanceof RuntimeHttpError && error.status === 404) flight = undefined; else throw error; }
         if (!flight || ['completed','failed','cancelled'].includes(flight.state) || Date.now() >= deadline) break;
         await delay(Math.min(500, deadline - Date.now()), undefined, { signal });
       } while (true);
       if (flight?.invocationId) lifecycle = await request(`/v1/invocations/${encodeURIComponent(flight.invocationId)}/lifecycle`);
-      return { ...context, flightId: a.flightId, found: !!flight, flight: flight ?? null, lifecycle: lifecycle ?? null, waitStatus: name === 'invocations_get' ? 'not_requested' : flight && ['completed','failed','cancelled'].includes(flight.state) ? 'completed' : 'timed_out' };
+      const terminal = !!flight && ['completed','failed','cancelled'].includes(flight.state);
+      return { ...context, flightId: a.flightId, found: !!flight, flight: flight ?? null, lifecycle: lifecycle ?? null,
+        terminal, output: flight?.output ?? null, error: flight?.error ?? null,
+        waitStatus: name === 'invocations_get' ? 'not_requested' : terminal ? 'completed' : 'timed_out' };
     }
     if (name === 'labels_brief' || name === 'labels_feed') {
       const s = await snapshot();
