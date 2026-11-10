@@ -148,6 +148,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/hooks/remove": "local",
   "GET /v1/inbox": "local",
   "GET /v1/inbox/stream": "local",
+  "GET /v1/integrations/setup": "local",
   "GET /v1/invocations/:id": "local",
   "GET /v1/invocations/:id/lifecycle": "local",
   "GET /v1/invocations/:id/stream": "local",

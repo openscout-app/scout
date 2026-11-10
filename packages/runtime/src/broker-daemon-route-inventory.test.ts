@@ -71,6 +71,7 @@ const expectedRouteInventory = [
   "GET /v1/hooks",
   "GET /v1/inbox",
   "GET /v1/inbox/stream",
+  "GET /v1/integrations/setup",
   "GET /v1/invocations/:id",
   "GET /v1/invocations/:id/lifecycle",
   "GET /v1/invocations/:id/stream",
