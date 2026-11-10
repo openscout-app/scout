@@ -56,13 +56,16 @@ export function runSandboxedFunction(input: {
     };
     const fail = (error: string) => finish({ ok: false, error, logs: [...logs] });
     const timer = setTimeout(() => fail(timeoutError(limits)), limits.timeoutMs + REPORT_GRACE_MS);
+    // Throws when the message cannot be cloned to the worker.
     const send = (message: SandboxHostMessage) => {
-      if (finished) return;
+      if (!finished) worker.postMessage(message);
+    };
+    const settle = (id: number, name: string, result: { ok: true; value: unknown } | { ok: false; error: string }) => {
       try {
-        worker.postMessage(message);
-      } catch (error) {
-        // Data or a host result the worker cannot be sent fails the run.
-        fail(`the callback sandbox could not be sent its input: ${error instanceof Error ? error.message : String(error)}`);
+        send({ type: "settled", id, ...result });
+      } catch {
+        // A host result the worker cannot be sent fails that call only.
+        send({ type: "settled", id, ok: false, error: `scout.${name} returned a value the callback cannot receive` });
       }
     };
 
@@ -81,23 +84,26 @@ export function runSandboxedFunction(input: {
         case "call": {
           const fn = Object.hasOwn(input.scout, message.name) ? input.scout[message.name] : undefined;
           if (!fn) {
-            send({ type: "settled", id: message.id, ok: false, error: `scout.${message.name} is not a function` });
+            settle(message.id, message.name, { ok: false, error: `scout.${message.name} is not a function` });
             return;
           }
           Promise.resolve()
             .then(() => fn(...message.args))
             .then(
-              (value) => send({ type: "settled", id: message.id, ok: true, value }),
-              (error: unknown) => send({ type: "settled", id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) }),
+              (value) => settle(message.id, message.name, { ok: true, value }),
+              (error: unknown) => settle(message.id, message.name, { ok: false, error: error instanceof Error ? error.message : String(error) }),
             )
-            // A value that cannot be cloned to the worker fails that call only.
-            .catch((error: unknown) => send({ type: "settled", id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) }));
+            .catch(() => {});
           return;
         }
       }
     });
     worker.on("error", (error) => fail(`the callback sandbox failed: ${error instanceof Error ? error.message : String(error)}`));
     worker.on("exit", () => fail("the callback sandbox exited before the run finished"));
-    send({ type: "run", code: input.code, data: input.data, functions: Object.keys(input.scout), limits });
+    try {
+      send({ type: "run", code: input.code, data: input.data, functions: Object.keys(input.scout), limits });
+    } catch (error) {
+      fail(`the callback sandbox could not be sent its input: ${error instanceof Error ? error.message : String(error)}`);
+    }
   });
 }

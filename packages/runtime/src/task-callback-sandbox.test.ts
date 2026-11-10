@@ -143,6 +143,12 @@ describe("callback sandbox", () => {
       .toEqual({ ok: true, logs: ["scout.big returned a value the callback cannot receive"] });
   });
 
+  test("a host result the worker cannot be sent rejects that call only", async () => {
+    const fn = async () => () => 1;
+    expect(await run(`async ({ scout }) => { try { await scout.fn(); } catch (e) { console.log(e.message); } }`, { fn }))
+      .toEqual({ ok: true, logs: ["scout.fn returned a value the callback cannot receive"] });
+  });
+
   test("host calls are capped per run", async () => {
     let calls = 0;
     const tick = async () => { calls += 1; };
