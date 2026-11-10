@@ -1,7 +1,12 @@
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH, type FlightRecord, type InvocationRequest } from "@openscout/protocol";
+import {
+  SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH,
+  type AgentDefinition,
+  type FlightRecord,
+  type InvocationRequest,
+} from "@openscout/protocol";
 import { scoutHost, type ScoutHostRevealMode } from "./system-probes/scout-host.js";
 import { runSandboxedFunction, type SandboxLimits } from "./task-callback-sandbox.js";
 
@@ -57,12 +62,33 @@ export function namedPaths(text: string): string[] {
  * ran on another host is recorded on both runtimes; only the worker's runs it.
  */
 export function callbackRunsHere(
-  flight: Pick<FlightRecord, "state">,
-  invocation: Pick<InvocationRequest, "metadata" | "requesterNodeId" | "targetNodeId">,
+  flight: Pick<FlightRecord, "state" | "metadata">,
+  invocation: Pick<InvocationRequest, "metadata" | "targetNodeId">,
   nodeId: string,
+  targetAgent?: Pick<AgentDefinition, "authorityNodeId" | "homeNodeId">,
 ): boolean {
   if (!invocationCallbackCode(invocation) || !TERMINAL_STATES.has(flight.state)) return false;
-  return Boolean(nodeId) && (invocation.targetNodeId ?? invocation.requesterNodeId) === nodeId;
+  return Boolean(nodeId) && taskWorkerNodeId(flight, invocation, targetAgent) === nodeId;
+}
+
+/**
+ * The node whose runtime ran the task, from the strongest evidence there is:
+ * an explicit target node, then the node that acknowledged the dispatch, then
+ * the target agent's authority. Never the requester's node: an ordinary ask to
+ * a remote agent names no target node, and the requester did not run it.
+ */
+export function taskWorkerNodeId(
+  flight: Pick<FlightRecord, "metadata">,
+  invocation: Pick<InvocationRequest, "targetNodeId">,
+  targetAgent?: Pick<AgentDefinition, "authorityNodeId" | "homeNodeId">,
+): string | undefined {
+  const ack = flight.metadata?.dispatchAck;
+  const ackNode = ack && typeof ack === "object" ? (ack as { nodeId?: unknown }).nodeId : undefined;
+  return invocation.targetNodeId
+    || (typeof ackNode === "string" && ackNode ? ackNode : undefined)
+    || targetAgent?.authorityNodeId
+    || targetAgent?.homeNodeId
+    || undefined;
 }
 
 /** What the callback gets as `result`. */
@@ -108,11 +134,13 @@ export async function runTaskCallback(input: {
   flight: FlightRecord;
   invocation: InvocationRequest;
   nodeId: string;
+  /** The target agent, when this runtime knows it; it names the worker's node. */
+  targetAgent?: Pick<AgentDefinition, "authorityNodeId" | "homeNodeId">;
   platform?: NodeJS.Platform;
   open?: (path: string, mode: ScoutHostRevealMode) => Promise<{ exitCode?: number | null } | unknown>;
   limits?: Partial<SandboxLimits>;
 }): Promise<TaskCallbackRun | undefined> {
-  if (!callbackRunsHere(input.flight, input.invocation, input.nodeId)) return undefined;
+  if (!callbackRunsHere(input.flight, input.invocation, input.nodeId, input.targetAgent)) return undefined;
   const code = invocationCallbackCode(input.invocation)!;
   const platform = input.platform ?? process.platform;
   const reveal = input.open ?? ((path: string, mode: ScoutHostRevealMode) => scoutHost.reveal.open(path, mode));

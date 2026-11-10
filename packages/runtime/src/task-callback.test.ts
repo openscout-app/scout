@@ -90,7 +90,18 @@ describe("ask --callback", () => {
     const remote = invocation({ targetNodeId: "node-remote" });
     expect(callbackRunsHere(flight(), remote, "node-home")).toBe(false);
     expect(callbackRunsHere(flight(), remote, "node-remote")).toBe(true);
-    expect(callbackRunsHere(flight(), invocation({ targetNodeId: undefined }), "node-home")).toBe(true);
+    // An ordinary ask names no target node: the worker's node comes from the
+    // dispatch or the target agent, never from the requester.
+    const unnamed = invocation({ targetNodeId: undefined });
+    expect(callbackRunsHere(flight(), unnamed, "node-home")).toBe(false);
+    const remoteAgent = { authorityNodeId: "node-remote", homeNodeId: "node-remote" };
+    expect(callbackRunsHere(flight(), unnamed, "node-home", remoteAgent)).toBe(false);
+    expect(callbackRunsHere(flight(), unnamed, "node-remote", remoteAgent)).toBe(true);
+    const localAgent = { authorityNodeId: "node-home", homeNodeId: "node-home" };
+    expect(callbackRunsHere(flight(), unnamed, "node-home", localAgent)).toBe(true);
+    const acked = flight({ metadata: { dispatchAck: { nodeId: "node-remote" } } });
+    expect(callbackRunsHere(acked, unnamed, "node-home", localAgent)).toBe(false);
+    expect(callbackRunsHere(acked, unnamed, "node-remote")).toBe(true);
     expect(callbackRunsHere(flight(), invocation({ metadata: {} }), "node-home")).toBe(false);
     expect(callbackRunsHere(flight(), invocation(), "")).toBe(false);
   });
