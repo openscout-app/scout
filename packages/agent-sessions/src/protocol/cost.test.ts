@@ -59,6 +59,31 @@ describe("adapter cost estimates", () => {
     }
   });
 
+  test("prices a model only from the card its id is listed under", () => {
+    const priced = (model: string | null) => estimateAdapterCost({
+      provider: "anthropic",
+      model,
+      usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+      capturedAt: 1,
+    });
+    for (const [model, total] of [
+      ["claude-opus-4-7", 30],
+      ["claude-opus-4-8", 30],
+      ["claude-opus-5", 30],
+      ["claude-sonnet-5", 12],
+      ["claude-haiku-4-5-20251001", 6],
+      ["claude-3-7-sonnet-20250219", 18],
+    ] as const) {
+      expect(priced(model).totalUsd, model).toBeCloseTo(total, 6);
+    }
+    // No listed id, no price: never an older model's rates guessed from the name.
+    for (const model of ["claude-haiku-6", "claude-haiku-5-5-20990101", "claude-sonnet-next", null]) {
+      const estimate = priced(model);
+      expect(estimate.rateCardSource, String(model)).toBe("unknown");
+      expect(estimate.totalUsd, String(model)).toBeNull();
+    }
+  });
+
   test("marks subscription-covered usage down while preserving API-equivalent cost", () => {
     const estimate = estimateAdapterCost({
       provider: "openai",
