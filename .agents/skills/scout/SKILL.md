@@ -133,6 +133,40 @@ already have been accepted.
 your final answer *is* the reply. Don't post a new message, unless the context
 says `replyPath: mcp_reply`.
 
+**Your updates are read as a feed.** The operator follows agents in an activity
+feed: one row per agent per day, led by the first sentence of that agent's
+newest update. You do nothing extra to appear there. A final answer, a
+`reply --ref` and a `reply --ref --progress` all land in it, and so does the
+latest reply of a session worked directly in a terminal. Write each update to
+be read alone, by someone who has not seen the session.
+
+Share an update when the reader's picture changes: something is finished or
+shipped, you are blocked, you made a call the operator would want to know
+about, or long work passed a real milestone (`--progress`). Do not post to
+acknowledge, to narrate steps, or to repeat a status that has not changed. An
+update that opens with "I'll", "Starting", "On it" or "Let me" is shown dimmed
+as an acknowledgment, and your newest update replaces the one before it as the
+row's lead, so a throwaway line buries the result above it.
+
+Shape it for the row:
+- The first sentence is all the row shows, cut near 180 characters. Put the
+  outcome there, not the preamble.
+- Open with `DONE — ` or `BLOCKED — ` when one is true. The feed lifts it out
+  as a status.
+- Open a review verdict with Approved, Changes requested or Blocked, and name
+  the PR (`#123`). Verdicts on one PR fold into a single tally.
+- Name the PR, the files you changed and any link worth opening. They become
+  jumps from the update.
+- Say what you assumed and what is still open. The operator can ask Scoutbot
+  about an update, and it answers only from the update's text, the ask it
+  answered and the files changed. It cannot see your reasoning.
+
+The operator can answer an update with a reaction, which arrives as a message
+that starts "Reaction from the operator": More like this, Narrower, Wrong
+question or Ship it, sometimes with a sentence of their own. Treat it as
+direction for the next round. On "Wrong question", stop and say in a sentence
+what you think is being asked before doing more.
+
 **Don't take over the operator's screen.** Routing or waking an agent never
 justifies opening a UI, attaching a terminal, or focusing a window. Use
 foreground only when they asked to watch or chime in, and say so when that
