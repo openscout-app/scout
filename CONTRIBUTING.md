@@ -18,8 +18,9 @@ evidence proportionate to their risk.
 ## Repository routing
 
 Use the public Scout checkout for public CLI, TUI, protocol, pairing, harness,
-and runtime work. Push a topic branch to your fork and open its pull
-request against `openscout-app/scout`. Keep private Scout product work in its
+and runtime work. Outside contributors push a topic branch to their fork and
+open its pull request against `openscout-app/scout`. Maintainer work follows
+[branches and promotion](#branches-and-promotion). Keep private Scout product work in its
 private repository. See [the source boundary](./docs/public-source-boundary.md)
 for ownership details; inspect mixed changes before copying them across repos.
 
@@ -28,74 +29,99 @@ Before editing, committing, or pushing, verify `pwd`,
 project placement does not prove the shell's working directory. Set the command
 working directory explicitly when the recorded chat directory is stale.
 
-## Branch from canonical main
+## Branches and promotion
 
-`openscout-app/scout:main` is the integration branch and source of truth.
-In a fork-based checkout, use these remote names:
+`openscout-app/scout:main` is the release base. The maintainer fork,
+`arach/scout`, is where maintainer work is built and reviewed. Drafts, review
+rounds, fix-up commits and rebases happen on the fork. The public repository
+receives only finished changes, and it receives them quickly.
 
 | Ref | Purpose |
 | --- | --- |
-| `upstream/main` | Canonical core history from `openscout-app/scout` |
-| `origin/main` | Fast-forward mirror in your fork |
-| Local `main` | Local copy of canonical main; tracks `upstream/main` |
-| `origin/<topic>` | Published work for one pull request into canonical `main` |
+| `origin/main` | Fork `main`, where maintainer pull requests merge |
+| `upstream/main` | Release base; receives fork `main` through promotion pull requests |
+| Local `main` | Tracks `origin/main` |
+| `origin/<topic>` | One topic branch for each pull request into fork `main` |
 
-Keep feature commits on short-lived topic branches. Use `fix/<description>`,
-`feat/<description>`, `docs/<description>`, or another descriptive name.
-Create a separate worktree for each task so the main checkout can keep running
-the developer's suite. Existing `develop`, `core-split`, or historical branches
-are not integration or release bases.
+Fork `main` is ahead of upstream `main` only by fork pull requests that are
+merged and not yet promoted. Promote them the same day, so the two stay close.
 
 Configure a fork-based checkout once, after verifying its remotes:
 
 ```bash
-git config --local branch.main.remote upstream
+git config --local branch.main.remote origin
 git config --local branch.main.merge refs/heads/main
 git config --local remote.pushDefault origin
 git config --local push.default simple
 git config --local pull.ff only
 ```
 
-Start a task from fresh canonical history:
+### Work on the fork
 
-```bash
-git fetch upstream main
-git worktree add -b fix/short-description ../scout-short-description upstream/main
-```
+1. Start each task in its own worktree from fork `main`, so the main checkout
+   can keep running the developer's suite:
 
-Commit and push the topic branch from that worktree. Open its pull request
-against `openscout-app/scout:main`, not your fork's `main`.
+   ```bash
+   git fetch origin main
+   git worktree add -b fix/short-description ../scout-short-description origin/main
+   ```
 
-If canonical main advances, merge it into the topic branch and repeat affected
-checks on the resulting head. Keep published branch history intact unless its
-owner explicitly authorizes a rewrite. Review and merge the exact checked head.
-Prefer a merge commit so that head remains in canonical history. If a maintainer
-uses squash, record the reviewed head and resulting canonical commit separately.
+   Use `fix/<description>`, `feat/<description>`, `docs/<description>`, or
+   another descriptive name. Existing `develop`, `core-split`, or historical
+   branches are not integration or release bases.
+2. Push the topic branch and open its pull request against `arach/scout:main`.
+   Keep it a draft until it is ready for review.
+3. If fork `main` advances, merge it into the topic branch and repeat the
+   affected checks on the new head. Keep published history intact unless its
+   owner authorizes a rewrite.
+4. Merge when local checks pass on the exact head and a review clears it. Use a
+   merge commit, so the reviewed head stays in history.
 
-After merging, the fork owner synchronizes the fork's `main`:
+### Promote to the public repository
 
-```bash
-git fetch origin main
-git fetch upstream main
-git merge-base --is-ancestor origin/main upstream/main &&
-  git push origin upstream/main:refs/heads/main
-git fetch origin main
-git rev-list --left-right --count origin/main...upstream/main
-```
+Promote each merged fork pull request the same day; do not hold changes back
+to batch them. One promotion for each fork pull request is normal. When several
+fork merges land before a promotion merges, they ride on the same promotion.
 
-The final command must print `0 0`. If the ancestor check or push fails, inspect
-the divergence and stop. Do not force-push either `main` or discard fork-only work.
-Keep `origin/main` free of feature commits and fork-local PR merges.
+1. Open a pull request from `arach:main` into `openscout-app/scout:main`, unless
+   one is already open. Give it the fork pull request's title. In the body, link
+   each fork pull request it carries and copy their outcome and local check
+   results.
+2. Merge it with a merge commit when its head is the reviewed fork head. It
+   needs no second review.
+3. Fast-forward fork `main` to the result:
 
-Update local `main` with `git merge --ff-only upstream/main` when that checkout
+   ```bash
+   git fetch origin main
+   git fetch upstream main
+   git merge-base --is-ancestor origin/main upstream/main &&
+     git push origin upstream/main:refs/heads/main
+   git fetch origin main
+   git rev-list --left-right --count origin/main...upstream/main
+   ```
+
+   The final command must print `0 0`. If the ancestor check or the push fails,
+   inspect the divergence and stop. Never force-push either `main`.
+
+### Keep the public repository quiet
+
+- Open maintainer topic pull requests only on the fork. Do not push topic
+  branches to `openscout-app/scout`.
+- Do not open drafts, review rounds, or fix-up pull requests on the public
+  repository.
+- Outside contributors open pull requests against `openscout-app/scout` as
+  usual. After one merges, sync fork `main` with the commands above.
+
+Update local `main` with `git merge --ff-only origin/main` when that checkout
 is on `main` and clean. If it contains work, preserve that work and coordinate
 with its owner before updating it. Retire a topic branch and its worktree only
 after its merge and ownership are confirmed.
 
-Release tags name reviewed commits from canonical `main`. A source merge,
-fork synchronization, local build, installation, and publication are separate
-delivery states. Record each state explicitly. Run proportional local checks;
-hosted CI and publication require explicit maintainer authorization.
+Release tags name reviewed commits on `openscout-app/scout:main`. A source
+merge, a promotion, a fork sync, a local build, an installation, and a
+publication are separate delivery states. Record each state explicitly. Run
+proportional local checks; hosted CI and publication require explicit
+maintainer authorization.
 
 ## Set up the repository
 
@@ -136,8 +162,8 @@ Run the narrowest relevant tests while iterating. Use `bun run check` and
 - Prefer TypeScript for new JavaScript-side logic and Bun for tooling.
 - Add or update focused tests for behavior changes.
 - Run `bun run sync-exec:fence` for any new or changed process execution.
-- Use a concise gitmoji commit subject, for example `🐛 Fix session route
-  resolution` or `📝 Clarify broker ownership`.
+- Write the commit subject as a plain sentence, for example `Fix session
+  route resolution` or `Clarify broker ownership`.
 - Do not add AI-generated attribution or co-author footers.
 
 ## Pull requests
