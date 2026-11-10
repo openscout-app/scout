@@ -349,7 +349,7 @@ describe("broker daemon invocation dispatch", () => {
     expect(lifecycle.flightId).toBe(snapshot.flight?.id);
   }, 20_000);
 
-  test("reconciles a dispatched invocation after its executor is lost on restart", async () => {
+  test("keeps a dispatched invocation open when the runtime restarts", async () => {
     const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
     const firstHarness = await broker.startBroker({ controlHome });
     await broker.seedBasicConversation(firstHarness);
@@ -412,7 +412,7 @@ describe("broker daemon invocation dispatch", () => {
           };
         };
       } | null;
-    }>(secondHarness.baseUrl, "/v1/invocations/inv-restart-1"), snapshot => snapshot.flight?.state === "failed");
+    }>(secondHarness.baseUrl, "/v1/invocations/inv-restart-1"), snapshot => snapshot.flight?.state === "running");
 
     expect(snapshot.invocation).toEqual(expect.objectContaining({
       id: "inv-restart-1",
@@ -422,7 +422,7 @@ describe("broker daemon invocation dispatch", () => {
       invocationId: "inv-restart-1",
       targetAgentId: "ghost",
     }));
-    expect(snapshot.flight?.state).toBe("failed");
+    expect(snapshot.flight?.state).toBe("running");
 
     const lifecycle = await broker.getJson<{
       invocationId: string;
@@ -437,7 +437,7 @@ describe("broker daemon invocation dispatch", () => {
     }));
     // /lifecycle now returns the raw flight state (the projected "dispatching"
     // vocabulary was removed in ask-overbuild Phase 2), matching snapshot.flight.state.
-    expect(lifecycle.state).toBe("failed");
+    expect(lifecycle.state).toBe("running");
     expect(lifecycle.flightId).toBe(snapshot.flight?.id);
   }, 20_000);
 
