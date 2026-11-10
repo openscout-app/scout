@@ -1471,7 +1471,7 @@ describe("createBrokerHttpRouter", () => {
 describe("integration setup HTTP boundaries", () => {
   test("rejects remote setup and status even when SQLite is unavailable", async () => {
     const harness = createHarness();
-    for (const [method, path] of [["POST", "/v1/integrations/setup"], ["GET", "/v1/integrations/setup/op"], ["POST", "/v1/integrations/setup/op/credentials"], ["GET", "/v1/integrations/setup/op/manifest"], ["POST", "/v1/integrations/setup/op/lifecycle"], ["POST", "/v1/integrations/setup/op/worker"], ["POST", "/v1/integrations/setup/op/deliver"], ["POST", "/v1/integrations/setup/op/events"], ["POST", "/v1/integrations/setup/op/verify"], ["POST", "/v1/integrations/setup/op/rebind"]]) {
+    for (const [method, path] of [["POST", "/v1/integrations/setup"], ["GET", "/v1/integrations/setup"], ["GET", "/v1/integrations/setup/op"], ["POST", "/v1/integrations/setup/op/credentials"], ["GET", "/v1/integrations/setup/op/manifest"], ["POST", "/v1/integrations/setup/op/lifecycle"], ["POST", "/v1/integrations/setup/op/worker"], ["POST", "/v1/integrations/setup/op/deliver"], ["POST", "/v1/integrations/setup/op/events"], ["POST", "/v1/integrations/setup/op/verify"], ["POST", "/v1/integrations/setup/op/rebind"]]) {
       const result = await requestRouter(harness, method!, path!, { transportContext: { transport: "remote" } });
       expect(result.response.status).toBe(403);
     }
@@ -1504,6 +1504,30 @@ describe("integration setup HTTP boundaries", () => {
       const advanced = await requestRouter(harness, "POST", `/v1/integrations/setup/${id}/resume`, { body: { action: "choose_workspace", expectedRevision: 1, workspaceId: "T123" } });
       expect(advanced.response.status).toBe(200);
       expect((advanced.body as { operation: { state: string } }).operation.state).toBe("awaiting_authority");
+    } finally { database.close(); }
+  });
+  test("lists every setup operation as a receipt", async () => {
+    const database = new Database(":memory:");
+    migrateControlPlaneDatabaseSchema(database);
+    try {
+      const integrationSetupService = new BrokerIntegrationSetupService({
+        database, ownerRealmId: "mesh-1", nodeId: "node-1",
+        snapshot: () => ({ agents: { alpha: { id: "alpha", definitionId: "alpha", displayName: "Alpha", homeNodeId: "node-1", authorityNodeId: "node-1", metadata: { projectRoot: "/work/alpha" } } }, endpoints: {} }) as never,
+      });
+      const harness = createHarness({ integrationSetupService });
+      const empty = await requestRouter(harness, "GET", "/v1/integrations/setup");
+      expect(empty.response.status).toBe(200);
+      expect(empty.body).toEqual({ integrations: [] });
+      const created = await requestRouter(harness, "POST", "/v1/integrations/setup", { body: { provider: "slack", mode: "project_agent", projectPath: "/work/alpha" } });
+      expect(created.response.status).toBe(200);
+      const id = (created.body as { operation: { id: string } }).operation.id;
+      const listed = await requestRouter(harness, "GET", "/v1/integrations/setup");
+      expect(listed.response.status).toBe(200);
+      const integrations = (listed.body as { integrations: Array<{ operation: { id: string }; readiness: string }> }).integrations;
+      expect(integrations).toHaveLength(1);
+      expect(integrations[0]!.operation.id).toBe(id);
+      expect(integrations[0]!.readiness).toBe("not_connected");
+      expect(integrations[0]).toEqual(created.body as never);
     } finally { database.close(); }
   });
 });
