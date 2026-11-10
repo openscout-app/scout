@@ -30,6 +30,7 @@ import {
   endpointAvailabilityScore,
   endpointLifecycleAt,
   endpointCandidateState,
+  endpointStronglyMatchesSession,
   endpointsForAgent,
   endpointsForSession,
   homeEndpointForAgent,
@@ -748,6 +749,21 @@ function canonicalNativeSessionId(endpoint: AgentEndpoint): string | null {
     ?? null;
 }
 
+function compareRoutedSessionEndpoints(
+  snapshot: RuntimeSnapshot,
+  left: AgentEndpoint,
+  right: AgentEndpoint,
+  preferLocalNodeId: string | undefined,
+  preferredNativeSessionId: string | undefined,
+): number {
+  if (preferredNativeSessionId) {
+    const nativeDelta = Number(canonicalNativeSessionId(right) === preferredNativeSessionId)
+      - Number(canonicalNativeSessionId(left) === preferredNativeSessionId);
+    if (nativeDelta !== 0) return nativeDelta;
+  }
+  return compareSessionProjectionEndpoint(snapshot, left, right, preferLocalNodeId);
+}
+
 function resolveSessionTarget(
   snapshot: RuntimeSnapshot,
   sessionId: string,
@@ -800,14 +816,20 @@ function resolveSessionTarget(
     };
   }
 
-  // Multiple alias matches are projections of one session only when every
-  // endpoint agrees on the same canonical harness-native id. A shared tmux,
-  // relay, pairing, or runtime alias is not evidence that the sessions are the
-  // same, even when all of them use one harness.
+  // One session when every match shares a single harness-native id, or when
+  // every match is a strong identity for this Scout session and the native ids
+  // that are present agree. A relay copy of a tmux session often stores
+  // observedSessionId and omits externalSessionId; that gap is not a second
+  // session. A shared tmux, pairing, or runtime alias is still not proof,
+  // including when one side has no native id.
+  let preferredNativeSessionId: string | undefined;
   if (routingMatches.length > 1) {
     const canonicalIds = routingMatches.map(canonicalNativeSessionId);
-    const canonicalIdSet = new Set(canonicalIds.filter((value): value is string => Boolean(value)));
-    if (canonicalIds.some((value) => !value) || canonicalIdSet.size !== 1) {
+    const present = [...new Set(canonicalIds.filter((value): value is string => Boolean(value)))];
+    const missingNative = canonicalIds.some((value) => !value);
+    const sameStrongSession = routingMatches.every((endpoint) => endpointStronglyMatchesSession(endpoint, sessionId));
+    const collapse = (!missingNative && present.length === 1) || (sameStrongSession && present.length <= 1);
+    if (!collapse) {
       const exactRoutes = [...new Set(routingMatches.flatMap((endpoint) => {
         const nativeId = canonicalNativeSessionId(endpoint);
         return nativeId ? [`session:${endpoint.harness}:${nativeId}`] : [];
@@ -821,6 +843,7 @@ function resolveSessionTarget(
           : `${label} matches multiple session projections without one canonical native session id`,
       };
     }
+    if (present.length === 1) preferredNativeSessionId = present[0];
   }
 
   // Preserve card-backed identity and downstream unavailable diagnostics. If
@@ -830,10 +853,12 @@ function resolveSessionTarget(
     return { kind: "resolved", agent: carded[0]! };
   }
   if (carded.length > 1) {
+    // Prefer the projection that carries the harness-native id. Availability
+    // would otherwise pick an active tmux relay that never stored that id.
     const endpoint = [...routingMatches]
       .filter((candidate) => Boolean(snapshot.agents[candidate.agentId]))
       .sort((left, right) =>
-        compareSessionProjectionEndpoint(snapshot, left, right, options.preferLocalNodeId)
+        compareRoutedSessionEndpoints(snapshot, left, right, options.preferLocalNodeId, preferredNativeSessionId)
       )[0]!;
     return { kind: "resolved", agent: snapshot.agents[endpoint.agentId]! };
   }
@@ -848,7 +873,7 @@ function resolveSessionTarget(
   }
   const endpoint = [...live]
     .sort((left, right) =>
-      compareSessionProjectionEndpoint(snapshot, left, right, options.preferLocalNodeId)
+      compareRoutedSessionEndpoints(snapshot, left, right, options.preferLocalNodeId, preferredNativeSessionId)
     )[0]!;
   return {
     kind: "resolved_session",

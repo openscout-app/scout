@@ -28,7 +28,7 @@ import { brokerDeliverRequestSchema } from "./broker-command-boundary-schemas.js
 import { deliverScoutRequest, prepareScoutSessionReply } from "./delivery-client.js";
 import { createHash } from "node:crypto";
 import { canonicalRequest } from "./broker-request-receipts.js";
-import { BrokerDeliveryAcceptanceService, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
+import { BrokerDeliveryAcceptanceService, validateTaskDelivery, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
 import type { InvocationResolution } from "./broker-delivery-routing.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
@@ -1746,4 +1746,23 @@ test.each([{ targetAgentId: "worker" }, { targetLabel: "worker" }, { targetSessi
   await expect(h.service.accept({ ...legacy, requestId: "conflict", intent: "consult", body: "context",
     task: { version: 1, ref: "parent" } })).rejects.toThrow("another recipient route");
   expect(h.localAgentSyncReasons).toHaveLength(0); expect(h.ensuredActors).toHaveLength(0);
+});
+
+test("a task ref may repeat itself as the rendered ref label", () => {
+  const followup = {
+    requestId: "followup-1",
+    intent: "consult" as const,
+    body: "more context",
+    target: { kind: "binding_ref" as const, ref: "abcd1234" },
+    task: { version: 1 as const, ref: "abcd1234" },
+  };
+  expect(() => validateTaskDelivery({ ...followup, targetLabel: "ref:abcd1234" })).not.toThrow();
+  expect(() => validateTaskDelivery({ ...followup, requestId: "followup-2", targetLabel: "REF:Abcd1234" })).not.toThrow();
+  expect(() => validateTaskDelivery({ ...followup, requestId: "followup-3", targetLabel: "worker" })).toThrow("another recipient route");
+  expect(() => validateTaskDelivery({
+    ...followup,
+    requestId: "followup-4",
+    target: { kind: "binding_ref", ref: "other-ref" },
+    targetLabel: "ref:abcd1234",
+  })).toThrow("another recipient route");
 });

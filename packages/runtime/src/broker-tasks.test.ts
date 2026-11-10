@@ -324,6 +324,81 @@ test("task suffixes need eight characters and ambiguous matches fail closed", as
   expect((await tasks.resolve("first-abcdefgh")).invocation.id).toBe("first");
 });
 
+function tasksFor(h: Awaited<ReturnType<typeof fixture>>) {
+  return new BrokerTaskService({
+    nodeId: "node", operatorActorId: "operator", snapshot: () => h.runtime.snapshot(),
+    openOperatorTasks: () => h.journal.openOperatorTasks(),
+    invocation: id => h.journal.getInvocation(id), flight: id => h.journal.getFlight(id),
+    currentFlight: id => h.journal.getCurrentFlightForInvocation(id),
+    postMessage: async message => h.messages.postConversationMessage(message),
+    recordFlight: (value, eligible) => h.lifecycle.recordFlight(value, eligible),
+    accept: async () => ({ accepted: true }) as any,
+  });
+}
+
+test("a work item id resolves to its open task and a question id does not", async () => {
+  const h = await fixture();
+  const tasks = tasksFor(h);
+  const linked = { ...invocation("parent", { completion: undefined, taskVersion: 1 }), collaborationRecordId: "work-parent" };
+  await h.accept(linked);
+  await h.runtime.upsertCollaboration({
+    id: "work-parent", kind: "work_item", title: "Parent", createdById: "operator", ownerId: "worker",
+    nextMoveOwnerId: "worker", state: "working", acceptanceState: "none", createdAt: 1, updatedAt: 1,
+  });
+  const fromMetadata = invocation("metadata-task", { completion: undefined, taskVersion: 1, collaborationRecordId: "work-from-metadata", workId: "work-from-metadata" });
+  await h.accept(fromMetadata);
+  expect((await tasks.resolve("work-parent")).invocation.id).toBe("parent");
+  expect((await tasks.resolve("work-from-metadata")).invocation.id).toBe("metadata-task");
+
+  await h.runtime.upsertCollaboration({
+    id: "question-parent", kind: "question", title: "Parent?", createdById: "operator",
+    nextMoveOwnerId: "worker", state: "open", acceptanceState: "none", createdAt: 1, updatedAt: 1,
+  });
+  await h.accept({ ...invocation("question-task", { completion: undefined }), collaborationRecordId: "question-parent" });
+  await expect(tasks.resolve("question-parent")).rejects.toThrow("unknown task");
+});
+
+test("session handles resolve to the open task and ignore a shared tmux alias", async () => {
+  const h = await fixture();
+  const tasks = tasksFor(h);
+  const scoutSessionId = "session-card";
+  const nativeId = "native-followup-1";
+  await h.runtime.upsertAgent({
+    id: scoutSessionId, kind: "agent", definitionId: scoutSessionId, displayName: scoutSessionId,
+    agentClass: "general", capabilities: ["chat"], wakePolicy: "on_demand", homeNodeId: "node",
+    authorityNodeId: "node", advertiseScope: "local", labels: [], metadata: {},
+  });
+  await h.runtime.upsertEndpoint({
+    id: "endpoint-live", agentId: scoutSessionId, nodeId: "node", harness: "claude", transport: "http",
+    state: "active", sessionId: scoutSessionId,
+    metadata: { externalSessionId: nativeId, observedSessionId: nativeId },
+  });
+  await h.runtime.upsertEndpoint({
+    id: "endpoint-relay", agentId: `${scoutSessionId}-relay`, nodeId: "node", harness: "claude", transport: "http",
+    state: "idle", sessionId: scoutSessionId,
+    metadata: { source: "relay-agent-registry", tmuxSession: scoutSessionId, runtimeInstanceId: scoutSessionId, observedSessionId: nativeId },
+  });
+  await h.runtime.upsertEndpoint({
+    id: "endpoint-tmux", agentId: "worker-tmux", nodeId: "node", harness: "claude", transport: "tmux",
+    state: "idle", metadata: { tmuxSession: "shared-tmux" },
+  });
+  const open = { ...invocation("open-task", { completion: undefined, taskVersion: 1 }), targetAgentId: scoutSessionId };
+  const finished = { ...invocation("finished-task", { completion: undefined, taskVersion: 1 }), targetAgentId: scoutSessionId };
+  await h.accept(open);
+  await h.accept(finished);
+  await h.lifecycle.recordFlight({ ...h.runtime.flightForInvocation("finished-task")!, state: "completed", output: "done", completedAt: 4 });
+  await h.accept({ ...invocation("tmux-task", { completion: undefined }), targetAgentId: "worker-tmux" });
+
+  expect((await tasks.resolve(scoutSessionId)).invocation.id).toBe("open-task");
+  expect((await tasks.resolve(nativeId)).invocation.id).toBe("open-task");
+  expect((await tasks.resolve(`session:claude:${nativeId}`)).invocation.id).toBe("open-task");
+  await expect(tasks.resolve("shared-tmux")).rejects.toThrow("unknown task");
+
+  const other = { ...invocation("other-open", { completion: undefined, taskVersion: 1 }), targetAgentId: scoutSessionId };
+  await h.accept(other);
+  await expect(tasks.resolve(scoutSessionId)).rejects.toThrow("ambiguous task");
+});
+
 test.each(["explicit", "cancel", "claimed"])("remote %s supersedes an automatic result durably without retrying it", async winner => {
   const authority = await fixture();
   const ingress = new BrokerMeshHttpService({ nodeId: "node", runtime: authority.runtime,
