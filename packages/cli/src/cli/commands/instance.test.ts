@@ -16,7 +16,8 @@ function registryFixture(portBase: number, root?: string) {
   mkdirSync(join(registry, ".claims"), { recursive: true });
   writeFileSync(join(registry, ".slots", String(portBase)), "dev-live\n");
   writeFileSync(join(registry, ".claims", "dev-live.json"), JSON.stringify({ portBase, root: instanceRoot, claimedAt: Date.now() }));
-  return { dir, registry, root: instanceRoot, env: { ...process.env, OPENSCOUT_INSTANCE_REGISTRY: registry } };
+  return { dir, registry, root: instanceRoot, // HOME keeps repair off the developer's own instance roots.
+    env: { ...process.env, HOME: dir, OPENSCOUT_INSTANCE_REGISTRY: registry } };
 }
 
 /**

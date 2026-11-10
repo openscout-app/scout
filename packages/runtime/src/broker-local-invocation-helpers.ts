@@ -309,6 +309,11 @@ export function staleWorkingFlightReason(
   options: {
     isInvocationActive: (invocationId: string) => boolean;
     now?: number;
+    /**
+     * When this runtime process started. A runtime-owned child that began its
+     * turn before then died with the previous process.
+     */
+    bootedAt?: number;
   },
 ): string | null {
   if (!isWorkingFlightState(flight.state)) {
@@ -390,8 +395,11 @@ export function staleWorkingFlightReason(
     && startedEndpointAt >= startedAt
   ) {
     // A requester timeout ends the broker task on purpose while the agent keeps
-    // working. Its reply still completes the flight when it arrives.
-    if (flight.metadata?.requesterTimedOut === true) {
+    // working. Its reply still completes the flight when it arrives, but only
+    // while the child that runs the turn is alive: a turn that started before
+    // this process booted ran in a child of the previous one.
+    const turnPredatesBoot = options.bootedAt !== undefined && startedEndpointAt < options.bootedAt;
+    if (flight.metadata?.requesterTimedOut === true && !turnPredatesBoot) {
       return null;
     }
     return `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task`;

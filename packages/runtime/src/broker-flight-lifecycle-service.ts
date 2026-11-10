@@ -77,6 +77,8 @@ export type BrokerFlightLifecycleServiceOptions = {
   ) => Promise<void>;
   maybeForwardFlightToAuthority: (flight: FlightRecord) => Promise<void>;
   isInvocationActive: (invocationId: string) => boolean;
+  /** When this runtime process started; see `staleWorkingFlightReason`. */
+  bootedAt?: number;
   /** Runs inside the writer; the report intent commits with terminal truth. */
   prepareTerminalReport?: (flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
   deliverTerminalReport?: (flightId: string) => Promise<unknown>;
@@ -476,6 +478,7 @@ export class BrokerFlightLifecycleService {
       const reason = staleWorkingFlightReason(snapshot, flight, {
         isInvocationActive: this.options.isInvocationActive,
         now,
+        bootedAt: this.options.bootedAt,
       });
       if (!reason) {
         continue;
