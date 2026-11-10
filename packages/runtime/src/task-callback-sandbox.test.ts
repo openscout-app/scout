@@ -82,6 +82,38 @@ describe("callback sandbox", () => {
     expect(performance.now() - started).toBeLessThan(1_500);
   });
 
+  test("a guest that swallows its interrupt in a synchronous loop is ended", async () => {
+    // QuickJS turns the interrupt into a rejection inside the async call or
+    // executor, so the outer loop never returns; only the worker can be ended.
+    const computing = "the callback computed for more than 100 ms without awaiting";
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks += 1; }, 10);
+    try {
+      for (const code of [
+        `export default () => { for (;;) { (async () => { for (;;) {} })(); } };`,
+        `for (;;) { new Promise(() => { for (;;) {} }); }\nexport default () => 1;`,
+      ]) {
+        const started = performance.now();
+        expect(await runModule(code, {}, 5_000)).toMatchObject({ ok: false, error: computing });
+        expect(performance.now() - started).toBeLessThan(2_000);
+      }
+    } finally {
+      clearInterval(ticker);
+    }
+    // The runtime's own thread kept turning while the guest spun.
+    expect(ticks).toBeGreaterThan(5);
+  });
+
+  test("guest code that replaces Promise.prototype.then fails the run, not the host", async () => {
+    const result = await run(`() => { Promise.prototype.then = function () { throw new Error("hijacked"); }; return 1; }`);
+    expect(result.ok).toBe(false);
+  });
+
+  test("logs written before a hang are kept", async () => {
+    expect(await runModule(`console.log("before");\nfor (;;) { (async () => { for (;;) {} })(); }\nexport default () => 1;`, {}, 3_000))
+      .toEqual({ ok: false, error: "the callback computed for more than 100 ms without awaiting", logs: ["before"] });
+  });
+
   test("a host call that fails after a long wait still settles the run", async () => {
     const slow = async () => { await new Promise((resolve) => setTimeout(resolve, 150)); throw new Error("no such file"); };
     expect(await run(`async ({ scout }) => { try { await scout.slow(); } catch (error) { console.log(error.message); } }`, { slow }))
