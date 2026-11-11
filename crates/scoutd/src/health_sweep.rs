@@ -419,8 +419,8 @@ pub struct Finding {
 }
 pub fn disk_level(disk: Option<(u64, u64)>) -> u8 {
     match disk {
-        Some((free, total)) if free < GIB.max((total / 20).min(5 * GIB)) => 2,
-        Some((free, total)) if free < (2 * GIB).max((total / 10).min(20 * GIB)) => 1,
+        Some((free, _)) if free < GIB / 4 => 2,
+        Some((free, _)) if free < GIB => 1,
         _ => 0,
     }
 }
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn disk_critical_escalates_and_persistent_pressure_reminds() {
         let mut s = Sweep::default();
-        s.observe(0, Some(READY), Some((10 * GIB, 228 * GIB)));
+        s.observe(0, Some(READY), Some((GIB / 2, 228 * GIB)));
         assert!(s.due_notifications(60_000).contains(&"disk".into()));
         s.conditions
             .iter_mut()
@@ -740,18 +740,21 @@ mod tests {
         assert!(s
             .due_notifications(60_000 + NOTIFICATION_COOLDOWN)
             .contains(&"disk".into()));
-        s.observe(70_000, Some(READY), Some((3 * GIB, 228 * GIB)));
+        s.observe(70_000, Some(READY), Some((GIB / 8, 228 * GIB)));
         assert!(!s.due_notifications(129_999).contains(&"disk".into()));
         assert!(s.due_notifications(130_000).contains(&"disk".into()));
-        s.observe(140_000, Some(READY), Some((25 * GIB, 228 * GIB)));
+        s.observe(140_000, Some(READY), Some((GIB, 228 * GIB)));
         assert!(!s.conditions.iter().any(|c| c.condition == "disk"));
     }
     #[test]
-    fn large_disk_thresholds_are_capped_and_two_gib_allows_recovery() {
+    fn disk_warning_starts_strictly_below_one_gib_on_every_volume() {
         for total in [228 * GIB, 1000 * GIB] {
-            assert_eq!(disk_level(Some((21 * GIB, total))), 0);
-            assert_eq!(disk_level(Some((10 * GIB, total))), 1);
-            assert_eq!(disk_level(Some((GIB, total))), 2);
+            for free in [GIB, 2 * GIB, 5 * GIB, 20 * GIB] {
+                assert_eq!(disk_level(Some((free, total))), 0);
+            }
+            assert_eq!(disk_level(Some((GIB - 1, total))), 1);
+            assert_eq!(disk_level(Some((GIB / 4, total))), 1);
+            assert_eq!(disk_level(Some((GIB / 4 - 1, total))), 2);
             let mut s = Sweep::default();
             s.observe(0, Some(FULL), Some((GIB, total)));
             assert!(s.observe(120_000, Some(FULL), Some((3 * GIB, total))));
@@ -840,9 +843,9 @@ mod tests {
     #[test]
     fn disk_detects_changes_and_clears_without_runtime() {
         let mut s = Sweep::default();
-        s.observe(10, None, Some((6 * GIB, 100 * GIB)));
+        s.observe(10, None, Some((GIB / 2, 100 * GIB)));
         assert!(s.conditions[0].cause.starts_with("low"));
-        s.observe(20, None, Some((GIB, 100 * GIB)));
+        s.observe(20, None, Some((GIB / 8, 100 * GIB)));
         assert_eq!(s.conditions[0].since, 10);
         assert!(s.conditions[0].cause.starts_with("critical"));
         s.observe(30, None, SPACE);

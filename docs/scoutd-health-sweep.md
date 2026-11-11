@@ -28,8 +28,8 @@ its notice. The slow-sweep deadline advances only when work is accepted.
 | Startup projection degraded by SQLITE_FULL, ENOSPC, or equivalent text | 120 seconds | Wait for 2 GiB free space, then restart the owned base child once. |
 | Other startup projection error | 120 seconds | At most three owned-base restarts; subsequent retries wait 120 seconds, then 240 seconds. |
 | Existing projection incident still not mutation-ready | 10 minutes from the latest of `since`, sweep recovery restart, or the initial child spawn in this supervisor lifetime | Report a persistent outage, including unknown, failed or restoring health. A disk latch waiting for space keeps its free-space notice instead. This notice does not spend or replenish the restart budget. |
-| Disk below max(2 GiB, min(10%, 20 GiB)) free | 60 seconds | Report low space and Scout's top three observed consumers. |
-| Disk below max(1 GiB, min(5%, 5 GiB)) free | 60 seconds | Mark the same disk condition critical and refresh its consumer inventory. |
+| Disk below 1 GiB free | 60 seconds | Report low space and Scout's top three observed consumers. |
+| Disk below 256 MiB free | 60 seconds | Mark the same disk condition critical and refresh its consumer inventory. |
 | Web expected but not running | 90 seconds | Report the cause. Never start or restart web from scoutd. |
 | Pairing intent running without a relay listener | 90 seconds | Report the cause. Leave pairing claim retry to the runtime. |
 | Version skew | None; checked every 10 minutes | Report differing service and CLI package installations and the repair action. |
