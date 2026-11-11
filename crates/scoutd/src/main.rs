@@ -2156,6 +2156,78 @@ fn fetch_health(config: &Config) -> HealthStatus {
     health
 }
 
+/// Supervision needs write readiness as well as liveness. Older health-cache
+/// workers omit startup; use the bounded runtime probe for that observation.
+fn fetch_health_for_sweep(config: &Config) -> HealthStatus {
+    let health = fetch_health(config);
+    operational_health(health, || {
+        fetch_unix_health(&config.broker_socket_path).ok()
+    })
+}
+
+fn operational_health(
+    health: HealthStatus,
+    fallback: impl FnOnce() -> Option<HealthStatus>,
+) -> HealthStatus {
+    let has_readiness = health
+        .body
+        .as_deref()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|v| {
+            v.pointer("/startup/mutationsAdmitted")
+                .and_then(|v| v.as_bool())
+        })
+        .is_some();
+    if health.transport.as_deref() == Some("health_socket") && !has_readiness {
+        fallback().unwrap_or(health)
+    } else {
+        health
+    }
+}
+
+#[cfg(test)]
+mod operational_health_tests {
+    use super::*;
+    fn health(body: &str) -> HealthStatus {
+        HealthStatus {
+            state: "healthy",
+            checked_at: 0,
+            duration_ms: 0,
+            reachable: true,
+            ok: true,
+            transport: Some("health_socket".into()),
+            status_code: Some(200),
+            body: Some(body.into()),
+            error: None,
+        }
+    }
+    #[test]
+    fn old_liveness_cache_cannot_hide_a_closed_write_gate() {
+        let result =
+            operational_health(health(r#"{"ok":true,"responder":"health_cache"}"#), || {
+                Some(health(
+                    r#"{"startup":{"phase":"degraded","mutationsAdmitted":false}}"#,
+                ))
+            });
+        assert!(result.body.unwrap().contains("degraded"));
+    }
+    #[test]
+    fn readiness_cache_avoids_runtime_io_and_probe_failure_is_not_recovery() {
+        let cached = r#"{"ok":true,"startup":{"mutationsAdmitted":false}}"#;
+        assert_eq!(
+            operational_health(health(cached), || panic!("no fallback needed"))
+                .body
+                .as_deref(),
+            Some(cached)
+        );
+        let old = r#"{"ok":true}"#;
+        assert_eq!(
+            operational_health(health(old), || None).body.as_deref(),
+            Some(old)
+        );
+    }
+}
+
 /// The runtime answers health from a cache on its own thread, on a socket beside
 /// `broker.sock`. Runtime work cannot delay that answer.
 fn broker_health_socket_path(config: &Config) -> PathBuf {
@@ -6734,12 +6806,10 @@ mod tests {
             .get_args()
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
-        assert!(args
-            .windows(3)
-            .any(|a| a == ["notify", "--as", "scoutd-health"]));
+        assert!(args.windows(3).any(|a| a == ["ask", "--operator", "--fyi"]));
         assert!(args
             .windows(2)
-            .any(|a| a == ["--cwd", config.runtime_directory.to_str().unwrap()]));
+            .any(|a| a == ["--context-root", config.runtime_directory.to_str().unwrap()]));
         assert_eq!(
             command.get_current_dir(),
             Some(config.runtime_directory.as_path())

@@ -149,3 +149,25 @@ line the journal wrote last for that id, the event line stores its envelope and
   keeps only the latest registry upsert, so an older version is not there to
   reference.
 
+
+## Review quarantined projection records
+
+`scout quarantine list` lists unresolved preserved records. `show <id>` displays
+the failure, original data, and recent review decisions; `--json` retains the
+exact base64 evidence and digest for tooling.
+
+- `scout quarantine defer <id>` leaves the record unresolved for later. Use
+  `list --status deferred` to return to it. Its read fence remains in place.
+- `scout quarantine acknowledge <id>` records review without retrying or
+  claiming the underlying record was repaired.
+- `scout quarantine retry <id>` explicitly attempts derived-projection repair.
+  The first supported kinds are messages and conversation read cursors. Retry
+  verifies the preserved bytes, locates the record in the retained canonical
+  journal, and applies its latest value at a fixed boundary. It never starts
+  an agent, resends a message, or injects preserved bytes as a new command.
+
+Unsupported kinds, malformed evidence, missing parents, and records requiring
+archive reconciliation remain quarantined with a recorded failure. A successful
+retry marks the record resolved and removes only its own read fence. Original
+evidence and decisions remain stored. A subsequent projection failure reopens
+the record. Existing quarantined records are never retried automatically.

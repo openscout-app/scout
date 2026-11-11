@@ -279,6 +279,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/quarantine": "local",
   "GET /v1/quarantine/:id": "local",
   "POST /v1/quarantine/:id/acknowledge": "local",
+  "POST /v1/quarantine/:id/defer": "local",
+  "POST /v1/quarantine/:id/retry": "local",
 
   // ── guest: owner-approved guest keys only (never mesh peers)
   "GET /v1/guest/agents": "guest",

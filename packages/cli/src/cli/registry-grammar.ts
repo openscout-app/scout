@@ -11,7 +11,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "report": node("--diagnostics --file= --local-only --message-file="),
   "feedback": node("--diagnostics --file= --local-only --message-file="),
   "doctor": node("-y --context-root= --detail --fix --yes"),
-  "quarantine": node("--limit= --session= --status=", { "list": node(), "show": node(), "acknowledge": node() }),
+  "quarantine": node("--limit= --session= --status=", { "list": node(), "show": node(), "acknowledge": node(), "defer": node(), "retry": node() }),
   "status": node("--all --blocked --failed --next-actor="),
   "operator": node("-q --as= --because= --cwd= --image= --message= --option= --question="),
   "notify": node("--as= --cwd= --image= --message="),

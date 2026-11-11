@@ -132,3 +132,36 @@ test("whole-frame quarantine fences every record beyond the bounded warning samp
   ledger.acknowledge(evidence.id);
   expect(ledger.hasRecord("sibling-24")).toBe(true);
 });
+
+test("defer and review preserve fences, while a successful retry records its decision and resolves its fence", async () => {
+  const root = await fixture(), path = join(root, "quarantine.sqlite");
+  const ledger = new BrokerQuarantine(path); cleanup.push(() => ledger.close());
+  const entry = message("review-me"), bytes = Buffer.from(JSON.stringify(entry));
+  const row = ledger.preserve({ kind: entry.kind, bytes, reason: "missing parent", source: { path: "journal" }, entries: [entry] });
+  expect(ledger.defer(row.id)?.status).toBe("deferred");
+  expect(ledger.status().deferredCount).toBe(1);
+  expect(ledger.hasRecord("review-me")).toBe(true);
+  expect(ledger.acknowledge(row.id)?.status).toBe("acknowledged");
+  expect(ledger.hasRecord("review-me")).toBe(true);
+  expect(ledger.retryResult(row.id, "failed", "parent missing")?.status).toBe("open");
+  expect(ledger.retryResult(row.id, "resolved", null)?.status).toBe("resolved");
+  expect(ledger.hasRecord("review-me")).toBe(false);
+  expect(ledger.status().resolvedCount).toBe(1);
+  const read = ledger.read(row.id)!;
+  expect(Buffer.from(read.payload, "base64")).toEqual(bytes);
+  expect(read.decisions?.map(d => d.outcome)).toEqual(["deferred", "reviewed", "failed", "resolved"]);
+  expect(ledger.defer(row.id)?.status).toBe("resolved");
+});
+
+test("a repaired record that fails again reopens rather than silently losing its fence", async () => {
+  const root = await fixture();
+  const ledger = new BrokerQuarantine(join(root, "quarantine.sqlite")); cleanup.push(() => ledger.close());
+  const entry = message("fails-again"), bytes = Buffer.from(JSON.stringify(entry));
+  const input = { kind: entry.kind, bytes, reason: "parent missing", source: { path: "journal" }, entries: [entry] };
+  const row = ledger.preserve(input);
+  ledger.retryResult(row.id, "resolved", null);
+  expect(ledger.hasRecord("fails-again")).toBe(false);
+  expect(ledger.preserve(input).status).toBe("open");
+  expect(ledger.hasRecord("fails-again")).toBe(true);
+  expect(ledger.read(row.id)?.decisions?.at(-1)?.detail).toContain("Failed again");
+});

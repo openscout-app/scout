@@ -179,6 +179,15 @@ export class WorkerSQLiteProjection {
     if (this.closed || this.options.disabled) return Promise.reject(new Error("Quarantine storage is unavailable."));
     return this.rpc("acknowledgeQuarantine", args);
   }
+  deferQuarantine(...args: Parameters<RecoverableSQLiteProjection["deferQuarantine"]>): Promise<ReturnType<RecoverableSQLiteProjection["deferQuarantine"]>> {
+    if (this.closed || this.options.disabled) return Promise.reject(new Error("Quarantine storage is unavailable."));
+    return this.rpc("deferQuarantine", args);
+  }
+  async retryQuarantine(...args: Parameters<RecoverableSQLiteProjection["retryQuarantine"]>): ReturnType<RecoverableSQLiteProjection["retryQuarantine"]> {
+    if (this.closed || this.options.disabled) throw new Error("Quarantine retry is unavailable.");
+    await this.flush();
+    return this.rpc("retryQuarantine", args);
+  }
   readMessages(...args: Parameters<RecoverableSQLiteProjection["readMessages"]>): ReturnType<RecoverableSQLiteProjection["readMessages"]> {
     if (this.closed || this.options.disabled) return Promise.reject(new Error("Historical message storage is unavailable."));
     return this.read("readMessages", args, new Map());

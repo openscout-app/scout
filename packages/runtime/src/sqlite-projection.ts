@@ -1,5 +1,6 @@
 import { ProjectionSkipLedger } from './projection-skip-ledger.js';
 import { BrokerQuarantine, QuarantinePersistenceError, type QuarantineListOptions, type QuarantineSummary } from "./broker-quarantine.js";
+import { planQuarantineRetry } from "./quarantine-retry.js";
 import type {
   ConversationProjectionCursor,
   ConversationProjectionEvent,
@@ -585,6 +586,37 @@ export class RecoverableSQLiteProjection {
   listQuarantine(options: QuarantineListOptions = {}) { return this.quarantineStore().list(options); }
   readQuarantine(id: string) { return this.quarantineStore().read(id); }
   acknowledgeQuarantine(id: string) { return this.quarantineStore().acknowledge(id); }
+  deferQuarantine(id: string) { return this.quarantineStore().defer(id); }
+  async retryQuarantine(id: string): Promise<import("./broker-quarantine.js").QuarantineRetryResult | null> {
+    if (this.closed || this.options.disabled) throw new Error("Quarantine retry is unavailable.");
+    await this.flush();
+    return this.enqueueResult(async () => {
+      const ledger = this.quarantineStore();
+      const evidence = ledger.read(id);
+      if (!evidence) return null;
+      if (evidence.status === "resolved") return { record: evidence, outcome: "resolved", detail: null };
+      try {
+        const store = this.store;
+        if (!store || this.warming) throw new Error("Projection must be ready before retrying a record.");
+        const boundary = await this.journal.captureReplayBoundary();
+        let work = 0;
+        const entry = await planQuarantineRetry(evidence, (visit, at) => this.journal.replay(visit, at), boundary, async () => {
+          this.replayProgress++;
+          if (++work % 128 === 0) await this.yieldReplayTurn();
+        });
+        store.runReplayTransaction(() => {
+          applyJournalEntryToStore(store, entry);
+          this.ensureConversationProjection(store).applyBrokerBatch([entry]);
+        });
+        this.publishConversationFeed(this.ensureConversationProjection(store));
+        this.publishConversationThreads(store, this.ensureConversationProjection(store));
+        return { record: ledger.retryResult(id, "resolved", null)!, outcome: "resolved", detail: null };
+      } catch (error) {
+        const detail = formatError(error);
+        return { record: ledger.retryResult(id, "failed", detail)!, outcome: "failed", detail };
+      }
+    });
+  }
 
   /**
    * Live-path write batches that exhausted busy retries or hit a fatal store

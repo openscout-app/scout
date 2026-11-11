@@ -298,3 +298,11 @@ test("required setup failure still fails even when expected identity was not sup
   const endpointOnly = build({ target: { instance: target.instance, brokerUrl: target.brokerUrl }, health: observation() });
   expect(complete({ report: endpointOnly, failures: ["required write failed"] }).outcome).toBe("failed");
 });
+
+test("resolved quarantine does not retain a historical skip warning, while deferred records remain unresolved", () => {
+  const projection = { ...healthy().projection!, skips: { total: 1, byKind: {} },
+    quarantine: { openCount: 0, acknowledgedCount: 0, resolvedCount: 1, samples: [] } };
+  expect(report({ ...healthy(), projection }).service.checks.find(c => c.name === "projection")?.state).toBe("working");
+  expect(report({ ...healthy(), projection: { ...projection, quarantine: { ...projection.quarantine, deferredCount: 1 } } })
+    .service.checks.find(c => c.name === "projection")?.state).toBe("impaired");
+});

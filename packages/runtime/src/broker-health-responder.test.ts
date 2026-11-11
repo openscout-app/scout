@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 
+import type { BrokerStartupTrafficGateSnapshot } from "./broker-startup-traffic-gate.js";
 import { BrokerHealthResponder, brokerHealthSocketPath } from "./broker-health-responder.js";
 
 const roots = new Set<string>();
@@ -16,7 +17,7 @@ afterEach(async () => {
   roots.clear();
 });
 
-async function started(options: { busyAfterMs?: number } = {}) {
+async function started(options: { busyAfterMs?: number; beatMs?: number; readStartup?: ConstructorParameters<typeof BrokerHealthResponder>[0]["readStartup"] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "openscout-health-")); roots.add(root);
   const responder = new BrokerHealthResponder({ socketPath: join(root, "broker-health.sock"), ...options });
   responders.add(responder);
@@ -79,6 +80,19 @@ describe("BrokerHealthResponder", () => {
     expect(body.ok).toBe(true);
     expect(body.mainThread.lagMs).toBeGreaterThanOrEqual(300);
     expect(body.flags.map((flag: { source: string }) => flag.source)).toContain("main_thread");
+  });
+
+  test("cached liveness carries degraded and recovered write readiness", async () => {
+    let startup: BrokerStartupTrafficGateSnapshot = { state: "degraded", phase: "degraded", mutationsAdmitted: false,
+      error: "sqlite projection worker stalled" };
+    const responder = await started({ beatMs: 10, readStartup: () => startup });
+    responder.markReady({ nodeId: "node-1" });
+    await Bun.sleep(30);
+    expect(await read(responder.socketPath)).toMatchObject({ ok: true, startup });
+    startup = { state: "ready", phase: "ready", mutationsAdmitted: true, error: null };
+    await Bun.sleep(30);
+    expect(await read(responder.socketPath)).toMatchObject({ ok: true,
+      startup: { phase: "ready", mutationsAdmitted: true, error: null } });
   });
 
   test("a flag carries its source, reason and first time, and clears when the source catches up", async () => {

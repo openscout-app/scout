@@ -132,7 +132,9 @@ export function buildCoreServiceReport(input: {
     const projection = payload.projection;
     if (!projection) add("projection", "not_checked", "Projection evidence was not supplied.");
     else if (projection.state === "degraded" || projection.state === "disabled"
-      || (projection.skips?.total ?? 0) > 0 || (projection.quarantine?.openCount ?? 0) > 0) {
+      || (projection.quarantine
+        ? (projection.quarantine.openCount ?? 0) + (projection.quarantine.deferredCount ?? 0) > 0
+        : (projection.skips?.total ?? 0) > 0)) {
       add("projection", "impaired", "Core projection is unavailable, degraded, or has unapplied/quarantined records.");
     } else add("projection", projection.state === "ready" ? "working" : projection.state === "warming" ? "starting" : "inconclusive",
       "Projection state supplied.");

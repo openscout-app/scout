@@ -6,6 +6,12 @@ pairing, write app service configuration, or signal a pid found on disk.
 
 ## Conditions and actions
 
+The fast health responder carries cached startup phase, error, and
+`mutationsAdmitted` independently of its liveness `ok`. The sweep uses those
+fields to detect a running runtime whose write gate is closed. With an older
+health cache that omits readiness, the bounded runtime socket probe supplies
+operational state; liveness-only evidence never proves write readiness.
+
 The supervisor requests a regular sweep every 30 seconds, starting at startup.
 A bounded worker collects host observations and delivers notifications. The
 supervisor continues polling its owned children while this work is in progress.
@@ -22,8 +28,8 @@ its notice. The slow-sweep deadline advances only when work is accepted.
 | Startup projection degraded by SQLITE_FULL, ENOSPC, or equivalent text | 120 seconds | Wait for 2 GiB free space, then restart the owned base child once. |
 | Other startup projection error | 120 seconds | At most three owned-base restarts; subsequent retries wait 120 seconds, then 240 seconds. |
 | Existing projection incident still not mutation-ready | 10 minutes from the latest of `since`, sweep recovery restart, or the initial child spawn in this supervisor lifetime | Report a persistent outage, including unknown, failed or restoring health. A disk latch waiting for space keeps its free-space notice instead. This notice does not spend or replenish the restart budget. |
-| Disk below max(2 GiB, min(5%, 10 GiB)) free | 60 seconds | Report low space and Scout's top three observed consumers. |
-| Disk below max(1 GiB, min(2%, 2 GiB)) free | 60 seconds | Mark the same disk condition critical and refresh its consumer inventory. |
+| Disk below max(2 GiB, min(10%, 20 GiB)) free | 60 seconds | Report low space and Scout's top three observed consumers. |
+| Disk below max(1 GiB, min(5%, 5 GiB)) free | 60 seconds | Mark the same disk condition critical and refresh its consumer inventory. |
 | Web expected but not running | 90 seconds | Report the cause. Never start or restart web from scoutd. |
 | Pairing intent running without a relay listener | 90 seconds | Report the cause. Leave pairing claim retry to the runtime. |
 | Version skew | None; checked every 10 minutes | Report differing service and CLI package installations and the repair action. |
@@ -110,6 +116,10 @@ therefore produces a new repair notice, not just the earlier instruction to free
 space. A late delivery result for a lower level cannot delay the new notice.
 Incident timestamps use epoch milliseconds, including across laptop sleep.
 
+Unresolved disk pressure reminds at most once every 30 minutes. A transition
+from warning to critical can notify again after its 60-second grace, without
+waiting out the earlier warning's cooldown. Clearing space clears the condition.
+
 A cleared condition retains a per-condition notification cooldown of 30 minutes
 in the checkpoint. Re-entry during that window does not send another notice,
 even after a supervisor restart. A higher-level escalation bypasses a lower-level
@@ -118,8 +128,8 @@ remain subject to cooldown. Conditions still clear on confirmed recovery.
 
 The persisted reservation prevents a supervisor restart from resending the
 same incident. Dispatch uses
-the service package's `scout notify` implementation, which shares the
-`sendScoutMessage` operator-signal path with MCP `notify_operator`. The command
+the service package's `scout ask --operator --fyi --notify` implementation,
+which records an operator FYI without creating an agent task. The command
 uses the supervised instance, not the ambient client instance. If the runtime
 cannot accept the notification, macOS receives a local notification instead.
 

@@ -89,8 +89,13 @@ impl Sweep {
                 now,
             );
         }
-        if disk.is_some() {
+        if let Some((free, total)) = disk {
+            let critical = disk_level(Some((free, total))) == 2;
             if let Some(condition) = self.conditions.iter_mut().find(|c| c.condition == "disk") {
+                if critical && condition.notice_level < NoticeLevel::Outage {
+                    condition.notice_level = NoticeLevel::Outage;
+                    condition.notify_after = now + 60_000;
+                }
                 if !observation.top_consumers.is_empty() {
                     condition.cause.push_str(&format!(
                         "; Scout top consumers: {}",
@@ -324,11 +329,16 @@ impl Sweep {
         self.conditions
             .iter()
             .filter(|c| {
-                (c.notice_level != NoticeLevel::Outage || outage_due)
+                (c.condition != "startup-projection"
+                    || c.notice_level != NoticeLevel::Outage
+                    || outage_due)
                     && c.escalated
                     && now >= c.notify_after
                     && (c.notified_at.is_none()
-                        || c.notice_level > c.notified_level.unwrap_or_default())
+                        || c.notice_level > c.notified_level.unwrap_or_default()
+                        || (c.condition == "disk"
+                            && c.notified_at
+                                .is_some_and(|at| now.saturating_sub(at) >= NOTIFICATION_COOLDOWN)))
             })
             .map(|c| c.condition.clone())
             .collect()
@@ -409,8 +419,8 @@ pub struct Finding {
 }
 pub fn disk_level(disk: Option<(u64, u64)>) -> u8 {
     match disk {
-        Some((free, total)) if free < GIB.max((total / 50).min(2 * GIB)) => 2,
-        Some((free, total)) if free < (2 * GIB).max((total / 20).min(10 * GIB)) => 1,
+        Some((free, total)) if free < GIB.max((total / 20).min(5 * GIB)) => 2,
+        Some((free, total)) if free < (2 * GIB).max((total / 10).min(20 * GIB)) => 1,
         _ => 0,
     }
 }
@@ -705,10 +715,42 @@ mod tests {
             .contains(&"startup-projection".into()));
     }
     #[test]
+    fn alive_cache_with_closed_writes_triggers_bounded_recovery() {
+        let closed = r#"{"ok":true,"responder":"health_cache","startup":{"phase":"degraded","mutationsAdmitted":false,"error":"projection stalled"}}"#;
+        let mut s = Sweep::default();
+        assert!(!s.observe(0, Some(closed), SPACE));
+        assert!(s.observe(120_000, Some(closed), SPACE));
+        assert!(!s.observe(120_001, Some(READY), SPACE));
+        assert!(!s
+            .conditions
+            .iter()
+            .any(|c| c.condition == "startup-projection"));
+    }
+    #[test]
+    fn disk_critical_escalates_and_persistent_pressure_reminds() {
+        let mut s = Sweep::default();
+        s.observe(0, Some(READY), Some((10 * GIB, 228 * GIB)));
+        assert!(s.due_notifications(60_000).contains(&"disk".into()));
+        s.conditions
+            .iter_mut()
+            .find(|c| c.condition == "disk")
+            .unwrap()
+            .reserve_notice(60_000);
+        assert!(!s.due_notifications(60_001).contains(&"disk".into()));
+        assert!(s
+            .due_notifications(60_000 + NOTIFICATION_COOLDOWN)
+            .contains(&"disk".into()));
+        s.observe(70_000, Some(READY), Some((3 * GIB, 228 * GIB)));
+        assert!(!s.due_notifications(129_999).contains(&"disk".into()));
+        assert!(s.due_notifications(130_000).contains(&"disk".into()));
+        s.observe(140_000, Some(READY), Some((25 * GIB, 228 * GIB)));
+        assert!(!s.conditions.iter().any(|c| c.condition == "disk"));
+    }
+    #[test]
     fn large_disk_thresholds_are_capped_and_two_gib_allows_recovery() {
         for total in [228 * GIB, 1000 * GIB] {
-            assert_eq!(disk_level(Some((11 * GIB, total))), 0);
-            assert_eq!(disk_level(Some((3 * GIB, total))), 1);
+            assert_eq!(disk_level(Some((21 * GIB, total))), 0);
+            assert_eq!(disk_level(Some((10 * GIB, total))), 1);
             assert_eq!(disk_level(Some((GIB, total))), 2);
             let mut s = Sweep::default();
             s.observe(0, Some(FULL), Some((GIB, total)));
@@ -798,7 +840,7 @@ mod tests {
     #[test]
     fn disk_detects_changes_and_clears_without_runtime() {
         let mut s = Sweep::default();
-        s.observe(10, None, Some((4 * GIB, 100 * GIB)));
+        s.observe(10, None, Some((6 * GIB, 100 * GIB)));
         assert!(s.conditions[0].cause.starts_with("low"));
         s.observe(20, None, Some((GIB, 100 * GIB)));
         assert_eq!(s.conditions[0].since, 10);

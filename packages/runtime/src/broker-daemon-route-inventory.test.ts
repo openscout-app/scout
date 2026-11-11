@@ -227,6 +227,8 @@ const expectedRouteInventory = [
   "POST /v1/permissions/native",
   "POST /v1/permissions/native/wait",
   "POST /v1/quarantine/:id/acknowledge",
+  "POST /v1/quarantine/:id/defer",
+  "POST /v1/quarantine/:id/retry",
   "POST /v1/rendezvous/match",
   "POST /v1/repo-watch/warm",
   "POST /v1/roles/assignments",

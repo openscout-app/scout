@@ -612,3 +612,29 @@ test("exact flight projection reads cover live rows and archived records without
   projection.close();
   await expect(projection.readFlights([flight.id])).rejects.toThrow("unavailable");
 });
+
+test("explicit retry repairs a read cursor after its parent arrives without appending or redispatching work", async () => {
+  const { projection, durable, journalPath, dbPath } = await setup();
+  await projection.warm(); await projection.flush();
+  const orphan: BrokerJournalEntry = { kind: "conversation.read_cursor.upsert", cursor: {
+    conversationId: "conversation", actorId: "actor", lastReadMessageId: "late-message",
+    lastReadAt: 2, updatedAt: 2, metadata: {},
+  } };
+  await durable.runWrite(() => durable.commitEntries([orphan], async () => {}));
+  await projection.flush();
+  const quarantined = (await projection.listQuarantine()).find(row => row.kind === orphan.kind)!;
+  expect(quarantined).toBeDefined();
+  expect((await durable.runWrite(() => projection.retryQuarantine(quarantined.id)))?.outcome).toBe("failed");
+  await durable.runWrite(() => durable.commitEntries([message("late-message")], async () => {}));
+  await projection.flush();
+  const before = await readFile(journalPath, "utf8");
+  const repaired = await durable.runWrite(() => projection.retryQuarantine(quarantined.id));
+  expect(repaired?.outcome).toBe("resolved");
+  const reader = new SQLiteControlPlaneStore(dbPath);
+  try { expect(reader.listReadCursors("conversation")[0]?.lastReadMessageId).toBe("late-message"); }
+  finally { reader.close(); }
+  expect(await readFile(journalPath, "utf8")).toBe(before);
+  expect((await projection.readQuarantine(quarantined.id))?.decisions?.map(d => d.outcome)).toEqual(["failed", "resolved"]);
+  expect((await projection.retryQuarantine(quarantined.id))?.outcome).toBe("resolved");
+  expect((await projection.readQuarantine(quarantined.id))?.decisions).toHaveLength(2);
+});
