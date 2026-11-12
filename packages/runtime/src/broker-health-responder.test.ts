@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ afterEach(async () => {
   roots.clear();
 });
 
-async function started(options: Partial<ConstructorParameters<typeof BrokerHealthResponder>[0]> = {}) {
+async function started(options: { busyAfterMs?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "openscout-health-")); roots.add(root);
   const responder = new BrokerHealthResponder({ socketPath: join(root, "broker-health.sock"), ...options });
   responders.add(responder);
@@ -96,22 +96,5 @@ describe("BrokerHealthResponder", () => {
     responder.report("storage", null);
     await Bun.sleep(20);
     expect((await read(responder.socketPath)).flags).toEqual([]);
-  });
-
-  test("over the soft memory limit it writes a snapshot, and the main thread logs what it holds", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "openscout-memory-")); roots.add(dir);
-    const lines: string[] = [];
-    await started({
-      memory: { dir, softBytes: 1, hardBytes: 0, intervalMs: 20 },
-      memoryProbes: { tail: () => ({ watchers: 3 }) },
-      log: (line) => lines.push(line),
-    });
-    for (let i = 0; i < 100 && !lines.length; i++) await Bun.sleep(20);
-    expect(lines[0]).toStartWith("[memory-guard] runtime detail ");
-    const detail = JSON.parse(lines[0]!.slice("[memory-guard] runtime detail ".length));
-    expect(detail.reason).toBe("soft");
-    expect(detail.probes).toEqual({ tail: { watchers: 3 } });
-    expect(Object.keys(detail.jsc).length).toBeGreaterThan(0);
-    expect(readdirSync(dir).some((file) => file.startsWith("runtime-memory-guard-") && file.endsWith("-soft.json"))).toBe(true);
   });
 });

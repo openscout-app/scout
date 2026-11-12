@@ -4,6 +4,7 @@ compile_error!("scoutd first slice requires a Unix-like platform.");
 mod health_observations;
 mod health_sweep;
 mod health_worker;
+mod memory_watch;
 mod probes;
 
 use std::collections::HashSet;
@@ -984,6 +985,17 @@ fn supervise_service_inner(
         health_worker::Worker::start(config.clone())
     };
     let mut health_worker_backoff = health_worker::RestartBackoff::new(clock_now!());
+    // Off in tests: the watcher reads the real process tree and host.
+    let mut memory_watch = if testing {
+        None
+    } else {
+        memory_watch::Watcher::start(memory_watch::WatchConfig {
+            root: std::process::id() as i32,
+            snapshot_dir: memory_snapshot_dir(config),
+            state_path: config.runtime_directory.join("memory-watch.json"),
+            limits: memory_watch::Limits::from_env(env_nonempty),
+        })
+    };
     if !testing && health_worker.is_none() {
         let delay = health_worker_backoff.failed(clock_now!());
         eprintln!(
@@ -1047,6 +1059,11 @@ fn supervise_service_inner(
                     health_worker_backoff.failures,
                     delay.as_secs()
                 );
+            }
+        }
+        if let Some(watch) = memory_watch.as_mut() {
+            while let Some(decision) = watch.poll() {
+                carry_out_memory_decision(&decision);
             }
         }
         let mut collected = None;
@@ -1394,6 +1411,9 @@ fn supervise_service_inner(
         }
     }
 
+    if let Some(watch) = memory_watch.take() {
+        watch.stop();
+    }
     let stopping_state = write_state!(
         "stopping",
         write_daemon_state(
@@ -1453,6 +1473,24 @@ fn launch_instance(optional_env: impl Fn(&str) -> Option<String>) -> String {
     optional_env("OPENSCOUT_INSTANCE").unwrap_or_else(|| "prod".to_string())
 }
 
+/// Where the memory watch and the processes it asks write their snapshots.
+fn memory_snapshot_dir(config: &Config) -> PathBuf {
+    config.logs_directory.join("memory")
+}
+
+/// The memory watch decides; the supervisor thread sends the signal. Each
+/// parent's own restart brings a stopped process back.
+fn carry_out_memory_decision(decision: &memory_watch::Decision) {
+    let (pid, signal) = match decision {
+        memory_watch::Decision::Stop { pid, .. } => (*pid, libc::SIGTERM),
+        memory_watch::Decision::Kill { pid, .. } => (*pid, libc::SIGKILL),
+        _ => return,
+    };
+    if pid > 1 && pid != std::process::id() as i32 {
+        unsafe { libc::kill(pid, signal) };
+    }
+}
+
 fn spawn_base_process(config: &Config) -> Result<Child, String> {
     prepare_child_logs_for_spawn(config)?;
     let stdout_log = open_child_log(&config.stdout_log_path)?;
@@ -1478,6 +1516,7 @@ fn base_process_command(config: &Config, optional_env: impl Fn(&str) -> Option<S
         .arg("base")
         .current_dir(&config.runtime_package_dir)
         .env("OPENSCOUT_PARENT_PID", std::process::id().to_string())
+        .env(memory_watch::SNAPSHOT_DIR_ENV, memory_snapshot_dir(config))
         .env("OPENSCOUT_INSTANCE", launch_instance(&optional_env))
         .env(
             "OPENSCOUT_SUPPORT_DIRECTORY",

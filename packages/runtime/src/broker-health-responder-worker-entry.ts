@@ -1,8 +1,7 @@
 import { createServer } from "node:http";
 import { parentPort, workerData } from "node:worker_threads";
 import { listenUnixSocket } from "./broker-server-lifecycle.js";
-import type { BrokerHealthFlag, BrokerHealthResponderMessage, BrokerHealthResponderWorkerData, BrokerHealthResponderWorkerMessage } from "./broker-health-responder.js";
-import { memoryGuardAction, MemoryGuardRecord, memoryUsageMb } from "./memory-guard.js";
+import type { BrokerHealthFlag, BrokerHealthResponderMessage, BrokerHealthResponderWorkerData } from "./broker-health-responder.js";
 
 if (!parentPort) throw new Error("health responder requires a parent port");
 const port = parentPort;
@@ -58,34 +57,6 @@ const stallWatch = setInterval(() => {
   }
 }, 250);
 stallWatch.unref?.();
-
-// The memory guard lives here, off the main thread, so it still acts when the main thread is too busy to.
-// Its snapshot names the size and the main thread's lag; the main thread adds what it holds when it next gets a turn.
-if (data.memory) {
-  const guard = data.memory;
-  const record = new MemoryGuardRecord(guard.dir, "runtime");
-  const limits = { softBytes: guard.softBytes, hardBytes: guard.hardBytes };
-  let lastSoftAt = 0, lastHeldAt = 0, exiting = false;
-  const memoryWatch = setInterval(() => {
-    if (exiting) return;
-    const now = Date.now(), rss = process.memoryUsage().rss;
-    const action = memoryGuardAction({ rss, now, limits, lastSoftAt, lastHeldAt, recentExits: record.recentExits(now) });
-    if (action === "none") return;
-    if (action === "soft") lastSoftAt = now;
-    if (action === "hard-held") lastHeldAt = now;
-    const at = new Date(now).toISOString();
-    record.write({ reason: action, at, pid: data.pid, uptimeS: Math.round((now - data.startedAt) / 1000), ...memoryUsageMb(), rssMb: Math.round(rss / 1048576), mainThread: mainThread(now), flags }, (line) => console.warn(line));
-    port.postMessage({ type: "memory", reason: action, at } satisfies BrokerHealthResponderWorkerMessage);
-    if (action !== "hard-exit") return;
-    // Stop cleanly if the main thread can; if it cannot within the grace period, stop it outright.
-    exiting = true;
-    record.noteExit(now);
-    clearInterval(memoryWatch);
-    setTimeout(() => process.kill(data.pid, "SIGTERM"), 2_000).unref?.();
-    setTimeout(() => process.kill(data.pid, "SIGKILL"), 2_000 + (guard.graceMs ?? 20_000)).unref?.();
-  }, guard.intervalMs ?? 5_000);
-  memoryWatch.unref?.();
-}
 
 const server = createServer((request, response) => {
   const path = (request.url ?? "/").split("?")[0];
