@@ -6814,6 +6814,14 @@ export async function invokeLocalAgentEndpoint(
     transcriptReply: transcriptReader
       ? async () => {
         const reply = await transcriptReader.read();
+        if (reply.state === "aborted") {
+          // Nobody answers an interrupted turn; waiting out the budget would only hide it.
+          throw new DeliveryBlockedError({
+            stage: "in_place_turn_aborted",
+            summary: "its turn was interrupted before it answered.",
+            message: `Scout continued ${agentRuntimeId} and typed the ask, and that turn was interrupted before it answered.`,
+          });
+        }
         return reply.state === "answered" ? reply.text : null;
       }
       : undefined,
@@ -6864,7 +6872,11 @@ export async function waitForLocalAgentReply(input: {
     const output = snapshot ? localAgentReplyFromSnapshot(snapshot, input) : null;
     if (output !== null) return output;
     if (input.transcriptReply) {
-      const answer = await input.transcriptReply().catch(() => null);
+      const answer = await input.transcriptReply().catch((error) => {
+        // A transcript that cannot be read is skipped; a turn that ended without an answer is not.
+        if (error instanceof DeliveryBlockedError) throw error;
+        return null;
+      });
       if (answer !== null) return answer;
     }
 

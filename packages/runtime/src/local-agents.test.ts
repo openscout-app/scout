@@ -42,6 +42,7 @@ import {
 import { buildCardlessSessionEndpoint } from "./broker-cardless-session";
 import { DEFAULT_BROKER_URL } from "./broker-process-manager";
 import { shutdownCodexAppServerAgent } from "./codex-app-server";
+import { DeliveryBlockedError } from "./delivery-blocked";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scoutCli = `bun ${JSON.stringify(join(repoRoot, "packages", "cli", "bin", "scout.mjs"))}`;
@@ -1398,6 +1399,20 @@ describe("terminal broker reply capture", () => {
     expect(output).toBe("It passes.");
     expect(reads).toBe(3);
   });
+  test("a turn the transcript shows was interrupted ends the wait with the reason", async () => {
+    const interrupted = new DeliveryBlockedError({
+      stage: "in_place_turn_aborted",
+      summary: "its turn was interrupted before it answered.",
+      message: "The turn was interrupted before it answered.",
+    });
+    await expect(waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => ({ messages: {} }),
+      transcriptReply: async () => { throw interrupted; },
+    })).rejects.toBe(interrupted);
+  });
+
   test("a reply the worker posts itself still wins, and a transcript that cannot be read is not an answer", async () => {
     const reply = { class: "agent", actorId: input.agentRuntimeId, conversationId: "chn-smoke", replyToMessageId: "msg-smoke", body: "posted", createdAt: 11_000 };
     let snapshots = 0;

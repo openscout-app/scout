@@ -82,6 +82,24 @@ describe("codexActivityFromRollout", () => {
     await rm(path);
     expect(await codexActivityFromRollout(path)).toBe("unknown");
   });
+
+  test("two probes at once leave the next reading right", async () => {
+    folder = await mkdtemp(join(tmpdir(), "scout-codex-activity-"));
+    const path = join(folder, "rollout.jsonl");
+    await writeFile(path, row("task_started") + row("task_complete"));
+    expect(await Promise.all([codexActivityFromRollout(path), codexActivityFromRollout(path)])).toEqual(["idle", "idle"]);
+    await appendFile(path, row("task_started"));
+    expect(await codexActivityFromRollout(path)).toBe("busy");
+  });
+
+  test("a rollout that was replaced is read from its start", async () => {
+    folder = await mkdtemp(join(tmpdir(), "scout-codex-activity-"));
+    const path = join(folder, "rollout.jsonl");
+    await writeFile(path, row("task_started") + row("task_complete") + row("task_started"));
+    expect(await codexActivityFromRollout(path)).toBe("busy");
+    await writeFile(path, row("task_started") + row("task_complete"));
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+  });
 });
 
 function claudeRecord(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {

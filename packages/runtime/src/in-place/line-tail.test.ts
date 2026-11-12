@@ -57,6 +57,29 @@ test("a line longer than one piece is still handed over whole", async () => {
   expect(seen.map((line) => line.length)).toEqual([5, long.length, 4]);
 });
 
+test("reads that overlap do not skip or repeat a line", async () => {
+  const path = await fileWith("one\ntwo\n");
+  const tail = openLineTail(path);
+  const seen: string[] = [];
+  const read = () => tail.read((line) => { seen.push(line); });
+  expect(await Promise.all([read(), read(), read()])).toEqual([true, true, true]);
+  expect(seen).toEqual(["one", "two"]);
+  await appendFile(path, "three\n");
+  await Promise.all([read(), read()]);
+  expect(seen).toEqual(["one", "two", "three"]);
+  expect(tail.size()).toBe(14);
+});
+
+test("a replaced file is read again from its start when the reader asks for that", async () => {
+  const path = await fileWith("one\ntwo\nthree\n");
+  let replaced = 0;
+  const tail = openLineTail(path, 0, { onReplaced: () => { replaced += 1; } });
+  expect(await readLines(tail)).toEqual(["one", "two", "three"]);
+  await writeFile(path, "new\n");
+  expect(await readLines(tail)).toEqual(["new"]);
+  expect(replaced).toBe(1);
+});
+
 test("a file that cannot be read says so, and a file that shrank reads as nothing new", async () => {
   const path = await fileWith("one\ntwo\n");
   const tail = openLineTail(path);

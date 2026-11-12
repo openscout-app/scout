@@ -242,7 +242,8 @@ export async function invokeSessionInPlace(
       continue;
     }
     if (!probe.live) {
-      unverifiedSince = null;
+      // `unverifiedSince` is kept: readings that swing between "cannot be
+      // seen" and "not open" are refused when the grace ends.
       // Claude Code has no second-writer guard: a session running where Scout
       // cannot type must not get a second copy resumed beside it. Codex parks
       // on its own thread lock, so the caller's resume path handles it.

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { findClaudeSessionOutsideScout, probeInPlace, type DeliverInPlaceDeps } from "./deliver.js";
+import { findClaudeSessionOutsideScout, probeInPlace, probeInPlaceConfirmed, type DeliverInPlaceDeps, type InPlaceProbe } from "./deliver.js";
 
 const SESSION = "4cc36bba-a893-461f-a5b1-79c1f6b7e088";
 
@@ -228,5 +228,48 @@ describe("probeInPlace", () => {
       .toEqual({ live: false, code: "session_ambiguous" });
     expect(await probeInPlace(strict, noHosts({ findHerdrPane: async () => ({ ...herdrPane("idle"), harness: "codex" }) })))
       .toEqual({ live: false, code: "session_runtime_unobserved" });
+  });
+});
+
+describe("probeInPlaceConfirmed", () => {
+  const notOpen: InPlaceProbe = { live: false, code: "not_live", held: false };
+  const unseen: InPlaceProbe = { live: false, code: "session_runtime_unobserved" };
+  const open: InPlaceProbe = { live: true, via: "tmux", location: "tmux main", activity: "idle" };
+  const scripted = (readings: Array<InPlaceProbe | Error>, harness = "claude") => {
+    let count = 0;
+    const result = probeInPlaceConfirmed({ sessionId: SESSION, harness, requireExactHarness: true }, {}, {
+      sleep: async () => undefined,
+      probe: async () => {
+        const reading = readings[Math.min(count++, readings.length - 1)]!;
+        if (reading instanceof Error) throw reading;
+        return reading;
+      },
+    });
+    return { result, count: () => count };
+  };
+
+  test("a Claude session is not open only on two readings in a row", async () => {
+    const closed = scripted([notOpen]);
+    expect(await closed.result).toEqual(notOpen);
+    expect(closed.count()).toBe(2);
+    // The first reading caught the record half written.
+    expect(await scripted([notOpen, open]).result).toEqual(open);
+    expect(await scripted([notOpen, { ...notOpen, held: true }]).result).toEqual({ ...notOpen, held: true });
+  });
+
+  test("a Codex thread is taken at its first reading: its own lock guards it", async () => {
+    const codex = scripted([notOpen], "codex");
+    expect(await codex.result).toEqual(notOpen);
+    expect(codex.count()).toBe(1);
+  });
+
+  test("a reading that could not see the session is taken again, and never turns into not open", async () => {
+    expect(await scripted([new Error("tmux timed out"), open]).result).toEqual(open);
+    expect(await scripted([unseen, open]).result).toEqual(open);
+    expect(await scripted([unseen]).result).toEqual(unseen);
+    // Unseen twice and then one "not open": not established.
+    expect(await scripted([unseen, unseen, notOpen]).result).toEqual(unseen);
+    expect(await scripted([new Error("tmux timed out"), notOpen, notOpen]).result).toEqual(notOpen);
+    await expect(scripted([new Error("tmux timed out")]).result).rejects.toThrow("tmux timed out");
   });
 });

@@ -326,6 +326,17 @@ describe("invokeSessionInPlace", () => {
     expect(session.typed).toEqual([]);
   });
 
+  test("readings that swing between unseen and not open are refused, never held for good and never resumed", async () => {
+    const swing: Array<InPlaceProbe | Error> = [];
+    for (let reading = 0; reading < 40; reading += 1) {
+      swing.push(reading % 2 === 0 ? new Error("tmux: timed out") : { live: false, code: "not_live", held: false });
+    }
+    const session = harness({ probes: swing });
+    expect((await refusal(session.run)).stage).toBe("in_place_unverified");
+    expect(session.elapsed()).toBeLessThan(30_000);
+    expect(session.typed).toEqual([]);
+  });
+
   test("an ask cancelled while the delivery finds the place again is never typed", async () => {
     const session = harness({ probes: [live("idle")], cancelDuringDelivery: true });
     expect(await session.run()).toEqual({ output: "", delivery: null });

@@ -229,7 +229,7 @@ async function readProcessTerminal(pid: number): Promise<ClaudeProcessTerminal |
 
 function missingTmuxSession(error: unknown): boolean {
   const stderr = (error as { stderr?: unknown })?.stderr;
-  return /can't find (?:session|window|pane)|no server running|no sessions/u.test(`${String(error)}\n${typeof stderr === "string" ? stderr : ""}`);
+  return /can't find (?:session|window|pane)|no server running|no sessions|error connecting to/u.test(`${String(error)}\n${typeof stderr === "string" ? stderr : ""}`);
 }
 
 function sameProcess(record: ClaudeSessionRecord, pane: ClaudeLivePane): boolean {
@@ -298,8 +298,13 @@ export async function findLiveClaudeSession(nativeSessionId: string, options: {
     try {
       panes = await (options.probe ?? probeClaudePanes)(record.tmux.session);
     } catch (error) {
-      // A missing tmux session leaves no pane to match; timeouts and unavailable probes fail closed.
-      if (!missingTmuxSession(error)) throw error;
+      // A missing tmux session or server leaves no pane to match. A probe that
+      // timed out or is unavailable fails closed, but only for a process that
+      // still runs: a record left by a crash is stale whatever tmux says.
+      if (!missingTmuxSession(error)) {
+        if (!await stillRunning(record)) continue;
+        throw error;
+      }
     }
     if (panes.some(pane => sameProcess(record, pane))) return record;
     const pane = panes.find(candidate => candidate.session === record.tmux?.session

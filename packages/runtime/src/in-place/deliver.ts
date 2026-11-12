@@ -339,6 +339,53 @@ export async function probeInPlace(
   return { live: true, via: "lattices", location: `terminal ${tty}`, activity: await harnessActivity() };
 }
 
+const PROBE_CONFIRM_READINGS = 3;
+const PROBE_CONFIRM_MS = 500;
+
+/**
+ * `probeInPlace`, for a caller that acts on one answer. A single reading can
+ * fail, or catch Claude's own record half written, and Claude Code has no
+ * guard against a second copy resumed beside a live session. So a Claude
+ * session reads as not open only on two readings in a row, and a reading that
+ * could not see the session is taken again before it is reported.
+ */
+export async function probeInPlaceConfirmed(
+  input: { sessionId: string; harness?: string | null; requireExactHarness?: boolean },
+  deps: DeliverInPlaceDeps = {},
+  options: { sleep?: (ms: number) => Promise<void>; probe?: typeof probeInPlace } = {},
+): Promise<InPlaceProbe> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const probe = options.probe ?? probeInPlace;
+  const claude = input.harness?.trim().toLowerCase() === "claude";
+  let notOpen = 0;
+  let last: InPlaceProbe | null = null;
+  let failure: unknown = null;
+  for (let reading = 0; reading < PROBE_CONFIRM_READINGS; reading += 1) {
+    if (reading > 0) await sleep(PROBE_CONFIRM_MS);
+    try {
+      last = await probe(input, deps);
+      failure = null;
+    } catch (error) {
+      failure = error;
+      last = null;
+      notOpen = 0;
+      continue;
+    }
+    if (last.live) return last;
+    if (last.code !== "not_live") {
+      notOpen = 0;
+      continue;
+    }
+    if (last.held || !claude) return last;
+    notOpen += 1;
+    if (notOpen >= 2) return last;
+  }
+  if (failure !== null) throw failure;
+  // "Not open" seen once, after a reading that could not see: not established.
+  if (last && !last.live && last.code === "not_live") return { live: false, code: "session_runtime_unobserved" };
+  return last ?? { live: false, code: "session_runtime_unobserved" };
+}
+
 const CODEX_APP_LOCATION = "the ChatGPT app’s Codex";
 
 function herdrLocation(pane: HerdrPaneMatch): string {
@@ -714,7 +761,12 @@ export async function codexActivityFromRollout(path: string): Promise<CodexActiv
     if (codexActivityTails.size >= CODEX_ACTIVITY_TAILS) {
       codexActivityTails.delete(codexActivityTails.keys().next().value as string);
     }
-    entry = { tail: openLineTail(path), state: "unknown" };
+    const fresh: { tail: LineTail; state: CodexActivity } = {
+      // A rollout that was replaced is read again from its start.
+      tail: openLineTail(path, 0, { onReplaced: () => { fresh.state = "unknown"; } }),
+      state: "unknown",
+    };
+    entry = fresh;
     codexActivityTails.set(path, entry);
   }
   const reading = entry;

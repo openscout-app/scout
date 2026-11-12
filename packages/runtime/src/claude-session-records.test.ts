@@ -209,7 +209,24 @@ test("observes the actual pane process and rejects stale records, reused PIDs, a
   expect((await observeClaudeSessionForTmuxSession({ ...base, cwd: "/foreign", probe: async () => [livePane] })).ok).toBe(false);
   expect(await findLiveClaudeSession("native-agent", { directory, probe: async () => [livePane] })).toEqual(expect.objectContaining({ sessionId: "native-agent" }));
   expect(await findLiveClaudeSession("native-agent", { directory, probe: async () => [{ ...livePane, procStart: "different" }] })).toBeNull();
-  await expect(findLiveClaudeSession("native-agent", { directory, probe: async () => { throw new Error("probe timed out"); } })).rejects.toThrow("probe timed out");
+  const timedOut = async () => { throw new Error("probe timed out"); };
+  await expect(findLiveClaudeSession("native-agent", { directory, probe: timedOut, processStart: async () => livePane.procStart }))
+    .rejects.toThrow("probe timed out");
+  // A record left by a crash is stale whatever tmux says: its process is gone, or its pid is someone else's.
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: timedOut, processStart: async () => null })).toBeNull();
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: timedOut, processStart: async () => "Tue Sep 15 09:00:00 2026" })).toBeNull();
+});
+
+test("a record whose tmux server is gone is stale, not a session that cannot be seen", async () => {
+  const directory = scratchDirectory();
+  writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "native-agent" }));
+  const noServer = async () => {
+    throw new ProbeCommandError("tmux exited with 1", { code: "exit", exitCode: 1, stderr: "error connecting to /tmp/tmux-1000/default (No such file or directory)" });
+  };
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: noServer, processStart: async () => null })).toBeNull();
+  // The process still runs with no server to show its pane: open, and no pane to type into.
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: noServer, processStart: async () => livePane.procStart, processTerminal: async () => null }))
+    .toEqual(expect.objectContaining({ sessionId: "native-agent", paneUnverified: true }));
 });
 
 test("Claude started from a shell in a tmux pane is in that pane while it sits on the pane's terminal, in front", async () => {
