@@ -6,7 +6,7 @@ import { assertValidCollaborationRecord, type QuestionRecord } from "@openscout/
 
 import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { claudeProjectDirectoryForCwd, type ClaudeSessionRecord } from "./claude-session-records.js";
-import { nativePermissionContext, describeNativePermission, nativePermissionDisplay, nativePermissionView, NativePermissionAskError, NativePermissionRequests } from "./native-permission.js";
+import { nativePermissionContext, describeNativePermission, nativePermissionDisplay, nativePermissionView, NativePermissionAskError, NativePermissionRequests, nativeAllowRuleUpdates } from "./native-permission.js";
 
 function session(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
   return {
@@ -86,6 +86,51 @@ describe("native session permission requests", () => {
     await h.registry(session({ status: "busy" }));
     expect(h.records.get(id)).toMatchObject({ state: "closed", answer: decision });
     await expect(h.service.decide(id, version, decision)).rejects.toThrow(PermissionRequestEndedError);
+  });
+
+  test("Claude Code's persistent allow rule becomes Allow always, and goes back to the hook only on that decision", async () => {
+    const h = harness();
+    const suggestions = [
+      { type: "addRules", behavior: "allow", destination: "localSettings", rules: [{ toolName: "Bash", ruleContent: "rm -rf dist" }] },
+      { type: "setMode", mode: "bypassPermissions", destination: "session" },
+    ];
+    const result = await h.native.open({ ...ask, suggestions });
+    if (!("requestId" in result)) throw new Error("skipped");
+    const id = result.requestId;
+    const request = h.records.get(id)!.metadata!.permissionRequest as { version: string; decisions: string[]; decisionLabels: unknown; native: { alwaysRules?: string[] } };
+    expect(request.decisions).toEqual(["once", "project", "deny"]);
+    expect(request.decisionLabels).toEqual({ project: "Allow always" });
+    expect(request.native.alwaysRules).toEqual(["Bash(rm -rf dist)"]);
+    const poll = h.native.wait(id, 5_000);
+    const decided = h.service.decide(id, request.version, "project");
+    expect(await poll).toEqual({ state: "decided", decision: "allow", updatedPermissions: [suggestions[0]] });
+    await decided;
+  });
+
+  test("Allow once never carries the rule, and a dialog with no persistent rule offers no Allow always", async () => {
+    const h = harness();
+    const result = await h.native.open({ ...ask, suggestions: [{ type: "addRules", behavior: "allow", destination: "localSettings", rules: [{ toolName: "Bash" }] }] });
+    if (!("requestId" in result)) throw new Error("skipped");
+    const version = (h.records.get(result.requestId)!.metadata!.permissionRequest as { version: string }).version;
+    const poll = h.native.wait(result.requestId, 5_000);
+    const decided = h.service.decide(result.requestId, version, "once");
+    expect(await poll).toEqual({ state: "decided", decision: "allow" });
+    await decided;
+    const plain = await h.native.open({ ...ask, suggestions: [{ type: "addRules", behavior: "allow", destination: "session", rules: [{ toolName: "Bash" }] }] });
+    if (!("requestId" in plain)) throw new Error("skipped");
+    expect((h.records.get(plain.requestId)!.metadata!.permissionRequest as { decisions: string[] }).decisions).toEqual(["once", "deny"]);
+  });
+
+  test("only persistent addRules allow entries are kept, rebuilt from known fields", () => {
+    expect(nativeAllowRuleUpdates([
+      { type: "setMode", mode: "bypassPermissions", destination: "userSettings" },
+      { type: "addRules", behavior: "deny", destination: "localSettings", rules: [{ toolName: "Bash" }] },
+      { type: "addRules", behavior: "allow", destination: "session", rules: [{ toolName: "Bash" }] },
+      { type: "addDirectories", directories: ["/"], destination: "localSettings" },
+      { type: "addRules", behavior: "allow", destination: "projectSettings", rules: [{ toolName: "Read", extra: true }, { toolName: 7 }] },
+      "junk",
+    ])).toEqual([{ type: "addRules", behavior: "allow", destination: "projectSettings", rules: [{ toolName: "Read" }] }]);
+    expect(nativeAllowRuleUpdates(undefined)).toEqual([]);
   });
 
   test("a dialog answered in the session ends the request, and the hook stands down", async () => {
