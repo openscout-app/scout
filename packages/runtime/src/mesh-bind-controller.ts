@@ -83,6 +83,12 @@ export type MeshBindControllerDeps = {
   logger?: Pick<Console, "log" | "warn">;
   /** Injectable for tests; default enumerates LAN + Tailscale IPv4 */
   resolveTlsAddresses?: () => string[];
+  /**
+   * How often mesh scope re-reads the interface addresses, so an interface
+   * that appears after boot (Tailscale connecting late) gets a listener.
+   * 0 turns the watch off. Default MESH_BIND_ADDRESS_POLL_MS.
+   */
+  addressPollMs?: number;
   loadTlsIdentity?: () => Promise<NodeTlsIdentity>;
   mdnsResponderFactory?: MdnsResponderFactory;
   onPeerFound?: (peer: MeshMdnsPeer) => void;
@@ -106,6 +112,11 @@ export type MeshBindController = {
   applyScope(scope: BrokerAdvertiseScope): Promise<MeshBindState>;
   /** Boot path: open listeners for the env/persisted scope once. */
   start(initialScope: BrokerAdvertiseScope): Promise<MeshBindState>;
+  /**
+   * Re-read the interface addresses and, in mesh scope, open listeners for new
+   * ones and close listeners for gone ones. No-op when the set is unchanged.
+   */
+  refreshAddresses(): Promise<MeshBindState>;
   stop(): Promise<void>;
 };
 
@@ -113,6 +124,15 @@ type LiveTlsListener = {
   address: string;
   server: HttpsServer;
 };
+
+/** Interface reads are cheap; Tailscale connecting late is noticed within this. */
+export const MESH_BIND_ADDRESS_POLL_MS = 10_000;
+
+function sameAddressSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const set = new Set(left);
+  return right.every((address) => set.has(address));
+}
 
 /**
  * Selected non-loopback IPv4 addresses for §11.3 TLS listeners: primary LAN
@@ -276,22 +296,51 @@ export function createMeshBindController(deps: MeshBindControllerDeps): MeshBind
     const previousIdentity = tlsIdentity;
     const previousMdns = mdns;
 
-    let nextListeners: LiveTlsListener[];
+    // A listener on an address we still want keeps serving when the identity
+    // is unchanged. Reopening it would collide with itself on the same
+    // address and port, so only new addresses open and only gone ones close.
+    const sameIdentity = previousIdentity !== null
+      && previousIdentity.spkiFingerprint === identity.spkiFingerprint;
+    const wanted = new Set(addresses);
+    const kept = sameIdentity
+      ? previousListeners.filter((entry) => wanted.has(entry.address))
+      : [];
+    const keptAddresses = new Set(kept.map((entry) => entry.address));
+    const dropped = previousListeners.filter((entry) => !kept.includes(entry));
+    const toOpen = addresses.filter((address) => !keptAddresses.has(address));
+
+    // A new identity must take over addresses it shares with the old one, so
+    // those close first; there is a short gap on them.
+    const contested = sameIdentity
+      ? []
+      : dropped.filter((entry) => wanted.has(entry.address));
+    await Promise.all(contested.map((entry) => closeServer(entry.server).catch(() => undefined)));
+
+    let opened: LiveTlsListener[];
     try {
-      nextListeners = await openTlsListeners(addresses, identity);
+      opened = await openTlsListeners(toOpen, identity);
     } catch (error) {
-      // Rollback: keep previous listeners if we had any.
-      tlsListeners = previousListeners;
-      tlsIdentity = previousIdentity;
+      // Rollback: keep the previous listeners that are still open.
+      tlsListeners = previousListeners.filter((entry) => !contested.includes(entry));
+      tlsIdentity = tlsListeners.length > 0 ? previousIdentity : null;
       mdns = previousMdns;
       throw error;
     }
 
-    // Swap: close old after new are up to minimize the gap (different addresses
-    // may overlap on rebind of the same set — close old first only when sets differ).
+    const nextListeners = addresses
+      .map((address) => kept.find((entry) => entry.address === address)
+        ?? opened.find((entry) => entry.address === address))
+      .filter((entry): entry is LiveTlsListener => entry !== undefined);
     tlsListeners = nextListeners;
     tlsIdentity = identity;
-    await Promise.all(previousListeners.map((entry) => closeServer(entry.server).catch(() => undefined)));
+    await Promise.all(
+      dropped
+        .filter((entry) => !contested.includes(entry))
+        .map((entry) => closeServer(entry.server).catch(() => undefined)),
+    );
+    for (const entry of dropped) {
+      logger?.log(`[openscout-runtime] mesh TLS stopped listening on https://${entry.address}:${deps.port}`);
+    }
 
     // mDNS only when we actually have non-loopback TLS up.
     if (nextListeners.some((entry) => !isLoopbackHost(entry.address))) {
@@ -365,20 +414,63 @@ export function createMeshBindController(deps: MeshBindControllerDeps): MeshBind
     return run;
   }
 
+  /**
+   * Mesh scope only: rebind when the interface addresses changed since the
+   * listeners opened. Scope and persistence are untouched.
+   */
+  async function refreshAddressesInternal(): Promise<MeshBindState> {
+    if (scope !== "mesh") return snapshot();
+    const addresses = resolveAddresses().filter((address) => address.trim().length > 0);
+    if (sameAddressSet(addresses, tlsListeners.map((entry) => entry.address))) return snapshot();
+    logger?.log(
+      `[openscout-runtime] mesh bind: interface addresses changed to [${addresses.join(", ")}]; rebinding`,
+    );
+    const state = await applyMesh();
+    await deps.onStateChange?.(state);
+    return state;
+  }
+
+  const addressPollMs = deps.addressPollMs ?? MESH_BIND_ADDRESS_POLL_MS;
+  let addressTimer: ReturnType<typeof setInterval> | undefined;
+
+  function watchAddresses(): void {
+    if (addressTimer || addressPollMs <= 0) return;
+    addressTimer = setInterval(() => {
+      enqueue(refreshAddressesInternal).catch((error) => {
+        logger?.warn(
+          `[openscout-runtime] mesh bind: address refresh failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    }, addressPollMs);
+    addressTimer.unref?.();
+  }
+
+  function unwatchAddresses(): void {
+    if (addressTimer) clearInterval(addressTimer);
+    addressTimer = undefined;
+  }
+
   return {
     getState: () => snapshot(),
     hasNonLoopbackListener: () => snapshot().hasNonLoopbackListener,
     applyScope(next) {
       return enqueue(() => applyScopeInternal(next));
     },
+    refreshAddresses() {
+      return enqueue(refreshAddressesInternal);
+    },
     start(initialScope) {
       return enqueue(async () => {
         if (started) return snapshot();
         started = true;
+        watchAddresses();
         return applyScopeInternal(initialScope);
       });
     },
     stop() {
+      unwatchAddresses();
       return enqueue(async () => {
         await closeAllTls();
         stopMdns();
