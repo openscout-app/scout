@@ -196,7 +196,8 @@ import {
   ObservedSessionReducer,
   subscribeObservedSessionReducer,
 } from "./observed-session-reducer.js";
-import { replacePersistedActiveObservedSessionSeeds } from "./tail/service.js";
+import { replacePersistedActiveObservedSessionSeeds, tailMemoryStats } from "./tail/service.js";
+import { memoryGuardLimits } from "./memory-guard.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
@@ -434,10 +435,13 @@ const nodeName = process.env.OPENSCOUT_NODE_NAME ?? hostname();
 const tailnetName = process.env.TAILSCALE_TAILNET ?? undefined;
 const brokerSocketPath = process.env.OPENSCOUT_BROKER_SOCKET_PATH
   ?? resolveBrokerServiceConfig().brokerSocketPath;
-// Health is a cache read on its own thread: runtime work never delays it.
+// Health is a cache read on its own thread: runtime work never delays it. The same thread guards memory: over 3 GB
+// it notes what the runtime holds, over 4 GB it notes it once more and stops the runtime for a fresh start.
 const healthResponder = new BrokerHealthResponder({
   socketPath: brokerHealthSocketPath(brokerSocketPath),
   log: (message) => console.warn(`[openscout-runtime] ${message}`),
+  memory: { dir: resolveOpenScoutSupportPaths().brokerLogsDirectory, ...memoryGuardLimits("runtime") },
+  memoryProbes: { tail: () => tailMemoryStats() },
 });
 let nodeId = process.env.OPENSCOUT_NODE_ID?.trim() ?? "";
 const tailnetWebHosts = readTailscaleSelfWebHostsSync();

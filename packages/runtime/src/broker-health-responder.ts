@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { basename, dirname, join } from "node:path";
+import { heapObjectTypes, memoryUsageMb, runMemoryProbes } from "./memory-guard.js";
 
 /** Something that fell behind. Health stays up; the flag says what and since when. */
 export type BrokerHealthFlag = {
@@ -20,7 +21,23 @@ export type BrokerHealthResponderWorkerData = {
   pid: number;
   startedAt: number;
   busyAfterMs: number;
+  /** The memory guard's limits and snapshot folder (memory-guard.ts); absent, the guard is off. */
+  memory?: BrokerMemoryGuardOptions;
 };
+
+export type BrokerMemoryGuardOptions = {
+  dir: string;
+  softBytes: number;
+  hardBytes: number;
+  intervalMs?: number;
+  /** after SIGTERM, how long the main thread has to stop before SIGKILL */
+  graceMs?: number;
+};
+
+/** Worker to main thread: the guard took a snapshot, so the main thread adds what it holds. */
+export type BrokerHealthResponderWorkerMessage =
+  | { type: "listening" }
+  | { type: "memory"; reason: "soft" | "hard-exit" | "hard-held"; at: string };
 
 /** The health socket sits beside the runtime socket: `broker.sock` -> `broker-health.sock`. */
 export function brokerHealthSocketPath(brokerSocketPath: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -51,6 +68,9 @@ export class BrokerHealthResponder {
     now?: () => number;
     log?: (message: string) => void;
     workerUrl?: URL;
+    memory?: BrokerMemoryGuardOptions;
+    /** what the main thread adds to a memory snapshot: named reports such as cache sizes */
+    memoryProbes?: Record<string, () => unknown>;
   }) {}
 
   get socketPath(): string { return this.options.socketPath; }
@@ -69,8 +89,12 @@ export class BrokerHealthResponder {
       pid: process.pid,
       startedAt: now,
       busyAfterMs: this.options.busyAfterMs ?? 1_000,
+      ...(this.options.memory ? { memory: this.options.memory } : {}),
     };
     const worker = new Worker(url, { workerData });
+    worker.on("message", (message: BrokerHealthResponderWorkerMessage) => {
+      if (message?.type === "memory") this.#memoryDetail(message);
+    });
     this.#worker = worker;
     worker.unref();
     return new Promise((resolve, reject) => {
@@ -117,6 +141,19 @@ export class BrokerHealthResponder {
     if (!worker) return;
     worker.postMessage({ type: "stopping" } satisfies BrokerHealthResponderMessage);
     await worker.terminate().catch(() => undefined);
+  }
+
+  /** The main thread's half of a memory snapshot: its heap's object types and its probes, logged beside the worker's line. */
+  #memoryDetail(message: Extract<BrokerHealthResponderWorkerMessage, { type: "memory" }>): void {
+    const detail = {
+      reason: message.reason,
+      snapshotAt: message.at,
+      at: new Date(this.#now()).toISOString(),
+      ...memoryUsageMb(),
+      jsc: heapObjectTypes(),
+      probes: runMemoryProbes(this.options.memoryProbes),
+    };
+    (this.options.log ?? ((line: string) => console.warn(line)))(`[memory-guard] runtime detail ${JSON.stringify(detail)}`);
   }
 
   #postFlags(): void {
