@@ -29,10 +29,13 @@ use std::{
 /// Set on scout-base, inherited by every Scout process under it: the folder a
 /// process registers in and writes its snapshots to.
 pub const SNAPSHOT_DIR_ENV: &str = "OPENSCOUT_MEMORY_SNAPSHOT_DIR";
+/// The file name, in the OpenScout home, that sets tripwires by role.
+pub const TRIPWIRES_FILE: &str = "memory-tripwires.json";
 const MB: u64 = 1024 * 1024;
 const SNAPSHOT_EVERY: Duration = Duration::from_secs(60);
-const STOP_AFTER_SNAPSHOT: Duration = Duration::from_secs(3);
-const KILL_AFTER_STOP: Duration = Duration::from_secs(20);
+const STOP_AFTER_SNAPSHOT: Duration = Duration::from_secs(2);
+const KILL_AFTER_STOP: Duration = Duration::from_secs(10);
+const KILL_AFTER_STOP_CRITICAL: Duration = Duration::from_secs(2);
 const STOP_WINDOW: Duration = Duration::from_secs(30 * 60);
 const STOPS_PER_WINDOW: usize = 2;
 const SAMPLE_NORMAL: Duration = Duration::from_secs(5);
@@ -61,26 +64,79 @@ impl Pressure {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    pub soft: u64,
-    pub hard: u64,
+/// The size each kind of process is never expected to reach. Crossing it
+/// means something is wrong, so the process is recorded and stopped.
+///
+/// Defaults sit about four times above what each process holds at normal
+/// load. `memory-tripwires.json` in the OpenScout home sets a role's tripwire
+/// in MB (`{"scout-web": 3072}`, `"default"` for any other role); an env var
+/// `OPENSCOUT_MEMORY_TRIPWIRE_<ROLE>_MB` overrides the file. 0 turns one off.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tripwires {
+    file: HashMap<String, u64>,
+    env: HashMap<String, u64>,
 }
 
-impl Limits {
-    /// `OPENSCOUT_MEMORY_SOFT_MB` and `OPENSCOUT_MEMORY_HARD_MB` (3072 and
-    /// 4096 by default) apply to each Scout process; 0 turns a limit off.
-    pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Self {
-        let mb = |name: &str, fallback: u64| {
-            get(name)
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .unwrap_or(fallback)
-                * MB
-        };
-        Limits {
-            soft: mb("OPENSCOUT_MEMORY_SOFT_MB", 3072),
-            hard: mb("OPENSCOUT_MEMORY_HARD_MB", 4096),
+impl Tripwires {
+    pub fn new(file_json: Option<&str>, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        let file = file_json
+            .and_then(|text| serde_json::from_str::<HashMap<String, serde_json::Value>>(text).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(role, mb)| Some((role, mb.as_u64()?)))
+            .collect();
+        let env = env
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("OPENSCOUT_MEMORY_TRIPWIRE_"))
+            .filter_map(|(name, mb)| Some((name, mb.trim().parse::<u64>().ok()?)))
+            .collect();
+        Tripwires { file, env }
+    }
+
+    pub fn env_name(role: &str) -> String {
+        let key: String = role
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("OPENSCOUT_MEMORY_TRIPWIRE_{key}_MB")
+    }
+
+    fn default_mb(role: &str) -> u64 {
+        match role {
+            "scout-web" | "scout-broker" => 2048,
+            _ if role.starts_with("scout") => 512,
+            _ => 1024,
         }
+    }
+
+    /// The tripwire in MB for a role, 0 when it is off.
+    pub fn mb(&self, role: &str) -> u64 {
+        self.env
+            .get(&Self::env_name(role))
+            .or_else(|| self.file.get(role))
+            .or_else(|| self.env.get("OPENSCOUT_MEMORY_TRIPWIRE_DEFAULT_MB"))
+            .or_else(|| self.file.get("default"))
+            .copied()
+            .unwrap_or_else(|| Self::default_mb(role))
+    }
+
+    fn over(&self, proc: &Proc) -> bool {
+        let mb = self.mb(&proc.role);
+        mb > 0 && proc.footprint >= mb * MB
+    }
+
+    /// Each role in the tree with its tripwire, for the state file.
+    pub fn table(&self, procs: &[Proc]) -> std::collections::BTreeMap<String, u64> {
+        procs
+            .iter()
+            .map(|p| (p.role.clone(), self.mb(&p.role)))
+            .collect()
     }
 }
 
@@ -100,8 +156,7 @@ pub struct Proc {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {
-    Soft,
-    Hard,
+    Tripwire,
     PressureWarn,
     PressureCritical,
 }
@@ -121,15 +176,16 @@ pub enum Decision {
         role: String,
         reason: Reason,
     },
-    /// Still running after `KILL_AFTER_STOP`: SIGKILL.
+    /// Still running after its grace: SIGKILL.
     Kill {
         pid: i32,
         role: String,
         reason: Reason,
     },
-    /// Over a limit, but this role was stopped twice in 30 minutes: keep it
-    /// running and keep recording, so a load that regrows at once does not
-    /// become a restart loop.
+    /// Over its tripwire, but this role was stopped twice in 30 minutes: keep
+    /// it running and keep recording, so a load that regrows at once does not
+    /// become a restart loop. Never at critical pressure, where the host's
+    /// survival comes first.
     Held {
         pid: i32,
         role: String,
@@ -137,21 +193,32 @@ pub enum Decision {
     },
 }
 
+impl Decision {
+    pub fn target(&self) -> (i32, &str, Reason) {
+        match self {
+            Decision::Snapshot { pid, role, reason }
+            | Decision::Stop { pid, role, reason }
+            | Decision::Kill { pid, role, reason }
+            | Decision::Held { pid, role, reason } => (*pid, role, *reason),
+        }
+    }
+}
+
 /// What to do about each process at this pressure, given what it did before.
 /// Pure: the watcher thread feeds it samples, the tests feed it numbers.
 pub struct Policy {
-    limits: Limits,
     root: i32,
     last_snapshot: HashMap<i32, Instant>,
-    pending: HashMap<i32, (Instant, Reason)>,
-    stopping: HashMap<i32, (Instant, Reason)>,
+    /// pid -> when to stop it, after its snapshot
+    pending: HashMap<i32, Instant>,
+    /// pid -> when to kill it if it is still there
+    stopping: HashMap<i32, Instant>,
     stops: HashMap<String, VecDeque<Instant>>,
 }
 
 impl Policy {
-    pub fn new(limits: Limits, root: i32) -> Self {
+    pub fn new(root: i32) -> Self {
         Policy {
-            limits,
             root,
             last_snapshot: HashMap::new(),
             pending: HashMap::new(),
@@ -160,16 +227,22 @@ impl Policy {
         }
     }
 
-    /// Something is in progress or over a limit, so sample quickly.
-    pub fn busy(&self, procs: &[Proc]) -> bool {
+    /// Something is in progress or over a tripwire, so sample quickly.
+    pub fn busy(&self, procs: &[Proc], tripwires: &Tripwires) -> bool {
         !self.pending.is_empty()
             || !self.stopping.is_empty()
             || procs
                 .iter()
-                .any(|p| self.limits.soft > 0 && p.footprint >= self.limits.soft)
+                .any(|p| p.pid != self.root && tripwires.over(p))
     }
 
-    pub fn decide(&mut self, now: Instant, pressure: Pressure, procs: &[Proc]) -> Vec<Decision> {
+    pub fn decide(
+        &mut self,
+        now: Instant,
+        pressure: Pressure,
+        procs: &[Proc],
+        tripwires: &Tripwires,
+    ) -> Vec<Decision> {
         let live: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
         self.last_snapshot.retain(|pid, _| live.contains_key(pid));
         self.pending.retain(|pid, _| live.contains_key(pid));
@@ -182,71 +255,63 @@ impl Policy {
                 times.pop_front();
             }
         }
-
+        let critical = pressure == Pressure::Critical;
         let mut out = Vec::new();
         // scoutd itself is never a target.
         let mut candidates: Vec<&Proc> = procs.iter().filter(|p| p.pid != self.root).collect();
         candidates.sort_by(|a, b| b.footprint.cmp(&a.footprint));
 
         // A stop that was sent and did not take.
-        for (pid, (at, reason)) in self.stopping.iter_mut() {
-            if now.duration_since(*at) >= KILL_AFTER_STOP {
+        for (pid, kill_at) in self.stopping.iter_mut() {
+            if now >= *kill_at {
                 out.push(Decision::Kill {
                     pid: *pid,
                     role: live[pid].role.clone(),
-                    reason: *reason,
+                    reason: Reason::Tripwire,
                 });
-                *at = now;
+                *kill_at = now + KILL_AFTER_STOP;
             }
         }
 
-        // A snapshot was asked for; now stop it, unless it shrank back.
-        let due: Vec<(i32, Reason)> = self
+        // A snapshot was asked for; now stop it, unless it shrank back under.
+        let due: Vec<i32> = self
             .pending
             .iter()
-            .filter(|(_, (at, _))| now >= *at)
-            .map(|(pid, (_, reason))| (*pid, *reason))
+            .filter(|(_, at)| now >= **at)
+            .map(|(pid, _)| *pid)
             .collect();
-        for (pid, reason) in due {
+        for pid in due {
             self.pending.remove(&pid);
             let proc = live[&pid];
-            if self.limits.soft > 0 && proc.footprint < self.limits.soft {
+            if !tripwires.over(proc) {
                 continue;
             }
             self.stops
                 .entry(proc.role.clone())
                 .or_default()
                 .push_back(now);
-            self.stopping.insert(pid, (now, reason));
+            let grace = if critical {
+                KILL_AFTER_STOP_CRITICAL
+            } else {
+                KILL_AFTER_STOP
+            };
+            self.stopping.insert(pid, now + grace);
             out.push(Decision::Stop {
                 pid,
                 role: proc.role.clone(),
-                reason,
+                reason: Reason::Tripwire,
             });
         }
 
-        let largest = candidates.first().copied();
         for proc in &candidates {
-            let over_hard = self.limits.hard > 0 && proc.footprint >= self.limits.hard;
-            let over_soft = self.limits.soft > 0 && proc.footprint >= self.limits.soft;
-            let critical_target = pressure == Pressure::Critical
-                && over_soft
-                && largest.is_some_and(|l| l.pid == proc.pid);
-            if over_hard || critical_target {
-                let reason = if over_hard {
-                    Reason::Hard
-                } else {
-                    Reason::PressureCritical
-                };
-                self.stop_or_hold(now, proc, reason, &mut out);
-            } else if over_soft {
-                self.snapshot(now, proc, Reason::Soft, false, &mut out);
+            if tripwires.over(proc) {
+                self.trip(now, proc, critical, &mut out);
             }
         }
 
-        // Under pressure, note the largest even when it is under its limits:
+        // Under pressure, note the largest even when it is under its tripwire:
         // the record shows who held the host.
-        if let Some(proc) = largest {
+        if let Some(proc) = candidates.first() {
             let reason = match pressure {
                 Pressure::Warn => Some(Reason::PressureWarn),
                 Pressure::Critical => Some(Reason::PressureCritical),
@@ -259,20 +324,19 @@ impl Policy {
         out
     }
 
-    fn stop_or_hold(&mut self, now: Instant, proc: &Proc, reason: Reason, out: &mut Vec<Decision>) {
+    fn trip(&mut self, now: Instant, proc: &Proc, critical: bool, out: &mut Vec<Decision>) {
         if self.pending.contains_key(&proc.pid) || self.stopping.contains_key(&proc.pid) {
             return;
         }
         let recent = self.stops.get(&proc.role).map_or(0, VecDeque::len);
-        if recent < STOPS_PER_WINDOW {
-            self.snapshot(now, proc, reason, true, out);
-            self.pending
-                .insert(proc.pid, (now + STOP_AFTER_SNAPSHOT, reason));
-        } else if self.snapshot(now, proc, reason, false, out) {
+        if recent < STOPS_PER_WINDOW || critical {
+            self.snapshot(now, proc, Reason::Tripwire, true, out);
+            self.pending.insert(proc.pid, now + STOP_AFTER_SNAPSHOT);
+        } else if self.snapshot(now, proc, Reason::Tripwire, false, out) {
             out.push(Decision::Held {
                 pid: proc.pid,
                 role: proc.role.clone(),
-                reason,
+                reason: Reason::Tripwire,
             });
         }
     }
@@ -300,6 +364,44 @@ impl Policy {
             reason,
         });
         true
+    }
+}
+
+/// The log line for a decision: what tripped, what happens next, and how to
+/// change it. Written for whoever reads the log, person or agent.
+pub fn explain(
+    decision: &Decision,
+    footprint_mb: u64,
+    tripwire_mb: u64,
+    tripwires_path: &Path,
+    record: Option<&Path>,
+) -> String {
+    let (pid, role, reason) = decision.target();
+    let saved = record.map_or(String::new(), |p| format!(" Record: {}.", p.display()));
+    let change = format!(
+        "To change it, set \"{role}\": <MB> in {} or {}; 0 turns it off.",
+        tripwires_path.display(),
+        Tripwires::env_name(role)
+    );
+    let over =
+        format!("{role} (pid {pid}) is at {footprint_mb} MB, over its {tripwire_mb} MB tripwire.");
+    match decision {
+        Decision::Snapshot { .. } if reason == Reason::Tripwire => format!(
+            "[scoutd] memory tripwire: {over} Recording it, then stopping it; its parent restarts it.{saved} {change}"
+        ),
+        Decision::Snapshot { .. } => format!(
+            "[scoutd] memory pressure {}: the largest Scout process is {role} (pid {pid}) at {footprint_mb} MB (tripwire {tripwire_mb} MB). Recorded, not stopped.{saved}",
+            if reason == Reason::PressureCritical { "critical" } else { "warn" }
+        ),
+        Decision::Stop { .. } => format!(
+            "[scoutd] memory tripwire: stopping {role} (pid {pid}) at {footprint_mb} MB with SIGTERM."
+        ),
+        Decision::Kill { .. } => format!(
+            "[scoutd] memory tripwire: {role} (pid {pid}) did not stop; SIGKILL at {footprint_mb} MB."
+        ),
+        Decision::Held { .. } => format!(
+            "[scoutd] memory tripwire: {over} It was already stopped twice in 30 minutes, so it keeps running; recording once a minute. {change}"
+        ),
     }
 }
 
@@ -621,7 +723,10 @@ pub struct WatchConfig {
     pub snapshot_dir: PathBuf,
     /// The latest reading, rewritten each sample, for atop and doctor.
     pub state_path: PathBuf,
-    pub limits: Limits,
+    /// `memory-tripwires.json`; read again whenever it changes.
+    pub tripwires_path: PathBuf,
+    /// The env the tripwire overrides come from.
+    pub env: Vec<(String, String)>,
 }
 
 pub struct Watcher {
@@ -726,6 +831,8 @@ struct Recent {
     #[serde(flatten)]
     decision: Decision,
     footprint_mb: u64,
+    tripwire_mb: u64,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -733,13 +840,65 @@ struct Recent {
 struct State<'a> {
     at_ms: u128,
     host: &'a Host,
-    limits_mb: (u64, u64),
+    /// Each role in the tree and its tripwire in MB (0 = off).
+    tripwires_mb: std::collections::BTreeMap<String, u64>,
+    tripwires_file: &'a Path,
     processes: &'a [Proc],
     recent: &'a VecDeque<Recent>,
 }
 
+/// The tripwire file, read again only when its modified time changes.
+struct TripwireSource {
+    path: PathBuf,
+    env: Vec<(String, String)>,
+    modified: Option<SystemTime>,
+    current: Tripwires,
+}
+
+impl TripwireSource {
+    fn new(path: PathBuf, env: Vec<(String, String)>) -> Self {
+        let mut source = TripwireSource {
+            path,
+            env,
+            modified: None,
+            current: Tripwires::default(),
+        };
+        source.load();
+        source
+    }
+
+    fn load(&mut self) {
+        let text = fs::read_to_string(&self.path).ok();
+        if let Some(text) = text.as_deref() {
+            if serde_json::from_str::<serde_json::Value>(text).is_err() {
+                eprintln!(
+                    "[scoutd] memory watch: {} is not valid JSON; using the default tripwires",
+                    self.path.display()
+                );
+            }
+        }
+        self.current = Tripwires::new(text.as_deref(), self.env.clone());
+    }
+
+    fn get(&mut self) -> &Tripwires {
+        let modified = fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        if modified != self.modified {
+            self.modified = modified;
+            self.load();
+            if modified.is_some() {
+                eprintln!(
+                    "[scoutd] memory watch: read tripwires from {}",
+                    self.path.display()
+                );
+            }
+        }
+        &self.current
+    }
+}
+
 fn run(kq: i32, config: WatchConfig, decisions: Sender<Decision>) {
-    let mut policy = Policy::new(config.limits, config.root);
+    let mut policy = Policy::new(config.root);
+    let mut tripwires = TripwireSource::new(config.tripwires_path.clone(), config.env.clone());
     let mut roles = HashMap::new();
     let mut watched: HashMap<i32, (String, u64)> = HashMap::new();
     let mut recent: VecDeque<Recent> = VecDeque::new();
@@ -768,7 +927,10 @@ fn run(kq: i32, config: WatchConfig, decisions: Sender<Decision>) {
                 (libc::EVFILT_PROC, ident) => {
                     let pid = ident as i32;
                     if let Some((role, footprint)) = watched.remove(&pid) {
-                        eprintln!("[scoutd] memory watch: {role} (pid {pid}) exited; last footprint {} MB", footprint / MB);
+                        eprintln!(
+                            "[scoutd] memory watch: {role} (pid {pid}) exited; last footprint {} MB",
+                            footprint / MB
+                        );
                     }
                     let _ = fs::remove_file(registration(&config.snapshot_dir, pid));
                 }
@@ -789,40 +951,60 @@ fn run(kq: i32, config: WatchConfig, decisions: Sender<Decision>) {
             );
             last_pressure = host.pressure;
         }
+        let tripwires = tripwires.get().clone();
         let now = Instant::now();
-        let made = policy.decide(now, host.pressure, &procs);
+        let made = policy.decide(now, host.pressure, &procs, &tripwires);
         let mut top: Option<Vec<Proc>> = None;
         for decision in made {
-            let (pid, role) = match &decision {
-                Decision::Snapshot { pid, role, .. }
-                | Decision::Stop { pid, role, .. }
-                | Decision::Kill { pid, role, .. }
-                | Decision::Held { pid, role, .. } => (*pid, role.clone()),
-            };
-            let footprint = procs
+            let (pid, role, reason) = decision.target();
+            let role = role.to_string();
+            let footprint_mb = procs
                 .iter()
                 .find(|p| p.pid == pid)
-                .map_or(0, |p| p.footprint);
-            eprintln!(
-                "[scoutd] memory watch: {} {role} (pid {pid}) at {} MB",
-                describe(&decision),
-                footprint / MB
-            );
-            match &decision {
-                Decision::Snapshot { reason, .. } => {
+                .map_or(0, |p| p.footprint / MB);
+            let tripwire_mb = tripwires.mb(&role);
+            let record = match &decision {
+                Decision::Snapshot { .. } => {
                     let top = top.get_or_insert_with(|| host_top(HOST_TOP));
-                    write_record(&config.snapshot_dir, &decision, *reason, &host, &procs, top);
+                    let message = explain(
+                        &decision,
+                        footprint_mb,
+                        tripwire_mb,
+                        &config.tripwires_path,
+                        None,
+                    );
+                    let path = write_record(
+                        &config.snapshot_dir,
+                        &decision,
+                        reason,
+                        &message,
+                        &host,
+                        &procs,
+                        top,
+                    );
                     ask_for_snapshot(&config.snapshot_dir, pid, &procs);
+                    path
                 }
                 Decision::Stop { .. } | Decision::Kill { .. } => {
                     let _ = decisions.send(decision.clone());
+                    None
                 }
-                Decision::Held { .. } => {}
-            }
+                Decision::Held { .. } => None,
+            };
+            let message = explain(
+                &decision,
+                footprint_mb,
+                tripwire_mb,
+                &config.tripwires_path,
+                record.as_deref(),
+            );
+            eprintln!("{message}");
             recent.push_back(Recent {
                 at_ms: epoch_ms(),
                 decision,
-                footprint_mb: footprint / MB,
+                footprint_mb,
+                tripwire_mb,
+                message,
             });
             while recent.len() > RECENT_KEPT {
                 recent.pop_front();
@@ -833,31 +1015,18 @@ fn run(kq: i32, config: WatchConfig, decisions: Sender<Decision>) {
             &State {
                 at_ms: epoch_ms(),
                 host: &host,
-                limits_mb: (config.limits.soft / MB, config.limits.hard / MB),
+                tripwires_mb: tripwires.table(&procs),
+                tripwires_file: &config.tripwires_path,
                 processes: &procs,
                 recent: &recent,
             },
         );
-        interval = if host.pressure != Pressure::Normal || policy.busy(&procs) {
+        interval = if host.pressure != Pressure::Normal || policy.busy(&procs, &tripwires) {
             SAMPLE_PRESSED
         } else {
             SAMPLE_NORMAL
         };
     }
-}
-
-fn describe(decision: &Decision) -> String {
-    let (verb, reason) = match decision {
-        Decision::Snapshot { reason, .. } => ("snapshot", reason),
-        Decision::Stop { reason, .. } => ("stopping", reason),
-        Decision::Kill { reason, .. } => ("killing", reason),
-        Decision::Held { reason, .. } => ("holding (stopped twice in 30 min)", reason),
-    };
-    let reason = serde_json::to_value(reason)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default();
-    format!("{verb} [{reason}]")
 }
 
 /// Exit events for the long-lived Scout processes, so a death carries its size.
@@ -895,10 +1064,11 @@ fn write_record(
     dir: &Path,
     decision: &Decision,
     reason: Reason,
+    message: &str,
     host: &Host,
     procs: &[Proc],
     top: &[Proc],
-) {
+) -> Option<PathBuf> {
     let reason = serde_json::to_value(reason)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -906,16 +1076,18 @@ fn write_record(
     let at = epoch_ms();
     let record = serde_json::json!({
         "atMs": at,
+        "message": message,
         "decision": decision,
         "host": host,
         "tree": procs,
         "hostTop": top,
     });
     let path = dir.join(format!("scoutd-{at}-{reason}.json"));
-    if let Ok(text) = serde_json::to_string_pretty(&record) {
-        let _ = fs::write(path, text);
-    }
+    let written = serde_json::to_string_pretty(&record)
+        .ok()
+        .and_then(|text| fs::write(&path, text).ok());
     prune(dir);
+    written.map(|_| path)
 }
 
 /// Keep the newest files: ours and the ones the processes wrote.
@@ -949,24 +1121,19 @@ fn write_state(path: &Path, state: &State) {
 mod tests {
     use super::*;
 
-    const GB: u64 = 1024 * MB;
-    fn proc(pid: i32, role: &str, gb: f64) -> Proc {
-        let footprint = (gb * GB as f64) as u64;
+    fn proc(pid: i32, role: &str, mb: u64) -> Proc {
         Proc {
             pid,
             ppid: 1,
             role: role.into(),
-            footprint_mb: footprint / MB,
+            footprint_mb: mb,
             resident_mb: 0,
             cpu_ms: 0,
-            footprint,
+            footprint: mb * MB,
         }
     }
-    fn limits() -> Limits {
-        Limits {
-            soft: 3 * GB,
-            hard: 4 * GB,
-        }
+    fn defaults() -> Tripwires {
+        Tripwires::default()
     }
     fn kinds(out: &[Decision]) -> Vec<&'static str> {
         out.iter()
@@ -980,179 +1147,237 @@ mod tests {
     }
 
     #[test]
-    fn under_its_limits_at_normal_pressure_nothing_happens() {
-        let mut policy = Policy::new(limits(), 1);
+    fn tripwires_default_by_role_and_follow_the_file_then_the_env() {
+        let t = defaults();
+        assert_eq!(t.mb("scout-web"), 2048);
+        assert_eq!(t.mb("scout-broker"), 2048);
+        assert_eq!(t.mb("scout-base"), 512);
+        assert_eq!(t.mb("scoutd probes"), 512);
+        assert_eq!(t.mb("bun pairing-controller.ts"), 1024);
+        let file = r#"{"scout-web": 3072, "default": 700, "scout-base": "lots"}"#;
+        let t = Tripwires::new(Some(file), Vec::new());
+        assert_eq!(t.mb("scout-web"), 3072);
+        assert_eq!(t.mb("bun x.ts"), 700);
+        assert_eq!(t.mb("scout-base"), 700);
+        let env = vec![
+            ("OPENSCOUT_MEMORY_TRIPWIRE_SCOUT_WEB_MB".into(), "0".into()),
+            ("PATH".into(), "/bin".into()),
+        ];
+        let t = Tripwires::new(Some(file), env);
+        assert_eq!(t.mb("scout-web"), 0);
+        assert_eq!(
+            Tripwires::env_name("scoutd probes"),
+            "OPENSCOUT_MEMORY_TRIPWIRE_SCOUTD_PROBES_MB"
+        );
+        assert_eq!(Tripwires::new(Some("not json"), Vec::new()), defaults());
+    }
+
+    #[test]
+    fn under_its_tripwire_at_normal_pressure_nothing_happens() {
+        let mut policy = Policy::new(1);
+        let procs = [
+            proc(1, "scoutd", 5000),
+            proc(2, "scout-web", 2000),
+            proc(3, "scout-base", 400),
+        ];
         assert!(policy
-            .decide(
-                Instant::now(),
-                Pressure::Normal,
-                &[proc(1, "scoutd", 5.0), proc(2, "scout-web", 2.0)]
-            )
+            .decide(Instant::now(), Pressure::Normal, &procs, &defaults())
             .is_empty());
     }
 
     #[test]
-    fn over_soft_it_snapshots_at_most_once_a_minute() {
-        let mut policy = Policy::new(limits(), 1);
+    fn over_its_tripwire_it_records_then_stops_then_kills_if_it_lingers() {
+        let mut policy = Policy::new(1);
         let t = Instant::now();
-        let procs = [proc(2, "scout-web", 3.2)];
+        let procs = [proc(2, "scout-broker", 2100)];
+        let tw = defaults();
         assert_eq!(
-            kinds(&policy.decide(t, Pressure::Normal, &procs)),
+            kinds(&policy.decide(t, Pressure::Normal, &procs, &tw)),
             ["snapshot"]
         );
         assert!(policy
-            .decide(t + Duration::from_secs(30), Pressure::Normal, &procs)
+            .decide(t + Duration::from_secs(1), Pressure::Normal, &procs, &tw)
             .is_empty());
         assert_eq!(
-            kinds(&policy.decide(t + Duration::from_secs(61), Pressure::Normal, &procs)),
-            ["snapshot"]
-        );
-    }
-
-    #[test]
-    fn over_hard_it_snapshots_then_stops_then_kills_if_it_lingers() {
-        let mut policy = Policy::new(limits(), 1);
-        let t = Instant::now();
-        let procs = [proc(2, "scout-broker", 4.5)];
-        assert_eq!(
-            kinds(&policy.decide(t, Pressure::Normal, &procs)),
-            ["snapshot"]
-        );
-        assert!(policy
-            .decide(t + Duration::from_secs(1), Pressure::Normal, &procs)
-            .is_empty());
-        assert_eq!(
-            kinds(&policy.decide(t + STOP_AFTER_SNAPSHOT, Pressure::Normal, &procs)),
+            kinds(&policy.decide(t + STOP_AFTER_SNAPSHOT, Pressure::Normal, &procs, &tw)),
             ["stop"]
         );
         assert!(policy
-            .decide(t + Duration::from_secs(10), Pressure::Normal, &procs)
+            .decide(t + Duration::from_secs(5), Pressure::Normal, &procs, &tw)
             .is_empty());
+        let kill_at = t + STOP_AFTER_SNAPSHOT + KILL_AFTER_STOP;
         assert_eq!(
-            kinds(&policy.decide(
-                t + STOP_AFTER_SNAPSHOT + KILL_AFTER_STOP,
-                Pressure::Normal,
-                &procs
-            )),
+            kinds(&policy.decide(kill_at, Pressure::Normal, &procs, &tw)),
             ["kill"]
         );
     }
 
     #[test]
+    fn a_small_process_trips_at_its_own_smaller_tripwire() {
+        let mut policy = Policy::new(1);
+        let procs = [proc(2, "scout-listening", 600), proc(3, "scout-web", 600)];
+        assert_eq!(
+            policy.decide(Instant::now(), Pressure::Normal, &procs, &defaults()),
+            [Decision::Snapshot {
+                pid: 2,
+                role: "scout-listening".into(),
+                reason: Reason::Tripwire
+            }]
+        );
+    }
+
+    #[test]
     fn a_process_that_shrinks_back_before_the_stop_is_left_alone() {
-        let mut policy = Policy::new(limits(), 1);
+        let mut policy = Policy::new(1);
         let t = Instant::now();
-        policy.decide(t, Pressure::Normal, &[proc(2, "scout-web", 4.5)]);
+        policy.decide(
+            t,
+            Pressure::Normal,
+            &[proc(2, "scout-web", 2100)],
+            &defaults(),
+        );
         assert!(policy
             .decide(
                 t + STOP_AFTER_SNAPSHOT,
                 Pressure::Normal,
-                &[proc(2, "scout-web", 1.0)]
+                &[proc(2, "scout-web", 900)],
+                &defaults()
             )
             .is_empty());
     }
 
+    /// Two stops of one role in the window; returns the time after them.
+    fn stop_twice(policy: &mut Policy, mut t: Instant) -> Instant {
+        for pid in [2, 3] {
+            let procs = [proc(pid, "scout-web", 2100)];
+            policy.decide(t, Pressure::Normal, &procs, &defaults());
+            t += STOP_AFTER_SNAPSHOT;
+            assert_eq!(
+                kinds(&policy.decide(t, Pressure::Normal, &procs, &defaults())),
+                ["stop"]
+            );
+            t += Duration::from_secs(1);
+            policy.decide(t, Pressure::Normal, &[], &defaults()); // it exited; its parent restarted it
+        }
+        t
+    }
+
     #[test]
     fn after_two_stops_in_the_window_a_role_is_held_not_stopped() {
-        let mut policy = Policy::new(limits(), 1);
-        let mut t = Instant::now();
-        for pid in [2, 3] {
-            let procs = [proc(pid, "scout-web", 4.5)];
-            policy.decide(t, Pressure::Normal, &procs);
-            t += STOP_AFTER_SNAPSHOT;
-            assert_eq!(kinds(&policy.decide(t, Pressure::Normal, &procs)), ["stop"]);
-            t += Duration::from_secs(1);
-            policy.decide(t, Pressure::Normal, &[]); // it exited; its parent restarted it
-        }
-        let procs = [proc(4, "scout-web", 4.5)];
+        let mut policy = Policy::new(1);
+        let t = stop_twice(&mut policy, Instant::now());
+        let procs = [proc(4, "scout-web", 2100)];
         assert_eq!(
-            kinds(&policy.decide(t, Pressure::Normal, &procs)),
+            kinds(&policy.decide(t, Pressure::Normal, &procs, &defaults())),
             ["snapshot", "held"]
         );
         assert!(policy
-            .decide(t + Duration::from_secs(10), Pressure::Normal, &procs)
+            .decide(
+                t + Duration::from_secs(10),
+                Pressure::Normal,
+                &procs,
+                &defaults()
+            )
             .is_empty());
-        // Once the window passes, stopping is allowed again.
         let later = t + STOP_WINDOW;
         assert_eq!(
-            kinds(&policy.decide(later, Pressure::Normal, &procs)),
+            kinds(&policy.decide(later, Pressure::Normal, &procs, &defaults())),
             ["snapshot"]
         );
         assert_eq!(
-            kinds(&policy.decide(later + STOP_AFTER_SNAPSHOT, Pressure::Normal, &procs)),
+            kinds(&policy.decide(
+                later + STOP_AFTER_SNAPSHOT,
+                Pressure::Normal,
+                &procs,
+                &defaults()
+            )),
             ["stop"]
         );
     }
 
     #[test]
-    fn critical_pressure_stops_only_the_largest_and_only_over_soft() {
-        let mut policy = Policy::new(limits(), 1);
-        let t = Instant::now();
-        let small = [proc(2, "scout-web", 2.0), proc(3, "scout-broker", 1.0)];
+    fn at_critical_pressure_a_held_role_is_stopped_anyway_and_killed_sooner() {
+        let mut policy = Policy::new(1);
+        let t = stop_twice(&mut policy, Instant::now());
+        let procs = [proc(4, "scout-web", 2100)];
         assert_eq!(
-            policy.decide(t, Pressure::Critical, &small),
+            kinds(&policy.decide(t, Pressure::Critical, &procs, &defaults())),
+            ["snapshot"]
+        );
+        let stop_at = t + STOP_AFTER_SNAPSHOT;
+        assert_eq!(
+            kinds(&policy.decide(stop_at, Pressure::Critical, &procs, &defaults())),
+            ["stop"]
+        );
+        let kill_at = stop_at + KILL_AFTER_STOP_CRITICAL;
+        assert_eq!(
+            kinds(&policy.decide(kill_at, Pressure::Critical, &procs, &defaults())),
+            ["kill"]
+        );
+    }
+
+    #[test]
+    fn under_pressure_the_largest_is_recorded_not_stopped() {
+        let mut policy = Policy::new(1);
+        let t = Instant::now();
+        let procs = [proc(2, "scout-web", 900), proc(3, "scout-broker", 400)];
+        assert_eq!(
+            policy.decide(t, Pressure::Critical, &procs, &defaults()),
             [Decision::Snapshot {
                 pid: 2,
                 role: "scout-web".into(),
                 reason: Reason::PressureCritical
             }]
         );
-        let mut policy = Policy::new(limits(), 1);
-        let big = [proc(2, "scout-web", 3.5), proc(3, "scout-broker", 3.2)];
-        let first = policy.decide(t, Pressure::Critical, &big);
-        assert_eq!(
-            first[0],
-            Decision::Snapshot {
-                pid: 2,
-                role: "scout-web".into(),
-                reason: Reason::PressureCritical
-            }
-        );
-        assert_eq!(
-            first[1],
-            Decision::Snapshot {
-                pid: 3,
-                role: "scout-broker".into(),
-                reason: Reason::Soft
-            }
-        );
-        let stops: Vec<_> = policy
-            .decide(t + STOP_AFTER_SNAPSHOT, Pressure::Critical, &big)
-            .into_iter()
-            .filter(|d| matches!(d, Decision::Stop { .. }))
-            .collect();
-        assert_eq!(
-            stops,
-            [Decision::Stop {
-                pid: 2,
-                role: "scout-web".into(),
-                reason: Reason::PressureCritical
-            }]
-        );
-    }
-
-    #[test]
-    fn scoutd_itself_is_never_a_target() {
-        let mut policy = Policy::new(limits(), 1);
         assert!(policy
             .decide(
-                Instant::now(),
+                t + STOP_AFTER_SNAPSHOT,
                 Pressure::Critical,
-                &[proc(1, "scoutd", 9.0)]
+                &procs,
+                &defaults()
             )
             .is_empty());
     }
 
     #[test]
-    fn limits_come_from_the_environment() {
-        assert_eq!(Limits::from_env(|_| None), limits());
-        let env = |name: &str| match name {
-            "OPENSCOUT_MEMORY_SOFT_MB" => Some("1024".to_string()),
-            "OPENSCOUT_MEMORY_HARD_MB" => Some("0".to_string()),
-            _ => None,
+    fn scoutd_itself_is_never_a_target() {
+        let mut policy = Policy::new(1);
+        assert!(policy
+            .decide(
+                Instant::now(),
+                Pressure::Critical,
+                &[proc(1, "scoutd", 9000)],
+                &defaults()
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn a_trip_explains_itself_and_how_to_change_it() {
+        let decision = Decision::Snapshot {
+            pid: 7,
+            role: "scout-web".into(),
+            reason: Reason::Tripwire,
         };
-        assert_eq!(Limits::from_env(env), Limits { soft: GB, hard: 0 });
-        assert_eq!(Limits::from_env(|_| Some("lots".into())), limits());
+        let line = explain(
+            &decision,
+            2100,
+            2048,
+            Path::new("/h/memory-tripwires.json"),
+            Some(Path::new("/l/r.json")),
+        );
+        assert!(line.contains("scout-web (pid 7) is at 2100 MB, over its 2048 MB tripwire"));
+        assert!(line.contains("Record: /l/r.json"));
+        assert!(line.contains("\"scout-web\": <MB> in /h/memory-tripwires.json"));
+        assert!(line.contains("OPENSCOUT_MEMORY_TRIPWIRE_SCOUT_WEB_MB"));
+        assert!(line.contains("0 turns it off"));
+        let held = Decision::Held {
+            pid: 7,
+            role: "scout-web".into(),
+            reason: Reason::Tripwire,
+        };
+        assert!(explain(&held, 2100, 2048, Path::new("/h/t.json"), None)
+            .contains("stopped twice in 30 minutes"));
     }
 
     #[test]
@@ -1192,48 +1417,58 @@ mod tests {
             .iter()
             .any(|p| p.pid == child.id() as i32 && p.role == "sleep"));
         assert!(!host_top(3).is_empty());
-        let host = host();
-        assert!(host.memory_mb.unwrap_or(0) > 0);
+        assert!(host().memory_mb.unwrap_or(0) > 0);
         child.kill().unwrap();
         let _ = child.wait();
     }
 
     #[test]
-    fn the_watcher_writes_its_state_and_stops_on_request() {
+    fn the_watcher_reads_the_tripwire_file_records_a_trip_and_stops_on_request() {
         let dir = std::env::temp_dir().join(format!("scoutd-memory-watch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let state_path = dir.join("memory-watch.json");
-        let watcher = Watcher::start(WatchConfig {
+        let tripwires_path = dir.join(TRIPWIRES_FILE);
+        // A child that holds 8 MB, against a 4 MB tripwire for its role.
+        fs::write(&tripwires_path, r#"{"perl": 4}"#).unwrap();
+        let mut child = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "my $x = 'a' x 8_000_000; sleep 10"])
+            .spawn()
+            .unwrap();
+        let mut watcher = Watcher::start(WatchConfig {
             root: std::process::id() as i32,
             snapshot_dir: dir.join("memory"),
             state_path: state_path.clone(),
-            limits: Limits { soft: 1, hard: 0 },
+            tripwires_path,
+            env: Vec::new(),
         })
         .unwrap();
-        // The test process itself is root, so never a target; give it a child over the 1-byte soft limit.
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg("10")
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while Instant::now() < deadline
-            && !fs::read_dir(dir.join("memory"))
+        let tripped = || {
+            fs::read_dir(dir.join("memory"))
                 .map(|d| {
                     d.flatten()
-                        .any(|e| e.file_name().to_string_lossy().ends_with("-soft.json"))
+                        .any(|e| e.file_name().to_string_lossy().ends_with("-tripwire.json"))
                 })
                 .unwrap_or(false)
-        {
-            thread::sleep(Duration::from_millis(100));
+        };
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && !tripped() {
+            thread::sleep(Duration::from_millis(50));
         }
+        assert!(tripped());
         let state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
-        assert!(state["processes"].as_array().unwrap().len() >= 2);
-        assert!(fs::read_dir(dir.join("memory"))
-            .unwrap()
-            .flatten()
-            .any(|e| e.file_name().to_string_lossy().ends_with("-soft.json")));
+        assert_eq!(state["tripwiresMb"]["perl"], 4);
+        // The stop comes to the supervisor side; this test carries it out itself.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut stop = None;
+        while Instant::now() < deadline && stop.is_none() {
+            stop = watcher
+                .poll()
+                .filter(|d| matches!(d, Decision::Stop { pid, .. } if *pid == child.id() as i32));
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(stop.is_some());
         watcher.stop();
         child.kill().unwrap();
         let _ = child.wait();

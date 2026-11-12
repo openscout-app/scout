@@ -993,7 +993,8 @@ fn supervise_service_inner(
             root: std::process::id() as i32,
             snapshot_dir: memory_snapshot_dir(config),
             state_path: config.runtime_directory.join("memory-watch.json"),
-            limits: memory_watch::Limits::from_env(env_nonempty),
+            tripwires_path: config.open_scout_home.join(memory_watch::TRIPWIRES_FILE),
+            env: env::vars().collect(),
         })
     };
     if !testing && health_worker.is_none() {
