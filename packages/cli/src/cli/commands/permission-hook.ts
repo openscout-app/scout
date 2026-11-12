@@ -28,10 +28,11 @@ type HookInput = {
   tool_name?: unknown;
   tool_input?: unknown;
   transcript_path?: unknown;
+  permission_suggestions?: unknown;
 };
 
 type Opened = { requestId?: string; skipped?: string };
-type Outcome = { state?: "open" | "decided" | "ended"; decision?: "allow" | "deny"; reason?: string };
+type Outcome = { state?: "open" | "decided" | "ended"; decision?: "allow" | "deny"; updatedPermissions?: unknown; reason?: string };
 
 export type PermissionHookDeps = {
   post?: <T>(path: string, body: unknown, timeoutMs: number) => Promise<T>;
@@ -63,6 +64,8 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
       harness: "claude", sessionId: input.session_id, cwd: input.cwd,
       toolName: input.tool_name, toolInput: input.tool_input ?? null,
       ...(typeof input.transcript_path === "string" ? { transcriptPath: input.transcript_path } : {}),
+      // The runtime keeps only the persistent allow rules among them, for "Allow always".
+      ...(Array.isArray(input.permission_suggestions) ? { suggestions: input.permission_suggestions } : {}),
     }, OPEN_TIMEOUT_MS);
   } catch {
     return;
@@ -83,8 +86,9 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
       continue;
     }
     if (outcome?.state === "decided") {
+      // "Allow always" comes back with the rules to keep: Claude Code writes them as its own "don't ask again".
       const decision = outcome.decision === "allow"
-        ? { behavior: "allow" }
+        ? { behavior: "allow", ...(Array.isArray(outcome.updatedPermissions) && outcome.updatedPermissions.length ? { updatedPermissions: outcome.updatedPermissions } : {}) }
         : { behavior: "deny", message: DENIED_MESSAGE };
       write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision } })}\n`);
       return;

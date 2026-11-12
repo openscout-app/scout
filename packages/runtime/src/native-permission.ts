@@ -41,15 +41,25 @@ export type NativePermissionAsk = {
   toolName: string;
   toolInput: unknown;
   transcriptPath?: string;
+  /** Claude Code's `permission_suggestions` for this dialog, as the hook received them. */
+  suggestions?: unknown;
 };
 
 export type NativePermissionOpened =
   | { requestId: string }
   | { skipped: "no_live_session" | "scout_managed" };
 
+/** One `addRules` allow entry, in Claude Code's own PermissionUpdate shape. */
+export type NativeAllowRuleUpdate = {
+  type: "addRules";
+  behavior: "allow";
+  destination: "localSettings" | "projectSettings" | "userSettings";
+  rules: Array<{ toolName: string; ruleContent?: string }>;
+};
+
 export type NativePermissionOutcome =
   | { state: "open" }
-  | { state: "decided"; decision: "allow" | "deny" }
+  | { state: "decided"; decision: "allow" | "deny"; updatedPermissions?: NativeAllowRuleUpdate[] }
   | { state: "ended"; reason: string };
 
 export class NativePermissionAskError extends Error {}
@@ -71,6 +81,8 @@ type Live = {
   file: string;
   sawWaiting: boolean;
   decision: Deferred<PermissionDecision>;
+  /** The allow rules Claude Code offered to keep; sent back only on an "always" decision. */
+  always: NativeAllowRuleUpdate[];
   delivered: Deferred<void>;
   ended: Deferred<string>;
   lease: ReturnType<typeof setTimeout> | null;
@@ -121,17 +133,20 @@ export class NativePermissionRequests {
     if (await (this.deps.launchedByScout ?? (async () => false))(record)) return { skipped: "scout_managed" };
 
     const now = (this.deps.now ?? Date.now)();
+    const always = nativeAllowRuleUpdates(ask.suggestions);
     const live: Live = {
       id: "", pid: record.pid, procStart: record.procStart, sessionId: ask.sessionId,
       file: basename(record.recordPath), sawWaiting: record.status === "waiting",
-      decision: deferred(), delivered: deferred(), ended: deferred(), lease: null,
+      decision: deferred(), always, delivered: deferred(), ended: deferred(), lease: null,
     };
     const prompt: ManagedPermissionPrompt = {
       sessionId: ask.sessionId,
       projectRoot: ask.cwd,
       text: describeNativePermission(ask),
       version: createHash("sha256").update(JSON.stringify([ask.sessionId, record.pid, ask.toolName, ask.toolInput ?? null, now])).digest("hex"),
-      decisions: ["once", "deny"],
+      // "project" is Claude Code's own "don't ask again" rule, offered only when it suggested one that persists.
+      decisions: always.length ? ["once", "project", "deny"] : ["once", "deny"],
+      ...(always.length ? { decisionLabels: { project: "Allow always" } } : {}),
       isCurrent: async () => !live.ended.settled,
       answer: async (decision) => {
         if (live.ended.settled) throw new Error("The session no longer waits on this request.");
@@ -148,7 +163,8 @@ export class NativePermissionRequests {
     const actorId = `native:${ask.harness}:${ask.sessionId}`;
     live.id = await this.deps.permissions.raise({
       prompt, actorId,
-      native: { context, harness: ask.harness, pid: record.pid, tool: ask.toolName, display: nativePermissionDisplay(ask), ...(record.jobId ? { jobId: record.jobId } : {}) },
+      native: { context, harness: ask.harness, pid: record.pid, tool: ask.toolName, display: nativePermissionDisplay(ask),
+        ...(always.length ? { alwaysRules: nativeAllowRuleLabels(always) } : {}), ...(record.jobId ? { jobId: record.jobId } : {}) },
     });
     this.live.set(live.id, live);
     this.renew(live);
@@ -179,7 +195,8 @@ export class NativePermissionRequests {
       const decision = await live.decision.promise;
       live.delivered.resolve();
       this.forget(live);
-      return { state: "decided", decision: decision === "deny" ? "deny" : "allow" };
+      if (decision === "deny") return { state: "decided", decision: "deny" };
+      return { state: "decided", decision: "allow", ...(decision === "project" && live.always.length ? { updatedPermissions: live.always } : {}) };
     }
     this.renew(live);
     return { state: "open" };
@@ -272,6 +289,42 @@ function validateAsk(ask: NativePermissionAsk): void {
   if (typeof ask.sessionId !== "string" || !SESSION_ID.test(ask.sessionId)) throw new NativePermissionAskError("sessionId is required");
   if (typeof ask.cwd !== "string" || !ask.cwd.startsWith("/") || ask.cwd.length > 4096) throw new NativePermissionAskError("cwd must be an absolute path");
   if (typeof ask.toolName !== "string" || !ask.toolName.trim() || ask.toolName.length > 200) throw new NativePermissionAskError("toolName is required");
+}
+
+const PERSISTENT_DESTINATIONS = new Set(["localSettings", "projectSettings", "userSettings"]);
+const MAX_RULE_UPDATES = 4;
+const MAX_RULES = 8;
+
+/**
+ * The "don't ask again" rules among Claude Code's suggestions: `addRules`
+ * allow entries that persist to a settings file. Everything else is dropped:
+ * mode changes (one can carry bypassPermissions), deny and ask rules,
+ * directory grants and session-only entries. What is kept is rebuilt from
+ * known fields, so nothing unchecked is ever handed back to Claude Code.
+ */
+export function nativeAllowRuleUpdates(suggestions: unknown): NativeAllowRuleUpdate[] {
+  if (!Array.isArray(suggestions)) return [];
+  const kept: NativeAllowRuleUpdate[] = [];
+  for (const entry of suggestions.slice(0, 16)) {
+    if (!entry || typeof entry !== "object") continue;
+    const { type, behavior, destination, rules } = entry as Record<string, unknown>;
+    if (type !== "addRules" || behavior !== "allow" || typeof destination !== "string" || !PERSISTENT_DESTINATIONS.has(destination) || !Array.isArray(rules)) continue;
+    const clean: NativeAllowRuleUpdate["rules"] = [];
+    for (const rule of rules.slice(0, MAX_RULES)) {
+      const { toolName, ruleContent } = (rule && typeof rule === "object" ? rule : {}) as Record<string, unknown>;
+      if (typeof toolName !== "string" || !toolName.trim() || toolName.length > 200) continue;
+      if (ruleContent !== undefined && (typeof ruleContent !== "string" || ruleContent.length > MAX_TEXT)) continue;
+      clean.push(typeof ruleContent === "string" ? { toolName, ruleContent } : { toolName });
+    }
+    if (clean.length) kept.push({ type: "addRules", behavior: "allow", destination: destination as NativeAllowRuleUpdate["destination"], rules: clean });
+    if (kept.length >= MAX_RULE_UPDATES) break;
+  }
+  return kept;
+}
+
+/** The kept rules as Claude Code writes them in settings: `Bash(npm test:*)`, or a bare tool name. */
+export function nativeAllowRuleLabels(updates: readonly NativeAllowRuleUpdate[]): string[] {
+  return updates.flatMap((update) => update.rules.map((rule) => clip(rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : rule.toolName, 300)));
 }
 
 function clip(value: string, max: number): string {

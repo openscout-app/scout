@@ -37,6 +37,15 @@ describe("scout permission-hook claude", () => {
     expect(r.out.map((line) => JSON.parse(line))).toEqual([{ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } }]);
   });
 
+  test("Allow always forwards Claude Code's suggestions and hands back the rules to keep", async () => {
+    const rule = { type: "addRules", behavior: "allow", destination: "localSettings", rules: [{ toolName: "Bash", ruleContent: "rm -rf dist" }] };
+    const r = runtime([{ requestId: "permission-1" }, { state: "decided", decision: "allow", updatedPermissions: [rule] }]);
+    await handleClaudePermissionHook(JSON.stringify({ ...JSON.parse(hook), permission_suggestions: [rule] }), r.deps);
+    expect(r.posts[0]!.body).toMatchObject({ suggestions: [rule] });
+    expect(JSON.parse(r.out[0]!)).toEqual({ hookSpecificOutput: { hookEventName: "PermissionRequest",
+      decision: { behavior: "allow", updatedPermissions: [rule] } } });
+  });
+
   test("a denial carries a message for the model", async () => {
     const r = runtime([{ requestId: "permission-1" }, { state: "decided", decision: "deny" }]);
     await handleClaudePermissionHook(hook, r.deps);
