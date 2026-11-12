@@ -42,6 +42,12 @@ export type ClaudeSessionRecord = {
   waitingFor?: string | null;
   /** A background session's job id (`kind: "bg"`): `claude attach <jobId>` opens it in a terminal. */
   jobId?: string | null;
+  /**
+   * The process runs, but the tmux pane its record names could not be shown to
+   * hold it: another tmux server, a pane that is gone, or a process no longer
+   * in the pane's foreground. The session is open; that pane is not a place to type.
+   */
+  paneUnverified?: boolean;
   recordPath: string;
 };
 
@@ -173,7 +179,13 @@ export async function readClaudeSessionRecords(options: { directory?: string } =
   return records;
 }
 
-export type ClaudeLivePane = { session: string; window: string; pane: string; pid: number; procStart: string };
+export type ClaudeLivePane = {
+  session: string; window: string; pane: string; pid: number; procStart: string;
+  /** The pane's terminal device, as tmux names it. */
+  tty?: string | null;
+};
+/** The terminal a process sits on, and whether it is that terminal's foreground job. */
+export type ClaudeProcessTerminal = { tty: string | null; foreground: boolean };
 export type ClaudePaneProbe = (tmuxSession: string) => Promise<ClaudeLivePane[]>;
 
 /** Compare both the pane's current process and its birth time: kill(pid, 0) alone permits PID reuse. */
@@ -181,18 +193,38 @@ async function probeClaudePanes(tmuxSession: string): Promise<ClaudeLivePane[]> 
   // -u: without a UTF-8 locale (launchd gives the broker none) tmux prints
   // tabs as "_", so every row would fail to split.
   const output = await execSystemFile("tmux", ["-u", "list-panes", "-s", "-t", `=${tmuxSession}`,
-    "-F", "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}"],
+    "-F", "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}"],
     { timeoutMs: 2000, maxStdoutBytes: 16384 });
   const rows = output.stdout.trim().split("\n").filter(Boolean);
   if (rows.length > 32) throw new Error("Claude tmux pane inspection limit exceeded");
   return Promise.all(rows.map(async (row) => {
-    const [session, window, pane, rawPid] = row.split("\t");
+    const [session, window, pane, rawPid, tty] = row.split("\t");
     const pid = Number(rawPid);
     if (!session || !window || !pane || !Number.isInteger(pid) || pid <= 0) throw new Error("Invalid tmux pane identity");
     const processResult = await execSystemFile("ps", ["-p", String(pid), "-o", "lstart="],
       { timeoutMs: 2000, env: { ...process.env, TZ: "UTC", LC_ALL: "C" }, maxStdoutBytes: 1024 });
-    return { session, window, pane, pid, procStart: processResult.stdout.trim() };
+    return { session, window, pane, pid, procStart: processResult.stdout.trim(), tty: tty?.trim() || null };
   }));
+}
+
+function terminalName(tty: string): string {
+  return tty.trim().replace(/^\/dev\//u, "");
+}
+
+async function readProcessTerminal(pid: number): Promise<ClaudeProcessTerminal | null> {
+  try {
+    const result = await execSystemFile("ps", ["-p", String(pid), "-o", "tty=,pgid=,tpgid="],
+      { timeoutMs: 2000, env: { ...process.env, LC_ALL: "C" }, maxStdoutBytes: 1024 });
+    const [tty, pgid, tpgid] = result.stdout.trim().split(/\s+/u);
+    if (!tty || !pgid || !tpgid) return null;
+    return {
+      tty: tty === "??" || tty === "?" ? null : terminalName(tty),
+      foreground: Number(pgid) > 0 && Number(pgid) === Number(tpgid),
+    };
+  } catch (error) {
+    if ((error as { exitCode?: number }).exitCode !== 1) throw error;
+    return null;
+  }
 }
 
 function missingTmuxSession(error: unknown): boolean {
@@ -244,6 +276,7 @@ async function readProcessStart(pid: number): Promise<string | null> {
 export async function findLiveClaudeSession(nativeSessionId: string, options: {
   directory?: string; probe?: ClaudePaneProbe;
   processStart?: (pid: number) => Promise<string | null>;
+  processTerminal?: (pid: number) => Promise<ClaudeProcessTerminal | null>;
   /** Records to pass over, so a second holder of the same session can be found. */
   skip?: (record: ClaudeSessionRecord) => boolean;
 } = {}): Promise<ClaudeSessionRecord | null> {
@@ -261,18 +294,28 @@ export async function findLiveClaudeSession(nativeSessionId: string, options: {
       if (await stillRunning(record)) return record;
       continue;
     }
+    let panes: ClaudeLivePane[] = [];
     try {
-      const panes = await (options.probe ?? probeClaudePanes)(record.tmux.session);
-      if (panes.some(pane => sameProcess(record, pane))) return record;
-      // Claude started from a shell is a child of the pane's process, not the
-      // pane's process itself. It is live while its pane is there and it runs.
-      const pane = panes.find(candidate => candidate.session === record.tmux?.session
-        && candidate.window === record.tmux.window && candidate.pane === record.tmux.pane);
-      if (pane && pane.pid !== record.pid && await stillRunning(record)) return record;
+      panes = await (options.probe ?? probeClaudePanes)(record.tmux.session);
     } catch (error) {
-      // Missing tmux sessions are stale records; timeouts and unavailable probes fail closed.
+      // A missing tmux session leaves no pane to match; timeouts and unavailable probes fail closed.
       if (!missingTmuxSession(error)) throw error;
     }
+    if (panes.some(pane => sameProcess(record, pane))) return record;
+    const pane = panes.find(candidate => candidate.session === record.tmux?.session
+      && candidate.window === record.tmux.window && candidate.pane === record.tmux.pane);
+    // The pane's own process has this pid and another birth time: the pid was reused.
+    if (pane && pane.pid === record.pid) continue;
+    if (!await stillRunning(record)) continue;
+    // Claude started from a shell is a child of the pane's process, not the
+    // pane's process itself. Ids alone do not place it there: they repeat
+    // across tmux servers, and a suspended Claude leaves the pane to its
+    // shell. It is in the pane when it sits on the pane's terminal, in front.
+    if (pane?.tty) {
+      const terminal = await (options.processTerminal ?? readProcessTerminal)(record.pid);
+      if (terminal?.foreground && terminal.tty === terminalName(pane.tty)) return record;
+    }
+    return { ...record, paneUnverified: true };
   }
   return null;
 }

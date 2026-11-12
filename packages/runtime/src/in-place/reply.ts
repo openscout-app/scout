@@ -4,11 +4,12 @@
 // after the words were typed are read, and the turn is found by a marker the
 // typed words carry, so an unrelated turn is never mistaken for the answer.
 
-import { open, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 
 import { claudeTranscriptPathForSession, findLiveClaudeSession } from "../claude-session-records.js";
 
-import { codexThreadHeldByChatGPTApp, codexThreadHolderPids, findCodexTranscript } from "./deliver.js";
+import { codexThreadHeldByChatGPTApp, codexThreadHolderPids, findClaudeSessionOutsideScout, findCodexTranscript } from "./deliver.js";
+import { openLineTail } from "./line-tail.js";
 
 export type SessionReply =
   /** No finished answer yet. `accepted` says the transcript recorded the typed words. */
@@ -46,44 +47,66 @@ function blockText(content: unknown, types: readonly string[]): string {
 }
 
 /**
+ * A transcript read one line at a time. Once the turn that took the words has
+ * ended, later lines change nothing.
+ */
+type ReplyScan = {
+  push(line: string): void;
+  reply(options?: { idle?: boolean }): SessionReply;
+};
+
+function scanAll(scan: ReplyScan, text: string, options?: { idle?: boolean }): SessionReply {
+  for (const line of text.split("\n")) scan.push(line);
+  return scan.reply(options);
+}
+
+/**
  * Codex writes `task_complete` with the turn's last message when a turn ends
  * and `turn_aborted` when it is interrupted. The answer is the first of those
  * after the user message that carries the marker.
  */
-export function codexReplyFromTranscript(text: string, marker: string): SessionReply {
+function codexReplyScan(marker: string): ReplyScan {
   let accepted = false;
   let lastMessage = "";
-  for (const line of text.split("\n")) {
-    const row = parseRow(line);
-    const payload = record(row?.payload);
-    if (!row || !payload) continue;
-    const type = String(payload.type);
-    if (row.type === "event_msg" && type === "user_message") {
-      if (!accepted && typeof payload.message === "string" && payload.message.includes(marker)) accepted = true;
-      continue;
-    }
-    if (row.type === "response_item" && type === "message") {
-      if (payload.role === "user") {
-        if (!accepted && blockText(payload.content, ["input_text", "text"]).includes(marker)) accepted = true;
-      } else if (accepted && payload.role === "assistant") {
-        const said = blockText(payload.content, ["output_text", "text"]);
-        if (said.trim()) lastMessage = said;
+  let ended: SessionReply | null = null;
+  return {
+    push(line) {
+      if (ended) return;
+      const row = parseRow(line);
+      const payload = record(row?.payload);
+      if (!row || !payload) return;
+      const type = String(payload.type);
+      if (row.type === "event_msg" && type === "user_message") {
+        if (!accepted && typeof payload.message === "string" && payload.message.includes(marker)) accepted = true;
+        return;
       }
-      continue;
-    }
-    if (!accepted || row.type !== "event_msg") continue;
-    if (type === "agent_message" && typeof payload.message === "string" && payload.message.trim()) {
-      lastMessage = payload.message;
-    } else if (type === "task_complete") {
-      const final = typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()
-        ? payload.last_agent_message
-        : lastMessage;
-      return { state: "answered", text: final.trim() };
-    } else if (type === "turn_aborted") {
-      return { state: "aborted" };
-    }
-  }
-  return { state: "pending", accepted };
+      if (row.type === "response_item" && type === "message") {
+        if (payload.role === "user") {
+          if (!accepted && blockText(payload.content, ["input_text", "text"]).includes(marker)) accepted = true;
+        } else if (accepted && payload.role === "assistant") {
+          const said = blockText(payload.content, ["output_text", "text"]);
+          if (said.trim()) lastMessage = said;
+        }
+        return;
+      }
+      if (!accepted || row.type !== "event_msg") return;
+      if (type === "agent_message" && typeof payload.message === "string" && payload.message.trim()) {
+        lastMessage = payload.message;
+      } else if (type === "task_complete") {
+        const final = typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()
+          ? payload.last_agent_message
+          : lastMessage;
+        ended = { state: "answered", text: final.trim() };
+      } else if (type === "turn_aborted") {
+        ended = { state: "aborted" };
+      }
+    },
+    reply: () => ended ?? { state: "pending", accepted },
+  };
+}
+
+export function codexReplyFromTranscript(text: string, marker: string): SessionReply {
+  return scanAll(codexReplyScan(marker), text);
 }
 
 /**
@@ -92,48 +115,61 @@ export function codexReplyFromTranscript(text: string, marker: string): SessionR
  * tool result: `stop_reason: "end_turn"`, the `turn_duration` system record,
  * and the harness's own report that the session is idle (`idle`).
  */
-export function claudeReplyFromTranscript(text: string, marker: string, options: { idle?: boolean } = {}): SessionReply {
+function claudeReplyScan(marker: string): ReplyScan {
   let accepted = false;
   let answer = "";
   let toolPending = false;
-  for (const line of text.split("\n")) {
-    const row = parseRow(line);
-    if (!row || row.isSidechain === true) continue;
-    const message = record(row.message);
-    if (row.type === "user") {
-      const content = message?.content;
-      if (blocks(content).some((block) => block.type === "tool_result")) {
-        if (accepted) {
-          answer = "";
-          toolPending = false;
+  let ended: SessionReply | null = null;
+  const answered = (): SessionReply => ({ state: "answered", text: answer.trim() });
+  return {
+    push(line) {
+      if (ended) return;
+      const row = parseRow(line);
+      if (!row || row.isSidechain === true) return;
+      const message = record(row.message);
+      if (row.type === "user") {
+        const content = message?.content;
+        if (blocks(content).some((block) => block.type === "tool_result")) {
+          if (accepted) {
+            answer = "";
+            toolPending = false;
+          }
+          return;
         }
-        continue;
+        const said = blockText(content, ["text"]);
+        if (!accepted) {
+          if (said.includes(marker)) accepted = true;
+          return;
+        }
+        if (row.isMeta === true || !said.trim()) return;
+        if (said.trimStart().startsWith("[Request interrupted")) {
+          ended = { state: "aborted" };
+          return;
+        }
+        // The next prompt: the turn that took our words has ended.
+        if (answer.trim() && !toolPending) ended = answered();
+        return;
       }
-      const said = blockText(content, ["text"]);
-      if (!accepted) {
-        if (said.includes(marker)) accepted = true;
-        continue;
+      if (!accepted) return;
+      if (row.type === "assistant") {
+        const said = blockText(message?.content, ["text"]);
+        if (said.trim()) answer = answer ? `${answer}\n\n${said}` : said;
+        if (blocks(message?.content).some((block) => block.type === "tool_use")) toolPending = true;
+        if (message?.stop_reason === "end_turn" && answer.trim()) ended = answered();
+        return;
       }
-      if (row.isMeta === true || !said.trim()) continue;
-      if (said.trimStart().startsWith("[Request interrupted")) return { state: "aborted" };
-      // The next prompt: the turn that took our words has ended.
-      if (answer.trim() && !toolPending) return { state: "answered", text: answer.trim() };
-      continue;
-    }
-    if (!accepted) continue;
-    if (row.type === "assistant") {
-      const said = blockText(message?.content, ["text"]);
-      if (said.trim()) answer = answer ? `${answer}\n\n${said}` : said;
-      if (blocks(message?.content).some((block) => block.type === "tool_use")) toolPending = true;
-      if (message?.stop_reason === "end_turn" && answer.trim()) return { state: "answered", text: answer.trim() };
-      continue;
-    }
-    if (row.type === "system" && row.subtype === "turn_duration" && answer.trim() && !toolPending) {
-      return { state: "answered", text: answer.trim() };
-    }
-  }
-  if (options.idle && accepted && answer.trim() && !toolPending) return { state: "answered", text: answer.trim() };
-  return { state: "pending", accepted };
+      if (row.type === "system" && row.subtype === "turn_duration" && answer.trim() && !toolPending) ended = answered();
+    },
+    reply(options = {}) {
+      if (ended) return ended;
+      if (options.idle && accepted && answer.trim() && !toolPending) return answered();
+      return { state: "pending", accepted };
+    },
+  };
+}
+
+export function claudeReplyFromTranscript(text: string, marker: string, options: { idle?: boolean } = {}): SessionReply {
+  return scanAll(claudeReplyScan(marker), text, options);
 }
 
 export type SessionReplyReader = {
@@ -175,56 +211,38 @@ export async function openSessionReplyReader(input: {
   const end = (await stat(path).catch(() => null))?.size;
   if (end === undefined) return null;
   const offset = input.fromOffset === undefined ? end : Math.min(Math.max(0, input.fromOffset), end);
-  const transcript = path;
-  let size = offset;
-  // A transcript that has not grown gives the same answer; it is read again
-  // only when it grows or the idle report changes.
-  let last: { size: number; idle: boolean; reply: SessionReply } | null = null;
+  // Each line is read once, however long the turn runs: a poll costs what
+  // was appended since the last one.
+  const tail = openLineTail(path, offset);
+  const scan = input.harness === "codex" ? codexReplyScan(input.marker) : claudeReplyScan(input.marker);
   return {
-    path: transcript,
+    path,
     offset,
-    size: () => size,
+    size: () => tail.size(),
     async read(options = {}) {
-      const idle = options.idle === true;
-      const current = (await stat(transcript).catch(() => null))?.size;
-      if (current === undefined) return { state: "pending", accepted: false };
-      if (last && last.size === current && last.idle === idle) return last.reply;
-      const text = await readFrom(transcript, offset).catch(() => null);
-      if (text === null) return { state: "pending", accepted: false };
-      size = offset + Buffer.byteLength(text, "utf8");
-      const reply = input.harness === "codex"
-        ? codexReplyFromTranscript(text, input.marker)
-        : claudeReplyFromTranscript(text, input.marker, options);
-      last = { size: current, idle, reply };
-      return reply;
+      if (!await tail.read((line) => scan.push(line))) return { state: "pending", accepted: false };
+      return scan.reply(options);
     },
   };
-}
-
-async function readFrom(path: string, offset: number): Promise<string> {
-  const handle = await open(path, "r");
-  try {
-    const { size } = await handle.stat();
-    if (size <= offset) return "";
-    const buffer = Buffer.alloc(size - offset);
-    await handle.read(buffer, 0, buffer.length, offset);
-    return buffer.toString("utf8");
-  } finally {
-    await handle.close();
-  }
 }
 
 /**
  * Whether a harness process still has the session open, and whether that
  * harness says it is idle. Only Claude Code reports idleness here; Codex turn
  * ends are read from its transcript.
+ *
+ * `outsideScout` reads the process a person runs, not a copy Scout runs on
+ * the same session: an idle copy says nothing about a turn in their pane.
  */
 export async function readSessionHolderState(
   sessionId: string,
   harness: "claude" | "codex",
+  options: { outsideScout?: boolean } = {},
 ): Promise<{ live: boolean; idle: boolean }> {
   if (harness === "claude") {
-    const live = await findLiveClaudeSession(sessionId);
+    const live = options.outsideScout
+      ? await findClaudeSessionOutsideScout(sessionId)
+      : await findLiveClaudeSession(sessionId);
     // "shell" is a finished turn with a background shell still running.
     return { live: live !== null, idle: live?.status === "idle" || live?.status === "shell" };
   }

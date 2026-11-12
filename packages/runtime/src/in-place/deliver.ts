@@ -39,6 +39,7 @@ import { execSystemFile } from "../system-probes/exec.js";
 import { findLiveClaudeSession, type ClaudeSessionRecord } from "../claude-session-records.js";
 import { listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailUnsentComposerText } from "../local-agents.js";
 
+import { openLineTail, type LineTail } from "./line-tail.js";
 import { readOrcaAgents, sendOrcaPrompt, type OrcaAgent } from "./orca.js";
 import {
   innermostProcessHost,
@@ -142,6 +143,23 @@ export function isScoutBackgroundCopy(record: ClaudeSessionRecord): boolean {
   return (record.tmux?.session ?? "").startsWith("flat-");
 }
 
+/**
+ * The Claude process that has a session open for a person, passing over the
+ * copies Scout runs itself. Throws when the processes cannot be read: that is
+ * not the same as finding none.
+ */
+export async function findClaudeSessionOutsideScout(
+  sessionId: string,
+  deps: Pick<DeliverInPlaceDeps, "scoutLaunchedTmuxSessions"> & {
+    find?: (sessionId: string, options: { skip: (record: ClaudeSessionRecord) => boolean }) => Promise<ClaudeSessionRecord | null>;
+  } = {},
+): Promise<ClaudeSessionRecord | null> {
+  const launched = await (deps.scoutLaunchedTmuxSessions ?? listScoutLaunchedTmuxSessions)().catch(() => new Set<string>());
+  return (deps.find ?? findLiveClaudeSession)(sessionId, {
+    skip: (candidate) => isScoutBackgroundCopy(candidate) || Boolean(candidate.tmux && launched.has(candidate.tmux.session)),
+  });
+}
+
 /** Every place one session is held, gathered before any is tried. */
 type Candidates = {
   herdr: HerdrPaneMatch | null;
@@ -187,13 +205,23 @@ async function gatherInPlaceCandidates(
       || Boolean(candidate.tmux && launched.has(candidate.tmux.session));
     // Scout's copy and the operator's pane can hold one session at once; the
     // operator's is the one to find.
-    const record = await (deps.findClaudeRecord ?? ((id: string) => findLiveClaudeSession(id, { skip: scoutCopy })))(sessionId)
-      .catch(() => null);
+    let record: ClaudeSessionRecord | null;
+    try {
+      record = await (deps.findClaudeRecord ?? ((id: string) => findLiveClaudeSession(id, { skip: scoutCopy })))(sessionId);
+    } catch {
+      // A read that failed (a tmux or ps timeout) does not say the session is
+      // closed. A caller that must know says so, and nothing is resumed
+      // beside a session that may be running.
+      if (input.requireExactHarness) return { ok: false, code: "session_runtime_unobserved" };
+      record = null;
+    }
     if (record && !scoutCopy(record)) {
       pids.push(record.pid);
-      candidates.terminalPid = record.pid;
       candidates.claude = record;
-      if (record.tmux) {
+      // A process whose pane could not be shown to hold it is open, but
+      // neither that pane nor its terminal is a place to type.
+      if (!record.paneUnverified) candidates.terminalPid = record.pid;
+      if (record.tmux && !record.paneUnverified) {
         candidates.tmux = {
           target: record.tmux.pane ?? record.tmux.session,
           location: `tmux ${record.tmux.session}${record.tmux.pane ? ` · ${record.tmux.pane}` : ""}`,
@@ -650,24 +678,61 @@ async function typeIntoCodexAppWithLattices(
   }
 }
 
+type CodexActivity = "idle" | "busy" | "unknown";
+
+/** What one rollout line says about the turn: it began, it ended, nothing, or the line cannot be read. */
+function codexLifecycle(line: string): "busy" | "idle" | "unreadable" | null {
+  if (!line.trim()) return null;
+  try {
+    const row = JSON.parse(line);
+    if (row.type !== "event_msg") return null;
+    if (row.payload?.type === "task_started") return "busy";
+    return ["task_complete", "turn_aborted"].includes(row.payload?.type) ? "idle" : null;
+  } catch {
+    return "unreadable";
+  }
+}
+
 /** No heuristic based on assistant prose: only harness lifecycle events establish activity. */
-export function codexActivityFromTranscript(text: string): "idle" | "busy" | "unknown" {
-  let state: "idle" | "busy" | "unknown" = "unknown";
+export function codexActivityFromTranscript(text: string): CodexActivity {
+  let state: CodexActivity = "unknown";
   for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      if (row.type !== "event_msg") continue;
-      if (row.payload?.type === "task_started") state = "busy";
-      if (["task_complete", "turn_aborted"].includes(row.payload?.type)) state = "idle";
-    } catch { return "unknown"; } // An incomplete append cannot establish idle.
+    const said = codexLifecycle(line);
+    if (said === "unreadable") return "unknown"; // An incomplete append cannot establish idle.
+    if (said) state = said;
   }
   return state;
 }
 
-async function codexActivity(sessionId: string): Promise<"idle" | "busy" | "unknown"> {
+const CODEX_ACTIVITY_TAILS = 16;
+/** Each rollout's state so far, so a probe reads only what was appended since the last one. */
+const codexActivityTails = new Map<string, { tail: LineTail; state: CodexActivity }>();
+
+export async function codexActivityFromRollout(path: string): Promise<CodexActivity> {
+  let entry = codexActivityTails.get(path);
+  if (!entry) {
+    if (codexActivityTails.size >= CODEX_ACTIVITY_TAILS) {
+      codexActivityTails.delete(codexActivityTails.keys().next().value as string);
+    }
+    entry = { tail: openLineTail(path), state: "unknown" };
+    codexActivityTails.set(path, entry);
+  }
+  const reading = entry;
+  const read = await reading.tail.read((line) => {
+    const said = codexLifecycle(line);
+    if (said) reading.state = said === "unreadable" ? "unknown" : said;
+  });
+  if (!read) {
+    codexActivityTails.delete(path);
+    return "unknown";
+  }
+  // A line still being written may be the start of a turn.
+  return reading.state === "idle" && reading.tail.unfinished() ? "unknown" : reading.state;
+}
+
+async function codexActivity(sessionId: string): Promise<CodexActivity> {
   const path = await findCodexTranscript(sessionId);
-  return path ? codexActivityFromTranscript(await readFile(path, "utf8")) : "unknown";
+  return path ? codexActivityFromRollout(path) : "unknown";
 }
 
 const TRANSCRIPT_CONFIRM_MS = 8_000;

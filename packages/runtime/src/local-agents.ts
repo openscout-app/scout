@@ -6141,11 +6141,32 @@ async function invokeFlatSessionInPlace(
 ): Promise<LocalAgentInvocationResult | null> {
   const session = inPlaceSessionForEndpoint(endpoint);
   if (!session) return null;
+  const agentRuntimeId = endpoint.agentId;
   // An endpoint Scout already runs holds the session itself. A Claude session
   // is still looked for: the operator can open it again beside Scout's copy,
   // and their pane is then the place it is open.
-  if (session.harness !== "claude" && isLocalAgentEndpointAlive(endpoint)) return null;
-  const agentRuntimeId = endpoint.agentId;
+  if (session.harness !== "claude" && isLocalAgentEndpointAlive(endpoint)) {
+    const left = hooks.inPlaceCheckpoint?.() ?? null;
+    if (flatSessionWasTypedInPlace(left)) {
+      // An earlier runtime typed this ask where the session was open. Sending
+      // it through the endpoint as well would run it twice: only watch.
+    } else {
+      if (left) {
+        // Held and never typed. The endpoint takes it now, so the record
+        // goes first, or a later restart would type it as well.
+        try {
+          await hooks.saveInPlaceCheckpoint?.(null);
+        } catch (error) {
+          throw new DeliveryBlockedError({
+            stage: "in_place_failed",
+            summary: "the task's record could not be updated.",
+            message: `Scout could not update the task's record before continuing ${String(endpoint.metadata?.displayName ?? agentRuntimeId)} itself (${error instanceof Error ? error.message : String(error)}). Nothing was typed.`,
+          });
+        }
+      }
+      return null;
+    }
+  }
   if (invocation.requesterId === agentRuntimeId) {
     throw new DeliveryBlockedError({
       stage: "in_place_self",
@@ -6172,7 +6193,9 @@ async function invokeFlatSessionInPlace(
     probe: (input) => probeInPlace(input),
     deliver: (input) => deliverInPlace(input),
     openReplyReader: openSessionReplyReader,
-    holderState: readSessionHolderState,
+    // The ask is typed where a person has the session open. A copy Scout runs
+    // on the same session says nothing about a turn in their pane.
+    holderState: (sessionId, harness) => readSessionHolderState(sessionId, harness, { outsideScout: true }),
     explicitReply: async () => localAgentReplyFromSnapshot(
       await readBrokerReplySnapshot(),
       { agentRuntimeId, invocation, flightId, askedAt },
@@ -6188,6 +6211,26 @@ async function invokeFlatSessionInPlace(
     externalSessionId: session.sessionId,
     ...(result.delivery ? { metadata: { lastInPlaceDelivery: { ...result.delivery, at: Date.now() } } } : {}),
   };
+}
+
+/** Whether an earlier runtime typed this ask, or was about to, where the session was open. */
+export function flatSessionWasTypedInPlace(checkpoint: InPlaceCheckpoint | null): boolean {
+  return checkpoint !== null && checkpoint.phase !== "held";
+}
+
+/**
+ * How long Scout waits for a session it continues itself. A worker asked to
+ * reply through Scout can still do so after this wait ends. One whose answer
+ * is read from its transcript cannot: nothing reads the transcript afterwards,
+ * so the wait is the one an ask typed into an open session gets.
+ */
+export function continuedSessionReplyWaitSeconds(input: {
+  timeoutMs?: number | null;
+  transcriptRead: boolean;
+  transcriptWaitMs: number;
+}): number {
+  const asked = input.timeoutMs ? Math.max(30, Math.floor(input.timeoutMs / 1000)) : 300;
+  return input.transcriptRead ? Math.max(asked, Math.floor(input.transcriptWaitMs / 1000)) : asked;
 }
 
 /**
@@ -6720,8 +6763,12 @@ export async function invokeLocalAgentEndpoint(
 
   const flightId = createLocalAgentFlightId();
   const askedAt = nowSeconds();
-  const timeoutSeconds = invocation.timeoutMs ? Math.max(30, Math.floor(invocation.timeoutMs / 1000)) : 300;
   const transcriptReader = await openContinuedSessionReplyReader(endpoint, invocation, onlineRecord.transport);
+  const timeoutSeconds = continuedSessionReplyWaitSeconds({
+    timeoutMs: invocation.timeoutMs,
+    transcriptRead: transcriptReader !== null,
+    transcriptWaitMs: inPlaceBudgetMs("OPENSCOUT_IN_PLACE_REPLY_WAIT_MS", IN_PLACE_REPLY_WAIT_MS),
+  });
   await sendLocalAgentPrompt(agentRuntimeId, onlineRecord, transcriptReader
     ? withScoutTaskMarker(buildAttachedSessionInvocationPrompt(invocation, agentRuntimeId), invocation.id)
     : buildLocalAgentNudge(agentRuntimeId, invocation, flightId));

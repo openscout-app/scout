@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { probeInPlace, type DeliverInPlaceDeps } from "./deliver.js";
+import { findClaudeSessionOutsideScout, probeInPlace, type DeliverInPlaceDeps } from "./deliver.js";
 
 const SESSION = "4cc36bba-a893-461f-a5b1-79c1f6b7e088";
 
@@ -155,6 +155,28 @@ describe("probeInPlace", () => {
     expect(probe).toEqual({ live: false, code: "not_live", held: true });
   });
 
+  test("a Claude process whose pane could not be shown to hold it is held, and neither its pane nor its terminal is offered", async () => {
+    const probe = await probeInPlace({ sessionId: SESSION, harness: "claude", requireExactHarness: true }, noHosts({
+      findClaudeRecord: async () => claudeRecord({
+        status: "idle",
+        paneUnverified: true,
+        tmux: { session: "main", window: "@1", pane: "%4" } as ClaudeSessionRecord["tmux"],
+      }),
+      ttyForPid: async () => "ttys004",
+    }));
+    expect(probe).toEqual({ live: false, code: "not_live", held: true });
+  });
+
+  test("a Claude record that cannot be read is not a closed session", async () => {
+    const failing = noHosts({ findClaudeRecord: async () => { throw new Error("tmux list-panes timed out"); } });
+    // The caller that would resume the session is told it could not be seen.
+    expect(await probeInPlace({ sessionId: SESSION, harness: "claude", requireExactHarness: true }, failing))
+      .toEqual({ live: false, code: "session_runtime_unobserved" });
+    // A caller that only looks for a place to type finds none.
+    expect(await probeInPlace({ sessionId: SESSION, harness: "claude" }, failing))
+      .toEqual({ live: false, code: "not_live", held: false });
+  });
+
   test("a Claude session in a plain terminal tab is reachable by its tty", async () => {
     const probe = await probeInPlace({ sessionId: SESSION, harness: "claude" }, noHosts({
       findClaudeRecord: async () => claudeRecord({ status: "busy" }),
@@ -183,6 +205,21 @@ describe("probeInPlace", () => {
   test("a Codex thread in a terminal Scout cannot address is held, not live", async () => {
     const probe = await probeInPlace({ sessionId: SESSION, harness: "codex" }, noHosts({ codexThreadPids: async () => [4242] }));
     expect(probe).toEqual({ live: false, code: "not_live", held: true });
+  });
+
+  test("the holder outside Scout passes over Scout's own copies of the session", async () => {
+    const tmux = (session: string) => ({ session, window: "@1", pane: "%1" }) as ClaudeSessionRecord["tmux"];
+    const records = [
+      claudeRecord({ pid: 1, tmux: tmux(`flat-claude-${SESSION}`) }),
+      claudeRecord({ pid: 2, tmux: tmux("relay-app-claude") }),
+      claudeRecord({ pid: 3, status: "busy", tmux: tmux("main") }),
+    ];
+    const find = (held: ClaudeSessionRecord[]) => findClaudeSessionOutsideScout(SESSION, {
+      scoutLaunchedTmuxSessions: async () => new Set(["relay-app-claude"]),
+      find: async (_sessionId, options) => held.find((record) => !options.skip(record)) ?? null,
+    });
+    expect((await find(records))?.pid).toBe(3);
+    expect(await find(records.slice(0, 2))).toBeNull();
   });
 
   test("with an exact harness required, an ambiguous or mismatched Herdr report is refused", async () => {

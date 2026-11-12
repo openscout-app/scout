@@ -18,13 +18,15 @@ const typedOk: InPlaceDelivery = { ok: true, ...PLACE };
  * last entry repeats. Time moves only when the code under test sleeps.
  */
 function harness(script: {
-  probes: InPlaceProbe[];
+  probes: Array<InPlaceProbe | Error>;
   deliveries?: InPlaceDelivery[];
   replies?: SessionReply[];
   transcript?: boolean;
   holder?: Array<{ live: boolean; idle: boolean } | Error>;
   explicit?: Array<string | null>;
   cancelAfterProbes?: number;
+  /** The ask is cancelled after the probe, while the delivery finds the place again. */
+  cancelDuringDelivery?: boolean;
   input?: Partial<InPlaceInvokeInput>;
   /** What an earlier runtime left on the task, and the time this one starts at. */
   checkpoint?: InPlaceCheckpoint;
@@ -45,10 +47,16 @@ function harness(script: {
   let replies = 0;
   let holders = 0;
   let explicits = 0;
+  let cancelled = false;
   const deps: InPlaceInvokeDeps = {
-    probe: async () => next(script.probes, probes++),
+    probe: async () => {
+      const probe = next(script.probes, probes++);
+      if (probe instanceof Error) throw probe;
+      return probe;
+    },
     deliver: async ({ body, beforeKeystroke }) => {
       const result = next(script.deliveries ?? [typedOk], deliveries++);
+      if (script.cancelDuringDelivery) cancelled = true;
       // As the real delivery does: once every check passed, before the first keystroke.
       if (result.ok || (result.code === "in_place_failed" && result.nothingSent !== true)) {
         try {
@@ -85,7 +93,7 @@ function harness(script: {
     },
     explicitReply: async () => next(script.explicit ?? [null], explicits++),
     onProgress: (summary) => { progress.push(summary); },
-    shouldContinue: () => script.cancelAfterProbes === undefined || probes < script.cancelAfterProbes,
+    shouldContinue: () => !cancelled && (script.cancelAfterProbes === undefined || probes < script.cancelAfterProbes),
     sleep: async (ms) => { clock += ms; },
     now: () => clock,
   };
@@ -218,6 +226,25 @@ describe("invokeSessionInPlace", () => {
     expect(session.typed).toEqual([]);
   });
 
+  test("a Claude session is left to the caller only on two readings of not open, never on one", async () => {
+    // One reading can catch Claude's own record half written.
+    const closed = harness({ probes: [{ live: false, code: "not_live", held: false }] });
+    expect(await closed.run()).toBeNull();
+    expect(closed.probeCount()).toBe(2);
+    const open = harness({
+      probes: [{ live: false, code: "not_live", held: false }, live("idle")],
+      replies: [{ state: "answered", text: "done" }],
+    });
+    expect((await open.run())?.output).toBe("done");
+    expect(open.typed).toHaveLength(1);
+    const outOfReach = harness({ probes: [{ live: false, code: "not_live", held: false }, { live: false, code: "not_live", held: true }] });
+    expect((await refusal(outOfReach.run)).stage).toBe("in_place_unreachable");
+    // Codex parks a second writer on its own thread lock, so one reading is enough.
+    const codex = harness({ probes: [{ live: false, code: "not_live", held: false }], input: { harness: "codex" } });
+    expect(await codex.run()).toBeNull();
+    expect(codex.probeCount()).toBe(1);
+  });
+
   test("a session that closes while the ask is held is left to the caller, with nothing typed", async () => {
     const session = harness({ probes: [live("busy"), live("busy"), { live: false, code: "not_live", held: false }] });
     expect(await session.run()).toBeNull();
@@ -241,20 +268,41 @@ describe("invokeSessionInPlace", () => {
     const session = harness({ probes: [{ live: false, code }] });
     expect((await refusal(session.run)).stage).toBe("in_place_unverified");
     expect(session.typed).toEqual([]);
+    expect(session.elapsed()).toBeLessThan(30_000);
+  });
+
+  test("one reading that cannot be verified is looked at again, not refused and not resumed", async () => {
+    for (const first of [new Error("tmux: timed out"), { live: false, code: "session_runtime_unobserved" } as const]) {
+      const session = harness({ probes: [first, live("idle")], replies: [{ state: "answered", text: "done" }] });
+      expect((await session.run())?.output).toBe("done");
+      expect(session.typed).toHaveLength(1);
+    }
+    // Unverified, then closed: still two clean readings before the caller continues it.
+    const closed = harness({ probes: [new Error("tmux: timed out"), { live: false, code: "not_live", held: false }] });
+    expect(await closed.run()).toBeNull();
+    expect(closed.probeCount()).toBe(3);
+    // The same at the keystroke: the delivery could not verify the place once.
+    const atKeystroke = harness({
+      probes: [live("idle")],
+      deliveries: [{ ok: false, code: "session_runtime_unobserved" }, typedOk],
+      replies: [{ state: "answered", text: "done" }],
+    });
+    expect((await atKeystroke.run())?.output).toBe("done");
+    expect(atKeystroke.typed).toHaveLength(1);
+    const never = harness({ probes: [live("idle")], deliveries: [{ ok: false, code: "session_ambiguous" }] });
+    expect((await refusal(never.run)).stage).toBe("in_place_unverified");
+    expect(never.typed).toEqual([]);
   });
 
   test("a probe that fails is a refusal, never a reason to resume the session", async () => {
-    const refused = await refusal(() => invokeSessionInPlace(
-      { sessionId: SESSION, harness: "claude", label: "app", prompt: "ask inv-1", explicitReplyPrompt: "ask inv-1", marker: "inv-1", wake: false },
-      {
-        probe: async () => { throw new Error("ps: operation not permitted"); },
-        deliver: async () => { throw new Error("must not type"); },
-        openReplyReader: async () => null,
-        holderState: async () => ({ live: true, idle: false }),
-      },
-    ));
+    const session = harness({ probes: [new Error("ps: operation not permitted")] });
+    const refused = await refusal(session.run);
     expect(refused.stage).toBe("in_place_unverified");
+    expect(refused.message).toContain("ps: operation not permitted");
     expect(refused.message).toContain("Nothing was typed");
+    expect(session.typed).toEqual([]);
+    expect(session.events).toEqual([]);
+    expect(session.elapsed()).toBeLessThan(30_000);
   });
 
   test("a keystroke that throws is refused as a failed delivery that may have landed", async () => {
@@ -276,6 +324,13 @@ describe("invokeSessionInPlace", () => {
     const session = harness({ probes: [live("busy"), live("busy"), live("idle")], cancelAfterProbes: 2 });
     expect(await session.run()).toEqual({ output: "", delivery: null });
     expect(session.typed).toEqual([]);
+  });
+
+  test("an ask cancelled while the delivery finds the place again is never typed", async () => {
+    const session = harness({ probes: [live("idle")], cancelDuringDelivery: true });
+    expect(await session.run()).toEqual({ output: "", delivery: null });
+    expect(session.typed).toEqual([]);
+    expect(session.events).toEqual([]);
   });
 
   test("a session that turns busy between the probe and the keystroke is held again, and typed into once", async () => {

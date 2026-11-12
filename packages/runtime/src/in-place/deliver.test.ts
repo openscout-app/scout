@@ -1,8 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
+import { codexActivityFromRollout, codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
 import { parseOrcaWorktreeAgents } from "./orca.js";
 import { innermostProcessHost, parseProcessHostEnv, processHostLocations } from "./process-host.js";
 
@@ -36,6 +39,49 @@ test("strict session input accepts a correlated Herdr native id and harness, and
     .toEqual({ ok: false, code: "session_ambiguous" });
   expect(await deliverInPlace(input, noHosts({ findHerdrPane: async () => { throw new Error("probe timed out"); } })))
     .toEqual({ ok: false, code: "session_runtime_unobserved" });
+});
+
+test("a Claude record that cannot be read, or a pane that cannot be shown to hold it, is never typed into", async () => {
+  const strict = { sessionId: SESSION, harness: "claude", body: "input", requireExactHarness: true };
+  expect(await deliverInPlace(strict, noHosts({ findClaudeRecord: async () => { throw new Error("ps timed out"); } })))
+    .toEqual({ ok: false, code: "session_runtime_unobserved" });
+  const unverified = noHosts({
+    findClaudeRecord: async () => claudeRecord({ status: "idle", paneUnverified: true, tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+    ttyForPid: async () => "ttys004",
+  });
+  expect(await deliverInPlace(strict, unverified)).toEqual({ ok: false, code: "not_live" });
+});
+
+describe("codexActivityFromRollout", () => {
+  let folder: string | null = null;
+  afterEach(async () => {
+    if (folder) await rm(folder, { recursive: true, force: true });
+    folder = null;
+  });
+  const row = (type: string) => `${JSON.stringify({ type: "event_msg", payload: { type } })}\n`;
+
+  test("each reading takes in only what the rollout gained, and a line still being written is not idle", async () => {
+    folder = await mkdtemp(join(tmpdir(), "scout-codex-activity-"));
+    const path = join(folder, "rollout.jsonl");
+    await writeFile(path, row("task_started") + row("task_complete"));
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+
+    // The start of the next turn, half written.
+    const started = row("task_started");
+    await appendFile(path, started.slice(0, 20));
+    expect(await codexActivityFromRollout(path)).toBe("unknown");
+    await appendFile(path, started.slice(20));
+    expect(await codexActivityFromRollout(path)).toBe("busy");
+
+    await appendFile(path, "not json\n");
+    expect(await codexActivityFromRollout(path)).toBe("unknown");
+    await appendFile(path, row("turn_aborted"));
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+
+    await rm(path);
+    expect(await codexActivityFromRollout(path)).toBe("unknown");
+  });
 });
 
 function claudeRecord(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {

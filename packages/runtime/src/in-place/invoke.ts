@@ -31,6 +31,18 @@ const EXPLICIT_REPLY_POLL_MS = 2_000;
 /** A session whose activity cannot be read is refused quickly, not held. */
 const UNKNOWN_ACTIVITY_GRACE_MS = 15_000;
 /**
+ * How long a session whose place cannot be verified is looked at again before
+ * the ask is refused. One failed read in a long hold is not a refusal.
+ */
+const UNVERIFIED_GRACE_MS = 15_000;
+/**
+ * Readings of "not open anywhere" before Scout continues a Claude session
+ * itself. Claude Code has no second-writer guard, and one reading can catch
+ * its session record half written.
+ */
+const NOT_OPEN_READINGS = 2;
+const NOT_OPEN_CONFIRM_MS = 500;
+/**
  * Holder readings (5 s apart) of an idle session with a quiet transcript that
  * never recorded the words, after a restart that interrupted the keystroke.
  */
@@ -175,6 +187,14 @@ export async function invokeSessionInPlace(
   let unconfirmed = false;
   let announced: InPlaceActivity | null = null;
   let unknownSince: number | null = null;
+  let unverifiedSince: number | null = null;
+  let notOpenReadings = 0;
+  // A reading that could not establish where the session is open. It is
+  // looked at again for a short while; it is never a reason to resume it.
+  const unverified = (summary: string, message: string): void => {
+    unverifiedSince ??= now();
+    if (now() - unverifiedSince >= UNVERIFIED_GRACE_MS) throw blocked("in_place_unverified", summary, message);
+  };
 
   if (resume && resume.phase !== "held") {
     // Already typed, or about to be when the runtime stopped. Never type again.
@@ -199,37 +219,49 @@ export async function invokeSessionInPlace(
   } else for (;;) {
     // Hold until the session can take a turn, then type.
     if (!proceed()) return stopped;
-    let probe: InPlaceProbe;
+    let probe: InPlaceProbe | null = null;
     try {
       probe = await deps.probe({ sessionId, harness, requireExactHarness: true });
     } catch (error) {
       // Not knowing whether the session is open is not a reason to resume it.
-      throw blocked(
-        "in_place_unverified",
+      unverified(
         "Scout could not check where it is open.",
         `Scout could not check where ${harness} session ${sessionId} is open (${errorText(error)}). Nothing was typed.`,
       );
     }
+    if (probe && !probe.live && probe.code !== "not_live") {
+      unverified(
+        "the place it is open could not be verified.",
+        `Scout could not verify where ${harness} session ${sessionId} is open (${probe.code}). Nothing was typed.`,
+      );
+      probe = null;
+    }
+    if (!probe) {
+      notOpenReadings = 0;
+      await sleep(HOLD_POLL_MS);
+      continue;
+    }
     if (!probe.live) {
-      if (probe.code !== "not_live") {
-        throw blocked(
-          "in_place_unverified",
-          "the place it is open could not be verified.",
-          `Scout found ${harness} session ${sessionId} open but could not verify which pane holds it (${probe.code}). Nothing was typed.`,
-        );
-      }
+      unverifiedSince = null;
       // Claude Code has no second-writer guard: a session running where Scout
       // cannot type must not get a second copy resumed beside it. Codex parks
       // on its own thread lock, so the caller's resume path handles it.
-      if (probe.held && harness === "claude") {
+      if (probe.code === "not_live" && probe.held && harness === "claude") {
         throw blocked(
           "in_place_unreachable",
           "it is open where Scout cannot type.",
           `Claude session ${sessionId} is running, but not in Herdr, Orca, tmux or a terminal Scout can address. Nothing was typed and no copy was started. Close it so Scout can resume it, or open it in one of those.`,
         );
       }
+      notOpenReadings += 1;
+      if (harness === "claude" && notOpenReadings < NOT_OPEN_READINGS) {
+        await sleep(NOT_OPEN_CONFIRM_MS);
+        continue;
+      }
       return handOff();
     }
+    notOpenReadings = 0;
+    if (probe.activity !== "idle") unverifiedSince = null;
     place = { via: probe.via, location: probe.location };
     // From here a restart finds the task and delivers it again from the start.
     if (probe.activity !== "idle" && !saved) await save({ phase: "held", since: startedAt }).catch(() => undefined);
@@ -243,6 +275,7 @@ export async function invokeSessionInPlace(
       if (!proceed()) return stopped;
       const transcriptOffset = reader?.offset ?? null;
       const unrecorded: unknown[] = [];
+      let cancelled = false;
       let delivery: InPlaceDelivery;
       try {
         delivery = await deps.deliver({
@@ -253,6 +286,11 @@ export async function invokeSessionInPlace(
           // Written before the first keystroke: once the words may be in the
           // session, no restart types them a second time.
           beforeKeystroke: async (at) => {
+            // Finding the place again takes time; an ask cancelled meanwhile is not typed.
+            if (!proceed()) {
+              cancelled = true;
+              throw new Error("the ask was cancelled before it was typed");
+            }
             try {
               await save({ phase: "typing", since: startedAt, at: now(), via: at.via, location: at.location, transcriptOffset });
             } catch (error) {
@@ -264,6 +302,7 @@ export async function invokeSessionInPlace(
       } catch (error) {
         delivery = { ok: false, code: "in_place_failed", ...place, detail: errorText(error) };
       }
+      if (cancelled) return stopped;
       if (unrecorded.length > 0) {
         throw blocked(
           "in_place_failed",
@@ -281,11 +320,12 @@ export async function invokeSessionInPlace(
         break;
       }
       if (delivery.code === "session_runtime_unobserved" || delivery.code === "session_ambiguous") {
-        throw blocked(
-          "in_place_unverified",
+        unverified(
           "the place it is open could not be verified.",
-          `Scout could not verify which pane holds ${harness} session ${sessionId} (${delivery.code}). Nothing was typed.`,
+          `Scout could not verify where ${harness} session ${sessionId} is open (${delivery.code}). Nothing was typed.`,
         );
+      } else {
+        unverifiedSince = null;
       }
       const nothingSent = delivery.code === "scout_app_unavailable"
         || delivery.code === "scout_app_accessibility"
