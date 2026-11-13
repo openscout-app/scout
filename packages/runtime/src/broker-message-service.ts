@@ -1,5 +1,6 @@
 import { taskCompletionMessage } from "./broker-tasks.js";
-import { hasExplicitCompletion } from "@openscout/protocol";
+import { completionReply, hasExplicitCompletion, type CollaborationRecord } from "@openscout/protocol";
+import { openPermissionRequestId } from "./broker-blocked-reply.js";
 import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
 import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
 import { isDeepStrictEqual } from "node:util";
@@ -36,6 +37,7 @@ export type BrokerMessageRuntime = {
   conversation(conversationId: string): ConversationDefinition | undefined;
   agent(agentId: string): AgentDefinition | undefined;
   flightForInvocation(invocationId: string): FlightRecord | undefined;
+  collaborationRecord?(recordId: string): CollaborationRecord | undefined;
 };
 
 export type BrokerMessageMesh = {
@@ -172,6 +174,10 @@ export class BrokerMessageService {
       await this.completeInvocationsForBrokerReply(duplicate);
       return { ok: true, message: duplicate, deliveries: [], duplicate: true };
     }
+    // The writer may record a reply differently than it was sent: a final
+    // reply to a flight waiting on an open permission is held as blocked.
+    const recorded = entries.find(entry => entry.kind === "message.record");
+    if (recorded?.kind === "message.record" && recorded.message.id === message.id) message = recorded.message;
     await this.deps.mesh.forwardPeerBrokerDeliveries(message, deliveries);
     await this.deps.applyProjectedEntries(entries);
     await this.deps.reconcileStaleLocalDeliveries();
@@ -286,6 +292,10 @@ export class BrokerMessageService {
       ? this.deps.completionCurrentFlight(invocation.id) : this.deps.runtime.flightForInvocation(invocation.id);
     if (!flight || !isWorkingFlightState(flight.state)
       || !explicitReplyMatchesFlight(reply, invocation, flight, this.deps.runtime.snapshot().flights ?? {}, this.deps.completionFlight)) return undefined;
+    // A reply with no typed completion skips the writer's hold. While the
+    // harness still shows a permission prompt, it cannot end the task either.
+    if (completionReply(reply)?.outcome !== "failed" && this.deps.runtime.collaborationRecord
+      && openPermissionRequestId(flight, id => this.deps.runtime.collaborationRecord?.(id))) return undefined;
     const startedAt = flight.startedAt ?? invocation.createdAt;
     if (reply.createdAt < Math.max(0, startedAt - 5_000)) return undefined;
     const accepted = acceptedInvocationReply(flight, invocation);

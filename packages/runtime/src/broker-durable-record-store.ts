@@ -1,6 +1,7 @@
 import { completionReply, flightCompletion, flightSessionTrace } from "@openscout/protocol";
 import { taskTerminal, finishedTaskError, taskCompletionMessage } from "./broker-tasks.js";
 import { assertExplicitReplyAdmission, prepareCompletionAdmission } from "./broker-explicit-completion.js";
+import { blockedFlight, holdFinalReplyWhilePermissionOpen, openPermissionRequestId, resumedFlight } from "./broker-blocked-reply.js";
 import { messageWithAcceptedFlight } from "./broker-delivery-receipt-recovery.js";
 import { ChatQuestionError, transitionChatQuestion } from "./chat-question-transition.js";
 import { clearOperatorTitle, markOperatorTitled } from "./conversation-title.js";
@@ -727,6 +728,8 @@ export class BrokerDurableRecordStore {
       if (replyIdentity && (this.options.completionCurrentFlight ?? this.options.runtime.flightForInvocation?.bind(this.options.runtime))?.(replyIdentity.invocationId ?? "")?.id !== replyIdentity.flightId) {
         throw new Error("completion_flight_not_current");
       }
+      message = holdFinalReplyWhilePermissionOpen(message,
+        openPermissionRequestId(durableReplyFlight, id => this.options.runtime.collaborationRecord(id)));
       assertExplicitReplyAdmission(message, durableReplyFlight ? { ...replySnapshot,
         flights: { ...replySnapshot.flights, [durableReplyFlight.id]: durableReplyFlight } } : replySnapshot, this.options.completionFlight);
       const taskEntries: BrokerJournalEntry[] = [];
@@ -758,6 +761,8 @@ export class BrokerDurableRecordStore {
         if (typedReply.kind === "final" && !late && !taskTerminal(durableReplyFlight)) taskEntries.push({ kind: "flight.record", flight: {
           ...durableReplyFlight, metadata: { ...durableReplyFlight.metadata, taskFinalReplyMessageId: message.id,
             taskFinalReplyRevision: typedReply.revision } } });
+        const waiting = blockedFlight(durableReplyFlight, message) ?? resumedFlight(durableReplyFlight, message);
+        if (waiting) taskEntries.push({ kind: "flight.record", flight: waiting });
         if (typedReply.kind === "progress" && task?.collaborationRecordId) {
           const work = this.options.runtime.collaborationRecord(task.collaborationRecordId);
           if (work?.kind === "work_item") taskEntries.push({ kind: "collaboration.record", record: { ...work,
