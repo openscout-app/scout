@@ -114,6 +114,31 @@ describe("BrokerConversationService", () => {
     expect(dm.participantIds).toEqual(["agent-1", "operator"]);
   });
 
+  test("delivers a chn- channel to that conversation instead of minting a room titled with the id", async () => {
+    const direct = conversation({
+      id: "chn-6f87a504d64f422dbbc721401dec6df9",
+      kind: "direct",
+      title: "Agent One",
+      visibility: "private",
+      shareMode: "local",
+      participantIds: ["agent-1", "operator"],
+      metadata: { naturalKey: directChannelNaturalKey(["agent-1", "operator"]) },
+    });
+    const harness = createHarness({
+      snapshot: createRuntimeRegistrySnapshot({ conversations: { [direct.id]: direct } }),
+    });
+
+    for (const requesterId of ["agent-1", "operator"]) {
+      await expect(harness.service.ensureDeliveryConversation({ requesterId, channel: ` ${direct.id} ` }))
+        .resolves.toBe(direct);
+    }
+    await expect(harness.service.ensureDeliveryConversation({ requesterId: "agent-2", channel: direct.id }))
+      .rejects.toThrow("agent-2 is not a participant of conversation chn-6f87a504d64f422dbbc721401dec6df9");
+    await expect(harness.service.ensureDeliveryConversation({ requesterId: "agent-1", channel: "chn-0000missing" }))
+      .rejects.toThrow("Unknown conversation chn-0000missing");
+    expect(harness.upsertedConversations).toEqual([]);
+  });
+
   test("creates missing broker actors and refreshes operator display names", async () => {
     const harness = createHarness({
       snapshot: createRuntimeRegistrySnapshot({

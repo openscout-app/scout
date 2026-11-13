@@ -1,4 +1,4 @@
-import { SCOUT_TASKS_CAPABILITY, agentRosterTag, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
+import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, SCOUT_TASKS_CAPABILITY, agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -627,7 +627,40 @@ export type ScoutWhoEntry = {
   roster?: AgentRosterTag;
   /** Route pointers targeting this agent; never separate roster entries. */
   aliases?: Array<Pick<RouteAliasBinding, "id" | "alias" | "revision" | "state" | "scopeProjectKey" | "scopeProjectRoot" | "scopeNodeId" | "target">>;
+  /** Work item of the ask that started or last steered this agent; null without one. */
+  workItemId?: string | null;
+  /** That work item's title. */
+  workItemTitle?: string | null;
+  /** First line of that ask's task, as plain text. */
+  currentTask?: string | null;
 };
+
+/** The latest ask to each agent, reduced to its work item and task line. */
+export function scoutWhoTaskLinks(
+  snapshot: Pick<ScoutBrokerSnapshot, "invocations" | "collaborationRecords">,
+): Map<string, SessionTaskLink> {
+  const byAgent = new Map<string, InvocationRequest[]>();
+  for (const invocation of Object.values(snapshot.invocations ?? {})) {
+    if (!invocation?.targetAgentId) continue;
+    const entries = byAgent.get(invocation.targetAgentId) ?? [];
+    entries.push(invocation);
+    byAgent.set(invocation.targetAgentId, entries);
+  }
+  const links = new Map<string, SessionTaskLink>();
+  for (const [agentId, invocations] of byAgent) {
+    const link = resolveSessionTaskLink(
+      invocations.map((invocation) => ({
+        task: invocation.task,
+        collaborationRecordId: invocation.collaborationRecordId,
+        action: invocation.action,
+        createdAt: normalizeUnixTimestamp(invocation.createdAt),
+      })),
+      (workItemId) => snapshot.collaborationRecords?.[workItemId]?.title,
+    );
+    if (link.workItemId || link.currentTask) links.set(agentId, link);
+  }
+  return links;
+}
 
 type RelayConfig = {
   channels?: Record<string, { audio: boolean; voice?: string }>;
@@ -2715,6 +2748,32 @@ function conversationDefinition(
   };
 }
 
+/**
+ * A `chn-…` channel is a conversation id, not a name. Treating it as a name
+ * would mint a second room titled with the id, so it resolves to that
+ * conversation or fails with a reason.
+ */
+export function existingConversationForChannelId(
+  snapshot: Pick<ScoutBrokerSnapshot, "conversations">,
+  channel: string | undefined,
+  senderId: string,
+): ScoutBrokerConversationRecord | null {
+  const conversationId = channel?.trim();
+  if (!conversationId?.startsWith(CHANNEL_ID_PREFIX)) return null;
+  const existing = snapshot.conversations[conversationId];
+  if (!existing) {
+    throw new Error(
+      `Unknown conversation ${conversationId}: a chn- channel is a conversation id, not a channel name, and this broker has no conversation with that id. Reply with --ref, address the agent, or use a channel name.`,
+    );
+  }
+  if (senderId !== OPERATOR_ID && !existing.participantIds.includes(senderId)) {
+    throw new Error(
+      `${senderId} is not a participant of conversation ${conversationId}; address the agent or use a channel name instead.`,
+    );
+  }
+  return existing;
+}
+
 async function ensureBrokerConversation(
   baseUrl: string,
   snapshot: ScoutBrokerSnapshot,
@@ -2723,6 +2782,8 @@ async function ensureBrokerConversation(
   senderId: string,
   targetParticipantIds: string[] = [],
 ): Promise<ScoutBrokerConversationRecord> {
+  const conversationById = existingConversationForChannelId(snapshot, channel, senderId);
+  if (conversationById) return conversationById;
   const definition = conversationDefinition(
     snapshot,
     nodeId,
@@ -5592,6 +5653,7 @@ export async function listScoutAgents(
       .catch(() => ({ bindings: [] })),
   ]);
   const rosterByAgent = await loadScoutRosterTags(broker.baseUrl);
+  const taskLinks = scoutWhoTaskLinks(broker.snapshot);
   const aliasesByAgent = new Map<string, RouteAliasBinding[]>();
   for (const binding of aliasResult.bindings) {
     if (binding.state !== "active") continue;
@@ -5668,6 +5730,7 @@ export async function listScoutAgents(
         agentId, nodeId, nodeName, projectRoot, state, messages, lastSeen, registrationKind,
         ...(roster ? { roster } : {}),
         ...(aliases?.length ? { aliases } : {}),
+        ...(taskLinks.get(agentId) ?? EMPTY_SESSION_TASK_LINK),
       };
     })
     .filter((entry) => !selectedNodeIds || (entry.nodeId !== null && selectedNodeIds.has(entry.nodeId)))

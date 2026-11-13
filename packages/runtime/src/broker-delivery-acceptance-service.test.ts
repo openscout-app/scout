@@ -28,7 +28,7 @@ import { brokerDeliverRequestSchema } from "./broker-command-boundary-schemas.js
 import { deliverScoutRequest, prepareScoutSessionReply } from "./delivery-client.js";
 import { createHash } from "node:crypto";
 import { canonicalRequest } from "./broker-request-receipts.js";
-import { BrokerDeliveryAcceptanceService, validateTaskDelivery, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
+import { BrokerDeliveryAcceptanceService, defaultTaskWorkItemTitle, validateTaskDelivery, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
 import type { InvocationResolution } from "./broker-delivery-routing.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
@@ -1838,4 +1838,11 @@ test("a task ref may repeat itself as the rendered ref label", () => {
     target: { kind: "binding_ref", ref: "other-ref" },
     targetLabel: "ref:abcd1234",
   })).toThrow("another recipient route");
+});
+
+test("titles a task's default work item by its first line, and a continued task by its successor", () => {
+  expect(defaultTaskWorkItemTitle("## Fix the room title\n\nSteps follow.")).toBe("Fix the room title");
+  expect(defaultTaskWorkItemTitle("Previous task inv-1 (completed):\nShipped.\n\nSuccessor task:\nLand the follow-up"))
+    .toBe("Land the follow-up");
+  expect(defaultTaskWorkItemTitle("```\n```")).toBe("```\n```");
 });

@@ -4920,3 +4920,131 @@ describe("web polling query plans", () => {
     } finally { store.close(); }
   });
 });
+
+describe("web db session and agent task links", () => {
+  test("names a session and its agent by the ask that last steered them", () => {
+    const store = createSeededStore();
+    try {
+      store.recordCollaborationRecord({
+        id: "work-2",
+        kind: "work_item",
+        title: "Carry the task\non session rows",
+        createdById: "operator",
+        ownerId: "agent-1",
+        conversationId: "c.conv-1",
+        state: "open",
+        acceptanceState: "none",
+        requestedById: "operator",
+        createdAt: 200,
+        updatedAt: 200,
+      });
+      store.recordInvocation({
+        id: "inv-2",
+        requesterId: "operator",
+        requesterNodeId: "node-1",
+        targetAgentId: "agent-1",
+        action: "consult",
+        task: "Previous task inv-1 (completed):\nDone.\n\nSuccessor task:\n## Add the **task** fields\n\nDetails follow.",
+        collaborationRecordId: "work-2",
+        conversationId: "c.conv-1",
+        ensureAwake: true,
+        stream: false,
+        createdAt: 200,
+      });
+      // A later wake has no task of its own and must not replace the ask.
+      store.recordInvocation({
+        id: "inv-3",
+        requesterId: "operator",
+        requesterNodeId: "node-1",
+        targetAgentId: "agent-1",
+        action: "wake",
+        task: "wake",
+        conversationId: "c.conv-1",
+        ensureAwake: true,
+        stream: false,
+        createdAt: 300,
+      });
+
+      const expected = {
+        workItemId: "work-2",
+        workItemTitle: "Carry the task",
+        currentTask: "Add the task fields",
+      };
+      expect(querySessions(10).find((entry) => entry.id === "c.conv-1")).toMatchObject(expected);
+      expect(querySessionById("c.conv-1")).toMatchObject(expected);
+      expect(queryAgents(10).find((entry) => entry.id === "agent-1")).toMatchObject(expected);
+      expect(queryAgentById("agent-1")).toMatchObject(expected);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("leaves the fields null when no ask reached the session", () => {
+    const store = createSeededStore();
+    try {
+      store.upsertConversation({
+        id: "chn-quietroom0001",
+        kind: "channel",
+        title: "quiet",
+        visibility: "workspace",
+        shareMode: "local",
+        authorityNodeId: "node-1",
+        participantIds: ["operator"],
+      });
+      store.recordMessage({
+        id: "msg-quiet",
+        conversationId: "chn-quietroom0001",
+        actorId: "operator",
+        originNodeId: "node-1",
+        class: "operator",
+        body: "hello",
+        visibility: "workspace",
+        policy: "durable",
+        createdAt: 400,
+      });
+      expect(querySessionById("chn-quietroom0001")).toMatchObject({
+        title: "quiet",
+        workItemId: null,
+        workItemTitle: null,
+        currentTask: null,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  test("titles a room that carries its id as a title by its work item", () => {
+    const store = createSeededStore();
+    try {
+      store.upsertConversation({
+        id: "chn-6f87a504d64f422d",
+        kind: "channel",
+        title: "chn-6f87a504d64f422d",
+        visibility: "workspace",
+        shareMode: "local",
+        authorityNodeId: "node-1",
+        participantIds: ["operator"],
+      });
+      store.recordInvocation({
+        id: "inv-room",
+        requesterId: "operator",
+        requesterNodeId: "node-1",
+        targetAgentId: "agent-1",
+        action: "consult",
+        task: "Review the room",
+        collaborationRecordId: "work-1",
+        conversationId: "chn-6f87a504d64f422d",
+        ensureAwake: true,
+        stream: false,
+        createdAt: 500,
+      });
+      expect(querySessionById("chn-6f87a504d64f422d")).toMatchObject({
+        title: "Observed work",
+        workItemId: "work-1",
+        currentTask: "Review the room",
+      });
+    } finally {
+      store.close();
+    }
+  });
+});
