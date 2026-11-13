@@ -11,7 +11,7 @@ describe("renderWaitCommandHelp", () => {
     const help = renderWaitCommandHelp();
 
     expect(help).toContain("Usage: scout wait <ref>");
-    expect(help).toContain("invocation id, flight id, message id, or ref:<short-id>");
+    expect(help).toContain("invocation id, flight id, message id, ref:<short-id>, or the session-… id it was sent to");
   });
 });
 
