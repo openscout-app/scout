@@ -301,8 +301,15 @@ export function correlateClaudeSessionForTmuxSession(input: {
   }
   const launchName = input.launchName?.trim() || null;
   const cwd = input.cwd?.trim() || null;
-  const narrowed = live.filter(record => (!launchName || (record.name === launchName && record.nameSource === "user"))
-    && (!cwd || record.cwd === cwd) && record.kind === "interactive");
+  const eligible = live.filter(record => (!cwd || record.cwd === cwd) && record.kind === "interactive");
+  // Claude Code replaces the `--name` Scout launched with by its own title
+  // (`nameSource: "auto"`) moments after start. An auto title says nothing
+  // about the launch, so it cannot contradict the launch name; only a
+  // different user-given name can. Prefer an exact launch-name match first.
+  const named = eligible.filter(record => record.name === launchName && record.nameSource === "user");
+  const narrowed = !launchName ? eligible
+    : named.length > 0 ? named
+    : eligible.filter(record => record.nameSource !== "user");
   if (narrowed.length !== 1) {
     return { ok: false, reason: "ambiguous", candidates: candidates.length, live: live.length };
   }

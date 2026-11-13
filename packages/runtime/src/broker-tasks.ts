@@ -140,17 +140,20 @@ export class BrokerTaskService {
       const execution = sessionActor
         ? { ...payload.execution, ...(invocation.execution?.harness ? { harness: invocation.execution.harness } : {}), session: "existing" as const, targetSessionId: sessionActor }
         : { ...payload.execution, session: "new" as const };
-      return this.options.accept({ ...payload, task: { version: 1, ...(request.callback ? { callback: request.callback } : {}) },
+      return this.options.accept({ ...payload, task: { version: 1, ...(request.callback ? { callback: request.callback } : {}),
+        ...(request.because ? { because: request.because } : {}) },
         target, targetAgentId: target.kind === "agent_id" ? invocation.targetAgentId : undefined,
         body: `${context}\n\nSuccessor task:\n${payload.body}`, execution,
         invocationMetadata: { ...payload.invocationMetadata, predecessorTaskId: invocation.id, predecessorState: flight.state } });
     }
     const messageId = taskMessageId(actor, payload.requestId!);
+    // A follow-up's reason travels in the text the worker reads.
+    const body = request.because ? `${payload.body}\n\nBecause: ${request.because}` : payload.body;
     const existing = await readMessageRecord(this.options.snapshot().messages, messageId);
     const retry = existing?.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean } | undefined;
     if (existing) {
       if (retry?.invocationId !== invocation.id || Boolean(retry.cancel) !== Boolean(request.cancel)
-        || existing.body !== payload.body) throw new Error("request ID conflicts with an earlier task follow-up");
+        || existing.body !== body) throw new Error("request ID conflicts with an earlier task follow-up");
       return this.followupReceipt(existing, task);
     }
     const cancelledByRequest = request.cancel && flight.state === "cancelled"
@@ -159,7 +162,7 @@ export class BrokerTaskService {
     if (!conversation || !invocation.messageId) throw new Error("task has no replyable conversation");
     let interrupted = false;
     if (request.cancel && !cancelledByRequest) {
-      await this.options.recordFlight({ ...flight, state: "cancelled", completedAt: this.now(), error: payload.body,
+      await this.options.recordFlight({ ...flight, state: "cancelled", completedAt: this.now(), error: body,
         summary: "Task cancelled by its asker.", metadata: { ...flight.metadata, taskCancellationRequestId: payload.requestId } },
         () => { const current = this.options.currentFlight(invocation.id); return Boolean(current && !taskTerminal(current) && !current.metadata?.taskFinalReplyMessageId); });
       const current = this.options.currentFlight(invocation.id)!;
@@ -169,7 +172,7 @@ export class BrokerTaskService {
     const message: MessageRecord = {
       id: messageId, requestId: payload.requestId,
       conversationId: conversation.id, replyToMessageId: invocation.messageId, actorId: actor, originNodeId: this.options.nodeId,
-      class: "status", body: payload.body, attachments: payload.attachments,
+      class: "status", body, attachments: payload.attachments,
       audience: request.cancel || flight.state === "queued" || flight.state === "waking"
         ? { delivery: "none" } : { notify: [invocation.targetAgentId], reason: "thread_reply" },
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),

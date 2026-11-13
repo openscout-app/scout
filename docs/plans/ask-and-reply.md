@@ -178,7 +178,9 @@ Parsing is strict. Unknown flags are errors, never message text. Today `ask` fol
 | More than one routing mode | Error |
 | `--option` with `--fyi` | Error: a pick needs an answer |
 | `--option` without `--operator` | Error, for now |
-| `--notify` without `--operator` | Error: `--notify now pushes to the operator; asks return on acceptance by default` |
+| `--notify` without `--operator` | Accepted: the ask returns on acceptance, as agent prompts describe; only operator asks push |
+| `--because` without `--operator` | Accepted: the reason rides to the worker as invocation context |
+| `--permission` without `--operator` | Error: only the operator can grant a permission request |
 | `--notify` on a blocking `--operator` ask | Accepted; it already pushes |
 | `--fyi` with `--ref`, `--continue`, `--cancel` or capability routing | Error |
 | `--cancel` without `--ref` | Error |
