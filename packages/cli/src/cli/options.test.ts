@@ -637,9 +637,9 @@ describe("parseImplicitAskCommandOptions", () => {
       expect(() => parseImplicitAskCommandOptions(args, "/tmp/workspace")).toThrow("exactly one routing mode");
     }
   });
-  test("unknown flags and the old notify meaning fail in shortcuts too", () => {
+  test("unknown flags fail in shortcuts too; --notify on an agent ask is accepted", () => {
     expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--message-file", "brief.md"], "/tmp/workspace")).toThrow("unknown flag");
-    expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--notify", "review"], "/tmp/workspace")).toThrow("--notify now pushes");
+    expect(parseImplicitAskCommandOptions(["--to", "worker", "--notify", "review"], "/tmp/workspace").task).toMatchObject({ notify: true });
   });
 });
 

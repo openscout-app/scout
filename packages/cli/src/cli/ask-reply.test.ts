@@ -40,7 +40,7 @@ test("repeated recipients are independent routes, not last-value-wins", () => {
   expect(() => parseAskCommandOptions(["--to", "a", "--ref", "inv-1", "review"], "/repo")).toThrow("exactly one");
 });
 test.each([
-  ["--to", "a", "--notify", "review"],
+  ["--to", "a", "--permission", "--because", "deploy blocked", "review"],
   ["--operator", "--fyi", "--option", "yes", "review"],
   ["--channel", "shared", "review"],
   ["--ref", "inv-1", "--harness", "codex", "review"],
@@ -64,7 +64,13 @@ test("missing values do not consume another flag and implicit asks are strict to
   }
   const { parseImplicitAskCommandOptions } = await import("./options.ts");
   expect(() => parseImplicitAskCommandOptions(["@worker", "--message-file", "brief.md"], "/repo")).toThrow("unknown flag");
-  expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--notify", "review"], "/repo")).toThrow("--notify now pushes");
+  expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--permission", "review"], "/repo")).toThrow("--permission requires --operator");
+});
+
+test("an agent ask accepts a reason and --notify without --operator", () => {
+  expect(parseAskCommandOptions(["--to", "worker", "--because", "the build is red", "rerun checks"], "/repo").task)
+    .toMatchObject({ because: "the build is red" });
+  expect(parseAskCommandOptions(["--to", "worker", "--notify", "review"], "/repo").task).toMatchObject({ notify: true });
 });
 
 
