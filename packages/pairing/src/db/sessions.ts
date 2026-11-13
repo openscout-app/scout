@@ -26,6 +26,7 @@ import {
   sqlTimestampMsExpression,
   transientBrokerWorkingStatusPredicate,
 } from "./internal/sql-helpers.ts";
+import { querySessionTaskLinkForConversation } from "./internal/session-task-links.ts";
 import type { MobileSessionSummary } from "./types/mobile.ts";
 
 export { isLikelyLocalSessionAgentId };
@@ -269,6 +270,22 @@ function conversationIdentityFields(
   };
 }
 
+/**
+ * A conversation's own title, unless it has none. A room made without a name
+ * can carry its id (or nothing) as its title; an id is not a name, so such a
+ * room reads as its work item, then its task. With neither, the stored title
+ * stays, so a client that recognises id titles still can.
+ */
+function conversationDisplayTitle(
+  row: Pick<SessionConversationRow, "id" | "title">,
+  taskLink: { workItemTitle: string | null; currentTask: string | null },
+): string {
+  const bare = (row.title ?? "").trim().replace(/^#/, "");
+  const untitled = !bare || bare === row.id || isOpaqueChannelId(bare);
+  if (!untitled) return row.title;
+  return taskLink.workItemTitle ?? taskLink.currentTask ?? row.title;
+}
+
 function projectSessionConversationRows(
   rows: SessionConversationRow[],
   opts?: {
@@ -411,11 +428,12 @@ function projectSessionConversationRows(
 
     const preview = (previewStmt.get(r.id) as { body: string } | null)?.body ?? null;
     const identityFields = conversationIdentityFields(r, conversationMetadata);
+    const taskLink = querySessionTaskLinkForConversation(r.id, agentId);
 
     return [{
       id: r.id,
       kind: r.kind,
-      title: agentName ?? r.title,
+      title: agentName ?? conversationDisplayTitle(r, taskLink),
       ...identityFields,
       participantIds: participants,
       agentId,
@@ -432,6 +450,7 @@ function projectSessionConversationRows(
       messageCount: r.message_count,
       lastMessageAt: r.last_message_at,
       workspaceRoot,
+      ...taskLink,
     }];
   });
 
@@ -588,6 +607,10 @@ function querySessionFallbackFromMessages(conversationId: string): MobileSession
     messageCount: stats.message_count,
     lastMessageAt: stats.last_message_at,
     workspaceRoot: agentRow?.project_root ?? null,
+    // No conversation record means no ask can reference it.
+    workItemId: null,
+    workItemTitle: null,
+    currentTask: null,
   };
 }
 

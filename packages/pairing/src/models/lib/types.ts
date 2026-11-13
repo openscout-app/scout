@@ -520,6 +520,12 @@ export type SessionEntry = {
   messageCount: number;
   lastMessageAt: number | null;
   workspaceRoot: string | null;
+  /** Work item of the ask that started or last steered this session. */
+  workItemId?: string | null;
+  /** That work item's title. */
+  workItemTitle?: string | null;
+  /** First line of that ask's task, as plain text. */
+  currentTask?: string | null;
 };
 
 export type ConversationEntry = SessionEntry;

@@ -1,6 +1,6 @@
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
-import { validateTaskAsk, taskNotificationPolicy, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
+import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { acceptSessionInput, recoverSessionInputDelivery, validateSessionInputRequest, type SessionInputDeliveryOptions } from "./broker-session-input-delivery.js";
 import { BrokerCommandAdmission } from "./broker-storage-pressure.js";
@@ -54,6 +54,15 @@ import {
 import { sessionActorAlias } from "./session-alias.js";
 import { endpointMatchesTargetSessionAddress, runtimeSessionAddressForSessionId } from "./runtime-session-address.js";
 import { RetryablePreEffectFailure, type BrokerRequestReceipts } from "./broker-request-receipts.js";
+
+/**
+ * A task without its own work item title is named by its first line. A
+ * continued task names the successor, not the predecessor's result the
+ * runtime prepends to it.
+ */
+export function defaultTaskWorkItemTitle(body: string): string {
+  return sessionTaskHeadline(body, 160) ?? body.slice(0, 160);
+}
 
 type EnsureBrokerDeliveryConversationInput = {
   requesterId: string;
@@ -429,7 +438,7 @@ export class BrokerDeliveryAcceptanceService {
       const policy = task.operator ? taskNotificationPolicy(task) : undefined;
       payload = { ...payload, intent: task.fyi ? "tell" : "consult", ensureAwake: task.fyi ? false : payload.ensureAwake,
         ...(task.fyi ? { workItem: undefined, collaborationRecordId: undefined, execution: undefined, invocationMetadata: undefined } :
-          { workItem: payload.workItem ?? { title: payload.body.slice(0, 160) } }),
+          { workItem: payload.workItem ?? { title: defaultTaskWorkItemTitle(payload.body) } }),
         messageMetadata: { ...payload.messageMetadata, taskVersion: 1, ...(policy ? { notificationPolicy: policy } : {}) },
         ...(task.operator ? { operatorSignal: task.fyi
           ? { kind: "notify", blocking: false, replyExpectation: "none", notificationPolicy: policy }

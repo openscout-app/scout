@@ -6,9 +6,10 @@
  * synthesize chat ids; chat creation goes through the broker.
  */
 
-import { agentRosterTag, directChannelNaturalKey, type AgentRosterTag } from "@openscout/protocol";
+import { agentRosterTag, directChannelNaturalKey, EMPTY_SESSION_TASK_LINK, type AgentRosterTag } from "@openscout/protocol";
 
 import { db } from "./internal/db.ts";
+import { querySessionTaskLinksForAgents } from "./internal/session-task-links.ts";
 import { metadataString } from "./internal/parse.ts";
 import {
   compact,
@@ -291,6 +292,7 @@ function mapAgentRows(
   conversationIdByAgentId: ReadonlyMap<string, string>,
 ): WebAgent[] {
   const rosterTags = rosterTagsForAgents(rows.map((row) => row.id));
+  const taskLinks = querySessionTaskLinksForAgents(rows.map((row) => row.id));
   return rows.map((r) => {
     let capabilities: string[] = [];
     try { capabilities = r.capabilities_json ? JSON.parse(r.capabilities_json) : []; } catch {}
@@ -347,6 +349,7 @@ function mapAgentRows(
       retiredFromFleet: meta.retiredFromFleet === true,
       replacedByAgentId: metadataString(meta, "replacedByAgentId") ?? null,
       roster: rosterTags.get(r.id) ?? null,
+      ...(taskLinks.get(r.id) ?? EMPTY_SESSION_TASK_LINK),
     };
   });
 }
