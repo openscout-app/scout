@@ -94,6 +94,12 @@ export type WebAgent = {
   runtimePolicy?: WebAgentRuntimePolicy | null;
   /** The agent's roster code (`OS-003`); null while it holds no number. */
   roster?: AgentRosterTag | null;
+  /** Work item of the ask that started or last steered this agent. */
+  workItemId?: string | null;
+  /** That work item's title. */
+  workItemTitle?: string | null;
+  /** First line of that ask's task, as plain text. */
+  currentTask?: string | null;
 };
 
 export type WebActivityItem = {
