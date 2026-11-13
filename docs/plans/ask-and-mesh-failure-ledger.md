@@ -107,8 +107,15 @@ session.
 - **Likely cause, not yet verified:** a client request deadline (about 30s)
   shorter than the runtime's work, and a wait loop that treats one timed-out
   poll as fatal.
+- **Seen again while writing this ledger:** the host ran short of memory, its
+  swap filled and the runtime stopped answering `/health` for about a minute.
+  `scout wait <ref> --timeout 5` then printed nothing for 30s. The ref is
+  resolved by a snapshot read that has no deadline, and `--timeout` covers only
+  the wait loop that follows it.
 - **Next:** reproduce against a dev instance. Find which call carries the
   deadline. A wait loop should retry a timed-out poll within its own budget.
+  `--timeout` should bound the whole command, including resolving the ref, and
+  should say "the runtime did not answer" when it runs out.
 
 ### 7. A flight id changes after the receipt
 
