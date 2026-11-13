@@ -234,6 +234,20 @@ test("a successor to an ask sent to an agent still starts a new session", async 
   expect(successors[0]?.execution.targetSessionId).toBeUndefined();
 });
 
+test("a follow-up's reason reaches the worker in its text, and retries stay idempotent", async () => {
+  const { h, ask } = await taskFixture("running");
+  const task = { version: 1, ref: "parent", because: "the operator narrowed the scope" };
+  const first = await ask({ task });
+  expect(first).toMatchObject({ accepted: true, message: { body: "scope change\n\nBecause: the operator narrowed the scope" } });
+  await ask({ task });
+  expect(Object.values(h.runtime.peek().messages).filter(m => m.body.startsWith("scope change"))).toHaveLength(1);
+  await expect(ask({ task: { ...task, because: "a different reason" } })).rejects.toThrow("request ID conflicts");
+});
+test("a successor carries the asker's reason", async () => {
+  const { ask, successors } = await taskFixture("completed");
+  await ask({ task: { version: 1, continue: "parent", because: "the first pass missed the CLI" } });
+  expect(successors[0]?.task).toEqual({ version: 1, because: "the first pass missed the CLI" });
+});
 test("a successor keeps its own closing step", async () => {
   const { ask, successors } = await taskFixture("completed");
   await ask({ task: { version: 1, continue: "parent", callback: { code: "() => {}" } } });

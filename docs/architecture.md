@@ -628,7 +628,12 @@ Invocation receipts preserve an `executionResolution` record for harness,
 model, and reasoning effort. Each dimension distinguishes `requested`,
 `resolved` plus its source (`flag`, `literal`, `profile`, `endpoint`, `config`,
 or `default`), and harness-reported `observed` truth plus drift. Resolved launch
-arguments are not treated as observation.
+arguments are not treated as observation. Model and effort come from the
+session that runs the work: its own report (Claude's stream-json init or
+statusline, Codex's thread config), recorded on the endpoint and on the flight
+as soon as the session reports it, including after a reply closed the flight.
+Drift compares observed with the ask, and is `not_requested` when the ask
+named no value.
 
 Bare natural-language tokens use one stable priority: a reserved profile id is
 a profile launch; otherwise a launchable harness id is a harness-only
