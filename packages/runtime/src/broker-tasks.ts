@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, SCOUT_TASKS_CAPABILITY, validateTaskReply,
   type AgentHarness, type FlightRecord, type InvocationRequest, type MessageRecord, type ScoutDeliverRequest,
-  type ScoutDeliverResponse, type ScoutTaskReply } from "@openscout/protocol";
+  type ScoutDeliverResponse, type ScoutTaskReply, parseReplyWaitingOn } from "@openscout/protocol";
 import { readMessageRecord } from "./broker-message-records.js";
 import { endpointStronglyMatchesSession } from "./broker-endpoint-selection.js";
 import type { RuntimeRegistrySnapshot } from "./registry.js";
@@ -214,7 +214,8 @@ export class BrokerTaskService {
         visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
         metadata: { clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
           completionReply: { invocationId: invocation.id, flightId: flight.id, revision: flightCompletion(flight)?.revision ?? 0,
-            kind: input.progress ? "progress" : "final", ...(input.failed ? { outcome: "failed" } : {}) } } }, input.image);
+            kind: input.waitingOn ? "blocked" : input.progress ? "progress" : "final",
+            ...(input.waitingOn ? { waitingOn: parseReplyWaitingOn(input.waitingOn) } : {}), ...(input.failed ? { outcome: "failed" } : {}) } } }, input.image);
     }
     const message = await resolveBrokerMessageRefAsync(this.options.snapshot(), input.to!);
     if (!message) throw new Error(`unknown conversation message ${input.to}`);

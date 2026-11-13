@@ -25,6 +25,7 @@ import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
+import { permissionWaitPatch } from "./broker-blocked-reply.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
 import { requireProtectedAccessState, protectAccessDirectories, removeLocalAdminEnvironment } from "./mesh-access-startup.js";
@@ -3124,10 +3125,8 @@ const permissionService = new BrokerPermissionService({
   },
   // A native session's request has no tmux pane to rebind: its hook went with the old runtime.
   reattach: request => request.native ? Promise.resolve({ sessionOpen: false }) : reattachTmuxPermission(request),
-  transition: (id, state, requestId) => transitionInvocation(id, {
-    state, summary: requestId ? "Waiting on permission" : "Permission wait resolved; continuing live session.",
-    metadata: { permissionRequestId: requestId, waitingOnPermission: Boolean(requestId), nextMoveOwnerId: requestId ? operatorActorId : null },
-  }),
+  transition: (id, state, requestId) => transitionInvocation(id,
+    permissionWaitPatch(runtime.flightForInvocation(id), state, requestId, operatorActorId, Date.now())),
   // A harness dialog, not a question an agent put to the operator: it reads
   // and rings as a permission request, and a tap opens the request.
   notify: (invocation, record, prompt) => {
