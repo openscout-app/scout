@@ -1,6 +1,7 @@
 import { flightCompletion, hasExplicitCompletion } from "@openscout/protocol";
 import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
 import { isFinalReplyForInvocation } from "./broker-conversation-helpers.js";
+import { holdBlockedFlight } from "./broker-blocked-reply.js";
 import { readMessageRecord } from "./broker-message-records.js";
 import { isDeepStrictEqual } from "node:util";
 
@@ -320,6 +321,7 @@ export class BrokerFlightLifecycleService {
           }
         }
       }
+      flightToRecord = holdBlockedFlight(previous, flightToRecord);
       flightToRecord = normalizeRecordedFlight(flightToRecord, invocation, this.now());
       // A delayed adapter/status update cannot erase an acknowledged reply
       // while its separate completion write is being recovered.

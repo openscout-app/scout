@@ -18,6 +18,10 @@ import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.
 import { BrokerMessageService } from "./broker-message-service.js";
 import { isFinalReplyForInvocation } from "./broker-conversation-helpers.js";
 import { planHistoryRotation } from "./history-rotation.js";
+import { BrokerPermissionService } from "./broker-permission-service.js";
+import { applyInvocationStatusPatch } from "./broker-local-invocation-helpers.js";
+import { permissionWaitPatch } from "./broker-blocked-reply.js";
+import type { QuestionRecord } from "@openscout/protocol";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -483,4 +487,123 @@ test.each(["explicit", "cancel", "claimed"])("remote %s supersedes an automatic 
   expect(restarted.recover(worker.journal.pendingInvocationResultFlights()).scheduled).toBe(0);
   expect(await restarted.deliver(task.id)).toBe("stale");
   expect(attempts).toBe(2);
+});
+
+/** A permission prompt on the parent task's flight, wired as the daemon wires it. */
+function permissionOn(h: Awaited<ReturnType<typeof fixture>>) {
+  let shown = true;
+  const service = new BrokerPermissionService({
+    operatorId: "operator", nodeId: "node", createId: () => "permission-1",
+    record: record => h.runtime.upsertCollaboration(record),
+    read: id => h.runtime.collaborationRecord(id) as QuestionRecord | undefined,
+    requests: () => [], flight: id => h.runtime.flightForInvocation(id), localInvocation: () => true,
+    reattach: async () => ({ sessionOpen: false }),
+    transition: async (id, state, requestId) => {
+      const current = h.journal.getCurrentFlightForInvocation(id)!;
+      await h.lifecycle.recordFlight(applyInvocationStatusPatch(current, permissionWaitPatch(current, state, requestId, "operator", 50)));
+    },
+    notify: () => {}, sleep: () => new Promise(resolve => setTimeout(resolve, 1)),
+  });
+  const wait = service.wait(h.journal.getInvocation("parent")!, { sessionId: "session", projectRoot: "/tmp/project", text: "Run rm -rf dist?",
+    version: "v1", decisions: ["once", "deny"], answer: async () => { shown = false; }, isCurrent: async () => shown });
+  return { service, wait, request: () => h.runtime.collaborationRecord("permission-1") as QuestionRecord | undefined };
+}
+async function until(predicate: () => boolean) {
+  for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 1));
+  expect(predicate()).toBe(true);
+}
+
+test("a reply while a permission request is open neither completes the flight nor declines the request", async () => {
+  const { h, answer } = await taskFixture();
+  const permission = permissionOn(h);
+  await until(() => h.runtime.flightForInvocation("parent")?.state === "waiting");
+  await answer({ body: "Waiting on operator" });
+  // Wait past several poll ticks: before the fix the wait loop saw the completed flight and declined the request.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const flight = h.runtime.flightForInvocation("parent")!;
+  expect(flight.state).toBe("waiting");
+  expect(flight.waitingOn).toMatchObject({ kind: "permission", requestRef: "permission-1", replyMessageId: expect.any(String) });
+  expect(permission.request()?.state).toBe("open");
+  // The reply is recorded as blocked on the request, and a retry of the same final is idempotent.
+  const message = Object.values(h.runtime.peek().messages).find(m => m.body === "Waiting on operator")!;
+  expect(message.metadata?.completionReply).toMatchObject({ kind: "blocked", held: "final", waitingOn: { kind: "permission", requestRef: "permission-1" } });
+  await expect(answer({ body: "Waiting on operator" })).resolves.toMatchObject({ duplicate: true });
+  // The harness turn ending while the prompt is up does not finish the task either.
+  await h.lifecycle.recordFlight({ ...flight, state: "completed", output: "Waiting on operator", completedAt: 9 });
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("waiting");
+
+  // The operator decides; the harness continues, and its turn end completes the task.
+  await permission.service.decide("permission-1", "v1", "once");
+  await permission.wait;
+  expect(permission.request()?.state).toBe("closed");
+  const resumed = h.runtime.flightForInvocation("parent")!;
+  expect(resumed.state).toBe("running");
+  expect(resumed.waitingOn).toBeUndefined();
+  await h.lifecycle.recordFlight({ ...resumed, state: "completed", output: "done", completedAt: 9 });
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("completed");
+});
+
+test("a blocked reply keeps the flight waiting through the turn end until a final reply", async () => {
+  const { h, answer } = await taskFixture();
+  await answer({ requestId: "blocked", body: "Need a review of the diff", waitingOn: { kind: "review", summary: "Diff review", requestRef: "work-7" } });
+  const waiting = h.runtime.flightForInvocation("parent")!;
+  expect(waiting).toMatchObject({ state: "waiting", summary: "Waiting on review: Diff review",
+    waitingOn: { kind: "review", summary: "Diff review", requestRef: "work-7", since: expect.any(Number) } });
+  expect(h.journal.getFlight(waiting.id)?.metadata?.waitingOn).toMatchObject({ kind: "review" });
+
+  // The harness turn ends with output; the task stays open on its blocker.
+  await h.lifecycle.recordFlight({ ...waiting, state: "completed", output: "Need a review of the diff", completedAt: 9,
+    metadata: { ...waiting.metadata, resultReply: { pending: true } } });
+  const held = h.runtime.flightForInvocation("parent")!;
+  expect(held).toMatchObject({ state: "waiting", waitingOn: { kind: "review" } });
+  expect(held.output).toBeUndefined(); expect(held.metadata?.resultReply).toBeUndefined();
+
+  await answer({ requestId: "final", body: "Reviewed and merged" });
+  const done = h.runtime.flightForInvocation("parent")!;
+  expect(done).toMatchObject({ state: "completed", output: "Reviewed and merged" });
+  expect(done.waitingOn).toBeUndefined(); expect(done.metadata?.waitingOn).toBeUndefined();
+});
+
+test("progress after a blocked reply resumes the flight; failed still ends it", async () => {
+  const { h, answer } = await taskFixture();
+  await answer({ requestId: "blocked", body: "Which branch?", waitingOn: { kind: "question", summary: "Which branch to target" } });
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("waiting");
+  await answer({ requestId: "progress", body: "Targeting main", progress: true });
+  const running = h.runtime.flightForInvocation("parent")!;
+  expect(running.state).toBe("running"); expect(running.waitingOn).toBeUndefined();
+  await answer({ requestId: "blocked-2", body: "Blocked again", waitingOn: { kind: "question", summary: "Need credentials" } });
+  await answer({ requestId: "failed", body: "Giving up", failed: true });
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("failed");
+});
+
+test("a failed reply while a permission request is open still ends the task", async () => {
+  const { h, answer } = await taskFixture();
+  const permission = permissionOn(h);
+  await until(() => h.runtime.flightForInvocation("parent")?.state === "waiting");
+  await answer({ body: "Cannot continue", failed: true });
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("failed");
+  await expect(permission.wait).rejects.toThrow("no longer active");
+  expect(permission.request()?.state).toBe("declined");
+});
+
+test("a legacy reply with no typed completion does not end a flight waiting on an open permission", async () => {
+  const h = await fixture();
+  await h.accept(invocation("parent", { completion: undefined }));
+  const permission = permissionOn(h);
+  await until(() => h.runtime.flightForInvocation("parent")?.state === "waiting");
+  await h.messages.postConversationMessage({ id: "legacy", actorId: "worker", originNodeId: "node", conversationId: "conversation",
+    replyToMessageId: "ask-parent", class: "agent", body: "Waiting on operator", policy: "durable", visibility: "private", createdAt: 10 });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("waiting");
+  expect(permission.request()?.state).toBe("open");
+  await permission.service.decide("permission-1", "v1", "once");
+  await permission.wait;
+  expect(h.runtime.flightForInvocation("parent")?.state).toBe("running");
+});
+
+test("blocked replies are validated", async () => {
+  const { answer } = await taskFixture();
+  await expect(answer({ waitingOn: { kind: "deploy", summary: "x" } })).rejects.toThrow("--waiting-on");
+  await expect(answer({ waitingOn: { kind: "review", summary: " " } })).rejects.toThrow("--waiting-on");
+  await expect(answer({ progress: true, waitingOn: { kind: "review", summary: "x" } })).rejects.toThrow("cannot be combined");
 });
