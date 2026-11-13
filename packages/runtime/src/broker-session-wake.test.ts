@@ -7,6 +7,7 @@ import {
   MESH_SESSION_WAKE_PATH,
   rankPeersForProjectPath,
   resolveMeshHost,
+  meshHostDispatchPeers,
   suggestHostForProjectPath,
   startSessionOnPeers,
   flatDispatchSessionId,
@@ -618,6 +619,18 @@ describe("resolveMeshHost", () => {
       expect(resolve("mini-local", { nodes: order, trustedNodeIds: new Set([mini.id, stale.id]) }))
         .toEqual({ kind: "peer", node: stale });
     }
+  });
+
+  test("the pre-dispatch check sees only the node routing picks, not a stale record that shares its name", () => {
+    const mini = node({ id: "mini-mesh-1", name: "mini", hostName: "mini.local" });
+    const stale = node({ id: "mini-local-mesh-1", name: "mini", hostName: "mini" });
+    for (const order of [[stale, mini], [mini, stale]]) {
+      expect(meshHostDispatchPeers(resolve("mini", { nodes: order, trustedNodeIds: new Set([mini.id, stale.id]) })))
+        .toEqual([mini]);
+    }
+    expect(meshHostDispatchPeers(resolve("arts-mini"))).toEqual([]);
+    expect(meshHostDispatchPeers(resolve("nowhere"))).toEqual([]);
+    expect(meshHostDispatchPeers({ kind: "ambiguous", nodes: [mini, stale] })).toEqual([mini, stale]);
   });
 
   test("normalized host aliases remain usable when no exact qualifier matches", () => {
