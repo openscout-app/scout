@@ -1,3 +1,4 @@
+import { projectFlightRecord } from "@openscout/protocol";
 import type { ControlPlaneHistoryReader, HistoricalRecord, HistoricalPublication } from "./control-plane-history-store.js";
 import type { BrokerMessageHistory } from "./broker-message-history.js";
 import { journalEntryProblem, readableCanonicalMessage, readableJournalKinds } from "./broker-journal-record-contract.js";
@@ -2141,7 +2142,7 @@ export class FileBackedBrokerJournal {
         snapshot.bindings[entry.binding.id] = entry.binding;
         return;
       case "flight.record":
-        snapshot.flights[entry.flight.id] = entry.flight;
+        snapshot.flights[entry.flight.id] = projectFlightRecord(entry.flight);
         return;
       case "history.rotate": {
         const evicted = entry.evicted
@@ -2224,7 +2225,7 @@ export class FileBackedBrokerJournal {
         this.indexDispatchJob(entry.job);
         return;
       case "flight.record":
-        this.state.snapshot.flights[entry.flight.id] = entry.flight;
+        this.state.snapshot.flights[entry.flight.id] = projectFlightRecord(entry.flight);
         if (!entry.preserveCurrent) this.currentFlightIds.set(entry.flight.invocationId, entry.flight.id);
         this.updateOpenOperatorTask(entry.flight.invocationId);
         this.updateDispatchJobsForFlight(entry.flight.id);

@@ -1,3 +1,4 @@
+import { FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH, parseReplyWaitingOn } from "./invocations.js";
 /** Versioned ask/reply semantics. Old peers must be refused before dispatch. */
 export const SCOUT_TASKS_CAPABILITY = "ask-reply/1";
 export type ScoutTaskAsk = {
@@ -42,6 +43,8 @@ export type ScoutTaskReply = {
   body: string;
   progress?: boolean;
   failed?: boolean;
+  /** The work is blocked: the task stays open and its flight waits on this. */
+  waitingOn?: import("./invocations.js").ReplyWaitingOn;
   attachments?: import("./messages.js").MessageAttachment[];
   image?: import("./attachments.js").AttachmentUpload;
 };
@@ -71,10 +74,15 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   if (task.callback !== undefined && (typeof task.callback?.code !== "string" || !task.callback.code.trim() || task.callback.code.length > SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH)) throw new Error(`--callback takes a JavaScript module file of up to ${SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH} characters`);
   if (task.callback !== undefined && (task.fyi || task.ref || task.cancel || task.operator || route.channel)) throw new Error("--callback belongs to a new task an agent carries out; it cannot be combined with --fyi, --ref, --cancel, --operator or --channel");
 }
-export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed">): void {
+export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed" | "waitingOn">): void {
   if (Number(Boolean(reply.ref)) + Number(Boolean(reply.to)) !== 1) throw new Error("reply requires exactly one of --ref <task> or --to <message>");
-  if (reply.progress && reply.failed) throw new Error("--progress and --failed cannot be combined");
-  if (reply.to && (reply.progress || reply.failed)) throw new Error("--progress and --failed require --ref <task>");
+  if (Number(Boolean(reply.progress)) + Number(Boolean(reply.failed)) + Number(reply.waitingOn !== undefined) > 1) {
+    throw new Error("--progress, --failed and --waiting-on cannot be combined");
+  }
+  if (reply.to && (reply.progress || reply.failed || reply.waitingOn !== undefined)) throw new Error("--progress, --failed and --waiting-on require --ref <task>");
+  if (reply.waitingOn !== undefined && !parseReplyWaitingOn(reply.waitingOn)) {
+    throw new Error(`--waiting-on takes permission, question or review, and a summary of up to ${FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH} characters`);
+  }
 }
 export function taskNotificationPolicy(task: ScoutTaskAsk): ScoutNotificationPolicy {
   return { requested: !task.fyi || Boolean(task.notify), priority: task.defaultAction ? "normal" : "interrupting" };
