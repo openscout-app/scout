@@ -40,7 +40,7 @@ test("repeated recipients are independent routes, not last-value-wins", () => {
   expect(() => parseAskCommandOptions(["--to", "a", "--ref", "inv-1", "review"], "/repo")).toThrow("exactly one");
 });
 test.each([
-  ["--to", "a", "--notify", "review"],
+  ["--to", "a", "--permission", "--because", "deploy blocked", "review"],
   ["--operator", "--fyi", "--option", "yes", "review"],
   ["--channel", "shared", "review"],
   ["--ref", "inv-1", "--harness", "codex", "review"],
@@ -57,6 +57,14 @@ test("reply is final by default; progress and failure stay typed and out of body
   expect(() => parseReplyCommandOptions(["--ref", "inv-1", "--progress", "--failed", "broken"])).toThrow();
   expect(() => parseReplyCommandOptions(["done"])).toThrow();
 });
+test("--waiting-on records a typed blocker from the reply's first line", () => {
+  expect(parseReplyCommandOptions(["--ref", "inv-1", "--waiting-on", "permission", "--waiting-ref=permission-1", "Waiting on operator\nto approve rm"]))
+    .toMatchObject({ waitingOn: { kind: "permission", summary: "Waiting on operator", requestRef: "permission-1" } });
+  expect(() => parseReplyCommandOptions(["--ref", "inv-1", "--waiting-on", "deploy", "blocked"])).toThrow("--waiting-on");
+  expect(() => parseReplyCommandOptions(["--ref", "inv-1", "--waiting-on", "review", "--progress", "blocked"])).toThrow("cannot be combined");
+  expect(() => parseReplyCommandOptions(["--ref", "inv-1", "--waiting-ref", "x", "blocked"])).toThrow("requires --waiting-on");
+  expect(() => parseReplyCommandOptions(["--to", "msg-1", "--waiting-on", "review", "blocked"])).toThrow("require --ref");
+});
 
 test("missing values do not consume another flag and implicit asks are strict too", async () => {
   for (const flag of ["--ref", "--harness", "--project", "--request-id"]) {
@@ -64,7 +72,13 @@ test("missing values do not consume another flag and implicit asks are strict to
   }
   const { parseImplicitAskCommandOptions } = await import("./options.ts");
   expect(() => parseImplicitAskCommandOptions(["@worker", "--message-file", "brief.md"], "/repo")).toThrow("unknown flag");
-  expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--notify", "review"], "/repo")).toThrow("--notify now pushes");
+  expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--permission", "review"], "/repo")).toThrow("--permission requires --operator");
+});
+
+test("an agent ask accepts a reason and --notify without --operator", () => {
+  expect(parseAskCommandOptions(["--to", "worker", "--because", "the build is red", "rerun checks"], "/repo").task)
+    .toMatchObject({ because: "the build is red" });
+  expect(parseAskCommandOptions(["--to", "worker", "--notify", "review"], "/repo").task).toMatchObject({ notify: true });
 });
 
 

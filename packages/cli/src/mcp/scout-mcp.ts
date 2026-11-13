@@ -4070,20 +4070,25 @@ export function createScoutMcpServer(options: {
 
   server.registerTool("reply", {
     title: "Reply",
-    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     inputSchema: z.object({
       requestId: z.string().min(1).max(256).optional().describe("Reuse after an uncertain receipt."),
       ref: z.string().min(1).optional(), to: z.string().min(1).optional(),
       sessionId: z.string().min(1).optional().describe("External mailbox return address, copied from the task."),
       deliveryId: z.string().min(1).optional(), replyToken: z.string().min(1).max(256).optional(),
-      progress: z.boolean().optional(), failed: z.boolean().optional(), body: z.string().trim().min(1),
+      progress: z.boolean().optional(), failed: z.boolean().optional(),
+      waitingOn: z.object({ kind: z.enum(["permission", "question", "review"]), summary: z.string().trim().min(1).max(500),
+        requestRef: z.string().min(1).optional().describe("The request that unblocks the work: a permission request, question, or task ref.") })
+        .strict().optional().describe("Blocked: the task stays open, its flight waits on this."),
+      body: z.string().trim().min(1),
       senderId: z.string().optional(), currentDirectory: z.string().optional(),
       image: z.string().optional().describe("Local image path."), attachments: attachmentsInputSchema,
     }).strict(),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
-  }, async ({ requestId, ref, to, progress, failed, body, senderId, currentDirectory, image, attachments, sessionId, deliveryId, replyToken }) => {
-    validateTaskReply({ ref, to, progress, failed });
+  }, async ({ requestId, ref, to, progress, failed, waitingOn, body, senderId, currentDirectory, image, attachments, sessionId, deliveryId, replyToken }) => {
+    validateTaskReply({ ref, to, progress, failed, waitingOn });
     if (sessionId || deliveryId || replyToken) {
+      if (waitingOn) throw new Error("waitingOn is not available on external mailbox replies");
       if (!ref || !sessionId || !deliveryId)
         throw new Error("external reply requires the task ref and its exact sessionId/deliveryId return address");
       const ownerId = await resolveMcpSenderId(deps, undefined, options.defaultCurrentDirectory, env);
@@ -4098,7 +4103,7 @@ export function createScoutMcpServer(options: {
     const directory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
     const actor = await resolveMcpSenderId(deps, senderId, directory, env);
     const result = await deps.replyTask({ requestId: requestId ?? `reply-${randomUUID()}`, senderId: actor,
-      ref, to, progress, failed, body,
+      ref, to, progress, failed, body, ...(waitingOn ? { waitingOn } : {}),
       ...(image ? { image: await readTaskImage(resolve(directory, image)) } : {}),
       ...(attachments ? { attachments: attachments.map((attachment, index) => ({ ...attachment, id: `attachment-${index}` })) } : {}) });
     return { content: createTextContent(result) };

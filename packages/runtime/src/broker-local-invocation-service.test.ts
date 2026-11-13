@@ -579,6 +579,58 @@ describe("BrokerLocalInvocationService", () => {
     }));
   });
 
+  test("the session's own model and effort reach the flight mid-turn and after a broker reply closed it", async () => {
+    const endpoint = testEndpoint({
+      harness: "claude",
+      transport: "tmux",
+      sessionId: "session-tmux-claude",
+      metadata: { agentName: "agent-one", sessionBacked: true, pendingExternalSession: true },
+    });
+    const observation: LocalEndpointSessionObservation = {
+      sessionId: "native-claude-session",
+      runtime: { harness: "claude", model: "claude-opus-5-5", reasoningEffort: "high" },
+      runtimeSource: "claude-statusline",
+      evidence: { source: "claude-session-record" },
+      observedAt: 19_000,
+    };
+    // The ask requested only the harness; model and effort come from the session.
+    const executionResolution = createScoutExecutionResolution({
+      requested: { harness: "claude" }, resolved: { harness: "claude" }, source: { harness: "flag" }, resolvedAt: 10_000,
+    });
+    const midTurnResolutions: unknown[] = [];
+    let harness!: ReturnType<typeof createHarness>;
+    harness = createHarness({
+      endpoint,
+      now: 20_000,
+      async invokeEndpoint(nextEndpoint, _invocation, hooks) {
+        await hooks?.onSessionObserved?.(sessionObservationMetadata(nextEndpoint, observation));
+        midTurnResolutions.push((harness.flightForInvocation("invocation-1")?.metadata?.dispatchAck as any)?.executionResolution);
+        // The worker answers with `reply`, which completes the flight before the turn returns.
+        harness.seedFlight({ ...harness.flightForInvocation("invocation-1")!, state: "completed", completedAt: 19_500,
+          metadata: { ...harness.flightForInvocation("invocation-1")!.metadata, completedByBrokerReply: true } });
+        return { output: "", metadata: sessionObservationMetadata(nextEndpoint, observation) };
+      },
+    });
+
+    harness.seedFlight(testFlight());
+    await harness.service.execute(testInvocation({ executionResolution }));
+
+    const sessionReport = {
+      harness: expect.objectContaining({ requested: "claude", observed: "claude", drift: "match" }),
+      model: { observed: "claude-opus-5-5", observedAt: 19_000, drift: "not_requested" },
+      reasoningEffort: { observed: "high", observedAt: 19_000, drift: "not_requested" },
+      sessionId: "native-claude-session",
+    };
+    expect(midTurnResolutions[0]).toEqual(expect.objectContaining(sessionReport));
+    const flight = harness.flightForInvocation("invocation-1")!;
+    expect(flight.state).toBe("completed");
+    expect((flight.metadata?.dispatchAck as any)?.executionResolution).toEqual(expect.objectContaining(sessionReport));
+    expect((flight.metadata?.sessionTrace as any[]).at(-1)?.executionResolution).toEqual(expect.objectContaining(sessionReport));
+    // The session record carries the same observation.
+    expect(harness.persistedEndpoints.at(-1)?.metadata?.observedRuntime)
+      .toEqual({ harness: "claude", model: "claude-opus-5-5", reasoningEffort: "high" });
+  });
+
   test("records which Codex app-server served an attached session in the dispatch trace", async () => {
     const endpoint = testEndpoint({
       harness: "codex",

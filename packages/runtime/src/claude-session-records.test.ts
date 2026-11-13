@@ -212,6 +212,30 @@ test("observes the actual pane process and rejects stale records, reused PIDs, a
   await expect(findLiveClaudeSession("native-agent", { directory, probe: async () => { throw new Error("probe timed out"); } })).rejects.toThrow("probe timed out");
 });
 
+test("a session Claude Code renamed after launch still correlates; a different user-given name does not", async () => {
+  const directory = scratchDirectory();
+  const base = { tmuxSession, directory, launchName: "project-woolf-20-relay-agent", cwd: "/Users/art/dev/openscout" };
+  // Claude Code 2.1.323 replaces the `--name` Scout passed with its own title moments after start.
+  writeFileSync(join(directory, "100.json"), JSON.stringify({ ...JSON.parse(record({ pid: 100, sessionId: "native-agent" })),
+    name: "scoutd-process-status", nameSource: "auto" }));
+  const renamed = await observeClaudeSessionForTmuxSession({ ...base, probe: async () => [livePane] });
+  expect(renamed.ok && renamed.record.sessionId).toBe("native-agent");
+  expect(renamed.ok && renamed.evidence.nameMatched).toBe(false);
+
+  // A user-given name that is not the launch name is a different launch.
+  writeFileSync(join(directory, "100.json"), JSON.stringify({ ...JSON.parse(record({ pid: 100, sessionId: "native-agent" })),
+    name: "someone-elses-session", nameSource: "user" }));
+  expect((await observeClaudeSessionForTmuxSession({ ...base, probe: async () => [livePane] })).ok).toBe(false);
+
+  // Two unnamed-by-user interactive processes in one tmux session remain a tie.
+  const records = [
+    { ...JSON.parse(record({ pid: 100, sessionId: "native-a" })), name: "title-a", nameSource: "auto" },
+    { ...JSON.parse(record({ pid: 101, sessionId: "native-b" })), name: null, nameSource: null },
+  ].map((raw, index) => parseClaudeSessionRecord(JSON.stringify(raw), join(directory, `${100 + index}.json`))!);
+  expect(correlateClaudeSessionForTmuxSession({ ...base, records, isProcessAlive: () => true }))
+    .toEqual({ ok: false, reason: "ambiguous", candidates: 2, live: 2 });
+});
+
 test("observation reads only the pane PID file and rejects oversized process records", async () => {
   const directory = scratchDirectory();
   writeFileSync(join(directory, "100.json"), " ".repeat(65537));

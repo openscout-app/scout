@@ -2733,6 +2733,11 @@ describe("two-verb MCP contract", () => {
     { operator: true },
     { operator: true, defaultAction: "staging", options: ["staging", "prod"], window: 60 },
     { operator: true, permission: true, because: "deploy blocked" },
+    // A reason rides on an agent ask; --notify on an agent ask returns on acceptance.
+    { to: "worker", because: "the release branch is red" },
+    { projectPath: "/repo", harness: "claude", because: "the release branch is red" },
+    { ref: "inv-parent", because: "scope changed" },
+    { to: "worker", notify: true },
     { operator: true, fyi: true },
     { operator: true, fyi: true, notify: true },
     { channel: "shared", fyi: true },
@@ -2756,7 +2761,7 @@ describe("two-verb MCP contract", () => {
   });
   test.each([
     { to: "worker", operator: true },
-    { to: "worker", notify: true },
+    { to: "worker", permission: true, because: "deploy blocked" },
     { channel: "shared" },
     { operator: true, fyi: true, options: ["yes"] },
     { operator: true, defaultAction: "yes", permission: true },

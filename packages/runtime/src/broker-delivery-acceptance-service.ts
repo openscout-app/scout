@@ -439,7 +439,8 @@ export class BrokerDeliveryAcceptanceService {
       payload = { ...payload, intent: task.fyi ? "tell" : "consult", ensureAwake: task.fyi ? false : payload.ensureAwake,
         ...(task.fyi ? { workItem: undefined, collaborationRecordId: undefined, execution: undefined, invocationMetadata: undefined } :
           { workItem: payload.workItem ?? { title: defaultTaskWorkItemTitle(payload.body) } }),
-        messageMetadata: { ...payload.messageMetadata, taskVersion: 1, ...(policy ? { notificationPolicy: policy } : {}) },
+        messageMetadata: { ...payload.messageMetadata, taskVersion: 1, ...(policy ? { notificationPolicy: policy } : {}),
+          ...(task.because ? { because: task.because } : {}) },
         ...(task.operator ? { operatorSignal: task.fyi
           ? { kind: "notify", blocking: false, replyExpectation: "none", notificationPolicy: policy }
           : task.defaultAction ? { kind: "consult", blocking: false, replyExpectation: "optional", defaultAction: task.defaultAction, notificationPolicy: policy }
@@ -1344,9 +1345,13 @@ export class BrokerDeliveryAcceptanceService {
       stream: false,
       createdAt,
       ...(labels.length ? { labels } : {}),
+      // The asker's reason rides to the worker: invocation context is part
+      // of the prompt every harness adapter builds.
+      ...(payload.task?.because ? { context: { because: payload.task.because } } : {}),
       metadata: {
         ...invocationMetadata,
         ...(payload.task ? { taskVersion: 1, taskHomeNodeId: this.options.nodeId } : {}),
+        ...(payload.task?.because ? { because: payload.task.because } : {}),
         ...(payload.task?.callback ? { callback: payload.task.callback } : {}),
         ...(replyToSessionId ? { replyToSessionId } : {}),
         completion: payload.completion,

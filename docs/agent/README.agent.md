@@ -135,7 +135,9 @@ known target.
 - Exact runtime asks create isolated sessions. Exact `session:<id>` asks fail
   unless observed harness/model/effort match every requested dimension.
 - Verify `executionResolution` on the invocation: requested and resolved show
-  launch intent and provenance; observed and drift show harness-owned truth.
+  launch intent and provenance; observed is what the running session reports
+  about itself. Drift compares observed with the ask and is `not_requested`
+  when the ask named no value.
 - Runtime/profile/route/effort grammar words are reserved agent names. Stored
   historical offenders fail targeted setup or broker startup with
   `reserved_name_existing`; fleet discovery quarantines invalid siblings so

@@ -144,7 +144,14 @@ export type ScoutRuntimeResolutionSource =
   | "config"
   | "default";
 
+/**
+ * Drift compares what the session reports against what the ask requested.
+ * `not_requested`: the ask named no value, so there is nothing to drift from;
+ * the session's own value is in `observed`. `unknown`: the ask named a value
+ * and the session has not reported one yet.
+ */
 export type ScoutRuntimeDriftState =
+  | "not_requested"
   | "unknown"
   | "match"
   | "mismatch";
@@ -179,7 +186,9 @@ export interface ScoutCodexAppServerIdentity {
 /**
  * Durable execution truth for one concrete session. `requested` is caller
  * intent, `resolved` is the spawn value after the launch ladder, and
- * `observed` is populated only from harness-owned evidence.
+ * `observed` is populated only from harness-owned evidence: the session's own
+ * report of the model and effort it runs. `drift` compares `observed` with the
+ * request and is `not_requested` when the ask named nothing.
  */
 export interface ScoutExecutionResolution {
   schemaVersion: "openscout.execution-resolution.v1";
@@ -500,11 +509,17 @@ export function runtimeDimensionResolution(input: {
   const requested = input.requested?.trim() || undefined;
   const resolved = input.resolved?.trim() || undefined;
   const observed = input.observed?.trim() || undefined;
-  const drift: ScoutRuntimeDriftState = !observed || !resolved
-    ? "unknown"
-    : observed.toLowerCase() === resolved.toLowerCase()
-      ? "match"
-      : "mismatch";
+  // Model and effort come from the session that runs the work. Drift is a
+  // question about the ask, so it exists only when the ask requested a value.
+  // The request is compared in its resolved (normalized) form when one exists.
+  const expected = requested ? resolved ?? requested : undefined;
+  const drift: ScoutRuntimeDriftState = !expected
+    ? "not_requested"
+    : !observed
+      ? "unknown"
+      : observed.toLowerCase() === expected.toLowerCase()
+        ? "match"
+        : "mismatch";
   return {
     ...(requested ? { requested } : {}),
     ...(resolved ? { resolved } : {}),
