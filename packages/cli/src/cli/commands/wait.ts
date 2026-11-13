@@ -35,7 +35,7 @@ export function renderWaitCommandHelp(): string {
   return [
     "Usage: scout wait <ref> [--timeout <seconds>]",
     "",
-    "Wait for a Scout ask to finish from an invocation id, flight id, message id, or ref:<short-id>.",
+    "Wait for a Scout ask to finish from an invocation id, flight id, message id, ref:<short-id>, or the session-… id it was sent to (its current task, else its last).",
     "The timeout is only your wait budget. It does not cancel or fail the underlying work.",
     "If still pending, wait on the same ref again or run scout status <ref> --json; do not submit a duplicate ask.",
     "Inspect the returned terminal state, output, and error before reporting completion.",

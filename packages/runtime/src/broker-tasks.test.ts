@@ -83,9 +83,9 @@ async function fixture(options: { nodeId?: string; authorize?: (invocation: Invo
   };
 }
 
-async function taskFixture(state: FlightRecord["state"] = "running", extra: Record<string, unknown> = {}, beforePost?: () => Promise<void>) {
+async function taskFixture(state: FlightRecord["state"] = "running", extra: Record<string, unknown> = {}, beforePost?: () => Promise<void>, requestPatch: Partial<InvocationRequest> = {}) {
   const h = await fixture();
-  const request = invocation("parent", { completion: undefined, taskVersion: 1, ...extra });
+  const request = { ...invocation("parent", { completion: undefined, taskVersion: 1, ...extra }), ...requestPatch };
   await h.accept(request);
   if (state !== "running") await h.lifecycle.recordFlight({ ...h.runtime.flightForInvocation("parent")!, state,
     output: state === "completed" ? "earlier result" : undefined, completedAt: ["completed", "failed", "cancelled"].includes(state) ? 4 : undefined });
@@ -211,6 +211,23 @@ test("successor launch overrides are separate from the predecessor route", async
   await ask({ task: { version: 1, continue: "parent", successor: { host: "build-peer", projectPath: "/project" } } });
   expect(successors[0]).toMatchObject({ target: { kind: "project_path", host: "build-peer", projectPath: "/project" },
     execution: { session: "new" }, invocationMetadata: { predecessorTaskId: "parent" } });
+});
+
+test("a successor to an ask sent to a harness session continues in that session", async () => {
+  const session = "session-abc";
+  const { ask, successors } = await taskFixture("completed", {}, undefined,
+    { targetAgentId: session, execution: { harness: "claude", session: "existing", targetSessionId: session } });
+  await ask({ task: { version: 1, continue: "parent" } });
+  expect(successors[0]).toMatchObject({ target: { kind: "agent_id", agentId: session }, targetAgentId: session,
+    execution: { harness: "claude", session: "existing", targetSessionId: session } });
+});
+
+test("a successor to an ask sent to an agent still starts a new session", async () => {
+  const { ask, successors } = await taskFixture("completed", {}, undefined,
+    { execution: { harness: "claude", session: "existing", targetSessionId: "session-of-worker" } });
+  await ask({ task: { version: 1, continue: "parent" } });
+  expect(successors[0]?.execution.session).toBe("new");
+  expect(successors[0]?.execution.targetSessionId).toBeUndefined();
 });
 
 test("a successor keeps its own closing step", async () => {

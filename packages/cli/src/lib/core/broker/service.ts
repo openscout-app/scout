@@ -1,4 +1,4 @@
-import { SCOUT_TASKS_CAPABILITY, agentRosterTag, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
+import { SCOUT_TASKS_CAPABILITY, agentRosterTag, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -454,7 +454,7 @@ export type ScoutWaitResolution =
   | {
       found: true;
       input: string;
-      kind: "invocation" | "flight" | "message" | "ref";
+      kind: "invocation" | "flight" | "message" | "ref" | "session";
       invocationId: string;
       flightId: string | null;
       messageId: string | null;
@@ -4780,12 +4780,51 @@ export async function resolveScoutWaitReference(
     }
   }
 
+  // A harness session handle (`ask --to session-…` targets one): wait on the
+  // task that session is running now, else the last one it ran.
+  const sessionFlight = latestFlightForSession(flights, invocations, normalized);
+  if (sessionFlight) {
+    return buildWaitResolution({
+      input: original,
+      kind: "session",
+      invocationId: sessionFlight.invocationId,
+      flightId: sessionFlight.id,
+      messageId: invocationMessageId(invocations, sessionFlight.invocationId),
+      bindingRef: metadataString(sessionFlight.metadata, "bindingRef") ?? sessionFlight.id.slice(-8),
+    });
+  }
+
   const candidates = [
     ...flightMatches.map((flight) => flight.id),
     ...invocationMatches.map((invocation) => invocation.id),
     ...messageMatches.map((message) => message.id),
   ];
   return { found: false, input: original, candidates };
+}
+
+const TERMINAL_FLIGHT_STATES = new Set(["completed", "failed", "cancelled"]);
+
+/** The flight a harness session is running now, else the newest one it ran. */
+export function latestFlightForSession(
+  flights: readonly ScoutFlightRecord[],
+  invocations: readonly { id: string; execution?: { targetSessionId?: string | null } | null }[],
+  sessionId: string,
+): ScoutFlightRecord | null {
+  if (!sessionId.startsWith("session-")) return null;
+  const targetedInvocations = new Set(
+    invocations.filter((invocation) => invocation.execution?.targetSessionId === sessionId).map((invocation) => invocation.id),
+  );
+  const ran = flights.filter((flight) => flight.targetAgentId === sessionId
+    || targetedInvocations.has(flight.invocationId)
+    || flightSessionTrace(flight.metadata as Parameters<typeof flightSessionTrace>[0]).some((entry) => entry.sessionId === sessionId));
+  if (ran.length === 0) return null;
+  const newest = (a: ScoutFlightRecord, b: ScoutFlightRecord) => flightStartedAt(b) - flightStartedAt(a);
+  const open = ran.filter((flight) => !TERMINAL_FLIGHT_STATES.has(flight.state)).sort(newest);
+  return open[0] ?? ran.sort(newest)[0]!;
+}
+
+function flightStartedAt(flight: ScoutFlightRecord): number {
+  return flight.startedAt ?? flight.completedAt ?? 0;
 }
 
 export async function waitForScoutInvocation(
@@ -5022,7 +5061,7 @@ function normalizeScoutWaitRef(value: string): string {
 
 function buildWaitResolution(input: {
   input: string;
-  kind: "invocation" | "flight" | "message" | "ref";
+  kind: "invocation" | "flight" | "message" | "ref" | "session";
   invocationId: string;
   flightId: string | null;
   messageId: string | null;
