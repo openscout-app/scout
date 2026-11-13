@@ -23,6 +23,7 @@ import {
 } from "./uptodate.ts";
 import { brokerUpdateDebugEnabled, ensureBrokerUptodate } from "./broker-update.ts";
 import { runNativeScoutdJson } from "./scoutd.ts";
+import { exitAfterCompletedCommand } from "./completed-command-exit.ts";
 import { SCOUT_APP_VERSION } from "../lib/shared/product.ts";
 import { resolveOpenScoutScoutHome } from "@openscout/runtime/support-paths";
 
@@ -122,7 +123,7 @@ async function main() {
     }
     const options = parseImplicitAskCommandOptions(implicitPromptArgs, defaultScoutContextDirectory(context));
     await runAskWithOptions(context, options);
-    exitAfterCompletedCommand("ask");
+    await exitAfterCompletedCommand("ask");
     return;
   }
 
@@ -133,29 +134,7 @@ async function main() {
   const resolvedCommand = registration.canonicalName ?? registration.name;
   const handler = await loadScoutCommandHandler(resolvedCommand as Parameters<typeof loadScoutCommandHandler>[0]);
   await handler(context, commandArgs);
-  exitAfterCompletedCommand(resolvedCommand, commandArgs);
-}
-
-const FORCE_EXIT_AFTER_COMPLETED_COMMANDS = new Set(["ask"]);
-
-function shouldForceExitAfterCommand(command: string | null, args: readonly string[]): boolean {
-  if (!command) {
-    return false;
-  }
-  if (FORCE_EXIT_AFTER_COMPLETED_COMMANDS.has(command)) {
-    return true;
-  }
-  // A tracked send runs the ask lifecycle and exits like ask. A plain send
-  // keeps its natural exit so a large --json receipt (which echoes the body)
-  // is never truncated on a pipe by a forced exit.
-  return command === "send" && args.includes("--tracked");
-}
-
-function exitAfterCompletedCommand(command: string | null, args: readonly string[] = []): void {
-  if (!shouldForceExitAfterCommand(command, args)) {
-    return;
-  }
-  process.exit(process.exitCode ?? 0);
+  await exitAfterCompletedCommand(resolvedCommand, commandArgs);
 }
 
 /** Cached scout shim path — resolved once per process. */

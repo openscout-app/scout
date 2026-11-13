@@ -293,6 +293,7 @@ import {
 } from "./broker-mesh-forwarding-service.js";
 import {
   resolveMeshHost,
+  meshHostDispatchPeers,
   suggestHostForProjectPath,
   startSessionOnPeers,
   wakeLocalHarnessSession,
@@ -3249,7 +3250,14 @@ const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDel
     const actorId = target?.kind === "agent_id" ? target.agentId : target?.kind === "agent_label"
       ? Object.values(snapshot.agents).find(agent => [agent.id, agent.handle, agent.displayName].includes(target.label))?.id : undefined;
     const endpoint = actorId ? homeEndpointForAgent(snapshot, actorId) : undefined;
-    const peers = host ? Object.values(snapshot.nodes).filter(node => [node.id, node.name, node.hostName].includes(host))
+    // Check the node routing will pick, not every record that shares the name.
+    const peers = host ? meshHostDispatchPeers(resolveMeshHost({
+      host,
+      localNode: snapshot.nodes[nodeId],
+      nodes: Object.values(snapshot.nodes).filter((node) => node.meshId === meshId),
+      trustedNodeIds: new Set(trustedPeerStore?.listTrustedPeers().flatMap((peer) => peer.nodeId ? [peer.nodeId] : []) ?? []),
+      isReachable: isReachableMeshNode,
+    }))
       : endpoint ? [snapshot.nodes[endpoint.nodeId]].filter((node): node is NodeDefinition => Boolean(node)) : [];
     for (const peer of peers) if (peer.id !== nodeId && !peer.capabilities?.includes(SCOUT_TASKS_CAPABILITY))
       throw new Error(`target runtime does not advertise ${SCOUT_TASKS_CAPABILITY}; upgrade it before dispatch`);

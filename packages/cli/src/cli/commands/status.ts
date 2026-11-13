@@ -176,6 +176,12 @@ export function selectWorkStatuses(rows: WorkStatus[], options: StatusOptions): 
     const ref = options.ref.replace(/^ref:/, "");
     const exact = rows.filter(row => row.id === ref);
     selected = exact.length ? exact : rows.filter(row => row.handles.includes(ref));
+    if (!selected.length && ref.startsWith("session-")) {
+      // A harness session handle: the task it is running now, else the last one it ran (rows are newest first).
+      const ran = rows.filter(row => row.kind === "flight" && (row.agentId === ref || row.assignee?.sessionId === ref));
+      const current = ran.find(row => !["completed", "failed", "cancelled"].includes(row.state)) ?? ran[0];
+      selected = current ? [current] : [];
+    }
     if (!selected.length) throw new ScoutCliError(`no work found for ${options.ref} in this broker snapshot`);
     if (selected.length > 1) throw new ScoutCliError(`ambiguous status handle ${options.ref}: ${selected.map(row => row.id).join(", ")}`);
   }
