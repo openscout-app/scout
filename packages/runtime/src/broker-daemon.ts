@@ -3134,7 +3134,7 @@ const permissionService = new BrokerPermissionService({
     const context = shapeAttentionContext(invocation.task, "task");
     const view = permissionDialogView(prompt.text);
     if (context) {
-      if (view.view === "turn.approve.command" || view.view === "turn.approve.tool") view.why = context.text;
+      if (view.view === "turn.approve.command" && !view.why) view.why = context.text;
       if (view.view === "turn.approve.edit") view.summary = context.text;
     }
     operatorAttentionService.queuePermissionRequest({

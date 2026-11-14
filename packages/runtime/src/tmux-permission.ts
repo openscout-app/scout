@@ -14,7 +14,10 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
   } else {
     const question = clean.lastIndexOf("Do you want to proceed?");
     const prefix = clean.slice(0, question);
-    const header = Math.max(prefix.lastIndexOf("Bash command"), prefix.lastIndexOf("Edit file"), prefix.lastIndexOf("Write file"));
+    // Generic tool confirmations (for example EnterWorktree) have a Tool use
+    // header. Bind only the live dialog, never capture-dependent scrollback.
+    const headers = [...prefix.matchAll(/^[ \t]*(?:Bash command|Edit file|Write file|Create file|Read file|Fetch|Web ?search|Tool use|MCP tool)[ \t]*$/gim)];
+    const header = headers.at(-1)?.index ?? -1;
     const end = clean.indexOf("Esc to cancel", question);
     if (header >= 0 && end >= 0) clean = clean.slice(header, end + "Esc to cancel".length).trim();
   }
