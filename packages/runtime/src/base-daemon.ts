@@ -1,4 +1,5 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
+import { installMemorySnapshot } from "./memory-snapshot.js";
 import { openScoutInstanceBootstrap } from "./instance-bootstrap.js";
 import { createRoomListeningSupervisor } from "./room-listening-supervisor.js";
 import { webStartRequestHeaders } from "./web-start-context.js";
@@ -1307,6 +1308,9 @@ if (Number.isFinite(parentPid) && parentPid > 0 && parentPid !== process.pid) {
   }, 2_000);
   parentWatcher.unref();
 }
+
+// scoutd watches this process's memory; when it asks, base says what it holds.
+installMemorySnapshot({ role: "scout-base" });
 
 log("starting Scout base service", {
   label: config.label,
