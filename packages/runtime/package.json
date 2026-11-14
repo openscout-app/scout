@@ -205,6 +205,12 @@
       "import": "./dist/support-paths.js",
       "default": "./dist/support-paths.js"
     },
+    "./memory-snapshot": {
+      "bun": "./src/memory-snapshot.ts",
+      "types": "./dist/memory-snapshot.d.ts",
+      "import": "./dist/memory-snapshot.js",
+      "default": "./dist/memory-snapshot.js"
+    },
     "./pairing-security": {
       "bun": "./src/pairing-security/index.ts",
       "types": "./dist/pairing-security/index.d.ts",
