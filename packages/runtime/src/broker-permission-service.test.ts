@@ -161,6 +161,26 @@ test("a selection redraw is not a permission acknowledgement", async () => {
   expect(capturesAfterSend).toBe(2);
 });
 
+test("a tool dialog with no known header keeps one version while the transcript above it redraws", () => {
+  const rule = "─".repeat(60);
+  const dashed = "╌".repeat(60);
+  const dialog = [rule, " Tool use", " │ Creates an isolated worktree and switches the session into it", dashed,
+    " Entering worktree(/tmp/project-topic)", dashed, "", " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "", " Esc to cancel · Tab to amend"].join("\n");
+  const pane = (mark: string) => [`${mark} Register copy, check attachments`, "  ⎿  $ cd /tmp/project-topic && bun run check", "", dialog,
+    `${"─".repeat(30)} pane-title ─`].join("\n");
+  const shown = parseTmuxPermission(pane("⏺"), "/tmp/project")!;
+  // The progress mark blinks between captures; the prompt is the same prompt.
+  expect(parseTmuxPermission(pane(" "), "/tmp/project")!.version).toBe(shown.version);
+  expect(shown.text.startsWith(rule)).toBe(true);
+  expect(shown.text.endsWith("Esc to cancel")).toBe(true);
+  expect(parseTmuxPermission(shown.text, "/tmp/project")).toEqual(shown);
+  expect(shown.keys).toEqual({ once: ["Enter"], deny: ["2"] });
+});
+
+test("a known header keeps the version it always had", () => {
+  expect(parseTmuxPermission(`${"─".repeat(60)}\n${tool}`)?.version).toBe(parseTmuxPermission(tool)?.version);
+});
+
 test("old folder trust history does not hide the current tool permission", () => {
   expect(parseTmuxPermission(`${trust}\n${tool}`)).toEqual(parseTmuxPermission(tool));
 });
