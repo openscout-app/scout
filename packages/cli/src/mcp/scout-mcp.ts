@@ -7,6 +7,7 @@ import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
+import { registerDiffTools } from "./diff-tools.ts";
 import { loadScoutMeshOverview, renderScoutMeshOverviewLines, type ScoutMeshMachine, type ScoutMeshOverview } from "../lib/core/mesh/overview.ts";
 import {
   detectCurrentLiveTerminalSession,
@@ -3414,6 +3415,7 @@ export function createScoutMcpServer(options: {
   };
 
   registerIntegrationTools(server, aliasBrokerRequest);
+  registerDiffTools(server, aliasBrokerRequest);
 
   registerChatListeningTools(server, (operation, body) => chatListeningRequest(
     { env },
