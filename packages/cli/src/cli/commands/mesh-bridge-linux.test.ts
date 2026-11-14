@@ -69,11 +69,11 @@ test("darwin mesh-bridge defaults stay on the keychain service", () => {
   withPlatform("darwin", () => {
     expect(meshBridgeSecretDefaults({
       explicitToken: false,
-      supportDirectory: "/Users/art/Library/Application Support/OpenScout",
+      supportDirectory: "/Users/you/Library/Application Support/OpenScout",
     })).toEqual({ tokenKeychainService: "OPENSCOUT_MCP_BRIDGE_TOKEN" });
     expect(meshBridgeSecretDefaults({
       explicitToken: true,
-      supportDirectory: "/Users/art/Library/Application Support/OpenScout",
+      supportDirectory: "/Users/you/Library/Application Support/OpenScout",
     })).toEqual({});
     expect(meshBridgeHelp()).toContain("--token-keychain <service>");
     expect(meshBridgeHelp()).toContain("OPENSCOUT_MCP_BRIDGE_TOKEN");

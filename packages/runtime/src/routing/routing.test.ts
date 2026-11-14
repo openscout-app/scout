@@ -286,11 +286,11 @@ describe("shortlist and fingerprint regressions", () => {
     expect(result.outcome).toBe("resolved");
   });
   test("fingerprints keep topic nouns rather than UUIDs, path prefixes, or repeated synthetic pairs", () => {
-    const noise = "/Users/art/dev/project/a2eeb692-d62d-4dd6-b253-ed87146819f8/scratchpad/ScoutCompanionController.swift\n";
+    const noise = "/Users/guest/dev/project/a2eeb692-d62d-4dd6-b253-ed87146819f8/scratchpad/ScoutCompanionController.swift\n";
     const terms = extractTerms(noise.repeat(200) + "world week\ncharacters\nrender queue render queue\n", "stable", NOW);
     const tokens = terms.map((t) => t.term);
     for (const token of ["companion", "week", "characters", "render queue"]) expect(tokens).toContain(token);
-    for (const token of ["users", "art", "scratchpad", "a2eeb692", "d62d", "ed87146819f8", "swift"]) expect(tokens).not.toContain(token);
+    for (const token of ["users", "guest", "scratchpad", "a2eeb692", "d62d", "ed87146819f8", "swift"]) expect(tokens).not.toContain(token);
     expect(terms.every((t) => t.weight <= 4)).toBe(true);
     const s = store(); const t = target("/repo/a"); doc(s, t, noise.repeat(200) + "world week characters");
     expect(s.terms(t.id).map((t) => t.term)).toContain("characters");

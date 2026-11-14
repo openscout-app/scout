@@ -868,15 +868,15 @@ describe("createScoutMcpServer", () => {
               host: "arts-mini", nodeId: "arts-mini-openscout", nodeName: "arts-mini", local: true,
               reach: "answering",
               activity: { agents: 3, working: 1, liveSessions: 2, runningWork: 1 },
-              projects: { total: 1, truncated: false, items: [{ root: "/Users/art/dev/openscout", name: "openscout", agents: 3, liveSessions: 2 }] },
-              startWork: "scout ask --on arts-mini --project /Users/art/dev/openscout --harness codex \"<brief>\"",
+              projects: { total: 1, truncated: false, items: [{ root: "/Users/you/dev/openscout", name: "openscout", agents: 3, liveSessions: 2 }] },
+              startWork: "scout ask --on arts-mini --project /Users/you/dev/openscout --harness codex \"<brief>\"",
             },
             {
               host: "archie", nodeId: "archie-openscout", nodeName: "archie", local: false,
               reach: "answering",
               activity: { agents: 1, working: 0, liveSessions: 0, runningWork: 0 },
-              projects: { total: 1, truncated: false, items: [{ root: "/home/arach/renders/arsenal-x", name: "arsenal-x", agents: 1, liveSessions: 0 }] },
-              startWork: "scout ask --on archie --project /home/arach/renders/arsenal-x --harness codex \"<brief>\"",
+              projects: { total: 1, truncated: false, items: [{ root: "/home/guest/renders/arsenal-x", name: "arsenal-x", agents: 1, liveSessions: 0 }] },
+              startWork: "scout ask --on archie --project /home/guest/renders/arsenal-x --harness codex \"<brief>\"",
             },
             { host: "hutch", nodeId: "hutch-openscout", nodeName: "hutch", local: false, reach: "no_answer", error: "no answer in 3s", next: "scout mesh doctor" },
           ],
@@ -887,8 +887,8 @@ describe("createScoutMcpServer", () => {
     const result = await client.callTool({ name: "hosts_list", arguments: {} });
     expect(receivedMachine).toBeUndefined();
     const text = (result.content as Array<{ text: string }>)[0]!.text;
-    expect(text).toContain("arts-mini (this machine): 1 working · 2 live sessions · projects: /Users/art/dev/openscout");
-    expect(text).toContain("archie: quiet · projects: /home/arach/renders/arsenal-x");
+    expect(text).toContain("arts-mini (this machine): 1 working · 2 live sessions · projects: /Users/you/dev/openscout");
+    expect(text).toContain("archie: quiet · projects: /home/guest/renders/arsenal-x");
     expect(text).toContain("hutch: no answer (no answer in 3s) · try `scout mesh doctor`");
     expect(result.structuredContent).toMatchObject({ machines: [{ host: "arts-mini" }, { host: "archie" }, { host: "hutch", reach: "no_answer" }] });
   });
@@ -904,8 +904,8 @@ describe("createScoutMcpServer", () => {
             host: "archie", nodeId: "archie-openscout", nodeName: "archie", local: false,
             reach: "answering",
             activity: { agents: 11, working: 0, liveSessions: 0, runningWork: 0 },
-            projects: { total: 1, truncated: false, items: [{ root: "/home/arach/renders/arsenal-x", name: "arsenal-x", agents: 1, liveSessions: 0 }] },
-            startWork: "scout ask --on archie --project /home/arach/renders/arsenal-x --harness codex \"<brief>\"",
+            projects: { total: 1, truncated: false, items: [{ root: "/home/guest/renders/arsenal-x", name: "arsenal-x", agents: 1, liveSessions: 0 }] },
+            startWork: "scout ask --on archie --project /home/guest/renders/arsenal-x --harness codex \"<brief>\"",
           }],
         };
       },

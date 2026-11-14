@@ -41,8 +41,8 @@ describe("mesh overview", () => {
     const overview = await loadScoutMeshOverview({}, deps({
       "http://archie:43110": report(archie, {
         projects: { total: 2, truncated: false, items: [
-          { root: "/home/arach/renders/arsenal-x", name: "arsenal-x", agents: 1, liveSessions: 1 },
-          { root: "/home/arach/dev/peal", name: "peal", agents: 1, liveSessions: 0 },
+          { root: "/home/guest/renders/arsenal-x", name: "arsenal-x", agents: 1, liveSessions: 1 },
+          { root: "/home/guest/dev/peal", name: "peal", agents: 1, liveSessions: 0 },
         ] },
       }),
       "http://hutch:43110": new Error("node-state HTTP 403 (denied or unsupported)"),
@@ -55,7 +55,7 @@ describe("mesh overview", () => {
     ]);
     const archieRow = overview.machines[1]!;
     if (archieRow.reach !== "answering") throw new Error("archie should answer");
-    expect(archieRow.startWork).toBe('scout ask --on archie --project /home/arach/renders/arsenal-x --harness codex "<brief>"');
+    expect(archieRow.startWork).toBe('scout ask --on archie --project /home/guest/renders/arsenal-x --harness codex "<brief>"');
     const hutchRow = overview.machines[2]!;
     if (hutchRow.reach !== "no_answer") throw new Error("hutch should not answer");
     expect(hutchRow.next).toBe("scout mesh trust");

@@ -162,8 +162,8 @@ function makeAgent(overrides: Partial<WebAgent> = {}): WebAgent {
     agentClass: "general",
     harness: "claude",
     state: "working",
-    projectRoot: "/Users/arach/dev/openscout",
-    cwd: "/Users/arach/dev/openscout",
+    projectRoot: "/Users/guest/dev/openscout",
+    cwd: "/Users/guest/dev/openscout",
     updatedAt: Date.now(),
     transport: "claude_stream_json",
     selector: null,
@@ -203,7 +203,7 @@ function writeClaudeHistory(
       subtype: "init",
       timestamp: "2026-04-22T12:00:00.000Z",
       session_id: options.sessionId ?? "claude-upstream-session",
-      cwd: options.cwd ?? "/Users/arach/dev/openscout",
+      cwd: options.cwd ?? "/Users/guest/dev/openscout",
       model: "claude-sonnet-test",
     }),
     JSON.stringify({
@@ -235,7 +235,7 @@ function writeActiveClaudeHistory(path: string, assistantText: string): void {
       subtype: "init",
       timestamp: "2026-04-22T12:00:00.000Z",
       session_id: "claude-upstream-session",
-      cwd: "/Users/arach/dev/openscout",
+      cwd: "/Users/guest/dev/openscout",
       model: "claude-sonnet-test",
     }),
     JSON.stringify({
@@ -466,7 +466,7 @@ describe("loadAgentObservePayload", () => {
         name: "Live Claude Session",
         adapterType: "claude-code",
         status: "active",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         providerMeta: {
           resumeSessionPath: historyPath,
         },
@@ -509,7 +509,7 @@ describe("loadAgentObservePayload", () => {
             sessionId: "relay-parent",
             harness: "claude",
             transport: "tmux",
-            cwd: "/Users/arach/dev/openscout",
+            cwd: "/Users/guest/dev/openscout",
           },
           "endpoint-child-bare": {
             id: "endpoint-child-bare",
@@ -518,7 +518,7 @@ describe("loadAgentObservePayload", () => {
             sessionId: "runtime-child-session",
             harness: "claude",
             transport: "tmux",
-            cwd: "/Users/arach/dev/openscout",
+            cwd: "/Users/guest/dev/openscout",
             metadata: { startedAt: sessionStart - 500 },
           },
           "endpoint-child-qualified": {
@@ -528,7 +528,7 @@ describe("loadAgentObservePayload", () => {
             sessionId: "runtime-child-session",
             harness: "claude",
             transport: "tmux",
-            cwd: "/Users/arach/dev/openscout",
+            cwd: "/Users/guest/dev/openscout",
             metadata: { startedAt: Math.floor((sessionStart - 500) / 1_000) },
           },
         },
@@ -616,7 +616,7 @@ describe("loadAgentObservePayload", () => {
         name: "Observed child history",
         adapterType: "claude-code",
         status: "active",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         providerMeta: { resumeSessionPath: historyPath },
       },
       turns: [],
@@ -686,7 +686,7 @@ describe("loadAgentObservePayload", () => {
         name: "Live Claude Session",
         adapterType: "claude-code",
         status: "active",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
       },
       turns: [],
     };
@@ -799,7 +799,7 @@ describe("loadAgentObservePayload", () => {
         name: "Live Claude Session",
         adapterType: "claude-code",
         status: "active",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         providerMeta: {
           resumeSessionPath: historyPath,
         },
@@ -863,7 +863,7 @@ describe("loadAgentObservePayload", () => {
         name: "Idle Claude Session",
         adapterType: "claude-code",
         status: "idle",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         providerMeta: {
           resumeSessionPath: historyPath,
         },
@@ -883,7 +883,7 @@ describe("loadAgentObservePayload", () => {
   test("falls back to the live snapshot when the hinted history file is not replayable", async () => {
     const tempRoot = makeTempDir("openscout-observe-live-");
     const historyPath = join(tempRoot, "codex-history.jsonl");
-    writeFileSync(historyPath, `${JSON.stringify({ cwd: "/Users/arach/dev/openscout" })}\n`, "utf8");
+    writeFileSync(historyPath, `${JSON.stringify({ cwd: "/Users/guest/dev/openscout" })}\n`, "utf8");
 
     queryAgentsResult = [
       makeAgent({
@@ -910,7 +910,7 @@ describe("loadAgentObservePayload", () => {
         name: "Live Codex Session",
         adapterType: "codex",
         status: "active",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         providerMeta: {
           resumeSessionPath: historyPath,
         },
@@ -980,7 +980,7 @@ describe("loadAgentObservePayload", () => {
         name: "talkie-codex",
         adapterType: "codex",
         status: "idle",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
       },
       turns: [],
     };
@@ -990,7 +990,7 @@ describe("loadAgentObservePayload", () => {
         name: "talkie-codex.feat-design-tokens-reimagined.mini",
         adapterType: "codex",
         status: "active",
-        cwd: "/Users/arach/dev/talkie",
+        cwd: "/Users/guest/dev/talkie",
       },
       turns: [
         {
@@ -1020,7 +1020,7 @@ describe("loadAgentObservePayload", () => {
     expect(payload).not.toBeNull();
     expect(payload?.source).toBe("live");
     expect(payload?.sessionId).toBe("relay-talkie-codex-feat-design-tokens-reimagined-mini-codex");
-    expect(payload?.data.metadata?.session?.cwd).toBe("/Users/arach/dev/talkie");
+    expect(payload?.data.metadata?.session?.cwd).toBe("/Users/guest/dev/talkie");
     expect(payload?.data.events.some((event) => event.text.includes("configured full instance snapshot"))).toBe(true);
   });
 
@@ -1034,8 +1034,8 @@ describe("loadAgentObservePayload", () => {
       makeAgent({
         harness: "claude",
         transport: "tmux",
-        cwd: "/Users/arach/dev/talkie",
-        projectRoot: "/Users/arach/dev/talkie",
+        cwd: "/Users/guest/dev/talkie",
+        projectRoot: "/Users/guest/dev/talkie",
         project: "talkie",
         harnessSessionId: "relay-talkie-claude",
       }),
@@ -1051,8 +1051,8 @@ describe("loadAgentObservePayload", () => {
             transport: "codex_app_server",
             state: "active",
             sessionId: "019ead09-5750-7862-99c3-78c804b34c84",
-            cwd: "/Users/arach/dev/talkie",
-            projectRoot: "/Users/arach/dev/talkie",
+            cwd: "/Users/guest/dev/talkie",
+            projectRoot: "/Users/guest/dev/talkie",
             metadata: {
               threadId: "019ead09-5750-7862-99c3-78c804b34c84",
               runtimeInstanceId: "relay-talkie-codex",
@@ -1067,8 +1067,8 @@ describe("loadAgentObservePayload", () => {
             transport: "tmux",
             state: "idle",
             sessionId: "relay-talkie-claude",
-            cwd: "/Users/arach/dev/talkie",
-            projectRoot: "/Users/arach/dev/talkie",
+            cwd: "/Users/guest/dev/talkie",
+            projectRoot: "/Users/guest/dev/talkie",
             metadata: {
               runtimeInstanceId: "relay-talkie-claude",
               tmuxSession: "relay-talkie-claude",
@@ -1086,7 +1086,7 @@ describe("loadAgentObservePayload", () => {
           source: "claude",
           transcriptPath: historyPath,
           sessionId: "claude-upstream-session",
-          cwd: "/Users/arach/dev/talkie",
+          cwd: "/Users/guest/dev/talkie",
           project: "talkie",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1116,7 +1116,7 @@ describe("loadAgentObservePayload", () => {
     const historyPath = join(tempRoot, "wrong-codex-session.jsonl");
     writeCodexHistory(historyPath, {
       sessionId: "wrong-codex-session",
-      cwd: "/Users/arach/dev/scope",
+      cwd: "/Users/guest/dev/scope",
       assistantText: "wrong raw codex history",
     });
 
@@ -1125,8 +1125,8 @@ describe("loadAgentObservePayload", () => {
         id: "scope.main.arts-mac-mini-local",
         harness: "codex",
         transport: "codex_app_server",
-        cwd: "/Users/arach/dev/scope",
-        projectRoot: "/Users/arach/dev/scope",
+        cwd: "/Users/guest/dev/scope",
+        projectRoot: "/Users/guest/dev/scope",
         project: "scope",
         harnessSessionId: "relay-scope-codex",
       }),
@@ -1142,8 +1142,8 @@ describe("loadAgentObservePayload", () => {
             transport: "codex_app_server",
             state: "waiting",
             sessionId: "relay-scope-codex",
-            cwd: "/Users/arach/dev/scope",
-            projectRoot: "/Users/arach/dev/scope",
+            cwd: "/Users/guest/dev/scope",
+            projectRoot: "/Users/guest/dev/scope",
             metadata: {
               runtimeInstanceId: "relay-scope-codex",
               runtimeMode: "direct_session",
@@ -1160,7 +1160,7 @@ describe("loadAgentObservePayload", () => {
           source: "codex",
           transcriptPath: historyPath,
           sessionId: "wrong-codex-session",
-          cwd: "/Users/arach/dev/scope",
+          cwd: "/Users/guest/dev/scope",
           project: "scope",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1190,7 +1190,7 @@ describe("loadAgentObservePayload", () => {
     const historyPath = join(tempRoot, "relay-scope-codex.jsonl");
     writeCodexHistory(historyPath, {
       sessionId: "relay-scope-codex",
-      cwd: "/Users/arach/dev/scope",
+      cwd: "/Users/guest/dev/scope",
       assistantText: "matched direct codex history",
     });
 
@@ -1199,8 +1199,8 @@ describe("loadAgentObservePayload", () => {
         id: "scope.main.arts-mac-mini-local",
         harness: "codex",
         transport: "codex_app_server",
-        cwd: "/Users/arach/dev/scope",
-        projectRoot: "/Users/arach/dev/scope",
+        cwd: "/Users/guest/dev/scope",
+        projectRoot: "/Users/guest/dev/scope",
         project: "scope",
         harnessSessionId: "relay-scope-codex",
       }),
@@ -1216,8 +1216,8 @@ describe("loadAgentObservePayload", () => {
             transport: "codex_app_server",
             state: "waiting",
             sessionId: "relay-scope-codex",
-            cwd: "/Users/arach/dev/scope",
-            projectRoot: "/Users/arach/dev/scope",
+            cwd: "/Users/guest/dev/scope",
+            projectRoot: "/Users/guest/dev/scope",
             metadata: {
               runtimeInstanceId: "relay-scope-codex",
               runtimeMode: "direct_session",
@@ -1234,7 +1234,7 @@ describe("loadAgentObservePayload", () => {
           source: "codex",
           transcriptPath: historyPath,
           sessionId: "relay-scope-codex",
-          cwd: "/Users/arach/dev/scope",
+          cwd: "/Users/guest/dev/scope",
           project: "scope",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1264,7 +1264,7 @@ describe("loadAgentObservePayload", () => {
     const historyPath = join(tempRoot, "relay-scope-codex.jsonl");
     writeCodexHistory(historyPath, {
       sessionId: "relay-scope-codex",
-      cwd: "/Users/arach/dev/scope",
+      cwd: "/Users/guest/dev/scope",
       assistantText: "routed direct codex history",
     });
 
@@ -1273,8 +1273,8 @@ describe("loadAgentObservePayload", () => {
         id: "scope.main.arts-mac-mini-local",
         harness: "codex",
         transport: "codex_app_server",
-        cwd: "/Users/arach/dev/scope",
-        projectRoot: "/Users/arach/dev/scope",
+        cwd: "/Users/guest/dev/scope",
+        projectRoot: "/Users/guest/dev/scope",
         project: "scope",
         harnessSessionId: null,
       }),
@@ -1290,8 +1290,8 @@ describe("loadAgentObservePayload", () => {
             transport: "codex_app_server",
             state: "waiting",
             sessionId: "relay-scope-codex",
-            cwd: "/Users/arach/dev/scope",
-            projectRoot: "/Users/arach/dev/scope",
+            cwd: "/Users/guest/dev/scope",
+            projectRoot: "/Users/guest/dev/scope",
             metadata: {
               runtimeInstanceId: "relay-scope-codex",
               runtimeMode: "direct_session",
@@ -1308,7 +1308,7 @@ describe("loadAgentObservePayload", () => {
           source: "codex",
           transcriptPath: historyPath,
           sessionId: "relay-scope-codex",
-          cwd: "/Users/arach/dev/scope",
+          cwd: "/Users/guest/dev/scope",
           project: "scope",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1338,7 +1338,7 @@ describe("loadAgentObservePayload", () => {
   test("maps a Claude session ref id directly to its history file", async () => {
     const home = makeTempDir("openscout-observe-home-");
     process.env.HOME = home;
-    const projectDir = join(home, ".claude", "projects", "-Users-arach-dev-openscout");
+    const projectDir = join(home, ".claude", "projects", "-Users-guest-dev-openscout");
     process.env.OPENSCOUT_CLAUDE_PROJECTS_ROOT = join(home, ".claude", "projects");
     mkdirSync(projectDir, { recursive: true });
     const historyPath = join(projectDir, "3b0fcaa9-024a-4e67-88f7-08a72d75fbbb.jsonl");
@@ -1367,7 +1367,7 @@ describe("loadAgentObservePayload", () => {
           source: "claude",
           transcriptPath: historyPath,
           sessionId: "tail-session",
-          cwd: "/Users/arach/dev/openscout",
+          cwd: "/Users/guest/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1395,7 +1395,7 @@ describe("loadAgentObservePayload", () => {
   });
 
   test("maps a native Grok session ref to tail observe data", async () => {
-    const transcriptPath = "/Users/art/.grok/sessions/openscout/019edd6b/events.jsonl";
+    const transcriptPath = "/Users/you/.grok/sessions/openscout/019edd6b/events.jsonl";
     tailDiscoveryResult = {
       generatedAt: Date.now(),
       processes: [],
@@ -1404,7 +1404,7 @@ describe("loadAgentObservePayload", () => {
           source: "grok",
           transcriptPath,
           sessionId: "019edd6b-fc26-7a53-a4a0-dd36c5378515",
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1440,12 +1440,12 @@ describe("loadSessionRefObservePayload", () => {
     const claudePath = join(tempRoot, "claude-shared.jsonl");
     writeCodexHistory(codexPath, {
       sessionId: sharedSessionId,
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       assistantText: "exact Codex response",
     });
     writeClaudeHistory(claudePath, "exact Claude response", {
       sessionId: sharedSessionId,
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
     });
     tailDiscoveryResult = {
       generatedAt: Date.now(),
@@ -1455,7 +1455,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "codex",
           transcriptPath: codexPath,
           sessionId: sharedSessionId,
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1465,7 +1465,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "claude",
           transcriptPath: claudePath,
           sessionId: sharedSessionId,
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now() + 1,
@@ -1511,8 +1511,8 @@ describe("loadSessionRefObservePayload", () => {
             state: "waiting",
             sessionId: "runtime-codex-owner",
             transport: "codex_app_server",
-            cwd: "/Users/art/dev/openscout",
-            projectRoot: "/Users/art/dev/openscout",
+            cwd: "/Users/you/dev/openscout",
+            projectRoot: "/Users/you/dev/openscout",
             metadata: {
               externalSessionId: sharedSessionId,
               threadId: sharedSessionId,
@@ -1537,7 +1537,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "grok",
           transcriptPath: grokPath,
           sessionId: sharedSessionId,
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now() + 3,
@@ -1547,7 +1547,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "opencode",
           transcriptPath: opencodePath,
           sessionId: sharedSessionId,
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now() + 2,
@@ -1557,7 +1557,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "kimi",
           transcriptPath: kimiPath,
           sessionId: sharedSessionId,
-          cwd: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now() + 1,
@@ -1630,8 +1630,8 @@ describe("loadSessionRefObservePayload", () => {
         id: "session-broker-1",
         harness: "claude",
         transport: "tmux",
-        cwd: "/Users/arach/dev/stale-checkout",
-        projectRoot: "/Users/arach/dev/stale-checkout",
+        cwd: "/Users/guest/dev/stale-checkout",
+        projectRoot: "/Users/guest/dev/stale-checkout",
         harnessSessionId: null,
       }),
     ];
@@ -1646,8 +1646,8 @@ describe("loadSessionRefObservePayload", () => {
             state: "active",
             sessionId: "session-broker-1",
             transport: "tmux",
-            cwd: "/Users/arach/dev/openscout",
-            projectRoot: "/Users/arach/dev/openscout",
+            cwd: "/Users/guest/dev/openscout",
+            projectRoot: "/Users/guest/dev/openscout",
             metadata: {
               pendingExternalSession: true,
             },
@@ -1663,7 +1663,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "claude",
           transcriptPath: historyPath,
           sessionId: "claude-upstream-session",
-          cwd: "/Users/arach/dev/openscout",
+          cwd: "/Users/guest/dev/openscout",
           project: "openscout",
           harness: "unattributed",
           mtimeMs: Date.now(),
@@ -1695,7 +1695,7 @@ describe("loadSessionRefObservePayload", () => {
     const actorId = "session-pending-tmux";
     const providerSessionId = "claude-native-owned";
     const decoySessionId = "claude-native-decoy";
-    const cwd = "/Users/art/dev/shared-flight-project";
+    const cwd = "/Users/you/dev/shared-flight-project";
     const tempRoot = makeTempDir("openscout-observe-pending-tmux-");
     const historyPath = join(tempRoot, `${providerSessionId}.jsonl`);
     const decoyPath = join(tempRoot, `${decoySessionId}.jsonl`);
@@ -1807,8 +1807,8 @@ describe("loadSessionRefObservePayload", () => {
             state: "active",
             sessionId: actorId,
             transport: "tmux",
-            cwd: "/Users/art/dev/project",
-            projectRoot: "/Users/art/dev/project",
+            cwd: "/Users/you/dev/project",
+            projectRoot: "/Users/you/dev/project",
             metadata: {
               pendingExternalSession: true,
               handle: "project-pending-failed",
@@ -1891,8 +1891,8 @@ describe("loadSessionRefObservePayload", () => {
             state: "active",
             sessionId: actorId,
             transport: "tmux",
-            cwd: "/Users/art/dev/project",
-            projectRoot: "/Users/art/dev/project",
+            cwd: "/Users/you/dev/project",
+            projectRoot: "/Users/you/dev/project",
             metadata: {
               pendingExternalSession: true,
               handle: "project-pending-unrelated",
@@ -1966,8 +1966,8 @@ describe("loadSessionRefObservePayload", () => {
             state: "active",
             sessionId: actorId,
             transport: "tmux",
-            cwd: "/Users/art/dev/project",
-            projectRoot: "/Users/art/dev/project",
+            cwd: "/Users/you/dev/project",
+            projectRoot: "/Users/you/dev/project",
             metadata: {
               pendingExternalSession: true,
               handle: "project-pending-superseded",
@@ -2070,8 +2070,8 @@ describe("loadSessionRefObservePayload", () => {
             state: "active",
             sessionId: actorId,
             transport: "tmux",
-            cwd: "/Users/art/dev/project",
-            projectRoot: "/Users/art/dev/project",
+            cwd: "/Users/you/dev/project",
+            projectRoot: "/Users/you/dev/project",
             metadata: {
               pendingExternalSession: false,
               externalSessionId: providerSessionId,
@@ -2123,7 +2123,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "claude",
           transcriptPath: historyPath,
           sessionId: providerSessionId,
-          cwd: "/Users/art/dev/project",
+          cwd: "/Users/you/dev/project",
           project: "project",
           harness: "scout-managed",
           mtimeMs: Date.now(),
@@ -2161,12 +2161,12 @@ describe("loadSessionRefObservePayload", () => {
     const aliasDecoyPath = join(tempRoot, `${actorAlias}.jsonl`);
     writeCodexHistory(actorDecoyPath, {
       sessionId: actorId,
-      cwd: "/Users/art/dev/shared-project",
+      cwd: "/Users/you/dev/shared-project",
       assistantText: "actor-id transcript decoy",
     });
     writeCodexHistory(aliasDecoyPath, {
       sessionId: actorAlias,
-      cwd: "/Users/art/dev/shared-project",
+      cwd: "/Users/you/dev/shared-project",
       assistantText: "actor-alias transcript decoy",
     });
     brokerContextResult = {
@@ -2269,7 +2269,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "codex",
           transcriptPath: actorDecoyPath,
           sessionId: actorId,
-          cwd: "/Users/art/dev/shared-project",
+          cwd: "/Users/you/dev/shared-project",
           project: "shared-project",
           harness: "scout-managed",
           mtimeMs: Date.now(),
@@ -2279,7 +2279,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "codex",
           transcriptPath: aliasDecoyPath,
           sessionId: actorAlias,
-          cwd: "/Users/art/dev/shared-project",
+          cwd: "/Users/you/dev/shared-project",
           project: "shared-project",
           harness: "scout-managed",
           mtimeMs: Date.now(),
@@ -2628,17 +2628,17 @@ describe("loadSessionRefObservePayload", () => {
     const decoyPath = join(tempRoot, `${decoySessionId}.jsonl`);
     writeCodexHistory(historyPath, {
       sessionId: providerSessionId,
-      cwd: "/Users/art/dev/shared-project",
+      cwd: "/Users/you/dev/shared-project",
       assistantText: "exact provider transcript event",
     });
     writeCodexHistory(routingDecoyPath, {
       sessionId: routingSessionId,
-      cwd: "/Users/art/dev/shared-project",
+      cwd: "/Users/you/dev/shared-project",
       assistantText: "routing session transcript decoy",
     });
     writeCodexHistory(decoyPath, {
       sessionId: decoySessionId,
-      cwd: "/Users/art/dev/shared-project",
+      cwd: "/Users/you/dev/shared-project",
       assistantText: "newer same-cwd decoy event",
     });
 
@@ -2656,7 +2656,7 @@ describe("loadSessionRefObservePayload", () => {
             state: "active",
             sessionId: routingSessionId,
             transport: "codex_app_server",
-            cwd: "/Users/art/dev/shared-project",
+            cwd: "/Users/you/dev/shared-project",
             metadata: {
               cardless: true,
               pendingExternalSession: false,
@@ -2674,7 +2674,7 @@ describe("loadSessionRefObservePayload", () => {
         name: "Current cardless session",
         adapterType: "codex_app_server",
         status: "active",
-        cwd: "/Users/art/dev/shared-project",
+        cwd: "/Users/you/dev/shared-project",
         providerMeta: { threadId: providerSessionId },
       },
       turns: [],
@@ -2687,7 +2687,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "codex",
           transcriptPath: routingDecoyPath,
           sessionId: routingSessionId,
-          cwd: "/Users/art/dev/shared-project",
+          cwd: "/Users/you/dev/shared-project",
           project: "shared-project",
           harness: "scout-managed",
           mtimeMs: Date.now() + 2_000,
@@ -2697,7 +2697,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "codex",
           transcriptPath: decoyPath,
           sessionId: decoySessionId,
-          cwd: "/Users/art/dev/shared-project",
+          cwd: "/Users/you/dev/shared-project",
           project: "shared-project",
           harness: "scout-managed",
           mtimeMs: Date.now() + 1_000,
@@ -2707,7 +2707,7 @@ describe("loadSessionRefObservePayload", () => {
           source: "codex",
           transcriptPath: historyPath,
           sessionId: providerSessionId,
-          cwd: "/Users/art/dev/shared-project",
+          cwd: "/Users/you/dev/shared-project",
           project: "shared-project",
           harness: "scout-managed",
           mtimeMs: Date.now(),

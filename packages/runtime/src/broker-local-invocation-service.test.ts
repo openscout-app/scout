@@ -834,8 +834,8 @@ describe("BrokerLocalInvocationService", () => {
       transport: "codex_app_server",
       harness: "codex",
       sessionId: sessionActor.id,
-      projectRoot: "/Users/art/dev/scope",
-      cwd: "/Users/art/dev/scope",
+      projectRoot: "/Users/you/dev/scope",
+      cwd: "/Users/you/dev/scope",
       metadata: {
         cardless: true,
         handle: "project-chopin",
@@ -874,8 +874,8 @@ describe("BrokerLocalInvocationService", () => {
       transport: "codex_app_server",
       harness: "codex",
       sessionId: sessionActor.id,
-      projectRoot: "/Users/art/dev/openscout-derived-state-retention",
-      cwd: "/Users/art/dev/openscout-derived-state-retention",
+      projectRoot: "/Users/you/dev/openscout-derived-state-retention",
+      cwd: "/Users/you/dev/openscout-derived-state-retention",
       metadata: {
         cardless: true,
         handle: "project-spinoza-2",
@@ -1567,8 +1567,8 @@ describe("tmux session observation across the invocation boundary", () => {
       harness: "claude",
       state: "active",
       sessionId: "session-mtus22pe-emx8hl",
-      cwd: "/Users/art/dev/openscout",
-      projectRoot: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
+      projectRoot: "/Users/you/dev/openscout",
       metadata: {
         source: "scout-isolated-agent-session",
         sessionBacked: true,

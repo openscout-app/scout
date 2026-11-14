@@ -12,7 +12,7 @@ function event(overrides: Partial<TailEvent>): TailEvent {
     pid: 1,
     parentPid: null,
     project: "scope",
-    cwd: "/Users/art/dev/scope",
+    cwd: "/Users/you/dev/scope",
     harness: "unattributed",
     kind: "system",
     summary: "phase · streaming_text",

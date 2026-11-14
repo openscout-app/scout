@@ -26,7 +26,7 @@ function pane(
     agent: null,
     agentStatus: "idle",
     agentSession: null,
-    cwd: "/Users/art/dev/openscout",
+    cwd: "/Users/you/dev/openscout",
     foregroundCwd: null,
     focused: false,
     scroll: null,
@@ -147,9 +147,9 @@ describe("digestHerdrTopology", () => {
 
   test("groups by literal directory, ordered by what is waiting", () => {
     const digest = digestHerdrTopology(topology([
-      pane("w1:p1", { cwd: "/Users/art/dev/openscout" }),
-      pane("w1:p2", { cwd: "/Users/art/dev/openscout" }),
-      pane("w1:p3", { cwd: "/Users/art/dev/hudson", agentStatus: "blocked" }),
+      pane("w1:p1", { cwd: "/Users/you/dev/openscout" }),
+      pane("w1:p2", { cwd: "/Users/you/dev/openscout" }),
+      pane("w1:p3", { cwd: "/Users/you/dev/hudson", agentStatus: "blocked" }),
       pane("w1:p4", { cwd: null }),
     ]));
 
@@ -160,9 +160,9 @@ describe("digestHerdrTopology", () => {
 
   test("foregroundCwd wins over the pane cwd", () => {
     const digest = digestHerdrTopology(topology([
-      pane("w1:p1", { cwd: "/Users/art/dev/openscout", foregroundCwd: "/Users/art/dev/openscout/packages/web" }),
+      pane("w1:p1", { cwd: "/Users/you/dev/openscout", foregroundCwd: "/Users/you/dev/openscout/packages/web" }),
     ]));
-    expect(digest.groups[0]!.directory).toBe("/Users/art/dev/openscout/packages/web");
+    expect(digest.groups[0]!.directory).toBe("/Users/you/dev/openscout/packages/web");
     expect(digest.groups[0]!.name).toBe("web");
   });
 
@@ -321,8 +321,8 @@ describe("renderHerdrWorkspaceDigest", () => {
     const text = renderHerdrWorkspaceDigest(digestHerdrTopology(topology([
       pane("w1:p1", { agent: "codex", agentStatus: "blocked" }),
     ])));
-    expect(text.split("/Users/art/dev/openscout").length - 1).toBe(1);
-    expect(text).toContain("openscout (/Users/art/dev/openscout) — 1 pane · 1 blocked");
+    expect(text.split("/Users/you/dev/openscout").length - 1).toBe(1);
+    expect(text).toContain("openscout (/Users/you/dev/openscout) — 1 pane · 1 blocked");
   });
 
   test("omits sections it has nothing to say in", () => {

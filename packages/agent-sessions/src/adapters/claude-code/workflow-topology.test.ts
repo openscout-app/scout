@@ -29,9 +29,9 @@ describe("readClaudeWorkflowTopology", () => {
     const home = makeTempHome();
     const sessionId = "542b3de4-e4c4-4325-842b-c33ef87cfdff";
     const runId = "wf_fixture-123";
-    const projectDir = join(home, ".claude", "projects", "-Users-art-dev-fixture");
+    const projectDir = join(home, ".claude", "projects", "-Users-you-dev-fixture");
     const workflowDir = join(projectDir, sessionId, "subagents", "workflows", runId);
-    const scriptDir = join(home, ".claude", "projects", "-Users-art-dev-fixture-packages-web-client", sessionId, "workflows", "scripts");
+    const scriptDir = join(home, ".claude", "projects", "-Users-you-dev-fixture-packages-web-client", sessionId, "workflows", "scripts");
     const scriptPath = join(scriptDir, `tokenize-scout-css-${runId}.js`);
     mkdirSync(workflowDir, { recursive: true });
     mkdirSync(scriptDir, { recursive: true });
@@ -186,7 +186,7 @@ const REL = [
     const home = makeTempHome();
     const sessionId = "session-1";
     const runId = "wf_other-123";
-    const projectDir = join(home, ".claude", "projects", "-Users-art-dev-fixture");
+    const projectDir = join(home, ".claude", "projects", "-Users-you-dev-fixture");
     const workflowDir = join(projectDir, sessionId, "subagents", "workflows", runId);
     mkdirSync(workflowDir, { recursive: true });
     writeFileSync(join(projectDir, `${sessionId}.jsonl`), jsonl([
