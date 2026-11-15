@@ -452,9 +452,23 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
 export async function runSharedScoutMcpServer(options: SharedMcpServerOptions): Promise<void> {
   const handle = startSharedScoutMcpServer(options);
   console.error(`[scout-mcp-shared] listening on ${handle.url}`);
+  // Under scout-base: stop with it, or the port stays held and every
+  // restart of the service fails.
+  const parentPid = Number((options.env ?? process.env).OPENSCOUT_PARENT_PID);
   await new Promise<void>((resolve) => {
-    const stop = () => { void handle.stop().then(resolve); };
+    let parentWatch: ReturnType<typeof setInterval> | undefined;
+    const stop = () => {
+      if (parentWatch) clearInterval(parentWatch);
+      void handle.stop().then(resolve);
+    };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
+    if (Number.isInteger(parentPid) && parentPid > 1) {
+      parentWatch = setInterval(() => {
+        if (isProcessAlive(parentPid)) return;
+        console.error(`[scout-mcp-shared] parent ${parentPid} exited; stopping`);
+        stop();
+      }, 5_000);
+    }
   });
 }

@@ -40,7 +40,7 @@ export function renderMcpCommandHelp(): string {
   return [
     "Usage:",
     "  scout mcp [--context-root <path>] [--notifications]",
-    "  scout mcp install [--host <codex|claude|zed>] [--force] [--dry-run]",
+    "  scout mcp install [--host <codex|claude|zed>] [--shared] [--force] [--dry-run]",
     "  scout mcp serve [--port <n>] [--host 127.0.0.1] [--idle-timeout <seconds>] [--notifications]",
     "                   one shared server for every local session (Streamable HTTP)",
     "",

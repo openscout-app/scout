@@ -3,6 +3,17 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
+import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
+import {
+  readSharedMcpOptIn,
+  removeSharedMcpOptIn,
+  sharedMcpOptInPath,
+  sharedMcpPort,
+  sharedMcpUrl,
+  writeSharedMcpOptIn,
+} from "@openscout/runtime/shared-mcp";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { planZedScoutContextServer, zedSettingsPath } from "./zed-settings.ts";
@@ -14,6 +25,7 @@ const SUPPORTED_HOSTS = ["codex", "claude", "zed"] as const;
 type ScoutMcpInstallOptions = {
   dryRun: boolean;
   force: boolean;
+  shared: boolean;
   hosts: ScoutMcpInstallHost[];
 };
 
@@ -21,6 +33,11 @@ type ScoutMcpLaunchCommand = {
   command: string;
   args: string[];
 };
+
+/** How a host reaches Scout MCP: its own stdio server, or the shared HTTP server. */
+type ScoutMcpTransport =
+  | ({ kind: "stdio" } & ScoutMcpLaunchCommand)
+  | { kind: "http"; url: string };
 
 type CommandResult = {
   status: number | null;
@@ -178,7 +195,7 @@ function parseHostValue(value: string): ScoutMcpInstallHost {
 
 export function renderMcpInstallHelp(): string {
   return [
-    "Usage: scout mcp install [--host <codex|claude|zed>] [--force] [--dry-run]",
+    "Usage: scout mcp install [--host <codex|claude|zed>] [--shared] [--force] [--dry-run]",
     "",
     "Register the current Scout MCP server command with supported local hosts.",
     "",
@@ -187,11 +204,22 @@ export function renderMcpInstallHelp(): string {
     "context_servers.scout in its user settings.json; the rest of that file,",
     "comments included, stays as it was, and Zed reloads it without a restart.",
     "",
+    "--shared turns on one shared Scout MCP server for every session on this",
+    "host, run by scout-base at http://127.0.0.1:43115/mcp, and points Codex",
+    "and Claude Code at it instead of starting a server per session. Zed keeps",
+    "its own server. Sessions that are already running keep theirs until they",
+    "restart. Run on the main instance only, since the host configs are global.",
+    "",
+    "--force without --shared replaces the entries with the per-session",
+    "command, then turns the shared server off.",
+    "",
     "Examples:",
     "  scout mcp install",
     "  scout mcp install --host codex --force",
     "  scout mcp install --host claude --dry-run",
     "  scout mcp install --host zed",
+    "  scout mcp install --shared",
+    "  scout mcp install --force",
   ].join("\n");
 }
 
@@ -202,6 +230,7 @@ export function parseMcpInstallCommandOptions(
   const hosts: ScoutMcpInstallHost[] = [];
   let force = false;
   let dryRun = false;
+  let shared = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const current = args[index] ?? "";
@@ -217,6 +246,10 @@ export function parseMcpInstallCommandOptions(
     }
     if (current === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (current === "--shared") {
+      shared = true;
       continue;
     }
     if (current === "--host" || current.startsWith("--host=")) {
@@ -235,6 +268,7 @@ export function parseMcpInstallCommandOptions(
   return {
     dryRun,
     force,
+    shared,
     hosts: [...resolvedHosts],
   };
 }
@@ -262,121 +296,83 @@ function commandFailed(result: CommandResult): boolean {
   return Boolean(result.error) || result.status !== 0;
 }
 
-function installForCodex(input: {
+type CliHost = "codex" | "claude";
+
+const CLI_HOSTS: Record<CliHost, {
+  label: string;
+  remove: string[];
+  add: (transport: ScoutMcpTransport) => string[];
+}> = {
+  codex: {
+    label: "Codex",
+    remove: ["mcp", "remove", "scout"],
+    add: (transport) => transport.kind === "http"
+      ? ["mcp", "add", "scout", "--url", transport.url]
+      : ["mcp", "add", "scout", "--", transport.command, ...transport.args],
+  },
+  claude: {
+    label: "Claude Code",
+    remove: ["mcp", "remove", "--scope", "user", "scout"],
+    add: (transport) => transport.kind === "http"
+      ? ["mcp", "add", "--scope", "user", "--transport", "http", "scout", transport.url]
+      : ["mcp", "add", "--scope", "user", "scout", "--", transport.command, ...transport.args],
+  },
+};
+
+/** Codex and Claude Code are installed through their own `mcp` commands. */
+function installThroughHostCli(input: {
+  host: CliHost;
   executablePath: string;
-  launch: ScoutMcpLaunchCommand;
+  transport: ScoutMcpTransport;
   force: boolean;
   dryRun: boolean;
   run: CommandRunner;
 }): HostInstallOutcome {
+  const { label, remove, add } = CLI_HOSTS[input.host];
   const existing = input.run(input.executablePath, ["mcp", "get", "scout"]);
   if (!commandFailed(existing) && !input.force) {
     return {
-      host: "codex",
+      host: input.host,
       status: "already_installed",
-      detail: "Codex already has a scout MCP entry.",
+      detail: `${label} already has a scout MCP entry.`,
     };
   }
 
+  const addArgs = add(input.transport);
   if (input.dryRun) {
     return {
-      host: "codex",
+      host: input.host,
       status: "installed",
-      detail: `Would run: ${input.executablePath} mcp add scout -- ${input.launch.command} ${input.launch.args.join(" ")}`,
+      detail: `Would run: ${input.executablePath} ${addArgs.join(" ")}`,
     };
   }
 
   if (!commandFailed(existing) && input.force) {
-    const removed = input.run(input.executablePath, ["mcp", "remove", "scout"]);
+    const removed = input.run(input.executablePath, remove);
     if (commandFailed(removed)) {
       return {
-        host: "codex",
+        host: input.host,
         status: "failed",
-        detail: removed.stderr.trim() || removed.stdout.trim() || "Failed to replace existing Codex MCP config.",
+        detail: removed.stderr.trim() || removed.stdout.trim() || `Failed to replace existing ${label} MCP config.`,
       };
     }
   }
 
-  const added = input.run(input.executablePath, [
-    "mcp",
-    "add",
-    "scout",
-    "--",
-    input.launch.command,
-    ...input.launch.args,
-  ]);
+  const added = input.run(input.executablePath, addArgs);
   if (commandFailed(added)) {
     return {
-      host: "codex",
+      host: input.host,
       status: "failed",
-      detail: added.stderr.trim() || added.stdout.trim() || "Failed to install scout MCP into Codex.",
+      detail: added.stderr.trim() || added.stdout.trim() || `Failed to install scout MCP into ${label}.`,
     };
   }
 
   return {
-    host: "codex",
+    host: input.host,
     status: "installed",
-    detail: "Installed scout MCP for Codex.",
-  };
-}
-
-function installForClaude(input: {
-  executablePath: string;
-  launch: ScoutMcpLaunchCommand;
-  force: boolean;
-  dryRun: boolean;
-  run: CommandRunner;
-}): HostInstallOutcome {
-  const existing = input.run(input.executablePath, ["mcp", "get", "scout"]);
-  if (!commandFailed(existing) && !input.force) {
-    return {
-      host: "claude",
-      status: "already_installed",
-      detail: "Claude Code already has a scout MCP entry.",
-    };
-  }
-
-  if (input.dryRun) {
-    return {
-      host: "claude",
-      status: "installed",
-      detail: `Would run: ${input.executablePath} mcp add --scope user scout -- ${input.launch.command} ${input.launch.args.join(" ")}`,
-    };
-  }
-
-  if (!commandFailed(existing) && input.force) {
-    const removed = input.run(input.executablePath, ["mcp", "remove", "--scope", "user", "scout"]);
-    if (commandFailed(removed)) {
-      return {
-        host: "claude",
-        status: "failed",
-        detail: removed.stderr.trim() || removed.stdout.trim() || "Failed to replace existing Claude Code MCP config.",
-      };
-    }
-  }
-
-  const added = input.run(input.executablePath, [
-    "mcp",
-    "add",
-    "--scope",
-    "user",
-    "scout",
-    "--",
-    input.launch.command,
-    ...input.launch.args,
-  ]);
-  if (commandFailed(added)) {
-    return {
-      host: "claude",
-      status: "failed",
-      detail: added.stderr.trim() || added.stdout.trim() || "Failed to install scout MCP into Claude Code.",
-    };
-  }
-
-  return {
-    host: "claude",
-    status: "installed",
-    detail: "Installed scout MCP for Claude Code.",
+    detail: input.transport.kind === "http"
+      ? `Pointed scout MCP for ${label} at the shared server.`
+      : `Installed scout MCP for ${label}.`,
   };
 }
 
@@ -467,8 +463,13 @@ export function installScoutMcpForHosts(input: {
   context?: ScoutCommandContext;
   resolveHostPath?: (host: ScoutMcpInstallHost, env: NodeJS.ProcessEnv) => string | null;
   resolveLaunchCommand?: (env: NodeJS.ProcessEnv) => ScoutMcpLaunchCommand;
+  /** Point Codex and Claude Code at this shared server URL (replacing their entries); Zed is left alone. */
+  sharedUrl?: string | null;
 }): HostInstallOutcome[] {
-  const launch = (input.resolveLaunchCommand ?? resolveCurrentScoutMcpLaunchCommand)(input.env);
+  const sharedUrl = input.sharedUrl ?? null;
+  let launch: ScoutMcpLaunchCommand | null = null;
+  // Resolved only when a host needs the stdio command, so --shared works without a stable launcher.
+  const stdioLaunch = () => (launch ??= (input.resolveLaunchCommand ?? resolveCurrentScoutMcpLaunchCommand)(input.env));
   const run = input.run
     ?? (input.context ? defaultCommandRunner(input.context) : undefined);
   const resolvePath = input.resolveHostPath ?? resolveHostPath;
@@ -476,7 +477,10 @@ export function installScoutMcpForHosts(input: {
     throw new ScoutCliError("A command runner or command context is required.");
   }
 
-  return input.hosts.map((host) => {
+  return input.hosts.map((host): HostInstallOutcome => {
+    if (sharedUrl && host === "zed") {
+      return { host, status: "skipped", detail: "Skipped zed: it keeps its own Scout MCP server." };
+    }
     const executablePath = resolvePath(host, input.env);
     if (!executablePath) {
       return {
@@ -488,28 +492,109 @@ export function installScoutMcpForHosts(input: {
     if (host === "zed") {
       return installForZed({
         settingsPath: executablePath,
-        launch,
+        launch: stdioLaunch(),
         force: input.force,
         dryRun: input.dryRun,
       });
     }
-    if (host === "codex") {
-      return installForCodex({
-        executablePath,
-        launch,
-        force: input.force,
-        dryRun: input.dryRun,
-        run,
-      });
-    }
-    return installForClaude({
+    return installThroughHostCli({
+      host,
       executablePath,
-      launch,
-      force: input.force,
+      transport: sharedUrl ? { kind: "http", url: sharedUrl } : { kind: "stdio", ...stdioLaunch() },
+      // A shared install always replaces the per-session entry.
+      force: input.force || sharedUrl !== null,
       dryRun: input.dryRun,
       run,
     });
   });
+}
+
+const SHARED_MCP_START_TIMEOUT_MS = 20_000;
+
+/** True once the shared server answers /stats; scout-base starts it within a reconcile tick. */
+export async function waitForSharedMcpServer(port: number, timeoutMs = SHARED_MCP_START_TIMEOUT_MS): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/stats`, { signal: AbortSignal.timeout(1_000) });
+      if (response.ok) return true;
+    } catch {
+      // Not listening yet.
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+function hostFailed(outcomes: HostInstallOutcome[]): boolean {
+  return outcomes.some((outcome) => outcome.status === "failed");
+}
+
+/**
+ * `scout mcp install --shared`: leave the opt-in that makes scout-base run
+ * the shared server, wait until it answers, then point the hosts at it. If
+ * the server never answers, the opt-in this call wrote is taken back and no
+ * host config changes.
+ */
+export async function enableSharedScoutMcp(input: {
+  env: NodeJS.ProcessEnv;
+  hosts: ScoutMcpInstallHost[];
+  dryRun: boolean;
+  run?: CommandRunner;
+  context?: ScoutCommandContext;
+  resolveHostPath?: (host: ScoutMcpInstallHost, env: NodeJS.ProcessEnv) => string | null;
+  supportDirectory?: string;
+  instance?: { name: string; isProd: boolean };
+  port?: number;
+  waitForServer?: (port: number) => Promise<boolean>;
+}): Promise<string[]> {
+  const instance = input.instance ?? deriveOpenScoutInstanceLayout({ env: input.env });
+  if (!instance.isProd) {
+    throw new ScoutCliError(
+      `scout mcp install --shared changes the global Codex and Claude Code configs, so it runs only on the main instance (this is "${instance.name}"). Run \`scout mcp serve\` to try the shared server here.`,
+    );
+  }
+  const supportDirectory = input.supportDirectory ?? resolveOpenScoutSupportPaths().supportDirectory;
+  const previous = readSharedMcpOptIn(supportDirectory);
+  const port = previous?.port ?? input.port ?? sharedMcpPort(input.env);
+  const url = sharedMcpUrl(port);
+  const install = () => installScoutMcpForHosts({
+    env: input.env,
+    hosts: input.hosts,
+    force: true,
+    dryRun: input.dryRun,
+    run: input.run,
+    context: input.context,
+    resolveHostPath: input.resolveHostPath,
+    sharedUrl: url,
+  });
+  const hostLines = (outcomes: HostInstallOutcome[]) => outcomes.map((outcome) => `[${outcome.host}] ${outcome.detail}`);
+
+  if (input.dryRun) {
+    return [
+      previous
+        ? `The shared Scout MCP server is already on at ${url}.`
+        : `Would write ${sharedMcpOptInPath(supportDirectory)}; scout-base then runs the shared Scout MCP server at ${url}.`,
+      ...hostLines(install()),
+    ];
+  }
+
+  if (!previous) writeSharedMcpOptIn(supportDirectory, port);
+  if (!(await (input.waitForServer ?? waitForSharedMcpServer)(port))) {
+    if (!previous) removeSharedMcpOptIn(supportDirectory);
+    throw new ScoutCliError(
+      `The shared Scout MCP server did not answer at ${url} within ${SHARED_MCP_START_TIMEOUT_MS / 1000} s, so no host config was changed. scout-base runs it only from a Scout version with this command; see ${join(supportDirectory, "logs", "base", "shared-mcp.stderr.log")}.`,
+    );
+  }
+
+  const outcomes = install();
+  return [
+    `The shared Scout MCP server is on at ${url}, run by scout-base.`,
+    ...hostLines(outcomes),
+    hostFailed(outcomes)
+      ? "A host was not switched; it keeps its own Scout MCP server. Rerun after fixing it, or run scout mcp install --force to switch every host back."
+      : "New Codex and Claude Code sessions use it. Sessions that are already running keep their own server until they restart.",
+  ];
 }
 
 export async function runMcpInstallCommand(
@@ -522,6 +607,16 @@ export async function runMcpInstallCommand(
   }
 
   const options = parseMcpInstallCommandOptions(args, context.env);
+  if (options.shared) {
+    const lines = await enableSharedScoutMcp({
+      env: context.env,
+      hosts: options.hosts,
+      dryRun: options.dryRun,
+      context,
+    });
+    context.output.writeText(lines.join("\n"));
+    return;
+  }
   if (options.hosts.length === 0) {
     context.output.writeText("No supported hosts detected. Looked for codex, claude, and zed.");
     return;
@@ -535,7 +630,22 @@ export async function runMcpInstallCommand(
     context,
   });
 
-  context.output.writeText(
-    outcomes.map((outcome) => `[${outcome.host}] ${outcome.detail}`).join("\n"),
-  );
+  const lines = outcomes.map((outcome) => `[${outcome.host}] ${outcome.detail}`);
+  // --force puts the hosts back on their own server. The shared server stops
+  // only once every detected Codex and Claude Code install was switched back.
+  const supportDirectory = resolveOpenScoutSupportPaths().supportDirectory;
+  if (options.force && readSharedMcpOptIn(supportDirectory)) {
+    const switched = new Set(outcomes.filter((outcome) => outcome.status === "installed").map((outcome) => outcome.host));
+    const pending = (Object.keys(CLI_HOSTS) as CliHost[])
+      .filter((host) => !switched.has(host) && resolveHostPath(host, context.env) !== null);
+    if (pending.length > 0) {
+      lines.push(`The shared Scout MCP server stays on: ${pending.join(" and ")} may still point at it.`);
+    } else if (options.dryRun) {
+      lines.push(`Would remove ${sharedMcpOptInPath(supportDirectory)}; scout-base then stops the shared Scout MCP server.`);
+    } else {
+      removeSharedMcpOptIn(supportDirectory);
+      lines.push("Turned off the shared Scout MCP server; scout-base stops it.");
+    }
+  }
+  context.output.writeText(lines.join("\n"));
 }
