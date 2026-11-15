@@ -63,7 +63,7 @@ function item(
     title: `Title ${feedId}`,
     alias: null,
     naturalKey: null,
-    projectRoot: "/Users/art/dev/openscout",
+    projectRoot: "/Users/you/dev/openscout",
     harness: "codex",
     model: "gpt-5.6-sol",
     effort: "high",

@@ -534,6 +534,16 @@ export class BrokerLocalInvocationService {
           onSessionObserved: async (metadata) => {
             liveEndpoint = promoteLocalEndpointProviderSession(liveEndpoint, { metadata });
             await this.options.persistEndpoint(liveEndpoint);
+            // The session's own report of model and effort belongs on the
+            // flight as soon as it exists, not only when the turn returns.
+            await this.recordObservedExecution(invocation.id, {
+              ...dispatchAck,
+              executionResolution: executionResolutionWithObservedEndpoint(
+                invocation.executionResolution,
+                liveEndpoint,
+                this.now(),
+              ),
+            });
           },
         },
       );
@@ -558,6 +568,9 @@ export class BrokerLocalInvocationService {
       };
 
       if (this.currentFlightIsTerminal(invocation.id)) {
+        // A broker reply can close the flight before the turn returns. What
+        // the session reported about itself is still a fact about this flight.
+        await this.recordObservedExecution(invocation.id, completedDispatchAck);
         await this.options.persistEndpoint({ ...completedEndpoint, state: "idle" });
         return;
       }
@@ -977,6 +990,28 @@ export class BrokerLocalInvocationService {
 
     if (failedFlight) {
       await this.options.postInvocationStatusMessage(invocation, failedFlight);
+    }
+  }
+
+  /**
+   * Write a dispatch acknowledgement whose execution resolution now carries
+   * the session's observed runtime. Metadata only: it never changes flight
+   * state, so it also enriches a flight a broker reply already completed.
+   * Observation is evidence; failing to record it never fails the turn.
+   */
+  private async recordObservedExecution(
+    invocationId: string,
+    dispatchAck: { executionResolution: ScoutExecutionResolution | null } & Record<string, unknown>,
+  ): Promise<void> {
+    const current = this.options.runtime.flightForInvocation(invocationId);
+    const recorded = (current?.metadata?.dispatchAck as { executionResolution?: unknown } | undefined)?.executionResolution;
+    if (!current || !dispatchAck.executionResolution
+      || JSON.stringify(recorded ?? null) === JSON.stringify(dispatchAck.executionResolution)) return;
+    try {
+      await this.options.transitionInvocation(invocationId, { metadata: { dispatchAck } });
+    } catch (error) {
+      this.options.warn?.(`[openscout-runtime] could not record the observed runtime for ${invocationId}: ${
+        error instanceof Error ? error.message : String(error)}`);
     }
   }
 

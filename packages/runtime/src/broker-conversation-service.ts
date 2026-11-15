@@ -1,4 +1,5 @@
 import {
+  CHANNEL_ID_PREFIX,
   conversationNaturalKey,
   conversationsWithNaturalKey,
   directChannelNaturalKey,
@@ -97,6 +98,10 @@ export class BrokerConversationService {
       throw new Error("Delivery requires an explicit target or channel; use scout broadcast to tell everyone.");
     }
 
+    if (normalizedChannel.startsWith(CHANNEL_ID_PREFIX)) {
+      return this.existingConversationById(snapshot, normalizedChannel, input.requesterId);
+    }
+
     return await this.ensureChannelConversation(snapshot, {
       requesterId: input.requesterId,
       targetAgentId,
@@ -104,6 +109,30 @@ export class BrokerConversationService {
       channel: normalizedChannel === "shared" ? "broadcast" : normalizedChannel,
     });
   };
+
+  /**
+   * A `chn-…` channel is a conversation id, not a name. Minting a named
+   * channel from it would create a second room titled with the id, so the
+   * delivery goes to that conversation or fails with a reason.
+   */
+  private existingConversationById(
+    snapshot: RuntimeSnapshot,
+    conversationId: string,
+    requesterId: string,
+  ): ConversationDefinition {
+    const existing = snapshot.conversations[conversationId];
+    if (!existing) {
+      throw new Error(
+        `Unknown conversation ${conversationId}: a chn- channel is a conversation id, not a channel name, and this broker has no conversation with that id. Reply with --ref, address the agent, or use a channel name.`,
+      );
+    }
+    if (requesterId !== this.deps.operatorActorId && !existing.participantIds.includes(requesterId)) {
+      throw new Error(
+        `${requesterId} is not a participant of conversation ${conversationId}; address the agent or use a channel name instead.`,
+      );
+    }
+    return existing;
+  }
 
   private async ensureDirectConversation(
     snapshot: RuntimeSnapshot,

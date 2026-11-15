@@ -1,3 +1,4 @@
+import { projectFlightRecord } from "@openscout/protocol";
 import { canonicalMessageRecord } from "./message-record-canonical.js";
 import { ControlPlaneHistoryReader, ControlPlaneHistoryStore, type HistoricalPublication, type HistoricalRecordLocation } from "./control-plane-history-store.js";
 import { ControlPlaneHistoryRelocation, ensureHistoryAnchorSchema, type HistoricalTypedReader } from "./control-plane-history-relocation.js";
@@ -1400,7 +1401,7 @@ function invocationRequestFromRow(row: InvocationRow): InvocationRequest {
 }
 
 function flightRecordFromRow(row: FlightRow): FlightRecord {
-  return canonicalRecord("flight", {
+  return projectFlightRecord(canonicalRecord("flight", {
     id: row.id,
     invocationId: row.invocation_id,
     requesterId: row.requester_id,
@@ -1413,7 +1414,7 @@ function flightRecordFromRow(row: FlightRow): FlightRecord {
     metadata: parseJson<Record<string, unknown> | undefined>(row.metadata_json, undefined),
     startedAt: row.started_at ?? undefined,
     completedAt: row.completed_at ?? undefined,
-  }) as FlightRecord;
+  }) as FlightRecord);
 }
 
 /** The drizzle deliveries select shape — camelCase columns. */

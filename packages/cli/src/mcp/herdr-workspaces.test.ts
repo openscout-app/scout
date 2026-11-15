@@ -26,7 +26,7 @@ async function clientFor(deps: HerdrWorkspacesDependencies) {
 function pane(paneId: string, overrides: Partial<HerdrPaneProjection> = {}): HerdrPaneProjection {
   return {
     paneId, terminalId: `term-${paneId}`, tabId: "w1:t1", workspaceId: "w1", label: null,
-    agent: "claude", agentStatus: "idle", agentSession: null, cwd: "/Users/art/dev/openscout",
+    agent: "claude", agentStatus: "idle", agentSession: null, cwd: "/Users/you/dev/openscout",
     foregroundCwd: null, focused: false, scroll: null, ...overrides,
   };
 }

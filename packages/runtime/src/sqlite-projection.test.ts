@@ -70,6 +70,7 @@ function createProjectionOptions(overrides: {
     transactionWorkSizes: [] as number[],
     replayTimerYieldObserved: false,
     replayOrder: [] as string[],
+    conversationTitles: {} as Record<string, string>,
     deliveryBatchSizes: [] as number[],
     upsertAgentCalls: 0,
     upsertedAgentNames: [] as string[],
@@ -216,8 +217,9 @@ function createProjectionOptions(overrides: {
     upsertEndpoint(endpoint: { id: string }): void {
       stats.replayOrder.push(`endpoint:${endpoint.id}`);
     },
-    upsertConversation(conversation: { id: string }): void {
+    upsertConversation(conversation: { id: string; title?: string }): void {
       stats.replayOrder.push(`conversation:${conversation.id}`);
+      stats.conversationTitles[conversation.id] = conversation.title ?? "";
     },
     upsertBinding(): void {},
     recordInvocation(): void {},
@@ -548,6 +550,16 @@ describe("RecoverableSQLiteProjection", () => {
     expect(stats.conversationProjectionReconcileCalls).toBe(1);
     expect(stats.conversationProjectionBatchCalls).toBe(0);
     expect(stats.conversationFeedPublishCalls).toBe(1);
+  });
+
+  test("leaves a conversation seen only by reference untitled instead of titling it with its id", async () => {
+    const message = sampleMessageEntry();
+    const { projection, stats } = createProjectionOptions({ replayEntries: [message] });
+
+    projection.warm();
+    await projection.flush();
+
+    expect(stats.conversationTitles["conv-1"]).toBe("");
   });
 
   test("does not let pre-recovery runtime events capture the journal boundary", async () => {

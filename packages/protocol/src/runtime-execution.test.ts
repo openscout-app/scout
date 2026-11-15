@@ -119,6 +119,32 @@ describe("runtime execution contracts", () => {
     expect(resolution.reasoningEffort.drift).toBe("match");
   });
 
+  test("drift compares the session's report with the ask, and only when the ask requested a value", () => {
+    // Nothing requested: the session's own model and effort are recorded, with no drift to compute.
+    const unrequested = createScoutExecutionResolution({
+      requested: { harness: "claude" },
+      resolved: { harness: "claude", model: "claude-opus-5-5", reasoningEffort: "high" },
+      source: { harness: "flag", model: "profile", reasoningEffort: "profile" },
+      observed: { harness: "claude", model: "claude-sonnet-5-5", reasoningEffort: "medium" },
+      observedAt: 7,
+    });
+    expect(unrequested.harness.drift).toBe("match");
+    expect(unrequested.model).toEqual({
+      resolved: "claude-opus-5-5", source: "profile", observed: "claude-sonnet-5-5", observedAt: 7, drift: "not_requested",
+    });
+    expect(unrequested.reasoningEffort).toEqual(expect.objectContaining({ observed: "medium", drift: "not_requested" }));
+
+    // Requested but not yet reported by the session.
+    expect(createScoutExecutionResolution({
+      requested: { model: "opus" }, resolved: { model: "claude-opus-5-5" },
+    }).model.drift).toBe("unknown");
+    // Requested without a resolved form: compare with the request itself.
+    expect(createScoutExecutionResolution({
+      requested: { reasoningEffort: "high" }, observed: { reasoningEffort: "HIGH" },
+    }).reasoningEffort.drift).toBe("match");
+    expect(createScoutExecutionResolution({}).model).toEqual({ drift: "not_requested" });
+  });
+
   test("parses a shell-safe fixed-position runtime literal", () => {
     expect(parseScoutRuntimeSpec("codex/gpt-5.6-sol/xhigh")).toEqual({
       ok: true,

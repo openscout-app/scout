@@ -125,9 +125,13 @@ describe("scout instance release", () => {
 
   test("an unreadable claim is reported with the repair command; repair is refused on a healthy registry", async () => {
     const fixture = registryFixture(29850);
+    // Repair also scans <home>/.openscout/instances for instance roots. Give
+    // it a home of its own so other instances on this host stay out of view.
+    const home = join(fixture.dir, "home");
+    mkdirSync(join(home, ".openscout", "instances"), { recursive: true });
     try {
       const lines: string[] = [];
-      const context = createScoutCommandContext({ env: fixture.env, stdout: (line) => lines.push(line) });
+      const context = createScoutCommandContext({ env: { ...fixture.env, HOME: home }, stdout: (line) => lines.push(line) });
       await runInstanceCommand(context, ["repair"]);
       expect(lines.join("\n")).toContain("healthy; nothing to repair");
       writeFileSync(join(fixture.registry, ".claims", "dev-live.json"), "{ broken");

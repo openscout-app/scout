@@ -1,3 +1,4 @@
+import { projectFlightRecord } from "@openscout/protocol";
 import { stampAskContext, assertAskTrace } from "./ask-context.js";
 import type {
   ActorIdentity,
@@ -684,6 +685,7 @@ export class InMemoryControlRuntime implements ControlRuntime {
   }
 
   async upsertFlight(flight: FlightRecord, options: { preserveCurrent?: boolean } = {}): Promise<void> {
+    flight = projectFlightRecord(flight);
     const previous = this.registry.flights[flight.id];
     if (!options.preserveCurrent && previous && this.flightIdByInvocationId.get(previous.invocationId) === previous.id) {
       this.flightIdByInvocationId.delete(previous.invocationId);
@@ -849,6 +851,7 @@ export class InMemoryControlRuntime implements ControlRuntime {
     invocation: InvocationRequest,
     flight: FlightRecord,
   ): Promise<void> {
+    flight = projectFlightRecord(flight);
     const previous = this.registry.flights[flight.id];
     if (previous && this.flightIdByInvocationId.get(previous.invocationId) === previous.id) {
       this.flightIdByInvocationId.delete(previous.invocationId);
