@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
@@ -545,6 +545,28 @@ describe("mesh bind address changes", () => {
       },
     });
   }
+
+  test("queued start and stop clear the address watcher, including after restart", async () => {
+    const controller = rebindController(await freePort(), tempSupportDir(), { current: [] }, { addressPollMs: 60_000 });
+    const intervals = spyOn(globalThis, "setInterval");
+    const clears = spyOn(globalThis, "clearInterval");
+    try {
+      for (let cycle = 0; cycle < 2; cycle++) {
+        const starting = controller.start("local");
+        const stopping = controller.stop();
+        await Promise.all([starting, stopping]);
+        const timer = intervals.mock.results.at(-1)!.value;
+        expect(timer).toBeDefined();
+        expect(clears).toHaveBeenCalledWith(timer);
+      }
+      expect(intervals).toHaveBeenCalledTimes(2);
+      expect(clears).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+      intervals.mockRestore();
+      clears.mockRestore();
+    }
+  });
 
   test("re-applying mesh with an added address keeps the open listener", async () => {
     const support = tempSupportDir();

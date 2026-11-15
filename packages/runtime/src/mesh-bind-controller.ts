@@ -470,8 +470,8 @@ export function createMeshBindController(deps: MeshBindControllerDeps): MeshBind
       });
     },
     stop() {
-      unwatchAddresses();
       return enqueue(async () => {
+        unwatchAddresses();
         await closeAllTls();
         stopMdns();
         tlsIdentity = null;
