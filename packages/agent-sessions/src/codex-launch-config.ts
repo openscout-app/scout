@@ -1,5 +1,6 @@
 import { repoScoutEntrypoint } from "./repo-scout-entry.js";
-import { accessSync, constants, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -165,21 +166,131 @@ function resolveScoutMcpCommand(options: {
   } : null;
 }
 
-export function buildScoutMcpCodexLaunchArgs(options: {
+export type CodexScoutMcpEntry = "url" | "command" | null | "unknown";
+
+/** Runs `codex mcp get scout --json`; injectable for tests. */
+export type CodexMcpGet = (codexExecutable: string, env: Record<string, string | undefined>) => {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => {
+  const result = spawnSync(codexExecutable, ["mcp", "get", "scout", "--json"], {
+    env: env as NodeJS.ProcessEnv,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 5_000,
+  });
+  return { status: result.error ? null : result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+};
+
+/**
+ * How the Codex home (CODEX_HOME in `env`) declares the `scout` MCP server,
+ * asked of Codex itself so its own config parser decides: a url entry (the
+ * shared server, from `scout mcp install --shared`), a command entry
+ * (stdio), none, or "unknown" when Codex could not say.
+ */
+export function codexHomeScoutMcpEntry(
+  env: Record<string, string | undefined>,
+  codexExecutable: string,
+  mcpGet: CodexMcpGet = runCodexMcpGet,
+): CodexScoutMcpEntry {
+  const result = mcpGet(codexExecutable, env);
+  if (result.status === 0) {
+    try {
+      const type = (JSON.parse(result.stdout) as { transport?: { type?: string } }).transport?.type;
+      if (type === "stdio") return "command";
+      if (type === "streamable_http" || type === "http" || type === "sse") return "url";
+    } catch {
+      // Fall through.
+    }
+    return "unknown";
+  }
+  return /No MCP server named/i.test(result.stderr) ? null : "unknown";
+}
+
+export type ScoutMcpCodexLaunch = {
+  /** `-c` overrides for `codex app-server`. */
+  args: string[];
+  /** The app-server will reach Scout MCP over a URL: register it as a shared-server client. */
+  usesUrl: boolean;
+  /** Set when Codex could not report its scout entry; the home's config is then left as it is. */
+  unknownReason: string | null;
+};
+
+/**
+ * How a Scout-started Codex app-server gets Scout MCP. The Codex home's own
+ * `scout` entry wins: with a url entry there are no overrides (stdio keys on
+ * a url entry make Codex refuse the server). With no entry,
+ * OPENSCOUT_MCP_SHARED_URL (set by the runtime while the shared server is on)
+ * points Scout MCP at the shared server; otherwise, and over a stdio entry,
+ * Scout MCP runs over stdio for this app-server. When Codex can't report the
+ * entry, nothing is added, so a url entry is never mixed with stdio keys.
+ * Without `codexExecutable` the home is not asked and stdio is used.
+ */
+export function resolveScoutMcpCodexLaunch(options: {
   currentDirectory: string;
   env?: Record<string, string | undefined>;
-}): string[] {
-  const resolved = resolveScoutMcpCommand(options);
-  if (!resolved) {
-    return [];
+  codexExecutable?: string | null;
+  mcpGet?: CodexMcpGet;
+}): ScoutMcpCodexLaunch {
+  const env = options.env ?? process.env;
+  const homeEntry = options.codexExecutable
+    ? codexHomeScoutMcpEntry(env, options.codexExecutable, options.mcpGet)
+    : "command";
+  if (homeEntry === "url") {
+    return { args: [], usesUrl: true, unknownReason: null };
+  }
+  if (homeEntry === "unknown") {
+    return {
+      args: [],
+      usesUrl: false,
+      unknownReason: `\`${options.codexExecutable} mcp get scout --json\` did not report the scout MCP entry for CODEX_HOME=${env.CODEX_HOME ?? "~/.codex"}; Scout added no MCP overrides and left that home's config as it is`,
+    };
+  }
+  const sharedUrl = env.OPENSCOUT_MCP_SHARED_URL?.trim();
+  if (!homeEntry && sharedUrl) {
+    return { args: ["-c", `mcp_servers.scout.url=${JSON.stringify(sharedUrl)}`], usesUrl: true, unknownReason: null };
   }
 
-  return [
-    "-c",
-    `mcp_servers.scout.command=${JSON.stringify(resolved.command)}`,
-    "-c",
-    `mcp_servers.scout.args=${JSON.stringify(resolved.args)}`,
-    "-c",
-    `mcp_servers.scout.cwd=${JSON.stringify(resolved.cwd)}`,
-  ];
+  const resolved = resolveScoutMcpCommand({ currentDirectory: options.currentDirectory, env });
+  if (!resolved) {
+    return { args: [], usesUrl: false, unknownReason: null };
+  }
+
+  return {
+    args: [
+      "-c",
+      `mcp_servers.scout.command=${JSON.stringify(resolved.command)}`,
+      "-c",
+      `mcp_servers.scout.args=${JSON.stringify(resolved.args)}`,
+      "-c",
+      `mcp_servers.scout.cwd=${JSON.stringify(resolved.cwd)}`,
+    ],
+    usesUrl: false,
+    unknownReason: null,
+  };
+}
+
+/** The `-c` overrides alone; see resolveScoutMcpCodexLaunch. */
+export function buildScoutMcpCodexLaunchArgs(options: Parameters<typeof resolveScoutMcpCodexLaunch>[0]): string[] {
+  return resolveScoutMcpCodexLaunch(options).args;
+}
+
+/**
+ * Registers a Codex app-server pointed at the shared Scout MCP server, so a
+ * drain keeps the server up for it: an empty file named by its pid in
+ * OPENSCOUT_MCP_SHARED_CLIENTS_DIR (the runtime's shared-mcp.ts reads it).
+ */
+export function registerSharedScoutMcpClient(env: Record<string, string | undefined>, pid: number | null | undefined): string | null {
+  const directory = env.OPENSCOUT_MCP_SHARED_CLIENTS_DIR?.trim();
+  if (!directory || !pid) return null;
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, String(pid)), "");
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }

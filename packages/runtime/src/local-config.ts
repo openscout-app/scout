@@ -22,6 +22,8 @@ export const DEFAULT_SCOUT_WEB_VITE_HMR_PATH = "/ws/hmr";
 export const OPENSCOUT_PORTS = {
   broker: 43110,
   roomListening: 43112,
+  // Opt-in shared Scout MCP server, one process for every local session.
+  mcp: 43115,
   web: 43120,
   webTerminalRelay: 43121,
   vite: 43122,
