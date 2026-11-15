@@ -21,6 +21,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { homedir, hostname, networkInterfaces } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -254,6 +255,18 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
   const serverRuntimeUrl = baseEnv.OPENSCOUT_BROKER_URL?.trim() || resolveScoutBrokerUrl();
   const connections = new Map<string, Connection>();
   const clientPids = new Set<number>();
+  // Under scout-base, every process served is registered on disk before its
+  // session is answered, so a drain outlives a crash of this server.
+  const clientsDirectory = baseEnv.OPENSCOUT_MCP_SHARED_CLIENTS_DIR?.trim() || null;
+  const registerClient = (pid: number) => {
+    if (!clientsDirectory) return;
+    try {
+      mkdirSync(clientsDirectory, { recursive: true });
+      writeFileSync(join(clientsDirectory, String(pid)), "");
+    } catch (error) {
+      log(`could not register client pid ${pid}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
   const lag = createLagSampler();
   // Built once: every connection runs these tool definitions and handlers.
   const tools = createSharedScoutTools(baseEnv);
@@ -355,6 +368,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
         };
         connections.set(id, connection);
         clientPids.add(identity.pid);
+        registerClient(identity.pid);
         log(`opened ${identity.harness} ${identity.sessionId ?? "?"} (pid ${identity.harnessPid}, ${identity.cwd ?? "?"}); ${connections.size} open`);
       },
       onsessionclosed: (id) => {

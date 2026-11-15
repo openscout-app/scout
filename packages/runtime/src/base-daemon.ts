@@ -81,7 +81,7 @@ import {
 } from "./menu-helper-supervisor.js";
 import { readAllProcessCommandRows } from "./system-probes/ps.js";
 import { selectInstanceAwareEntrypoint } from "./instance.js";
-import { createSharedMcpSupervisor, readSharedMcpOptIn, resolveSharedMcpCommand, settleSharedMcpOptIn, sharedMcpPort } from "./shared-mcp.js";
+import { createSharedMcpSupervisor, readSharedMcpOptIn, resolveSharedMcpCommand, settleSharedMcpOptIn, sharedMcpClientsDirectory, sharedMcpPort } from "./shared-mcp.js";
 
 import { loadOpenScoutRuntimeBuildIdentity } from "./build-info.js";
 import { resolveMeshBridgeExtension, meshBridgeLaunchKey, meshBridgeExtensionCommand, writeMeshBridgeLaunchConfig, readMeshBridgeDestinationKeyId, type MeshBridgeExtension } from "./mesh-bridge-extension.js";
@@ -354,7 +354,8 @@ const sharedMcpSupervisor = createSharedMcpSupervisor({
       return spawn(launch.command, launch.args, {
         argv0: "scout-mcp", cwd: launch.cwd,
         env: { ...process.env, OPENSCOUT_PARENT_PID: String(process.pid),
-          OPENSCOUT_CONTROL_HOME: config.controlHome, OPENSCOUT_BROKER_URL: brokerControlUrl },
+          OPENSCOUT_CONTROL_HOME: config.controlHome, OPENSCOUT_BROKER_URL: brokerControlUrl,
+          OPENSCOUT_MCP_SHARED_CLIENTS_DIR: sharedMcpClientsDirectory(config.supportDirectory) },
         stdio: ["ignore", stdout, stderr],
       });
     } finally { closeSync(stdout); closeSync(stderr); }
@@ -369,9 +370,10 @@ function startSharedMcpSupervision(): void {
   const tick = () => {
     if (shuttingDown || ticking) return;
     ticking = true;
-    // Record the server's clients first; a drain with none left removes the
-    // opt-in, and reconcile then stops the server.
-    void settleSharedMcpOptIn(config.supportDirectory, { log })
+    // A drain with no registered client left removes the opt-in first, and
+    // reconcile then stops the server.
+    void Promise.resolve()
+      .then(() => settleSharedMcpOptIn(config.supportDirectory, { log }))
       .catch((error) => warn("shared MCP opt-in update failed", error instanceof Error ? error.message : String(error)))
       .then(() => sharedMcpSupervisor.reconcile())
       .catch((error) => warn("shared MCP reconcile failed", error instanceof Error ? error.message : String(error)))

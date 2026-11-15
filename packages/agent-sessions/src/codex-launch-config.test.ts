@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { buildScoutMcpCodexLaunchArgs, codexHomeScoutMcpEntry } from "./codex-launch-config";
+import {
+  buildScoutMcpCodexLaunchArgs,
+  codexHomeScoutMcpEntry,
+  registerSharedScoutMcpClient,
+  resolveScoutMcpCodexLaunch,
+} from "./codex-launch-config";
 
 const homes: string[] = [];
 function codexHome(config?: string): string {
@@ -111,8 +116,37 @@ describe("buildScoutMcpCodexLaunchArgs", () => {
     expect(args).toHaveLength(6);
   });
 
-  test("falls back to stdio when Codex cannot say, and when no Codex executable is given", () => {
-    expect(launch("broken").args).toHaveLength(6);
+  test("adds nothing when Codex cannot say, so a url entry is never mixed with stdio keys", () => {
+    expect(launch("broken").args).toEqual([]);
+    const result = resolveScoutMcpCodexLaunch({
+      currentDirectory: import.meta.dir,
+      env: { PATH: "", CODEX_HOME: "/codex-home", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: SHARED_URL },
+      codexExecutable: "/bin/codex",
+      mcpGet: () => answers.broken,
+    });
+    expect(result).toMatchObject({ args: [], usesUrl: false });
+    expect(result.unknownReason).toContain("CODEX_HOME=/codex-home");
+  });
+
+  test("marks the launches that reach Scout MCP over a URL", () => {
+    const usesUrl = (answer: keyof typeof answers, shared: string | undefined) => resolveScoutMcpCodexLaunch({
+      currentDirectory: import.meta.dir,
+      env: { PATH: "", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: shared },
+      codexExecutable: "/bin/codex",
+      mcpGet: () => answers[answer],
+    }).usesUrl;
+    expect([usesUrl("none", SHARED_URL), usesUrl("url", undefined), usesUrl("stdio", SHARED_URL), usesUrl("none", undefined)])
+      .toEqual([true, true, false, false]);
+  });
+
+  test("registers an app-server as a shared-server client by pid", () => {
+    const dir = join(codexHome(), "clients");
+    expect(registerSharedScoutMcpClient({ OPENSCOUT_MCP_SHARED_CLIENTS_DIR: dir }, 4321)).toBeNull();
+    expect(readdirSync(dir)).toEqual(["4321"]);
+    expect(registerSharedScoutMcpClient({}, 4321)).toBeNull();
+  });
+
+  test("uses stdio when no Codex executable is given", () => {
     expect(buildScoutMcpCodexLaunchArgs({
       currentDirectory: import.meta.dir,
       env: { PATH: "", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: SHARED_URL },
