@@ -13,7 +13,7 @@
 import { join } from "node:path";
 
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TAIL_BYTES = 256 * 1024;
+const CHUNK_BYTES = 256 * 1024;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -70,29 +70,86 @@ export async function findCodexRollout(threadId: string, codexHome: string): Pro
   return null;
 }
 
-function cwdOf(line: string, type: string): string | null {
+type TurnContext = { turnId: string | null; cwd: string };
+
+function payloadOf(line: string, type: string): Record<string, unknown> | null {
   if (!line.includes(`"type":"${type}"`)) return null;
   try {
-    const cwd = record(record(JSON.parse(line))?.payload)?.cwd;
-    return typeof cwd === "string" && cwd ? cwd : null;
+    const entry = record(JSON.parse(line));
+    return entry?.type === type ? record(entry.payload) : null;
   } catch {
     return null;
   }
 }
 
-/** The folder of a thread's latest turn, else the folder it started in. */
-export async function readCodexRolloutCwd(path: string): Promise<string | null> {
+function turnContextOf(line: string): TurnContext | null {
+  const payload = payloadOf(line, "turn_context");
+  const cwd = payload?.cwd;
+  if (typeof cwd !== "string" || !cwd) return null;
+  return { turnId: typeof payload!.turn_id === "string" ? payload!.turn_id : null, cwd };
+}
+
+function sessionMetaCwd(line: string): string | null {
+  const cwd = payloadOf(line, "session_meta")?.cwd;
+  return typeof cwd === "string" && cwd ? cwd : null;
+}
+
+function joinBytes(head: Uint8Array, tail: Uint8Array): Uint8Array {
+  if (!tail.length) return head;
+  const joined = new Uint8Array(head.length + tail.length);
+  joined.set(head);
+  joined.set(tail, head.length);
+  return joined;
+}
+
+/**
+ * The folder a thread works in: the `cwd` of the `turn_context` for `turnId`,
+ * or of its latest turn when no turn is named. A turn's output can run to
+ * megabytes, so the file is read backwards in chunks as far as it takes. A
+ * thread with no turns yet works where it started (`session_meta`). Null when
+ * the named turn is not in the rollout (yet), or the file can't be read.
+ */
+export async function readCodexRolloutCwd(path: string, turnId: string | null = null): Promise<string | null> {
   const file = Bun.file(path);
+  const decoder = new TextDecoder();
+  let latest: string | null = null;
+  let turnsNameTheirId = false;
   try {
-    const size = file.size;
-    const tail = (await file.slice(Math.max(0, size - TAIL_BYTES), size).text()).split("\n");
-    for (let index = tail.length - 1; index >= 0; index -= 1) {
-      const cwd = cwdOf(tail[index]!, "turn_context");
-      if (cwd) return cwd;
+    let end = file.size;
+    // The start of a line cut by the previous chunk's edge. Lines split on
+    // the newline byte, which never occurs inside a UTF-8 sequence.
+    let carry: Uint8Array = new Uint8Array(0);
+    while (end > 0) {
+      const start = Math.max(0, end - CHUNK_BYTES);
+      const bytes = joinBytes(new Uint8Array(await file.slice(start, end).arrayBuffer()), carry);
+      let from = 0;
+      if (start > 0) {
+        const newline = bytes.indexOf(10);
+        if (newline < 0) {
+          carry = bytes;
+          end = start;
+          continue;
+        }
+        carry = bytes.subarray(0, newline);
+        from = newline + 1;
+      }
+      const lines = decoder.decode(bytes.subarray(from)).split("\n");
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const turn = turnContextOf(lines[index]!);
+        if (turn) {
+          if (turnId === null) return turn.cwd;
+          if (turn.turnId === turnId) return turn.cwd;
+          latest ??= turn.cwd;
+          turnsNameTheirId ||= turn.turnId !== null;
+        } else if (start === 0 && index === 0 && latest === null && turnId === null) {
+          return sessionMetaCwd(lines[0]!);
+        }
+      }
+      end = start;
     }
-    const first = (await file.slice(0, Math.min(size, TAIL_BYTES)).text()).split("\n", 1)[0] ?? "";
-    return cwdOf(first, "session_meta");
   } catch {
     return null;
   }
+  // A Codex whose turn_context carries no turn id: its latest turn is the one.
+  return turnsNameTheirId ? null : latest;
 }

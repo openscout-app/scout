@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -30,19 +30,25 @@ function localDay(ms: number): string {
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
 }
 
+/** Writes a thread's rollout where Codex files it, by the date in the thread id. */
+function writeRollout(home: string, threadId: string, lines: string[]): string {
+  const directory = join(home, "sessions", localDay(uuidV7Time(threadId)!));
+  mkdirSync(directory, { recursive: true });
+  const rollout = join(directory, `rollout-2026-11-15T01-00-00-${threadId}.jsonl`);
+  writeFileSync(rollout, lines.join("\n"));
+  return rollout;
+}
+
 /** A CODEX_HOME holding one rollout for THREAD: started in /work/start, latest turn in `turnCwd`. */
 function codexHomeWithRollout(turnCwd: string): { home: string; rollout: string } {
   const home = mkdtempSync(join(tmpdir(), "scout-codex-home-"));
-  const directory = join(home, "sessions", localDay(uuidV7Time(THREAD)!));
-  mkdirSync(directory, { recursive: true });
-  const rollout = join(directory, `rollout-2026-11-15T01-00-00-${THREAD}.jsonl`);
-  writeFileSync(rollout, [
+  const rollout = writeRollout(home, THREAD, [
     JSON.stringify({ type: "session_meta", payload: { id: THREAD, cwd: "/work/start" } }),
     JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-1", cwd: "/work/first-turn" } }),
     JSON.stringify({ type: "response_item", payload: { type: "message" } }),
     JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-2", cwd: turnCwd } }),
     "",
-  ].join("\n"));
+  ]);
   return { home, rollout };
 }
 
@@ -273,6 +279,58 @@ describe.if(process.platform === "darwin")("shared server", () => {
     }
   });
 
+  test("two first calls naming different threads at once: one binds, the other is refused", async () => {
+    const runtime = recordingRuntime();
+    const { home, rollout } = codexHomeWithRollout("/work/thread-a");
+    writeRollout(home, OTHER_THREAD, [JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-b", cwd: "/work/thread-b" } }), ""]);
+    try {
+      handle = startSharedScoutMcpServer({
+        env: { HOME: "/h", PATH: process.env.PATH, OPENSCOUT_BROKER_URL: runtime.url },
+        log: () => {},
+        resolveIdentity: stubIdentity({ env: { HOME: "/h", PATH: process.env.PATH ?? "", CODEX_HOME: home } }),
+      });
+      const { client } = await connectClient(handle.url);
+      // The first call names a turn the rollout doesn't hold yet, so its
+      // lookup is still waiting when the second call arrives.
+      const first = Promise.allSettled([client.callTool({ name: "show", arguments: { path: "/work/a.png", caption: "a" }, _meta: codexMeta(THREAD, "turn-3") })]);
+      await Bun.sleep(80);
+      const second = Promise.allSettled([client.callTool({ name: "show", arguments: { path: "/work/b.png", caption: "b" }, _meta: codexMeta(OTHER_THREAD, "turn-b") })]);
+      await Bun.sleep(120);
+      appendFileSync(rollout, `${JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-3", cwd: "/work/thread-a-3" } })}\n`);
+      const results = [...await first, ...await second];
+      expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+      expect(String((results[1] as PromiseRejectedResult).reason)).toMatch(/belongs to Codex thread/);
+      expect(runtime.bodies.map((body) => [body.caller.metadata.sessionId, body.caller.currentDirectory])).toEqual([[THREAD, "/work/thread-a-3"]]);
+      expect(handle.connections()[0]!.thread!.id).toBe(THREAD);
+      await client.close();
+    } finally {
+      runtime.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a Codex call that names no thread, or whose folder can't be found", async () => {
+    const runtime = recordingRuntime();
+    const home = mkdtempSync(join(tmpdir(), "scout-codex-home-"));
+    try {
+      handle = startSharedScoutMcpServer({
+        env: { HOME: "/h", PATH: process.env.PATH, OPENSCOUT_BROKER_URL: runtime.url },
+        log: () => {},
+        resolveIdentity: stubIdentity({ env: { HOME: "/h", PATH: process.env.PATH ?? "", CODEX_HOME: home } }),
+      });
+      const { client } = await connectClient(handle.url);
+      await expect(client.callTool({ name: "show", arguments: { path: "/work/a.png", caption: "a" } }))
+        .rejects.toThrow(/without _meta.threadId/);
+      await expect(client.callTool({ name: "show", arguments: { path: "/work/a.png", caption: "a" }, _meta: codexMeta(THREAD, "turn-1") }))
+        .rejects.toThrow(/found no rollout/);
+      expect(runtime.bodies.length).toBe(0);
+      await client.close();
+    } finally {
+      runtime.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("a session id works only from the process that opened it", async () => {
     handle = startSharedScoutMcpServer({ log: () => {} });
     const { client } = await connectClient(handle.url);
@@ -355,6 +413,38 @@ describe("Codex threads", () => {
       expect(await readCodexRolloutCwd(rollout)).toBe("/work/latest-turn");
       writeFileSync(rollout, `${JSON.stringify({ type: "session_meta", payload: { cwd: "/work/start" } })}\n`);
       expect(await readCodexRolloutCwd(rollout)).toBe("/work/start");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("reads the named turn's folder past megabytes of output", async () => {
+    const home = mkdtempSync(join(tmpdir(), "scout-codex-home-"));
+    // Multibyte text, so chunk edges fall inside characters; one line longer
+    // than a chunk; and a quoted turn_context inside output, which isn't one.
+    const output = (index: number) => JSON.stringify({ type: "response_item", payload: { text: `${"é—".repeat(400)} ${index} {"type":"turn_context","payload":{"cwd":"/fake"}}` } });
+    const rollout = writeRollout(home, THREAD, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/work/start" } }),
+      JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-1", cwd: "/work/first" } }),
+      ...Array.from({ length: 300 }, (_, index) => output(index)),
+      JSON.stringify({ type: "turn_context", payload: { turn_id: "turn-2", cwd: "/work/moved" } }),
+      JSON.stringify({ type: "response_item", payload: { text: "x".repeat(300 * 1024) } }),
+      ...Array.from({ length: 300 }, (_, index) => output(index)),
+      "",
+    ]);
+    try {
+      expect(Bun.file(rollout).size).toBeGreaterThan(1024 * 1024);
+      expect(await readCodexRolloutCwd(rollout, "turn-2")).toBe("/work/moved");
+      expect(await readCodexRolloutCwd(rollout)).toBe("/work/moved");
+      expect(await readCodexRolloutCwd(rollout, "turn-1")).toBe("/work/first");
+      expect(await readCodexRolloutCwd(rollout, "turn-3")).toBeNull();
+      // A Codex whose turn_context names no turn: its latest turn is the one.
+      writeRollout(home, THREAD, [
+        JSON.stringify({ type: "turn_context", payload: { cwd: "/work/old" } }),
+        JSON.stringify({ type: "turn_context", payload: { cwd: "/work/new" } }),
+        "",
+      ]);
+      expect(await readCodexRolloutCwd(rollout, "turn-9")).toBe("/work/new");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -40,14 +40,14 @@ const SESSION_KEYS = /^(CLAUDE_|CODEX_|OPENSCOUT_AGENT$|OPENSCOUT_SESSION_ID$|OP
  */
 const RUNTIME_KEYS = /^(OPENSCOUT_BROKER_|OPENSCOUT_WEB_|SCOUT_WEB_|OPENSCOUT_INSTANCE|OPENSCOUT_CLIENT_INSTANCE$|OPENSCOUT_EXPOSE_)/;
 
-/** How long a client port stays checked against its process. Ports are reused, so a check expires. */
-const PEER_CHECK_TTL_MS = 60_000;
-
 type CodexThread = {
+  /** Claimed by the first call that names a thread, before anything awaits; never changes. */
   id: string;
-  turnId: string | null;
   rollout: string | null;
-  context: ScoutSessionContext;
+  /** The folder of the last turn resolved, for /sessions. */
+  cwd: string | null;
+  /** The current turn's context. A promise, so concurrent calls in a turn share one lookup. */
+  turn: { id: string | null; context: Promise<ScoutSessionContext> } | null;
 };
 
 type Connection = {
@@ -60,8 +60,6 @@ type Connection = {
   context: ScoutSessionContext;
   /** A Codex connection's thread, set by its first call that names one. */
   thread: CodexThread | null;
-  /** Client ports checked against identity.pid, with when. */
-  peerPorts: Map<number, number>;
   openedAt: number;
   lastRequestAt: number;
   requests: number;
@@ -135,7 +133,7 @@ function describe(connection: Connection, now = Date.now()) {
     sessionId: connection.thread?.id ?? connection.identity.sessionId,
     pid: connection.identity.pid,
     harnessPid: connection.identity.harnessPid,
-    cwd: connection.thread?.context.currentDirectory ?? connection.identity.cwd,
+    cwd: connection.thread?.cwd ?? connection.identity.cwd,
     agent: connection.identity.env.OPENSCOUT_AGENT ?? null,
     idleSeconds: Math.round((now - connection.lastRequestAt) / 1000),
     requests: connection.requests,
@@ -228,25 +226,47 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
     await connection.server.close().catch(() => {});
   };
 
-  /** A Codex call runs as its thread: CODEX_THREAD_ID and the folder of the thread's current turn. */
-  const threadContext = async (connection: Connection, threadId: string, turnId: string | null): Promise<ScoutSessionContext> => {
-    const bound = connection.thread;
-    if (bound && bound.id !== threadId) {
-      throw new McpError(ErrorCode.InvalidRequest, `This MCP session belongs to Codex thread ${bound.id}, not ${threadId}. Open a new MCP session for that thread.`);
+  /**
+   * A Codex call runs as its thread: CODEX_THREAD_ID and the folder of the
+   * thread's current turn. The thread is claimed before anything awaits, so
+   * two first calls that name different threads can't both bind.
+   */
+  const threadContext = (connection: Connection, threadId: string, turnId: string | null): Promise<ScoutSessionContext> => {
+    const thread = connection.thread ??= { id: threadId, rollout: null, cwd: null, turn: null };
+    if (thread.id !== threadId) {
+      throw new McpError(ErrorCode.InvalidRequest, `This MCP session belongs to Codex thread ${thread.id}, not ${threadId}. Open a new MCP session for that thread.`);
     }
-    if (bound && (turnId === null || bound.turnId === turnId)) return bound.context;
+    if (thread.turn && (turnId === null || thread.turn.id === turnId)) return thread.turn.context;
 
     const codexHome = connection.identity.env.CODEX_HOME || join(connection.identity.env.HOME || homedir(), ".codex");
-    const rollout = bound?.rollout ?? await findCodexRollout(threadId, codexHome);
-    const cwd = (rollout ? await readCodexRolloutCwd(rollout) : null) ?? connection.context.currentDirectory;
-    const context: ScoutSessionContext = {
-      env: { ...connection.context.env, CODEX_THREAD_ID: threadId },
-      currentDirectory: cwd,
-      scope: connection.context.scope,
+    const resolve = async (): Promise<ScoutSessionContext> => {
+      thread.rollout ??= await findCodexRollout(threadId, codexHome);
+      if (!thread.rollout) {
+        throw new McpError(ErrorCode.InvalidRequest, `Scout MCP found no rollout for Codex thread ${threadId} under ${join(codexHome, "sessions")}, so it can't tell which folder this call works in. Ephemeral threads need the stdio server (scout mcp).`);
+      }
+      // Codex writes a turn's turn_context before it samples the model; allow
+      // a moment in case the call outruns the rollout writer.
+      let cwd: string | null = null;
+      for (let attempt = 0; attempt < 4 && !cwd; attempt += 1) {
+        if (attempt) await Bun.sleep(100 * attempt);
+        cwd = await readCodexRolloutCwd(thread.rollout, turnId);
+      }
+      if (!cwd) {
+        throw new McpError(ErrorCode.InvalidRequest, `The rollout of Codex thread ${threadId} (${thread.rollout}) has no folder for turn ${turnId ?? "?"}, so Scout MCP can't tell where this call works.`);
+      }
+      if (thread.cwd === null) log(`bound ${connection.identity.harness} pid ${connection.identity.pid} to thread ${threadId} (${cwd})`);
+      thread.cwd = cwd;
+      return {
+        env: { ...connection.context.env, CODEX_THREAD_ID: threadId },
+        currentDirectory: cwd,
+        scope: connection.context.scope,
+      };
     };
-    connection.thread = { id: threadId, turnId, rollout, context };
-    if (!bound) log(`bound ${connection.identity.harness} pid ${connection.identity.pid} to thread ${threadId} (${cwd})`);
-    return context;
+    const turn = { id: turnId, context: resolve() };
+    thread.turn = turn;
+    // A failed lookup is not cached: the next call looks again.
+    turn.context.catch(() => { if (thread.turn === turn) thread.turn = null; });
+    return turn.context;
   };
 
   const open = async (request: Request, clientPort: number): Promise<Response> => {
@@ -277,9 +297,14 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
       },
     };
     server = tools.connect(async (call: SharedToolRequest) => {
-      if (!connection || identity.harness !== "codex" || call.method !== "tools/call") return connection?.thread?.context ?? context;
+      // Catalog traffic (tools/list, prompts) is the same for every thread.
+      if (!connection || identity.harness !== "codex" || call.method !== "tools/call") return context;
       const threadId = codexThreadIdFromMeta(call.params?._meta);
-      return threadId ? threadContext(connection, threadId, codexTurnIdFromMeta(call.params?._meta)) : connection.thread?.context ?? context;
+      if (!threadId) {
+        // Guessing would credit the call to whichever thread came first.
+        throw new McpError(ErrorCode.InvalidRequest, "Codex sent this tool call without _meta.threadId, so Scout MCP can't tell which thread made it. The shared server needs a Codex that names the thread on each call (codex-cli 0.169 does); otherwise use the stdio server (scout mcp).");
+      }
+      return threadContext(connection, threadId, codexTurnIdFromMeta(call.params?._meta));
     });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -287,7 +312,6 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
         const now = Date.now();
         connection = {
           id, transport, server: server!, lifetime, identity, context, thread: null,
-          peerPorts: new Map([[clientPort, now]]),
           openedAt: now, lastRequestAt: now, requests: 1, inFlight: 0,
         };
         connections.set(id, connection);
@@ -307,11 +331,12 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
     return response;
   };
 
-  /** A session id authorizes requests only from the process that opened it. */
+  /**
+   * A session id authorizes requests only from the process that opened it.
+   * Checked on every request: a port says nothing once its socket closes,
+   * and Bun.serve doesn't tell us when that happens.
+   */
   const fromSameProcess = async (connection: Connection, clientPort: number): Promise<boolean> => {
-    const now = Date.now();
-    const checkedAt = connection.peerPorts.get(clientPort);
-    if (checkedAt !== undefined && now - checkedAt < PEER_CHECK_TTL_MS) return true;
     // No process at all usually means the client already closed the socket;
     // look once more before refusing in case lsof caught it mid-change.
     const peer = (await findLoopbackPeerPid(clientPort)) ?? (await Bun.sleep(25), await findLoopbackPeerPid(clientPort));
@@ -319,8 +344,6 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
       log(`client port ${clientPort} belongs to pid ${peer ?? "none"}, not ${connection.identity.pid}`);
       return false;
     }
-    for (const [port, at] of connection.peerPorts) if (now - at >= PEER_CHECK_TTL_MS) connection.peerPorts.delete(port);
-    connection.peerPorts.set(clientPort, now);
     return true;
   };
 
