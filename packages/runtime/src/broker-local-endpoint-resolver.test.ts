@@ -11,6 +11,7 @@ import { createInMemoryControlRuntime } from "./broker.js";
 import {
   BrokerLocalEndpointResolver,
   PENDING_PROVISIONED_RUNTIME_TRUST_MS,
+  type BrokerLocalEndpointResolverOptions,
 } from "./broker-local-endpoint-resolver.js";
 import type { LocalAgentBinding } from "./local-agents.js";
 import type { LocalEndpointSessionObservation } from "./session-observation.js";
@@ -85,6 +86,7 @@ function createResolver(input: {
   };
   isolatedEndpoint?: AgentEndpoint | null;
   observe?: (endpoint: AgentEndpoint) => Promise<LocalEndpointSessionObservation | null>;
+  probe?: NonNullable<BrokerLocalEndpointResolverOptions["probeInPlace"]>;
   now?: number;
 } = {}) {
   const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
@@ -118,6 +120,7 @@ function createResolver(input: {
         return input.observe!(endpoint);
       },
     } : {}),
+    ...(input.probe ? { probeInPlace: input.probe } : {}),
     async upsertActor(actor) {
       upsertedActors.push(actor);
       await runtime.upsertActor(actor);
@@ -790,6 +793,100 @@ describe("BrokerLocalEndpointResolver", () => {
         }),
       }),
     ]);
+  });
+
+  describe("an offline endpoint for an exact session", () => {
+    const offlineSessionEndpoint = (input: Partial<AgentEndpoint> = {}): AgentEndpoint => testEndpoint({
+      id: "flat-session",
+      harness: "claude",
+      transport: "tmux",
+      state: "offline",
+      sessionId: `flat-claude-${nativeId}`,
+      ...input,
+      metadata: {
+        source: "scout-cardless-session",
+        sessionBacked: true,
+        flatDispatch: true,
+        nativeSessionId: nativeId,
+        externalSessionId: nativeId,
+        lastError: `tmux session missing: flat-claude-${nativeId}`,
+        lastFailedAt: 9_000,
+        ...input.metadata,
+      },
+    });
+    const ask = testInvocation({ execution: { session: "existing", targetSessionId: nativeId }, ensureAwake: true });
+    const open = { live: true, via: "tmux", location: "tmux work · %4", activity: "idle" } as const;
+
+    test("is used as it is when the session is open where Scout can type, and nothing is started", async () => {
+      const probed: unknown[] = [];
+      const harness = createResolver({ probe: async (input) => { probed.push(input); return open; } });
+      await harness.runtime.upsertEndpoint(offlineSessionEndpoint());
+
+      const endpoint = await harness.resolver.resolveLocalEndpointForInvocation(ask);
+
+      expect(endpoint).toMatchObject({ id: "flat-session", state: "idle" });
+      expect(endpoint?.metadata?.lastError).toBeUndefined();
+      expect(probed).toEqual([{ sessionId: nativeId, harness: "claude", requireExactHarness: true }]);
+      expect(harness.ensuredSessionEndpoints).toEqual([]);
+    });
+
+    test("is handed back for resume when the session is not open anywhere", async () => {
+      const harness = createResolver({ probe: async () => ({ live: false, code: "not_live", held: false }) });
+      await harness.runtime.upsertEndpoint(offlineSessionEndpoint());
+
+      const endpoint = await harness.resolver.resolveLocalEndpointForInvocation(ask);
+
+      expect(endpoint).toMatchObject({ id: "flat-session", state: "idle" });
+      expect(endpoint?.metadata).toMatchObject({ externalSessionId: nativeId, flatDispatch: true });
+      expect(endpoint?.metadata?.lastError).toBeUndefined();
+    });
+
+    test("is refused, and nothing is started, when a Claude session runs where Scout cannot type", async () => {
+      const harness = createResolver({ probe: async () => ({ live: false, code: "not_live", held: true }) });
+      await harness.runtime.upsertEndpoint(offlineSessionEndpoint());
+
+      await expect(harness.resolver.resolveLocalEndpointForInvocation(ask)).rejects.toThrow("session_live_unbound");
+      expect(harness.ensuredSessionEndpoints).toEqual([]);
+      expect(harness.persistedEndpoints).toEqual([]);
+    });
+
+    test("is refused when the place it is open cannot be checked or verified", async () => {
+      for (const probe of [
+        async () => { throw new Error("ps failed"); },
+        async () => ({ live: false, code: "session_ambiguous" } as const),
+      ]) {
+        const harness = createResolver({ probe });
+        await harness.runtime.upsertEndpoint(offlineSessionEndpoint());
+        await expect(harness.resolver.resolveLocalEndpointForInvocation(ask)).rejects.toThrow("nothing was started");
+        expect(harness.ensuredSessionEndpoints).toEqual([]);
+      }
+    });
+
+    test("a Codex thread open in a terminal is not resumed behind it; a closed one is revived as before", async () => {
+      const codex = offlineSessionEndpoint({ harness: "codex", transport: "codex_app_server", sessionId: nativeId });
+      const inTerminal = createResolver({ probe: async () => open });
+      await inTerminal.runtime.upsertEndpoint(codex);
+      expect(await inTerminal.resolver.resolveLocalEndpointForInvocation(ask)).toMatchObject({ id: "flat-session", state: "idle" });
+      expect(inTerminal.ensuredSessionEndpoints).toEqual([]);
+
+      const closed = createResolver({ probe: async () => ({ live: false, code: "not_live", held: false }) });
+      await closed.runtime.upsertEndpoint(codex);
+      expect(await closed.resolver.resolveLocalEndpointForInvocation(ask)).toMatchObject({ id: "flat-session", state: "idle" });
+      expect(closed.ensuredSessionEndpoints).toHaveLength(1);
+    });
+
+    test("an endpoint that is not for an exact session is never probed", async () => {
+      let probes = 0;
+      const harness = createResolver({ now: 14_000, probe: async () => { probes += 1; return open; } });
+      await harness.runtime.upsertEndpoint(testEndpoint({
+        id: "missing-tmux", transport: "tmux", state: "waiting", sessionId: "relay-agent-claude",
+        metadata: { source: "relay-agent-registry", tmuxSession: "relay-agent-claude" },
+      }));
+      await expect(harness.resolver.resolveLocalEndpointForInvocation(testInvocation({
+        execution: { session: "existing", targetSessionId: "relay-agent-claude" }, ensureAwake: true,
+      }))).rejects.toThrow("is not currently reachable");
+      expect(probes).toBe(0);
+    });
   });
 
   test("selects a wakeable session-backed endpoint only when wake is requested", async () => {
