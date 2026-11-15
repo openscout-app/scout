@@ -1313,13 +1313,15 @@ export class CodexAppServerTransport {
       }
     } else {
       const launchArgs = normalizeCodexAppServerLaunchArgs(this.options.launchArgs);
+      const codexExecutable = resolveCodexExecutable(env);
       connection = spawnCodexAppServerStdioConnection({
-        executable: resolveCodexExecutable(env),
+        executable: codexExecutable,
         args: [
           "app-server",
           ...buildScoutMcpCodexLaunchArgs({
             currentDirectory: this.options.cwd,
             env,
+            codexExecutable,
           }),
           ...launchArgs,
         ],

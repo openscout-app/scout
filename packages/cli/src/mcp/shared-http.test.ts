@@ -382,6 +382,9 @@ describe.if(process.platform === "darwin")("shared server", () => {
     await Bun.sleep(400);
     expect(handle.connections()).toHaveLength(0);
     expect((await rpc(handle.url, { jsonrpc: "2.0", id: 9, method: "tools/list" }, { "mcp-session-id": sessionId })).status).toBe(404);
+    // Still a client: it reconnects on its next call, so a draining server stays up for it.
+    const stats = await (await fetch(handle.url.replace(/\/mcp$/, "/stats"))).json() as { clientPids: number[] };
+    expect(stats.clientPids).toEqual([process.pid]);
     await client.close().catch(() => {});
   });
 

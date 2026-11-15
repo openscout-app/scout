@@ -5,8 +5,10 @@ import { delimiter, dirname, join } from "node:path";
 
 import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
 import {
+  drainSharedMcpOptIn,
   readSharedMcpOptIn,
   removeSharedMcpOptIn,
+  restoreSharedMcpOptIn,
   sharedMcpOptInPath,
   sharedMcpPort,
   sharedMcpUrl,
@@ -211,7 +213,8 @@ export function renderMcpInstallHelp(): string {
     "restart. Run on the main instance only, since the host configs are global.",
     "",
     "--force without --shared replaces the entries with the per-session",
-    "command, then turns the shared server off.",
+    "command, then turns the shared server off for new sessions. scout-base",
+    "stops it once every session it served has exited.",
     "",
     "Examples:",
     "  scout mcp install",
@@ -572,16 +575,18 @@ export async function enableSharedScoutMcp(input: {
 
   if (input.dryRun) {
     return [
-      previous
+      previous?.state === "on"
         ? `The shared Scout MCP server is already on at ${url}.`
         : `Would write ${sharedMcpOptInPath(supportDirectory)}; scout-base then runs the shared Scout MCP server at ${url}.`,
       ...hostLines(install()),
     ];
   }
 
-  if (!previous) writeSharedMcpOptIn(supportDirectory, port);
+  if (previous?.state !== "on") writeSharedMcpOptIn(supportDirectory, port);
   if (!(await (input.waitForServer ?? waitForSharedMcpServer)(port))) {
+    // Put the opt-in back as it was: gone, or still draining.
     if (!previous) removeSharedMcpOptIn(supportDirectory);
+    else if (previous.state !== "on") restoreSharedMcpOptIn(supportDirectory, previous);
     throw new ScoutCliError(
       `The shared Scout MCP server did not answer at ${url} within ${SHARED_MCP_START_TIMEOUT_MS / 1000} s, so no host config was changed. scout-base runs it only from a Scout version with this command; see ${join(supportDirectory, "logs", "base", "shared-mcp.stderr.log")}.`,
     );
@@ -631,20 +636,21 @@ export async function runMcpInstallCommand(
   });
 
   const lines = outcomes.map((outcome) => `[${outcome.host}] ${outcome.detail}`);
-  // --force puts the hosts back on their own server. The shared server stops
-  // only once every detected Codex and Claude Code install was switched back.
+  // --force puts the hosts back on their own server. The shared server
+  // drains only once every detected Codex and Claude Code install was
+  // switched back: sessions already using it keep it until they exit.
   const supportDirectory = resolveOpenScoutSupportPaths().supportDirectory;
-  if (options.force && readSharedMcpOptIn(supportDirectory)) {
+  if (options.force && readSharedMcpOptIn(supportDirectory)?.state === "on") {
     const switched = new Set(outcomes.filter((outcome) => outcome.status === "installed").map((outcome) => outcome.host));
     const pending = (Object.keys(CLI_HOSTS) as CliHost[])
       .filter((host) => !switched.has(host) && resolveHostPath(host, context.env) !== null);
     if (pending.length > 0) {
       lines.push(`The shared Scout MCP server stays on: ${pending.join(" and ")} may still point at it.`);
     } else if (options.dryRun) {
-      lines.push(`Would remove ${sharedMcpOptInPath(supportDirectory)}; scout-base then stops the shared Scout MCP server.`);
+      lines.push(`Would turn the shared Scout MCP server off for new sessions (${sharedMcpOptInPath(supportDirectory)}); scout-base stops it once every session it served has exited.`);
     } else {
-      removeSharedMcpOptIn(supportDirectory);
-      lines.push("Turned off the shared Scout MCP server; scout-base stops it.");
+      drainSharedMcpOptIn(supportDirectory);
+      lines.push("Turned the shared Scout MCP server off for new sessions. scout-base stops it once every session it served has exited.");
     }
   }
   context.output.writeText(lines.join("\n"));

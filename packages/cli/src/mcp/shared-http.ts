@@ -115,11 +115,25 @@ function createLagSampler(intervalMs = 50, keep = 1200) {
   };
 }
 
-function statsOf(connections: Map<string, Connection>, lag: ReturnType<typeof createLagSampler>) {
+/**
+ * Every process this server has served that is still alive, connected or
+ * not. A Codex app-server whose idle session was dropped reconnects to the
+ * same URL on its next call, so scout-base keeps a draining server up until
+ * this reaches zero.
+ */
+function liveClients(clientPids: Set<number>): number[] {
+  for (const pid of clientPids) {
+    if (!isProcessAlive(pid)) clientPids.delete(pid);
+  }
+  return [...clientPids].sort((a, b) => a - b);
+}
+
+function statsOf(connections: Map<string, Connection>, lag: ReturnType<typeof createLagSampler>, clientPids: Set<number>) {
   const memory = process.memoryUsage();
   return {
     pid: process.pid,
     connections: connections.size,
+    clientPids: liveClients(clientPids),
     rssMB: +(memory.rss / 1048576).toFixed(1),
     heapUsedMB: +(memory.heapUsed / 1048576).toFixed(1),
     eventLoopDelayMs: lag.summary(),
@@ -239,6 +253,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
   const idleTimeoutMs = options.idleTimeoutMs ?? 2 * 60 * 60 * 1000;
   const serverRuntimeUrl = baseEnv.OPENSCOUT_BROKER_URL?.trim() || resolveScoutBrokerUrl();
   const connections = new Map<string, Connection>();
+  const clientPids = new Set<number>();
   const lag = createLagSampler();
   // Built once: every connection runs these tool definitions and handlers.
   const tools = createSharedScoutTools(baseEnv);
@@ -339,6 +354,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
           openedAt: now, lastRequestAt: now, requests: 1, inFlight: 0,
         };
         connections.set(id, connection);
+        clientPids.add(identity.pid);
         log(`opened ${identity.harness} ${identity.sessionId ?? "?"} (pid ${identity.harnessPid}, ${identity.cwd ?? "?"}); ${connections.size} open`);
       },
       onsessionclosed: (id) => {
@@ -379,7 +395,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
       const refused = refuseForeignRequest(request);
       if (refused) return refused;
       const url = new URL(request.url);
-      if (url.pathname === "/stats") return Response.json(statsOf(connections, lag));
+      if (url.pathname === "/stats") return Response.json(statsOf(connections, lag, clientPids));
       if (url.pathname === "/sessions") {
         const now = Date.now();
         return Response.json([...connections.values()].map((c) => describe(c, now)));
@@ -439,7 +455,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
     url: `http://${options.host ?? "127.0.0.1"}:${port}/mcp`,
     port,
     connections: () => [...connections.values()],
-    stats: () => statsOf(connections, lag),
+    stats: () => statsOf(connections, lag, clientPids),
     stop: async () => {
       clearInterval(reaper);
       lag.stop();

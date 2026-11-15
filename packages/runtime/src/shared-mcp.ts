@@ -5,17 +5,32 @@
  * session (see packages/cli/src/mcp/shared-http.ts). It is opt-in:
  * `scout mcp install --shared` writes an opt-in file in the instance's
  * support directory, and scout-base runs the server on the instance's `mcp`
- * port while that file exists. `scout mcp install --force` removes it.
+ * port while that file exists.
+ *
+ * `scout mcp install --force` turns it off by draining, not stopping: new
+ * launches stop getting the shared URL, but sessions already pointed at it
+ * keep it (a Codex app-server's launch flags and a running session's loaded
+ * config can't be changed from outside). scout-base records every process
+ * the server has served in the opt-in file, and removes the file, which stops
+ * the server, once none of them is alive.
  */
 import type { ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { deriveOpenScoutInstanceLayout } from "./instance.js";
 
 export const SHARED_MCP_OPT_IN_FILE = "shared-mcp.json";
 
-export type SharedMcpOptIn = { url: string; port: number; enabledAt: number };
+export type SharedMcpOptIn = {
+  url: string;
+  port: number;
+  enabledAt: number;
+  /** "draining": off for new launches, kept up for the processes in clientPids. */
+  state: "on" | "draining";
+  /** Processes the server has served, recorded by scout-base so a restart of the server or base keeps them. */
+  clientPids: number[];
+};
 
 export function sharedMcpOptInPath(supportDirectory: string): string {
   return join(supportDirectory, SHARED_MCP_OPT_IN_FILE);
@@ -35,16 +50,103 @@ export function readSharedMcpOptIn(supportDirectory: string): SharedMcpOptIn | n
   try {
     const value = JSON.parse(readFileSync(sharedMcpOptInPath(supportDirectory), "utf8")) as Partial<SharedMcpOptIn>;
     if (typeof value.port !== "number" || !Number.isInteger(value.port) || value.port <= 0) return null;
-    return { url: sharedMcpUrl(value.port), port: value.port, enabledAt: Number(value.enabledAt) || 0 };
+    return {
+      url: sharedMcpUrl(value.port),
+      port: value.port,
+      enabledAt: Number(value.enabledAt) || 0,
+      state: value.state === "draining" ? "draining" : "on",
+      clientPids: Array.isArray(value.clientPids)
+        ? value.clientPids.filter((pid): pid is number => Number.isInteger(pid) && pid > 1)
+        : [],
+    };
   } catch {
     return null;
   }
 }
 
-export function writeSharedMcpOptIn(supportDirectory: string, port: number, now = Date.now()): SharedMcpOptIn {
-  const optIn: SharedMcpOptIn = { url: sharedMcpUrl(port), port, enabledAt: now };
-  writeFileSync(sharedMcpOptInPath(supportDirectory), `${JSON.stringify(optIn, null, 2)}\n`);
+function saveOptIn(supportDirectory: string, optIn: SharedMcpOptIn): SharedMcpOptIn {
+  const path = sharedMcpOptInPath(supportDirectory);
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(optIn, null, 2)}\n`);
+  renameSync(temp, path);
   return optIn;
+}
+
+/** Turns the shared server on (or back on from draining), keeping recorded clients. */
+export function writeSharedMcpOptIn(supportDirectory: string, port: number, now = Date.now()): SharedMcpOptIn {
+  const previous = readSharedMcpOptIn(supportDirectory);
+  return saveOptIn(supportDirectory, {
+    url: sharedMcpUrl(port),
+    port,
+    enabledAt: previous?.port === port ? previous.enabledAt : now,
+    state: "on",
+    clientPids: previous?.port === port ? previous.clientPids : [],
+  });
+}
+
+/** Puts back an opt-in exactly as it was read (used to undo a failed enable). */
+export function restoreSharedMcpOptIn(supportDirectory: string, optIn: SharedMcpOptIn): void {
+  saveOptIn(supportDirectory, optIn);
+}
+
+/** Off for new launches; scout-base stops the server once its clients have exited. False when it was not on. */
+export function drainSharedMcpOptIn(supportDirectory: string): boolean {
+  const optIn = readSharedMcpOptIn(supportDirectory);
+  if (!optIn) return false;
+  if (optIn.state !== "draining") saveOptIn(supportDirectory, { ...optIn, state: "draining" });
+  return true;
+}
+
+export function isSharedMcpClientAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** The process ids the running server reports in /stats, or null when it does not answer. */
+export async function fetchSharedMcpClientPids(port: number): Promise<number[] | null> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/stats`, { signal: AbortSignal.timeout(1_000) });
+    if (!response.ok) return null;
+    const stats = (await response.json()) as { clientPids?: unknown };
+    return Array.isArray(stats.clientPids) ? stats.clientPids.filter((pid): pid is number => Number.isInteger(pid)) : [];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One scout-base step before reconcile: record the server's clients in the
+ * opt-in, drop the ones that exited, and end a drain with no client left by
+ * removing the opt-in. The file is read again just before each write, so a
+ * `scout mcp install` that runs meanwhile keeps its state change.
+ */
+export async function settleSharedMcpOptIn(
+  supportDirectory: string,
+  options: {
+    fetchClientPids?: (port: number) => Promise<number[] | null>;
+    isAlive?: (pid: number) => boolean;
+    log?: (message: string, detail?: unknown) => void;
+  } = {},
+): Promise<SharedMcpOptIn | null> {
+  const isAlive = options.isAlive ?? isSharedMcpClientAlive;
+  const before = readSharedMcpOptIn(supportDirectory);
+  if (!before) return null;
+  const served = (await (options.fetchClientPids ?? fetchSharedMcpClientPids)(before.port)) ?? [];
+
+  const current = readSharedMcpOptIn(supportDirectory);
+  if (!current || current.port !== before.port) return current;
+  const clientPids = [...new Set([...current.clientPids, ...served])].filter(isAlive).sort((a, b) => a - b);
+  if (current.state === "draining" && clientPids.length === 0) {
+    removeSharedMcpOptIn(supportDirectory);
+    options.log?.("shared MCP server drained: no process it served is still running");
+    return null;
+  }
+  if (clientPids.join(",") === current.clientPids.join(",")) return current;
+  return saveOptIn(supportDirectory, { ...current, clientPids });
 }
 
 /** True when there was an opt-in to remove. */
@@ -57,11 +159,11 @@ export function removeSharedMcpOptIn(supportDirectory: string): boolean {
 
 /**
  * Environment for a harness that Scout starts, so its launch can point Scout
- * MCP at the shared server. Empty when the shared server is off.
+ * MCP at the shared server. Empty when the shared server is off or draining.
  */
 export function sharedMcpLaunchEnvironment(supportDirectory: string): Record<string, string> {
   const optIn = readSharedMcpOptIn(supportDirectory);
-  return optIn ? { OPENSCOUT_MCP_SHARED_URL: optIn.url } : {};
+  return optIn?.state === "on" ? { OPENSCOUT_MCP_SHARED_URL: optIn.url } : {};
 }
 
 export type SharedMcpCommand = { command: string; args: string[]; cwd: string };

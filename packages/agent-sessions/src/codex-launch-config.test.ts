@@ -70,44 +70,64 @@ describe("buildScoutMcpCodexLaunchArgs", () => {
       .toEqual(["mcp", "--context-root", import.meta.dir]);
   });
 
-  test("points a home with no scout entry at the shared server while it is on", () => {
+  const answers = {
+    none: { status: 1, stdout: "", stderr: "Error: No MCP server named 'scout' found.\n" },
+    url: { status: 0, stdout: JSON.stringify({ name: "scout", transport: { type: "streamable_http", url: SHARED_URL } }), stderr: "" },
+    stdio: { status: 0, stdout: JSON.stringify({ name: "scout", transport: { type: "stdio", command: "scout", args: ["mcp"] } }), stderr: "" },
+    broken: { status: 1, stdout: "", stderr: "Error: failed to parse config.toml\n" },
+  };
+  const launch = (answer: keyof typeof answers, shared: string | null = SHARED_URL) => {
+    const asked: Array<string | undefined> = [];
     const args = buildScoutMcpCodexLaunchArgs({
       currentDirectory: import.meta.dir,
-      env: { PATH: "", CODEX_HOME: codexHome('model = "gpt-5"\n'), OPENSCOUT_CLI_BIN: process.execPath,
-        OPENSCOUT_MCP_SHARED_URL: SHARED_URL },
+      env: { PATH: "", CODEX_HOME: "/codex-home", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: shared ?? undefined },
+      codexExecutable: "/bin/codex",
+      mcpGet: (executable, env) => {
+        asked.push(`${executable} ${env.CODEX_HOME}`);
+        return answers[answer];
+      },
     });
-    expect(args).toEqual(["-c", `mcp_servers.scout.url=${JSON.stringify(SHARED_URL)}`]);
+    return { args, asked };
+  };
+
+  test("asks Codex about the target home", () => {
+    expect(launch("none").asked).toEqual(["/bin/codex /codex-home"]);
+  });
+
+  test("points a home with no scout entry at the shared server while it is on", () => {
+    expect(launch("none").args).toEqual(["-c", `mcp_servers.scout.url=${JSON.stringify(SHARED_URL)}`]);
+    expect(launch("none", null).args).toHaveLength(6);
   });
 
   test("adds nothing when the home already points scout at a url", () => {
     // stdio keys on top of a url entry make Codex refuse the server.
-    const home = codexHome('[mcp_servers.scout]\nurl = "http://127.0.0.1:43115/mcp"\n');
-    for (const shared of [SHARED_URL, undefined]) {
-      expect(buildScoutMcpCodexLaunchArgs({
-        currentDirectory: import.meta.dir,
-        env: { PATH: "", CODEX_HOME: home, OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: shared },
-      })).toEqual([]);
-    }
+    expect(launch("url").args).toEqual([]);
+    expect(launch("url", null).args).toEqual([]);
   });
 
   test("keeps a home's stdio entry on stdio even while the shared server is on", () => {
-    const args = buildScoutMcpCodexLaunchArgs({
-      currentDirectory: import.meta.dir,
-      env: { PATH: "", CODEX_HOME: codexHome('[mcp_servers.scout]\ncommand = "scout"\nargs = ["mcp"]\n'),
-        OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: SHARED_URL },
-    });
+    const { args } = launch("stdio");
     expect(args[1]).toBe(`mcp_servers.scout.command=${JSON.stringify(process.execPath)}`);
     expect(args).toHaveLength(6);
   });
+
+  test("falls back to stdio when Codex cannot say, and when no Codex executable is given", () => {
+    expect(launch("broken").args).toHaveLength(6);
+    expect(buildScoutMcpCodexLaunchArgs({
+      currentDirectory: import.meta.dir,
+      env: { PATH: "", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: SHARED_URL },
+    })).toHaveLength(6);
+  });
 });
 
-describe("codexHomeScoutMcpEntry", () => {
-  test("reads the scout table and ignores servers that only share the prefix", () => {
-    const entry = (config: string) => codexHomeScoutMcpEntry({ CODEX_HOME: codexHome(config) });
+describe("codexHomeScoutMcpEntry with the real Codex CLI", () => {
+  const codex = Bun.which("codex");
+  test.skipIf(!codex)("reads a commented table header and a missing entry the way Codex does", () => {
+    const entry = (config?: string) => codexHomeScoutMcpEntry({ ...process.env, CODEX_HOME: codexHome(config) }, codex!);
+    expect(entry('[mcp_servers.scout] # shared transport\nurl = "http://127.0.0.1:43115/mcp"\n')).toBe("url");
+    expect(entry('mcp_servers.scout = { url = "http://127.0.0.1:43115/mcp" }\n')).toBe("url");
     expect(entry('[mcp_servers.scout-hosted]\nurl = "https://example.test/mcp"\n')).toBeNull();
-    expect(entry('[mcp_servers.scout]\ncommand = "scout"\n[mcp_servers.scout.env]\nurl = "x"\n')).toBe("command");
-    expect(entry('[mcp_servers."scout"]\nurl = "http://127.0.0.1:43115/mcp"\n')).toBe("url");
-    expect(entry('mcp_servers.scout.url = "http://127.0.0.1:43115/mcp"\n')).toBe("url");
-    expect(codexHomeScoutMcpEntry({ CODEX_HOME: codexHome() })).toBeNull();
+    expect(entry('[mcp_servers.scout]\ncommand = "scout"\nargs = ["mcp"]\n')).toBe("command");
+    expect(entry()).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { repoScoutEntrypoint } from "./repo-scout-entry.js";
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -165,38 +166,48 @@ function resolveScoutMcpCommand(options: {
   } : null;
 }
 
-export type CodexScoutMcpEntry = "url" | "command" | null;
+export type CodexScoutMcpEntry = "url" | "command" | null | "unknown";
+
+/** Runs `codex mcp get scout --json`; injectable for tests. */
+export type CodexMcpGet = (codexExecutable: string, env: Record<string, string | undefined>) => {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => {
+  const result = spawnSync(codexExecutable, ["mcp", "get", "scout", "--json"], {
+    env: env as NodeJS.ProcessEnv,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 5_000,
+  });
+  return { status: result.error ? null : result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+};
 
 /**
- * How the Codex home's own config.toml declares the `scout` MCP server: a
- * url entry (the shared server, from `scout mcp install --shared`), a
- * command entry (stdio), or none. A small line reader, not a TOML parser:
- * `codex mcp add` writes a `[mcp_servers.scout]` table.
+ * How the Codex home (CODEX_HOME in `env`) declares the `scout` MCP server,
+ * asked of Codex itself so its own config parser decides: a url entry (the
+ * shared server, from `scout mcp install --shared`), a command entry
+ * (stdio), none, or "unknown" when Codex could not say.
  */
-export function codexHomeScoutMcpEntry(env: Record<string, string | undefined>): CodexScoutMcpEntry {
-  const codexHome = env.CODEX_HOME?.trim() || join(env.HOME?.trim() || homedir(), ".codex");
-  let text: string;
-  try {
-    text = readFileSync(join(codexHome, "config.toml"), "utf8");
-  } catch {
-    return null;
-  }
-  let inScout = false;
-  let entry: CodexScoutMcpEntry = null;
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    const table = /^\[\s*([^\]]+?)\s*\]$/.exec(line);
-    if (table) {
-      inScout = table[1]!.replace(/"/g, "") === "mcp_servers.scout";
-      continue;
+export function codexHomeScoutMcpEntry(
+  env: Record<string, string | undefined>,
+  codexExecutable: string,
+  mcpGet: CodexMcpGet = runCodexMcpGet,
+): CodexScoutMcpEntry {
+  const result = mcpGet(codexExecutable, env);
+  if (result.status === 0) {
+    try {
+      const type = (JSON.parse(result.stdout) as { transport?: { type?: string } }).transport?.type;
+      if (type === "stdio") return "command";
+      if (type === "streamable_http" || type === "http" || type === "sse") return "url";
+    } catch {
+      // Fall through.
     }
-    const key = inScout
-      ? /^(url|command)\s*=/.exec(line)?.[1]
-      : /^mcp_servers\.scout\.(url|command)\s*=/.exec(line)?.[1];
-    if (key === "url") return "url";
-    if (key === "command") entry = "command";
+    return "unknown";
   }
-  return entry;
+  return /No MCP server named/i.test(result.stderr) ? null : "unknown";
 }
 
 /**
@@ -204,15 +215,20 @@ export function codexHomeScoutMcpEntry(env: Record<string, string | undefined>):
  * The Codex home's own `scout` entry wins: with a url entry there are no
  * overrides (stdio keys on a url entry make Codex refuse the server). With no
  * entry, OPENSCOUT_MCP_SHARED_URL (set by the runtime while the shared server
- * is on) points Scout MCP at the shared server. Otherwise Scout MCP runs over
- * stdio for this app-server.
+ * is on) points Scout MCP at the shared server. Otherwise, or when Codex
+ * can't say, Scout MCP runs over stdio for this app-server, as before.
+ * Without `codexExecutable` the home is not asked and stdio is used.
  */
 export function buildScoutMcpCodexLaunchArgs(options: {
   currentDirectory: string;
   env?: Record<string, string | undefined>;
+  codexExecutable?: string | null;
+  mcpGet?: CodexMcpGet;
 }): string[] {
   const env = options.env ?? process.env;
-  const homeEntry = codexHomeScoutMcpEntry(env);
+  const homeEntry = options.codexExecutable
+    ? codexHomeScoutMcpEntry(env, options.codexExecutable, options.mcpGet)
+    : "unknown";
   if (homeEntry === "url") {
     return [];
   }
@@ -221,7 +237,7 @@ export function buildScoutMcpCodexLaunchArgs(options: {
     return ["-c", `mcp_servers.scout.url=${JSON.stringify(sharedUrl)}`];
   }
 
-  const resolved = resolveScoutMcpCommand({ ...options, env });
+  const resolved = resolveScoutMcpCommand({ currentDirectory: options.currentDirectory, env });
   if (!resolved) {
     return [];
   }

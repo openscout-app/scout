@@ -8,12 +8,14 @@ import { join } from "node:path";
 import { deriveOpenScoutInstanceLayout } from "./instance.js";
 import {
   createSharedMcpSupervisor,
+  drainSharedMcpOptIn,
   readSharedMcpOptIn,
   removeSharedMcpOptIn,
   resolveSharedMcpCommand,
   sharedMcpLaunchEnvironment,
   sharedMcpOptInPath,
   sharedMcpPort,
+  settleSharedMcpOptIn,
   SHARED_MCP_MAX_RESTART_MS,
   SHARED_MCP_STABLE_AFTER_MS,
   writeSharedMcpOptIn,
@@ -26,7 +28,9 @@ describe("shared MCP opt-in", () => {
     expect(sharedMcpLaunchEnvironment(dir)).toEqual({});
 
     writeSharedMcpOptIn(dir, 43115, 7);
-    expect(readSharedMcpOptIn(dir)).toEqual({ url: "http://127.0.0.1:43115/mcp", port: 43115, enabledAt: 7 });
+    expect(readSharedMcpOptIn(dir)).toEqual({
+      url: "http://127.0.0.1:43115/mcp", port: 43115, enabledAt: 7, state: "on", clientPids: [],
+    });
     expect(sharedMcpLaunchEnvironment(dir)).toEqual({ OPENSCOUT_MCP_SHARED_URL: "http://127.0.0.1:43115/mcp" });
 
     expect(removeSharedMcpOptIn(dir)).toBe(true);
@@ -49,6 +53,62 @@ describe("shared MCP opt-in", () => {
     const dev = sharedMcpPort(env);
     expect(dev).not.toBe(43115);
     expect(dev - deriveOpenScoutInstanceLayout({ env }).ports.broker).toBe(5);
+  });
+});
+
+describe("draining the shared server", () => {
+  const alive = (pids: number[]) => (pid: number) => pids.includes(pid);
+
+  test("records the server's clients, and drops the ones that exited", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115);
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => [300, 200], isAlive: alive([200, 300]) });
+    expect(readSharedMcpOptIn(dir)?.clientPids).toEqual([200, 300]);
+    // A restarted server has seen nobody yet; the record keeps them.
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => [], isAlive: alive([200, 300]) });
+    expect(readSharedMcpOptIn(dir)?.clientPids).toEqual([200, 300]);
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => null, isAlive: alive([300]) });
+    expect(readSharedMcpOptIn(dir)?.clientPids).toEqual([300]);
+  });
+
+  test("off for new launches at once, removed only when no client is left", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    expect(drainSharedMcpOptIn(dir)).toBe(false);
+    writeSharedMcpOptIn(dir, 43115);
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => [200], isAlive: alive([200]) });
+
+    expect(drainSharedMcpOptIn(dir)).toBe(true);
+    expect(sharedMcpLaunchEnvironment(dir)).toEqual({});
+    // The server is down, but a client that will reconnect is alive: keep it.
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => null, isAlive: alive([200]) });
+    expect(readSharedMcpOptIn(dir)?.state).toBe("draining");
+
+    let drained = false;
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => [], isAlive: alive([]), log: () => { drained = true; } });
+    expect(readSharedMcpOptIn(dir)).toBeNull();
+    expect(drained).toBe(true);
+  });
+
+  test("turning it back on while draining keeps the recorded clients", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115, 5);
+    await settleSharedMcpOptIn(dir, { fetchClientPids: async () => [200], isAlive: alive([200]) });
+    drainSharedMcpOptIn(dir);
+    writeSharedMcpOptIn(dir, 43115, 9);
+    expect(readSharedMcpOptIn(dir)).toMatchObject({ state: "on", clientPids: [200], enabledAt: 5 });
+  });
+
+  test("a state change made while the server is asked is kept", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115);
+    await settleSharedMcpOptIn(dir, {
+      fetchClientPids: async () => {
+        drainSharedMcpOptIn(dir);
+        return [200];
+      },
+      isAlive: alive([200]),
+    });
+    expect(readSharedMcpOptIn(dir)).toMatchObject({ state: "draining", clientPids: [200] });
   });
 });
 

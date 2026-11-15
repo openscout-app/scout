@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readSharedMcpOptIn, writeSharedMcpOptIn } from "@openscout/runtime/shared-mcp";
+import { drainSharedMcpOptIn, readSharedMcpOptIn, writeSharedMcpOptIn } from "@openscout/runtime/shared-mcp";
 
 import {
   enableSharedScoutMcp,
@@ -103,6 +103,21 @@ describe("shared Scout MCP install", () => {
     writeSharedMcpOptIn(dir, 43115, 1);
     await expect(enableSharedScoutMcp(sharedInput(dir, [], { waitForServer: async () => false }))).rejects.toThrow();
     expect(readSharedMcpOptIn(dir)?.enabledAt).toBe(1);
+  });
+
+  test("a failed re-enable leaves a draining opt-in draining", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115, 1);
+    drainSharedMcpOptIn(dir);
+    let stateWhileWaiting: string | undefined;
+    await expect(enableSharedScoutMcp(sharedInput(dir, [], {
+      waitForServer: async () => {
+        stateWhileWaiting = readSharedMcpOptIn(dir)?.state;
+        return false;
+      },
+    }))).rejects.toThrow();
+    expect(stateWhileWaiting).toBe("on");
+    expect(readSharedMcpOptIn(dir)?.state).toBe("draining");
   });
 
   test("writes the opt-in, waits for the server, then switches the hosts", async () => {
