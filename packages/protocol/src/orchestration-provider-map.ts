@@ -160,7 +160,11 @@ function rolePolicies(taste: ScoutModelTaste, catalog: ScoutOwnedRuntimeCatalog)
   const runtimes = resolveScoutModelTaste(taste, catalog);
   return Object.fromEntries(Object.entries(taste.roles).map(([id, role]) => [id, {
     label: role.label, objective: role.objective, strategy: role.strategy,
-    candidates: role.candidates.map(candidate => ({ ...runtimes[candidate.runtime]!, fit: candidate.fit, taskRationale: candidate.rationale })),
+    // A candidate whose runtime the catalog cannot route is not offered.
+    candidates: role.candidates.flatMap(candidate => {
+      const runtime = runtimes[candidate.runtime];
+      return runtime ? [{ ...runtime, fit: candidate.fit, taskRationale: candidate.rationale }] : [];
+    }),
   }])) as Record<OrchestrationRoleId, RolePolicy>;
 }
 
@@ -249,7 +253,8 @@ export function buildOrchestrationProviderMap(
     report.providers.map((provider) => [provider.id, summarizeProviderPacing(provider, now)]),
   );
   const roles = options.role ? [options.role] : [...ORCHESTRATION_ROLE_IDS];
-  const assignments = roles.map((role) => {
+  // A role with no routable candidate gets no assignment rather than a guess.
+  const assignments = roles.flatMap((role) => {
     const policy = policies[role];
     const ranked = policy.candidates
       .map((runtime) => {
@@ -257,7 +262,8 @@ export function buildOrchestrationProviderMap(
         return { runtime, quota, score: runtime.fit + quotaScoreAdjustment(quota, now) * quotaWeight };
       })
       .sort((left, right) => right.score - left.score || right.runtime.fit - left.runtime.fit);
-    const selected = ranked[0]!;
+    const selected = ranked[0];
+    if (!selected) return [];
     const quotaRisk = isQuotaRisk(selected.quota);
     const alternatives = ranked.slice(1);
     if (quotaRisk) {
@@ -267,7 +273,7 @@ export function buildOrchestrationProviderMap(
         return leftRank - rightRank || right.score - left.score || right.runtime.fit - left.runtime.fit;
       });
     }
-    return {
+    return [{
       role,
       roleLabel: policy.label,
       modelLabel: selected.runtime.label,
@@ -293,7 +299,7 @@ export function buildOrchestrationProviderMap(
         quotaRisk: isQuotaRisk(quota),
         quota,
       })),
-    };
+    }];
   });
   const models = buildModelGuidance(roles, summaries, now, policies);
 

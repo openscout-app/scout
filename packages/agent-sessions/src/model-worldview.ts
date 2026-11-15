@@ -1,5 +1,6 @@
 import { SCOUT_MODEL_TASTE, SCOUT_RUNTIME_CATALOG, resolveScoutModelTaste, type ScoutModelTaste, type ScoutOwnedRuntimeCatalog } from "@openscout/protocol";
 import {
+  FAMILY_TIER_PICKS_REVIEWED_AT,
   POPULAR_MODEL_FAMILIES,
   inexpensiveCognitionPick,
 } from "./model-economics.js";
@@ -109,7 +110,7 @@ export function buildModelWorldview(generatedAt: string): ModelWorldview {
     source: "models.dev + curated FAMILY_TIER_PICKS",
     popularOrder: [...POPULAR_MODEL_FAMILIES],
     families,
-    economicsReviewedAt: "2026-08-08",
+    economicsReviewedAt: FAMILY_TIER_PICKS_REVIEWED_AT,
     inventory: {
       schemaVersion: "openscout.model-inventory.v1",
       catalog: SCOUT_RUNTIME_CATALOG,

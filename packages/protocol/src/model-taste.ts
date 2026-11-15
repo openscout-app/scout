@@ -39,14 +39,25 @@ export function assertValidScoutModelTaste(value: unknown): asserts value is Sco
   }
 }
 
-/** Resolve shorthand through a reviewed catalog; never invent provider-qualified IDs. */
+/**
+ * Resolve shorthand through a reviewed catalog; never invent provider-qualified IDs.
+ *
+ * Only slots the catalog can route are returned. A slot is left out when its
+ * harness is missing or disabled, or when it names a family or tier and no
+ * enabled model matches: a route without a model would silently fall back to
+ * the harness default. A slot with an empty selector (the harness picks its
+ * own model, as Kimi does) resolves with `model: null` on purpose.
+ */
 export function resolveScoutModelTaste(taste: ScoutModelTaste, catalog: ScoutOwnedRuntimeCatalog) {
   assertValidScoutModelTaste(taste);
-  return Object.fromEntries(Object.entries(taste.runtimes).map(([key, slot]) => {
+  return Object.fromEntries(Object.entries(taste.runtimes).flatMap(([key, slot]) => {
     const harness = catalog.harnesses.find(h => h.id === slot.harness && h.enabled);
-    const candidates = (harness?.models ?? []).filter(m => m.enabled && (slot.selector.tier ? m.id.endsWith(`-${slot.selector.tier}`) : slot.selector.family ? m.family === slot.selector.family : false));
+    if (!harness) return [];
+    const wantsModel = Boolean(slot.selector.tier || slot.selector.family);
+    const candidates = harness.models.filter(m => m.enabled && (slot.selector.tier ? m.id.endsWith(`-${slot.selector.tier}`) : slot.selector.family ? m.family === slot.selector.family : false));
     const model = candidates.find(m => m.default) ?? candidates[0];
+    if (wantsModel && !model) return [];
     const label = model ? (slot.selector.tier ? `GPT-${model.version ?? model.label}` : model.label) : slot.label;
-    return [key, { label, route: { providerId: slot.providerId, harness: slot.harness, model: model?.id ?? null, effort: slot.effort, profile: slot.profile }, capability: slot.capability, caution: slot.caution }];
+    return [[key, { label, route: { providerId: slot.providerId, harness: slot.harness, model: model?.id ?? null, effort: slot.effort, profile: slot.profile }, capability: slot.capability, caution: slot.caution }] as const];
   }));
 }
