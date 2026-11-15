@@ -104,12 +104,12 @@ describe("probeInPlace", () => {
     expect(reads).toHaveLength(2);
   });
 
-  test("a composer that cannot be read does not hold the session", async () => {
+  test("a composer that cannot be read cannot establish idle", async () => {
     const probe = await probeInPlace({ sessionId: SESSION, harness: "claude" }, noHosts({
       findClaudeRecord: async () => claudeRecord({ status: "idle", tmux: { session: "main", window: "@1", pane: "%4" } as ClaudeSessionRecord["tmux"] }),
       tmuxComposerDraft: async () => { throw new Error("no server running"); },
     }));
-    expect(probe).toMatchObject({ live: true, activity: "idle" });
+    expect(probe).toMatchObject({ live: true, activity: "unknown" });
   });
 
   test("a session Scout once continued is a place again where the operator reopens it", async () => {

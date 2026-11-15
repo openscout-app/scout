@@ -477,3 +477,17 @@ test("unsafe surfaces refuse without positive empty-composer evidence before che
   }
   expect(touched).toBe(0);
 });
+
+test("tmux refuses failed or missing composer observations before checkpoint or paste", async () => {
+  let touched = 0;
+  for (const read of [async () => undefined, async () => { throw new Error("capture timeout"); }]) {
+    const result = await deliverInPlace({
+      sessionId: SESSION, harness: "claude", body: "task", beforeKeystroke: async () => { touched++; },
+    }, noHosts({
+      findClaudeRecord: async () => claudeRecord({ status: "idle", tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+      tmuxComposerDraft: read, promptTmux: async () => { touched++; },
+    }));
+    expect(result).toMatchObject({ ok: false, code: "in_place_failed", nothingSent: true });
+  }
+  expect(touched).toBe(0);
+});

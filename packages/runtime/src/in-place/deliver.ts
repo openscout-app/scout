@@ -37,7 +37,7 @@ import { join } from "node:path";
 import { readHerdrSessions, readHerdrTopology } from "../system-probes/herdr.js";
 import { execSystemFile } from "../system-probes/exec.js";
 import { findLiveClaudeSession, type ClaudeSessionRecord } from "../claude-session-records.js";
-import { listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailUnsentComposerText } from "../local-agents.js";
+import { listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailComposerState } from "../local-agents.js";
 
 import { openLineTail, type LineTail } from "./line-tail.js";
 import { readOrcaAgents, sendOrcaPrompt, type OrcaAgent } from "./orca.js";
@@ -97,7 +97,7 @@ export type DeliverInPlaceDeps = {
   promptOrca?: (terminalHandle: string, body: string) => Promise<void>;
   promptTmux?: (target: string, body: string) => Promise<void>;
   /** Text a person typed into the pane's composer and has not sent, if any. */
-  tmuxComposerDraft?: (target: string) => Promise<string | null>;
+  tmuxComposerDraft?: (target: string) => Promise<string | null | undefined>;
   ttyForPid?: (pid: number) => Promise<string | null>;
   typeIntoTty?: (tty: string, body: string) => Promise<void>;
   /** Whether the ChatGPT app's Codex holds this thread's writer lock. */
@@ -321,7 +321,10 @@ export async function probeInPlace(
     }
     if (host === "tmux" && candidates.tmux) {
       let activity = await harnessActivity();
-      if (activity === "idle" && await tmuxDraft(candidates.tmux.target, deps)) activity = "composing";
+      if (activity === "idle") {
+        const draft = await tmuxDraft(candidates.tmux.target, deps);
+        activity = draft === undefined ? "unknown" : draft ? "composing" : "idle";
+      }
       return { live: true, via: "tmux", location: candidates.tmux.location, activity };
     }
   }
@@ -490,7 +493,12 @@ export async function deliverInPlace(
       const { target, location } = candidates.tmux;
       // Checked again here, just before the paste: a person may have started
       // typing since the probe.
-      if (await tmuxDraft(target, deps)) {
+      const draft = await tmuxDraft(target, deps);
+      if (draft === undefined) return {
+        ok: false, code: "in_place_failed", via: "tmux", location, nothingSent: true,
+        detail: "Cannot observe the tmux composer; unsent text could be overwritten. Nothing was typed.",
+      };
+      if (draft) {
         return { ok: false, code: "busy", via: "tmux", location, detail: "The composer holds unsent text. Nothing was typed." };
       }
       return typeAt({ via: "tmux", location }, before, () => (deps.promptTmux ?? promptTmuxPane)(target, body));
@@ -615,17 +623,17 @@ async function promptTmuxPane(target: string, body: string): Promise<void> {
 
 const TMUX_COMPOSER_TAIL_LINES = 40;
 
-/** A capture that fails says nothing; the paste that follows fails on its own. */
-async function tmuxDraft(target: string, deps: DeliverInPlaceDeps): Promise<string | null> {
-  return await (deps.tmuxComposerDraft ?? readTmuxComposerDraft)(target).catch(() => null);
+/** A failed capture cannot establish an empty composer. */
+async function tmuxDraft(target: string, deps: DeliverInPlaceDeps): Promise<string | null | undefined> {
+  return await (deps.tmuxComposerDraft ?? readTmuxComposerDraft)(target).catch(() => undefined);
 }
 
-async function readTmuxComposerDraft(target: string): Promise<string | null> {
+async function readTmuxComposerDraft(target: string): Promise<string | null | undefined> {
   // `-e` keeps the escape sequences, which tell typed text from a suggestion.
   const { stdout } = await execSystemFile("tmux", [
     "capture-pane", "-p", "-e", "-t", target, "-S", `-${TMUX_COMPOSER_TAIL_LINES}`,
   ], { timeoutMs: 2_000, maxStdoutBytes: 256 * 1024 });
-  return tmuxPaneTailUnsentComposerText(stdout);
+  return tmuxPaneTailComposerState(stdout);
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   tmuxPaneTailHarnessLoginError,
   tmuxPaneTailShowsReadyComposer,
   tmuxPaneTailUnsentComposerText,
+  tmuxPaneTailComposerState,
   tmuxVerifyDeadlineMs,
 } from "./local-agents";
 
@@ -434,6 +435,8 @@ describe("unsent composer text", () => {
   test("an empty composer has none", () => {
     expect(tmuxPaneTailUnsentComposerText(pane(""))).toBeNull();
     expect(tmuxPaneTailUnsentComposerText("no composer here")).toBeNull();
+    expect(tmuxPaneTailComposerState("no composer here")).toBeUndefined();
+    expect(tmuxPaneTailComposerState(pane(""))).toBeNull();
   });
 
   test("typed text is found", () => {

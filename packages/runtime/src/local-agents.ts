@@ -4258,8 +4258,13 @@ function stripDimTerminalRuns(value: string): string {
  * sequences cannot tell typed text from a suggestion and must not be used.
  */
 export function tmuxPaneTailUnsentComposerText(paneTailWithEscapes: string): string | null {
+  return tmuxPaneTailComposerState(paneTailWithEscapes) || null;
+}
+
+/** Undefined means no composer was observed; null means positively empty. */
+export function tmuxPaneTailComposerState(paneTailWithEscapes: string): string | null | undefined {
   const text = extractActiveTmuxComposerText(stripTerminalControlSequences(stripDimTerminalRuns(paneTailWithEscapes)));
-  return text ? text : null;
+  return text === null ? undefined : text || null;
 }
 
 function findLastIndex<T>(items: readonly T[], predicate: (item: T) => boolean): number {
