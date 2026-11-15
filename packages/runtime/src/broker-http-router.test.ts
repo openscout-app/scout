@@ -586,6 +586,53 @@ describe("createBrokerHttpRouter", () => {
     expect(calls).toEqual(["list", "set", "import", "resolve"]);
   });
 
+  test("tail discovery can leave out parent chains and narrow to one pid", async () => {
+    const chain = [{ pid: 10, command: "/bin/zsh -l" }, { pid: 1, command: "launchd" }];
+    const snapshot = {
+      generatedAt: 1,
+      processes: [
+        { pid: 11, ppid: 10, command: "claude", etime: "01:00", cpuPct: 3.5, rssKb: 2048, cwd: "/w/a", harness: "unattributed", parentChain: chain, source: "claude" },
+        { pid: 22, ppid: 10, command: "codex", etime: "02:00", cwd: "/w/b", harness: "unattributed", parentChain: chain, source: "codex" },
+      ],
+      transcripts: [
+        { source: "claude", transcriptPath: "/t/a.jsonl", sessionId: "a", cwd: "/w/a", project: "a", harness: "unattributed", mtimeMs: 2, size: 1 },
+        { source: "codex", transcriptPath: "/t/b.jsonl", sessionId: "b", cwd: "/w/b", project: "b", harness: "unattributed", mtimeMs: 1, size: 1 },
+      ],
+      totals: { total: 2, scoutManaged: 0, hudsonManaged: 0, unattributed: 2, transcripts: 2 },
+    };
+    const harness = createHarness({ getTailDiscovery: async () => snapshot as never });
+
+    const full = await requestRouter(harness, "GET", "/v1/tail/discover");
+    expect((full.body as any).processes[0].parentChain).toEqual(chain);
+    expect((full.body as any).processes[0]).toMatchObject({ cpuPct: 3.5, rssKb: 2048 });
+
+    const slim = await requestRouter(harness, "GET", "/v1/tail/discover?parentChain=0");
+    expect((slim.body as any).processes.map((p: any) => p.parentChain)).toEqual([[], []]);
+    expect((slim.body as any).transcripts).toHaveLength(2);
+
+    const one = await requestRouter(harness, "GET", "/v1/tail/discover?pid=22&limit=1");
+    expect((one.body as any).processes.map((p: any) => [p.pid, p.parentChain.length])).toEqual([[22, 2]]);
+    expect((one.body as any).transcripts.map((t: any) => t.sessionId)).toEqual(["b"]);
+    expect((one.body as any).totals.total).toBe(2);
+  });
+
+  test("tail usage reads requested sessions and refuses a request without one", async () => {
+    const calls: string[][] = [];
+    const harness = createHarness({
+      readTailSessionUsage: async (refs) => {
+        calls.push([...refs]);
+        return { generatedAt: 1, sessions: [], missing: [...refs] };
+      },
+    });
+    const ok = await requestRouter(harness, "GET", "/v1/tail/usage?sessionId=a,b&sessionId=c");
+    expect(ok.response.status).toBe(200);
+    expect(calls).toEqual([["a", "b", "c"]]);
+    expect((await requestRouter(harness, "GET", "/v1/tail/usage")).response.status).toBe(400);
+    const tooMany = Array.from({ length: 51 }, (_, index) => `s${index}`).join(",");
+    expect((await requestRouter(harness, "GET", `/v1/tail/usage?sessionId=${tooMany}`)).response.status).toBe(400);
+    expect((await requestRouter(createHarness(), "GET", "/v1/tail/usage?sessionId=a")).response.status).toBe(404);
+  });
+
   test("notification routing is metadata-only, machine-local, and absent on older services", async () => {
     const snapshot = createRuntimeRegistrySnapshot({ conversations: { old: {
       id: "old", title: "Old operator thread", kind: "direct", participantIds: ["builder", "operator"], authorityNodeId: "node-1",

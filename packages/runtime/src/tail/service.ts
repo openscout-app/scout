@@ -10,6 +10,15 @@ import { findClaudePendingToolCall } from "@openscout/agent-sessions";
 import { readClaudeSessionRecords, type ClaudeSessionRecord } from "../claude-session-records.js";
 
 import { ClaudeSource } from "./claude-source.js";
+import { withProcessListPass } from "./discover.js";
+import {
+  readLineTranscriptUsage,
+  TAIL_SESSION_USAGE_MAX_REFS,
+  TAIL_SESSION_USAGE_REQUEST_BYTES,
+  usageFromEvents,
+  type TailSessionUsage,
+  type TailSessionUsageReply,
+} from "./session-usage.js";
 import { CodexSource } from "./codex-source.js";
 import { CursorSource } from "./cursor-source.js";
 import { DevinSource } from "./devin-source.js";
@@ -1026,6 +1035,15 @@ async function refreshDiscovery(
   options: { pruneMissing: boolean } = { pruneMissing: scope !== "hot" },
   discoverySources: readonly TranscriptSource[] = sources,
 ): Promise<DiscoverySnapshot> {
+  // Every source in one pass reads the same `ps` snapshot.
+  return await withProcessListPass(() => refreshDiscoveryPass(scope, options, discoverySources));
+}
+
+async function refreshDiscoveryPass(
+  scope: TailDiscoveryScope,
+  options: { pruneMissing: boolean },
+  discoverySources: readonly TranscriptSource[],
+): Promise<DiscoverySnapshot> {
   const allProcesses: DiscoveredProcess[] = [];
   const cachedProcesses = lastDiscovery?.processes ?? [];
   const seenSessionKeys = new Set<string>();
@@ -1985,6 +2003,44 @@ export async function readTailEventsForSession(
   }
   const replayed = await parseTranscriptSessionEvents(transcript, discovery.processes, limit);
   return { transcript, events: mergeSessionHistory(replayed, buffered, limit) };
+}
+
+/**
+ * Token totals, model and newest turn for discovered sessions, read from each
+ * transcript incrementally. Uses the cached discovery: a session outside it is
+ * reported as missing rather than searched for.
+ */
+export async function readTailSessionUsage(sessionRefs: readonly string[]): Promise<TailSessionUsageReply> {
+  const discovery = await getTailDiscovery(false);
+  const sessions: TailSessionUsage[] = [];
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  // One request reads a bounded amount in total; a scan left short continues on the next.
+  let budget = TAIL_SESSION_USAGE_REQUEST_BYTES;
+  for (const ref of sessionRefs.slice(0, TAIL_SESSION_USAGE_MAX_REFS)) {
+    const normalizedRef = normalizeTailSessionRef(ref);
+    if (!normalizedRef || seen.has(normalizedRef)) continue;
+    seen.add(normalizedRef);
+    const transcript = discovery.transcripts.find((candidate) => transcriptMatchesSessionRef(candidate, normalizedRef));
+    const source = transcript ? sources.find((candidate) => candidate.name === transcript.source) : undefined;
+    if (!transcript || !source) {
+      missing.push(ref);
+      continue;
+    }
+    try {
+      if (source.parseFile) {
+        sessions.push(usageFromEvents(transcript, snapshotSessionEvents(transcript.sessionId?.trim() || normalizedRef, transcript.source, 200)));
+        continue;
+      }
+      const usage = await readLineTranscriptUsage(source, transcript, budget);
+      budget = Math.max(0, budget - usage.lastReadBytes);
+      const { lastReadBytes: _lastReadBytes, ...wire } = usage;
+      sessions.push(wire);
+    } catch {
+      missing.push(ref);
+    }
+  }
+  return { generatedAt: Date.now(), sessions, missing };
 }
 
 const LOCATED_TRANSCRIPT_TTL_MS = 30_000;

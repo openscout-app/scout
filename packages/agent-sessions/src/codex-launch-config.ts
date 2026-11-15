@@ -1,5 +1,5 @@
 import { repoScoutEntrypoint } from "./repo-scout-entry.js";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
@@ -169,21 +169,43 @@ function resolveScoutMcpCommand(options: {
 export type CodexScoutMcpEntry = "url" | "command" | null | "unknown";
 
 /** Runs `codex mcp get scout --json`; injectable for tests. */
-export type CodexMcpGet = (codexExecutable: string, env: Record<string, string | undefined>) => {
+export type CodexMcpGet = (codexExecutable: string, env: Record<string, string | undefined>) => Promise<{
   status: number | null;
   stdout: string;
   stderr: string;
-};
+}>;
 
-const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => {
-  const result = spawnSync(codexExecutable, ["mcp", "get", "scout", "--json"], {
-    env: env as NodeJS.ProcessEnv,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 5_000,
-  });
-  return { status: result.error ? null : result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-};
+const CODEX_MCP_GET_TIMEOUT_MS = 5_000;
+
+// Async, so a launch never blocks the runtime's event loop on Codex.
+const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => new Promise((resolve) => {
+  let stdout = "";
+  let stderr = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  const finish = (status: number | null) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    resolve({ status, stdout, stderr });
+  };
+  try {
+    const child = spawn(codexExecutable, ["mcp", "get", "scout", "--json"], {
+      env: env as NodeJS.ProcessEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(null);
+    }, CODEX_MCP_GET_TIMEOUT_MS);
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => finish(code));
+  } catch {
+    finish(null);
+  }
+});
 
 /**
  * How the Codex home (CODEX_HOME in `env`) declares the `scout` MCP server,
@@ -191,12 +213,12 @@ const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => {
  * shared server, from `scout mcp install --shared`), a command entry
  * (stdio), none, or "unknown" when Codex could not say.
  */
-export function codexHomeScoutMcpEntry(
+export async function codexHomeScoutMcpEntry(
   env: Record<string, string | undefined>,
   codexExecutable: string,
   mcpGet: CodexMcpGet = runCodexMcpGet,
-): CodexScoutMcpEntry {
-  const result = mcpGet(codexExecutable, env);
+): Promise<CodexScoutMcpEntry> {
+  const result = await mcpGet(codexExecutable, env);
   if (result.status === 0) {
     try {
       const type = (JSON.parse(result.stdout) as { transport?: { type?: string } }).transport?.type;
@@ -229,15 +251,15 @@ export type ScoutMcpCodexLaunch = {
  * entry, nothing is added, so a url entry is never mixed with stdio keys.
  * Without `codexExecutable` the home is not asked and stdio is used.
  */
-export function resolveScoutMcpCodexLaunch(options: {
+export async function resolveScoutMcpCodexLaunch(options: {
   currentDirectory: string;
   env?: Record<string, string | undefined>;
   codexExecutable?: string | null;
   mcpGet?: CodexMcpGet;
-}): ScoutMcpCodexLaunch {
+}): Promise<ScoutMcpCodexLaunch> {
   const env = options.env ?? process.env;
   const homeEntry = options.codexExecutable
-    ? codexHomeScoutMcpEntry(env, options.codexExecutable, options.mcpGet)
+    ? await codexHomeScoutMcpEntry(env, options.codexExecutable, options.mcpGet)
     : "command";
   if (homeEntry === "url") {
     return { args: [], usesUrl: true, unknownReason: null };
@@ -274,8 +296,8 @@ export function resolveScoutMcpCodexLaunch(options: {
 }
 
 /** The `-c` overrides alone; see resolveScoutMcpCodexLaunch. */
-export function buildScoutMcpCodexLaunchArgs(options: Parameters<typeof resolveScoutMcpCodexLaunch>[0]): string[] {
-  return resolveScoutMcpCodexLaunch(options).args;
+export async function buildScoutMcpCodexLaunchArgs(options: Parameters<typeof resolveScoutMcpCodexLaunch>[0]): Promise<string[]> {
+  return (await resolveScoutMcpCodexLaunch(options)).args;
 }
 
 /**

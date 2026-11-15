@@ -13,8 +13,9 @@
  */
 
 import { attentionContextBeforeBlock } from "@openscout/agent-sessions";
-import { hostname as osHostname } from "node:os";
-import { basename } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir, hostname as osHostname } from "node:os";
+import { basename, dirname, resolve } from "node:path";
 
 import type {
   ActionBlock,
@@ -57,6 +58,63 @@ export type AttentionNotificationItem = {
   risk: AgentNotificationRisk;
   createdAt: number;
 };
+
+const projectNameCache = new Map<string, string>();
+const PROJECT_NAME_CACHE_MAX = 256;
+const PROJECT_WALK_MAX = 12;
+
+/**
+ * The project a path belongs to, as the operator names it: the repository's
+ * folder, never a worktree's. `~/dev/webshop-canvas` (a linked
+ * worktree of webshop) and `webshop/.scout-worktrees/project-hawking-12`
+ * both read "webshop". It reads the nearest `.git` and follows a linked
+ * worktree's `gitdir:` back to the main checkout. A path that is not on this
+ * host falls back to the folder before a known worktree directory, then to
+ * the path's own folder name.
+ */
+export function notificationProjectName(path: string | null | undefined): string | null {
+  const trimmed = path?.trim().replace(/\/+$/u, "");
+  if (!trimmed) return null;
+  const cached = projectNameCache.get(trimmed);
+  if (cached !== undefined) return cached;
+  const name = repositoryName(trimmed) ?? worktreeParentName(trimmed) ?? (basename(trimmed) || null);
+  if (name) {
+    if (projectNameCache.size >= PROJECT_NAME_CACHE_MAX) projectNameCache.clear();
+    projectNameCache.set(trimmed, name);
+  }
+  return name;
+}
+
+function repositoryName(path: string): string | null {
+  let dir = resolve(path);
+  // A home folder kept under git is not every project inside it.
+  const home = resolve(homedir());
+  for (let depth = 0; depth < PROJECT_WALK_MAX && dir !== home; depth++) {
+    const dotGit = `${dir}/.git`;
+    try {
+      if (existsSync(dotGit)) {
+        if (statSync(dotGit).isDirectory()) return basename(dir) || null;
+        // A linked worktree: "gitdir: <main>/.git/worktrees/<name>".
+        const match = /^gitdir:\s*(.+)$/mu.exec(readFileSync(dotGit, "utf8"));
+        const gitdir = match?.[1]?.trim();
+        if (!gitdir) return basename(dir) || null;
+        const linked = /^(.*)\/\.git\/worktrees\/[^/]+\/?$/u.exec(resolve(dir, gitdir));
+        return basename(linked?.[1] ?? dir) || null;
+      }
+    } catch {
+      return null;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
+function worktreeParentName(path: string): string | null {
+  const match = /\/([^/]+)\/\.(?:scout-worktrees|claude\/worktrees|codex\/worktrees|worktrees)\//u.exec(`${path}/`);
+  return match?.[1] ?? null;
+}
 
 /** This Mac as the phone names it: the hostname without `.local`. */
 export function notificationHostName(hostname = osHostname()): string {
@@ -200,13 +258,16 @@ export function agentNotificationForSessionAttention(input: {
 }): AgentNotification {
   const { item, snapshot } = input;
   const { view, level } = viewForAttention(item, snapshot);
-  const cwd = snapshot?.session.cwd;
+  const project = notificationProjectName(snapshot?.session.cwd);
   return {
     ...view,
     v: AGENT_NOTIFICATION_VERSION,
     itemId: item.id,
-    sender: { name: item.sessionName || snapshot?.session.name || "Agent" },
-    ...(cwd ? { project: basename(cwd) } : {}),
+    sender: {
+      name: item.sessionName || snapshot?.session.name || item.sessionId || "Agent",
+      ...(snapshot?.session.adapterType ? { harness: snapshot.session.adapterType } : {}),
+    },
+    ...(project ? { project } : {}),
     host: input.host ?? notificationHostName(),
     level,
     createdAt: item.createdAt,
@@ -297,6 +358,9 @@ export function agentNotificationForPermissionRequest(input: {
   text: string;
   agentName: string;
   agentId: string;
+  /** Roster number text ("012") when the agent holds one. */
+  agentCode?: string | null;
+  agentHarness?: string | null;
   project?: string | null;
   host?: string;
   createdAt: number;
@@ -310,7 +374,7 @@ export function agentNotificationForPermissionRequest(input: {
     ...(input.view ?? permissionDialogView(input.text)),
     v: AGENT_NOTIFICATION_VERSION,
     itemId: input.requestId,
-    sender: { name: input.agentName, agentId: input.agentId },
+    sender: notificationSender(input),
     ...(input.project ? { project: input.project } : {}),
     host: input.host ?? notificationHostName(),
     level: "active",
@@ -337,6 +401,9 @@ export function agentNotificationForOperatorSignal(input: {
   signal: ScoutOperatorSignal;
   agentName: string;
   agentId?: string | null;
+  /** Roster number text ("012") when the agent holds one. */
+  agentCode?: string | null;
+  agentHarness?: string | null;
   body: string;
   project?: string | null;
   host?: string;
@@ -363,7 +430,7 @@ export function agentNotificationForOperatorSignal(input: {
     ...view,
     v: AGENT_NOTIFICATION_VERSION,
     itemId: input.messageId,
-    sender: { name: input.agentName, ...(input.agentId ? { agentId: input.agentId } : {}) },
+    sender: notificationSender(input),
     ...(input.project ? { project: input.project } : {}),
     host: input.host ?? notificationHostName(),
     level: signal.kind === "need" ? "time-sensitive" : "passive",
@@ -373,5 +440,19 @@ export function agentNotificationForOperatorSignal(input: {
       messageId: input.messageId,
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     },
+  };
+}
+
+function notificationSender(input: {
+  agentName: string;
+  agentId?: string | null;
+  agentCode?: string | null;
+  agentHarness?: string | null;
+}): AgentNotification["sender"] {
+  return {
+    name: input.agentName,
+    ...(input.agentId ? { agentId: input.agentId } : {}),
+    ...(input.agentCode?.trim() ? { code: input.agentCode.trim() } : {}),
+    ...(input.agentHarness?.trim() ? { harness: input.agentHarness.trim() } : {}),
   };
 }

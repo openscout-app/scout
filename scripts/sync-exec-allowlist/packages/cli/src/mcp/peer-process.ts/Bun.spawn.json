@@ -1,0 +1,7 @@
+{
+  "path": "packages/cli/src/mcp/peer-process.ts",
+  "symbol": "Bun.spawn",
+  "category": "probe-exec",
+  "reason": "async read-only lsof and ps peer lookups for shared MCP identity, each with a 3s SIGKILL deadline; no sync exec",
+  "owner": "cli"
+}

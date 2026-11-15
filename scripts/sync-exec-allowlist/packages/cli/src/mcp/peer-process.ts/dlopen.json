@@ -1,0 +1,10 @@
+{
+  "path": "packages/cli/src/mcp/peer-process.ts",
+  "symbol": "dlopen",
+  "category": "dlopen",
+  "libraryPaths": [
+    "/usr/lib/libSystem.B.dylib"
+  ],
+  "reason": "lazy Darwin-only read-only sysctl KERN_PROCARGS2 binding to read a peer process's own environment; fixed libSystem only, no process effects",
+  "owner": "cli"
+}
