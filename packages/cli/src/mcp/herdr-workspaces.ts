@@ -73,7 +73,15 @@ export function matchesHerdrPanel(panel: HerdrPanelIdentity, query: string): boo
 export function herdrWorkspacesDependencies(
   options: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
 ): HerdrWorkspacesDependencies {
-  const env = { ...(options.env ?? process.env) };
+  // Snapshot the runtime selection at registration, so a later env change
+  // cannot redirect these reads. Only the OPENSCOUT_BROKER_* keys the read
+  // uses: they choose the runtime, which is the same for every session the
+  // shared MCP server serves, and nothing session-specific is fixed here.
+  const source = options.env ?? process.env;
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of Object.keys(source)) {
+    if (key.startsWith("OPENSCOUT_BROKER_")) env[key] = source[key];
+  }
   return {
     readDigests: async (session) => {
       try {
