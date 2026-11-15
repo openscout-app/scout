@@ -14,12 +14,17 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
   } else {
     const question = clean.lastIndexOf("Do you want to proceed?");
     const prefix = clean.slice(0, question);
-    const header = Math.max(prefix.lastIndexOf("Bash command"), prefix.lastIndexOf("Edit file"), prefix.lastIndexOf("Write file"));
+    // Generic tool confirmations (for example EnterWorktree) have a Tool use
+    // header. Bind only the live dialog, never capture-dependent scrollback.
+    const headers = [...prefix.matchAll(/^[ \t]*(?:Bash command|Edit file|Write file|Create file|Read file|Fetch|Web ?search|Tool use|MCP tool)[ \t]*$/gim)];
+    const header = headers.at(-1)?.index ?? -1;
     // Every tool's dialog opens under a full-width rule ("Tool use" for MCP and
     // built-in tools has no header above). Start there at the latest, so the
     // transcript above the dialog (a progress mark that blinks, a line that
     // scrolls) never enters the fingerprint and the prompt keeps one version.
-    const start = Math.max(header, lastRuleLine(prefix));
+    const rule = lastRuleLine(prefix);
+    const start = rule >= 0 && header >= rule && !/^(?:Bash command|Edit file|Write file)[ \t]*$/im.test(prefix.slice(header))
+      ? rule : Math.max(header, rule);
     const end = clean.indexOf("Esc to cancel", question);
     if (start >= 0 && end >= 0) clean = clean.slice(start, end + "Esc to cancel".length).trim();
   }
