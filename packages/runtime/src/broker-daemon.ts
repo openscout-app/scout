@@ -202,6 +202,7 @@ import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
+import { BrokerDerivedRecordService } from "./broker-derived-records.js";
 import { ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths, controlPlaneArchiveDirectory } from "./support-paths.js";
 import { expandHomePath } from "./tool-resolution.js";
 import {
@@ -1024,6 +1025,18 @@ const workLifecycles = new BrokerWorkLifecycleService({
   createId: createRuntimeId,
   operatorActorId,
 });
+// Derived records: written only through this service; asks for pending ones
+// start only when a lifecycle station names where its agent runs.
+const derivedRecords = new BrokerDerivedRecordService({
+  registry: workLifecycleRegistry,
+  durableStore,
+  runtime,
+  listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  deliver: request => deliveryAcceptanceService.accept(request),
+  producerActorId: "scout.deriver",
+  nodeId,
+  warn: (message, error) => console.warn(message, error ?? ""),
+});
 const workItemStore = new BrokerWorkItemStore({
   runtime,
   durableStore,
@@ -1290,6 +1303,9 @@ runtime.subscribe((event) => {
   publishControlEvent(event);
   if (event.kind === "agent.registered" || event.kind === "agent.endpoint.upserted") {
     scheduleAgentRosterReconcile();
+  }
+  if (event.kind === "collaboration.upserted" && event.payload.record.kind === "work_item") {
+    derivedRecords.kick();
   }
 });
 
@@ -3450,6 +3466,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
+  derivedRecords,
   tasks: taskService,
   shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
@@ -4087,6 +4104,8 @@ setTimeout(() => {
   recoverInvocationResultReplies();
   recoverTerminalReports();
   recoverTerminalWorkPromotions();
+  // Pending derivations are computed from records, so one pass finds what a restart left.
+  derivedRecords.kick();
   // Reconcile persisted external attempts without repeating a provider send.
   void externalSessionService.recover([...knownInvocations.values()])
     .then((failed) => { if (failed.length) console.error("[openscout-runtime] external session recovery incomplete", failed); })
@@ -4239,6 +4258,7 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
 }
 
 async function shutdownBroker(exitCode = 0): Promise<void> {
+  derivedRecords.stop();
   if (shuttingDown) {
     return;
   }

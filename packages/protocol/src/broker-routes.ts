@@ -57,6 +57,8 @@ export const scoutBrokerPaths = {
     workMove: "/v1/work/move",
     workReview: "/v1/work/review",
     workClaim: "/v1/work/claim",
+    derived: "/v1/derived",
+    derivedPending: "/v1/derived/pending",
     pairingAttach: "/v1/pairing/attach",
     pairingDetach: "/v1/pairing/detach",
     localSessionsAttach: "/v1/local-sessions/attach",
