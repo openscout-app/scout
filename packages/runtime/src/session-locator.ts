@@ -43,6 +43,12 @@ export type SessionLocateInput = {
   harness?: AgentHarness | string | null;
   /** Caller-supplied project/cwd (--project). Required for Codex when store cwd missing. */
   projectPath?: string | null;
+  /**
+   * Where the caller happens to be. Used only when the store has no cwd and
+   * no project was named. It is never compared with the session's own cwd: a
+   * session is reachable from any folder.
+   */
+  fallbackCwd?: string | null;
   homeDir?: string;
   /** Test seam: override roots instead of ~/.codex/sessions and ~/.claude/projects. */
   codexSessionsRoot?: string;
@@ -295,9 +301,11 @@ export function locateHarnessSession(input: SessionLocateInput): SessionLocateRe
   candidates.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   const session = { ...candidates[0]! };
 
-  // Codex resume requires cwd; prefer store cwd, then caller project.
-  if (!session.cwd && projectPath) {
-    session.cwd = resolve(expandHomePath(projectPath));
+  // Codex resume requires cwd; prefer store cwd, then the named project,
+  // then the caller's own folder.
+  const assumedCwd = projectPath ?? (input.fallbackCwd?.trim() || undefined);
+  if (!session.cwd && assumedCwd) {
+    session.cwd = resolve(expandHomePath(assumedCwd));
   }
   if (session.harness === CODEX_HARNESS && !session.cwd) {
     return {

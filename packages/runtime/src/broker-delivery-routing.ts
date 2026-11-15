@@ -42,7 +42,10 @@ export type InvocationResolution =
 export type ExactSessionWakeInput = {
   nativeSessionId: string;
   harness?: AgentHarness;
+  /** The project the request named. A session in another folder is refused. */
   projectPath?: string;
+  /** The caller's own folder. Fills in a missing session cwd; never refuses. */
+  fallbackCwd?: string;
   requesterId?: string;
   /**
    * Opt-in: when the session is live outside Scout, continue it as a new
@@ -355,6 +358,8 @@ export class BrokerDeliveryRouter {
     resolveOptions: {
       requesterId?: string;
       currentDirectory?: string;
+      /** The project the request named, as distinct from where the caller is. */
+      projectPath?: string;
       reason: string;
     },
   ): Promise<InvocationResolution> {
@@ -439,7 +444,8 @@ export class BrokerDeliveryRouter {
       const wake = await this.options.wakeExactHarnessSession({
         nativeSessionId: exactSession.nativeSessionId,
         harness: exactSession.harness,
-        projectPath: resolveOptions.currentDirectory,
+        projectPath: resolveOptions.projectPath,
+        fallbackCwd: resolveOptions.currentDirectory,
         requesterId: resolveOptions.requesterId,
         ...(exactSession.forkIfLive ? { forkIfLive: true } : {}),
       });
@@ -529,6 +535,7 @@ export class BrokerDeliveryRouter {
     }, {
       requesterId: payload.requesterId,
       currentDirectory: contextDirectory ?? projectPathRouteTarget(payload),
+      projectPath: projectPathRouteTarget(payload),
       reason: "implicit project invocation card",
     });
   }

@@ -109,6 +109,7 @@ export async function wakeLocalHarnessSession(
     nativeSessionId: input.nativeSessionId,
     harness: input.harness,
     projectPath: input.projectPath,
+    fallbackCwd: input.fallbackCwd,
   });
   if (!located.ok) {
     return {
@@ -140,7 +141,7 @@ export async function wakeLocalHarnessSession(
     };
   }
 
-  const cwd = session.cwd || input.projectPath?.trim();
+  const cwd = session.cwd || input.projectPath?.trim() || input.fallbackCwd?.trim();
   if (!cwd) {
     return {
       ok: false,

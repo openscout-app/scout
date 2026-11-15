@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ActorIdentity, AgentEndpoint, NodeDefinition } from "@openscout/protocol";
 
@@ -17,7 +20,7 @@ import {
   type LocalSessionWakeDeps,
   type PeerSessionWakeResponse,
 } from "./broker-session-wake.js";
-import type { SessionLocateResult } from "./session-locator.js";
+import { locateHarnessSession, type SessionLocateResult } from "./session-locator.js";
 
 const NATIVE_SESSION_ID = "4fad8bb9-b4d3-4432-be75-8cfd636e78c0";
 
@@ -106,6 +109,51 @@ describe("wakeLocalHarnessSession", () => {
       remediation: "check the id",
     });
     expect(upsertedEndpoints).toEqual([]);
+  });
+
+  test("a caller in another folder wakes the session in the session's own folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-wake-elsewhere-"));
+    try {
+      const codexRoot = join(root, "codex");
+      const day = join(codexRoot, "2026", "08", "03");
+      mkdirSync(day, { recursive: true });
+      const sessionId = "019fbee7-3333-4444-5555-666677778888";
+      writeFileSync(
+        join(day, `rollout-${sessionId}.jsonl`),
+        `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/work/blink" } })}\n`,
+      );
+      const locateInputs: Array<{ projectPath?: string | null; fallbackCwd?: string | null }> = [];
+      const { deps, upsertedEndpoints } = createLocalDeps();
+      deps.locate = (input) => {
+        locateInputs.push(input);
+        return locateHarnessSession({ ...input, codexSessionsRoot: codexRoot, claudeProjectsRoot: join(root, "claude") });
+      };
+      deps.isCodexThreadLive = async () => false;
+
+      const result = await wakeLocalHarnessSession(deps, {
+        nativeSessionId: sessionId,
+        harness: "codex",
+        fallbackCwd: "/work/openscout",
+      });
+
+      if (!result.ok) {
+        throw new Error(`expected ok result, got ${result.reason}: ${result.detail}`);
+      }
+      expect(locateInputs[0]?.projectPath).toBeUndefined();
+      expect(locateInputs[0]?.fallbackCwd).toBe("/work/openscout");
+      expect(upsertedEndpoints[0]?.cwd).toBe("/work/blink");
+
+      // Naming a project the session does not live in is still refused.
+      const named = await wakeLocalHarnessSession(deps, {
+        nativeSessionId: sessionId,
+        harness: "codex",
+        projectPath: "/work/openscout",
+        fallbackCwd: "/work/blink",
+      });
+      expect(named).toMatchObject({ ok: false, reason: "session_cwd_conflict" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("refuses harnesses without a resume command", async () => {

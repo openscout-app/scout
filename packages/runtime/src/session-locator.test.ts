@@ -127,6 +127,76 @@ describe("locateHarnessSession", () => {
     if (withProject.ok) expect(withProject.session.cwd).toBe("/Users/you/dev/blink");
   });
 
+  test("the caller's own folder never conflicts with the session's folder", () => {
+    const codexRoot = makeRoot("codex-caller-elsewhere");
+    const day = join(codexRoot, "2026", "08", "03");
+    mkdirSync(day, { recursive: true });
+    const sessionId = "019fbee7-7777-8888-9999-aaaabbbbcccc";
+    writeFileSync(
+      join(day, `rollout-${sessionId}.jsonl`),
+      `${JSON.stringify({
+        type: "session_meta",
+        payload: { id: sessionId, cwd: "/work/blink" },
+      })}\n`,
+    );
+
+    const result = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      fallbackCwd: "/work/openscout",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-1"),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.session.cwd).toBe("/work/blink");
+
+    // A project the request names still has to match.
+    const named = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      projectPath: "/work/openscout",
+      fallbackCwd: "/work/blink",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-2"),
+    });
+    expect(named.ok).toBe(false);
+    if (!named.ok) expect(named.reason).toBe("session_cwd_conflict");
+  });
+
+  test("the caller's folder fills in a cwd the store does not have", () => {
+    const codexRoot = makeRoot("codex-caller-fallback");
+    const day = join(codexRoot, "2026", "08", "03");
+    mkdirSync(day, { recursive: true });
+    const sessionId = "019fbee7-dddd-eeee-ffff-000011112222";
+    writeFileSync(
+      join(day, `rollout-${sessionId}.jsonl`),
+      `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`,
+    );
+
+    const fromCaller = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      fallbackCwd: "/work/openscout",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-3"),
+    });
+    expect(fromCaller.ok).toBe(true);
+    if (fromCaller.ok) expect(fromCaller.session.cwd).toBe("/work/openscout");
+
+    // The named project wins over where the caller is.
+    const named = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      projectPath: "/work/blink",
+      fallbackCwd: "/work/openscout",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-4"),
+    });
+    expect(named.ok).toBe(true);
+    if (named.ok) expect(named.session.cwd).toBe("/work/blink");
+  });
+
   test("returns session_unknown when absent", () => {
     const result = locateHarnessSession({
       nativeSessionId: "does-not-exist",

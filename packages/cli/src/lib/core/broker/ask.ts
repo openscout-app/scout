@@ -15,6 +15,7 @@ import {
 } from "./service.ts";
 import type {
   ScoutAskCommand,
+  ScoutAskError,
   ScoutAskNextCall,
   ScoutAskReceipt,
   ScoutAskSenderContext,
@@ -124,6 +125,12 @@ function nextCallForAskFailure(input: {
     };
   }
 
+  // An exact session id names one session. An agent search cannot find
+  // another route to it, so the refusal itself is the answer.
+  if (input.target.target.kind === "session_id") {
+    return undefined;
+  }
+
   if (!input.result.flight) {
     const diagnostic = input.result.targetDiagnostic;
     const detail = diagnostic?.state === "unknown" && "detail" in diagnostic ? diagnostic.detail?.trim() : undefined;
@@ -142,7 +149,26 @@ function nextCallForAskFailure(input: {
   return undefined;
 }
 
-function buildScoutAskReceipt(input: {
+/** Why the runtime refused the target, in its own words and with its own code. */
+function askRefusalError(
+  diagnostic: ScoutAskDeliveryResult["targetDiagnostic"],
+): ScoutAskError | undefined {
+  if (!diagnostic || diagnostic.state === "ambiguous") {
+    return undefined;
+  }
+  const detail = "detail" in diagnostic ? diagnostic.detail?.trim() : undefined;
+  const reason = "sessionWakeReason" in diagnostic ? diagnostic.sessionWakeReason?.trim() : undefined;
+  if (!detail && !reason) {
+    return undefined;
+  }
+  return {
+    code: "target_unroutable",
+    message: detail || reason!,
+    ...(reason ? { reason } : {}),
+  };
+}
+
+export function buildScoutAskReceipt(input: {
   target: ScoutAskResolvedTarget;
   result: ScoutAskDeliveryResult;
   currentDirectory: string;
@@ -185,6 +211,7 @@ function buildScoutAskReceipt(input: {
         result: input.result,
         currentDirectory: input.currentDirectory,
       });
+  const refusal = ok ? undefined : askRefusalError(input.result.targetDiagnostic);
 
   const completion = flightCompletion(input.result.flight);
   const parent = input.result.flight?.metadata?.parentCompletion as { flightId?: unknown; revision?: unknown } | undefined;
@@ -215,6 +242,7 @@ function buildScoutAskReceipt(input: {
       ? { executionResolution: input.result.executionResolution }
       : {}),
     ...(next ? { next } : {}),
+    ...(refusal ? { error: refusal } : {}),
   };
 }
 
