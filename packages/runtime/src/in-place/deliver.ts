@@ -79,6 +79,8 @@ export type HerdrPaneMatch = { session: string; paneId: string; status: string |
 
 export type DeliverInPlaceDeps = {
   findHerdrPane?: (sessionId: string, harness?: string | null) => Promise<HerdrPaneMatch | null>;
+  /** Surface-bound composer read, immediately before input. Missing/failed reads refuse. */
+  composerEmpty?: (place: { via: InPlaceVia; location: string }) => Promise<boolean>;
   promptHerdr?: (match: HerdrPaneMatch, body: string) => Promise<void>;
   findClaudeRecord?: (sessionId: string) => Promise<ClaudeSessionRecord | null>;
   /** The tmux sessions Scout launched itself, by the mark it leaves on them. */
@@ -429,6 +431,25 @@ async function typeAt(
   }
 }
 
+/**
+ * Idle activity is not evidence of an empty composer. Current Herdr, Orca and
+ * plain-terminal actuators provide no such read, so refuse before checkpointing
+ * or typing. Do not fall through to another actuator for the same live session.
+ */
+async function typeWithEmptyComposer(
+  place: { via: InPlaceVia; location: string },
+  deps: DeliverInPlaceDeps,
+  before: BeforeKeystroke | undefined,
+  type: () => Promise<void>,
+): Promise<InPlaceDelivery> {
+  const empty = await deps.composerEmpty?.(place).catch(() => false);
+  if (empty !== true) return {
+    ok: false, code: "in_place_failed", ...place, nothingSent: true,
+    detail: "Cannot prove this surface's composer is empty; unsent text could be overwritten. Nothing was typed. Send manually or move the session to a supported surface.",
+  };
+  return typeAt(place, before, type);
+}
+
 export async function deliverInPlace(
   input: {
     sessionId: string;
@@ -513,7 +534,7 @@ export async function deliverInPlace(
   // The sender's own tab: typing there would feed it its own words.
   const ownTty = await (deps.selfTty ?? callerTty)().catch(() => null);
   if (tty === ownTty) return { ok: false, code: "not_live" };
-  return typeAt({ via: "lattices", location: `terminal ${tty}` }, before, () => (deps.typeIntoTty ?? typeIntoTtyWithLattices)(tty, body));
+  return typeWithEmptyComposer({ via: "lattices", location: `terminal ${tty}` }, deps, before, () => (deps.typeIntoTty ?? typeIntoTtyWithLattices)(tty, body));
 }
 
 async function promptHerdrCandidate(
@@ -524,7 +545,7 @@ async function promptHerdrCandidate(
 ): Promise<InPlaceDelivery> {
   const location = `Herdr ${pane.session} · ${pane.paneId}`;
   if (pane.status === "blocked") return { ok: false, code: "session_blocked", via: "herdr", location };
-  return typeAt({ via: "herdr", location }, before, () => (deps.promptHerdr ?? promptHerdrPane)(pane, body));
+  return typeWithEmptyComposer({ via: "herdr", location }, deps, before, () => (deps.promptHerdr ?? promptHerdrPane)(pane, body));
 }
 
 async function promptOrcaCandidate(
@@ -544,7 +565,7 @@ async function promptOrcaCandidate(
   if (agent?.state === "blocked" || agent?.state === "waiting") {
     return { ok: false, code: "session_blocked", via: "orca", location };
   }
-  return typeAt({ via: "orca", location }, before, () => (deps.promptOrca ?? sendOrcaPrompt)(terminal.terminalHandle, body));
+  return typeWithEmptyComposer({ via: "orca", location }, deps, before, () => (deps.promptOrca ?? sendOrcaPrompt)(terminal.terminalHandle, body));
 }
 
 export async function findHerdrPaneForSession(sessionId: string, harness?: string | null): Promise<HerdrPaneMatch | null> {

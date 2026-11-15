@@ -131,6 +131,7 @@ function noHosts(overrides: Partial<DeliverInPlaceDeps> = {}): DeliverInPlaceDep
     self: [],
     selfTty: async () => null,
     readOrcaAgents: async () => [],
+    composerEmpty: async () => true,
     promptHerdr: never,
     promptOrca: never,
     promptTmux: never,
@@ -454,4 +455,25 @@ test("native lifecycle uses harness events, fails closed on partial tails", () =
   expect(codexActivityFromTranscript(event("turn_aborted"))).toBe("idle");
   expect(codexActivityFromTranscript(event("task_complete") + event("task_started"))).toBe("busy");
   expect(codexActivityFromTranscript(event("task_complete") + "{partial")).toBe("unknown");
+});
+
+
+test("unsafe surfaces refuse without positive empty-composer evidence before checkpoint or input", async () => {
+  let touched = 0;
+  const touch = async () => { touched++; };
+  const surfaces: Partial<DeliverInPlaceDeps>[] = [
+    { findHerdrPane: async () => ({ session: "herdr", paneId: "p1", status: "idle" }) },
+    { findClaudeRecord: async () => claudeRecord({ status: "idle" }),
+      locateProcess: async () => ({ host: "orca", terminalHandle: "t1", paneKey: null }) },
+    { findClaudeRecord: async () => claudeRecord({ status: "idle" }), ttyForPid: async () => "ttys004" },
+  ];
+  for (const surface of surfaces) {
+    for (const composerEmpty of [undefined, async () => false, async () => { throw new Error("read failed"); }]) {
+      const result = await deliverInPlace({
+        sessionId: SESSION, harness: "claude", body: "task", beforeKeystroke: touch,
+      }, noHosts({ ...surface, composerEmpty, promptHerdr: touch, promptOrca: touch, typeIntoTty: touch }));
+      expect(result).toMatchObject({ ok: false, code: "in_place_failed", nothingSent: true });
+    }
+  }
+  expect(touched).toBe(0);
 });
