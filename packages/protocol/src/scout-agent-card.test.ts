@@ -13,7 +13,7 @@ describe("buildScoutReturnAddress", () => {
       conversationId: "dm.dewey.arc",
       replyToMessageId: "msg-1",
       nodeId: "node-1",
-      projectRoot: "/Users/arach/dev/dewey",
+      projectRoot: "/Users/guest/dev/dewey",
       sessionId: "relay-dewey-claude",
       metadata: {
         surface: "scout-card",
@@ -29,7 +29,7 @@ describe("buildScoutReturnAddress", () => {
       conversationId: "dm.dewey.arc",
       replyToMessageId: "msg-1",
       nodeId: "node-1",
-      projectRoot: "/Users/arach/dev/dewey",
+      projectRoot: "/Users/guest/dev/dewey",
       sessionId: "relay-dewey-claude",
       metadata: {
         surface: "scout-card",

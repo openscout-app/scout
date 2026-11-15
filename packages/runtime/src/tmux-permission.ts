@@ -14,9 +14,19 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
   } else {
     const question = clean.lastIndexOf("Do you want to proceed?");
     const prefix = clean.slice(0, question);
-    const header = Math.max(prefix.lastIndexOf("Bash command"), prefix.lastIndexOf("Edit file"), prefix.lastIndexOf("Write file"));
+    // Generic tool confirmations (for example EnterWorktree) have a Tool use
+    // header. Bind only the live dialog, never capture-dependent scrollback.
+    const headers = [...prefix.matchAll(/^[ \t]*(?:Bash command|Edit file|Write file|Create file|Read file|Fetch|Web ?search|Tool use|MCP tool)[ \t]*$/gim)];
+    const header = headers.at(-1)?.index ?? -1;
+    // Every tool's dialog opens under a full-width rule ("Tool use" for MCP and
+    // built-in tools has no header above). Start there at the latest, so the
+    // transcript above the dialog (a progress mark that blinks, a line that
+    // scrolls) never enters the fingerprint and the prompt keeps one version.
+    const rule = lastRuleLine(prefix);
+    const start = rule >= 0 && header >= rule && !/^(?:Bash command|Edit file|Write file)[ \t]*$/im.test(prefix.slice(header))
+      ? rule : Math.max(header, rule);
     const end = clean.indexOf("Esc to cancel", question);
-    if (header >= 0 && end >= 0) clean = clean.slice(header, end + "Esc to cancel".length).trim();
+    if (start >= 0 && end >= 0) clean = clean.slice(start, end + "Esc to cancel".length).trim();
   }
   let keys: Partial<Record<PermissionDecision, string[]>> = {};
   if (/Yes,\s*I\s*trust\s*this\s*folder/i.test(clean)) {
@@ -42,6 +52,14 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
   }
   return { text: clean, version: createHash("sha256").update(clean).digest("hex"),
     identity: createHash("sha256").update(clean.replace(/^\s*❯?\s*(?=\d+\.|No, exit|Yes, I trust this folder)/gm, "")).digest("hex"), keys };
+}
+
+/** Where the last line made only of a horizontal rule (a dialog's top border) starts in `text`; -1 when there is none. */
+function lastRuleLine(text: string): number {
+  const rule = /^[ \t]*─{20,}[ \t]*$/gmu;
+  let at = -1;
+  for (let match = rule.exec(text); match; match = rule.exec(text)) at = match.index;
+  return at;
 }
 
 type TmuxPermissionPane = {

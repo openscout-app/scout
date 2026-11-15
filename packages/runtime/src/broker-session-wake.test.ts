@@ -27,8 +27,8 @@ function locatedSession(): SessionLocateResult {
     session: {
       harness: "claude",
       nativeSessionId: NATIVE_SESSION_ID,
-      cwd: "/Users/art/dev/openscout",
-      path: `/Users/art/.claude/projects/-Users-art-dev-openscout/${NATIVE_SESSION_ID}.jsonl`,
+      cwd: "/Users/you/dev/openscout",
+      path: `/Users/you/.claude/projects/-Users-you-dev-openscout/${NATIVE_SESSION_ID}.jsonl`,
       lastActivityAt: 100,
       match: "filename",
     },
@@ -374,8 +374,8 @@ describe("startSessionOnPeers", () => {
     const peerActor = { id: peerEndpoint.agentId, kind: "session", displayName: "agentlist.io" } as ActorIdentity;
     const { deps, posts, upsertedActors, upsertedEndpoints } = createStartDeps({
       roots: {
-        "node-air": ["/Users/art/dev/openscout"],
-        "node-mini": ["/Users/arach/dev/talkie"],
+        "node-air": ["/Users/you/dev/openscout"],
+        "node-mini": ["/Users/guest/dev/talkie"],
       },
       responses: {
         "http://mini.example:43110": { ok: true, endpoint: peerEndpoint, actor: peerActor },
@@ -387,14 +387,14 @@ describe("startSessionOnPeers", () => {
         node({ id: "node-air", brokerUrl: "http://air.example:43110" }),
         node({ id: "node-mini", brokerUrl: "http://mini.example:43110" }),
       ] },
-      { projectPath: "/Users/arach/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
+      { projectPath: "/Users/guest/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
     );
 
     expect(result).toEqual({ ok: true, peerNodeId: "node-mini", endpoint: peerEndpoint, actor: peerActor });
     expect(posts).toEqual([{
       brokerBaseUrl: "http://mini.example:43110",
       path: MESH_SESSION_START_PATH,
-      payload: { projectPath: "/Users/arach/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
+      payload: { projectPath: "/Users/guest/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
     }]);
     expect(upsertedActors).toEqual([peerActor]);
     expect(upsertedEndpoints).toEqual([peerEndpoint]);
@@ -450,9 +450,9 @@ describe("startSessionOnPeers", () => {
 
   test("ranks peers by shared path depth, then id", () => {
     const peers = [node({ id: "node-c" }), node({ id: "node-b" }), node({ id: "node-a" })];
-    const ranked = rankPeersForProjectPath(peers, "/Users/arach/dev/x", (id) => ({
-      "node-b": ["/Users/arach/dev/talkie"],
-      "node-c": ["/Users/art/dev/openscout"],
+    const ranked = rankPeersForProjectPath(peers, "/Users/guest/dev/x", (id) => ({
+      "node-b": ["/Users/guest/dev/talkie"],
+      "node-c": ["/Users/you/dev/openscout"],
     })[id] ?? []);
 
     expect(ranked.map((peer) => peer.id)).toEqual(["node-b", "node-c", "node-a"]);
@@ -468,8 +468,8 @@ function locatedCodexSession(): SessionLocateResult {
     session: {
       harness: "codex",
       nativeSessionId: CODEX_THREAD_ID,
-      cwd: "/Users/art/dev/blink",
-      path: `/Users/art/.codex/sessions/2026/09/24/rollout-${CODEX_THREAD_ID}.jsonl`,
+      cwd: "/Users/you/dev/blink",
+      path: `/Users/you/.codex/sessions/2026/09/24/rollout-${CODEX_THREAD_ID}.jsonl`,
       lastActivityAt: 100,
       match: "session_meta id",
     },
@@ -574,14 +574,14 @@ describe("suggestHostForProjectPath", () => {
   const archie = { id: "archie-openscout", meshId: "openscout", name: "archie" } as NodeDefinition;
   const hutch = { id: "hutch-openscout", meshId: "openscout", name: "hutch" } as NodeDefinition;
   const roots: Record<string, string[]> = {
-    "archie-openscout": ["/home/arach/renders/arsenal-x", "/home/arach/dev/peal"],
+    "archie-openscout": ["/home/guest/renders/arsenal-x", "/home/guest/dev/peal"],
     "hutch-openscout": ["/root/dev/peal"],
   };
   const lookup = (id: string) => roots[id] ?? [];
 
   test("names the one peer holding a repo with that folder name", () => {
-    expect(suggestHostForProjectPath("/Users/art/renders/arsenal-x/", [archie, hutch], lookup))
-      .toEqual({ host: "archie", root: "/home/arach/renders/arsenal-x" });
+    expect(suggestHostForProjectPath("/Users/you/renders/arsenal-x/", [archie, hutch], lookup))
+      .toEqual({ host: "archie", root: "/home/guest/renders/arsenal-x" });
   });
 
   test("stays quiet when the name is ambiguous or unknown", () => {

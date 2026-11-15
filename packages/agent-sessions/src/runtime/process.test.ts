@@ -5,6 +5,15 @@ import { join } from "node:path";
 
 import { spawnHarnessProcess } from "./process.ts";
 
+function uncoloredEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key !== "FORCE_COLOR" && key !== "CLICOLOR_FORCE") env[key] = value;
+  }
+  env.NO_COLOR = "1";
+  return env;
+}
+
 describe("spawnHarnessProcess", () => {
   test("uses Bun subprocesses under Bun and reads newline-delimited stdout", async () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "openscout-harness-process-"));
@@ -24,7 +33,9 @@ for await (const line of rl) {
 `,
       ], {
         cwd: tempRoot,
-        env: process.env,
+        // The child's console output is compared as text, so the caller's
+        // color requests must not reach it.
+        env: uncoloredEnv(),
       });
 
       expect(child.runtime).toBe("bun");

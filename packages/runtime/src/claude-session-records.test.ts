@@ -44,7 +44,7 @@ function record(input: {
   return JSON.stringify({
     pid: input.pid,
     sessionId: input.sessionId,
-    cwd: input.cwd ?? "/Users/art/dev/openscout",
+    cwd: input.cwd ?? "/Users/you/dev/openscout",
     startedAt: 1789344878460,
     procStart: "Mon Sep 14 00:14:35 2026",
     version: "2.1.258",
@@ -77,7 +77,7 @@ describe("Claude session records", () => {
     expect(parsed).toEqual(expect.objectContaining({
       pid: 17446,
       sessionId: "7b81300d-0a9c-4953-8d7f-9274b11ebdfb",
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       kind: "interactive",
       name: "project-woolf-20-relay-agent",
       tmux: { session: "session-mtus22pe-emx8hl", window: "@16", pane: "%16" },
@@ -108,7 +108,7 @@ describe("Claude session records", () => {
     const correlation = correlateClaudeSessionForTmuxSession({
       tmuxSession: "session-mtus22pe-emx8hl",
       launchName: "project-woolf-20-relay-agent",
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       records: await readClaudeSessionRecords({ directory }),
       isProcessAlive: () => true,
     });
@@ -170,10 +170,10 @@ describe("Claude session records", () => {
   test("reads the answering model from the transcript tail and locates transcripts the way Claude names them", async () => {
     const directory = scratchDirectory();
     const env = { CLAUDE_CONFIG_DIR: directory } as NodeJS.ProcessEnv;
-    expect(claudeProjectDirectoryForCwd("/Users/art/.codex/worktrees/8722/openscout", env))
-      .toBe(join(directory, "projects", "-Users-art--codex-worktrees-8722-openscout"));
+    expect(claudeProjectDirectoryForCwd("/Users/you/.codex/worktrees/8722/openscout", env))
+      .toBe(join(directory, "projects", "-Users-you--codex-worktrees-8722-openscout"));
 
-    const projectDirectory = claudeProjectDirectoryForCwd("/Users/art/dev/openscout", env);
+    const projectDirectory = claudeProjectDirectoryForCwd("/Users/you/dev/openscout", env);
     mkdirSync(projectDirectory, { recursive: true });
     const transcriptPath = join(projectDirectory, "native-woolf.jsonl");
     const lines = [
@@ -184,9 +184,9 @@ describe("Claude session records", () => {
     ];
     writeFileSync(transcriptPath, `${lines.join("\n")}\n`);
 
-    expect(claudeTranscriptPathForSession("/Users/art/dev/openscout", "native-woolf", env)).toBe(transcriptPath);
-    expect(claudeTranscriptPathForSession("/Users/art/dev/openscout", "missing", env)).toBeNull();
-    expect(claudeTranscriptPathForSession("/Users/art/dev/openscout", "../escape", env)).toBeNull();
+    expect(claudeTranscriptPathForSession("/Users/you/dev/openscout", "native-woolf", env)).toBe(transcriptPath);
+    expect(claudeTranscriptPathForSession("/Users/you/dev/openscout", "missing", env)).toBeNull();
+    expect(claudeTranscriptPathForSession("/Users/you/dev/openscout", "../escape", env)).toBeNull();
     expect(await readClaudeTranscriptObservedModel(transcriptPath)).toBe("claude-opus-5");
     // Tail reads skip the partial first line without losing the newest record.
     expect(await readClaudeTranscriptObservedModel(transcriptPath, { maxBytes: 1024 })).toBe("claude-opus-5");
@@ -200,7 +200,7 @@ const livePane = { session: tmuxSession, window: "@16", pane: "%16", pid: 100, p
 test("observes the actual pane process and rejects stale records, reused PIDs, and mismatched launch identity", async () => {
   const directory = scratchDirectory();
   writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "native-agent" }));
-  const base = { tmuxSession, directory, launchName: "project-woolf-20-relay-agent", cwd: "/Users/art/dev/openscout" };
+  const base = { tmuxSession, directory, launchName: "project-woolf-20-relay-agent", cwd: "/Users/you/dev/openscout" };
   expect((await observeClaudeSessionForTmuxSession({ ...base, probe: async () => [livePane] })).ok).toBe(true);
   for (const changed of [{ pid: 101 }, { pane: "%17" }, { window: "@17" }, { procStart: "Tue Sep 15 00:14:35 2026" }]) {
     expect((await observeClaudeSessionForTmuxSession({ ...base, probe: async () => [{ ...livePane, ...changed }] })).ok).toBe(false);
@@ -214,7 +214,7 @@ test("observes the actual pane process and rejects stale records, reused PIDs, a
 
 test("a session Claude Code renamed after launch still correlates; a different user-given name does not", async () => {
   const directory = scratchDirectory();
-  const base = { tmuxSession, directory, launchName: "project-woolf-20-relay-agent", cwd: "/Users/art/dev/openscout" };
+  const base = { tmuxSession, directory, launchName: "project-woolf-20-relay-agent", cwd: "/Users/you/dev/openscout" };
   // Claude Code 2.1.323 replaces the `--name` Scout passed with its own title moments after start.
   writeFileSync(join(directory, "100.json"), JSON.stringify({ ...JSON.parse(record({ pid: 100, sessionId: "native-agent" })),
     name: "scoutd-process-status", nameSource: "auto" }));
