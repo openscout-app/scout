@@ -65,6 +65,7 @@ person whose machine it is.
   `bun run --cwd packages/<name> check`. Protocol, runtime, pairing, cli,
   agent-sessions, session-trace, and mesh-extension have one.
 - Run the narrowest affected tests while you work.
+- When changing tests or removing behavior, use [test hygiene](.agents/skills/test-hygiene/SKILL.md) to tidy the suite through judgment.
 - New or changed process spawning or shell execution: `bun run sync-exec:fence`.
 - Before you hand off a change: `bun run check` and `bun run test:changed`.
 - Before merge: run `bun run test:unit` once per pull request on the exact head.
