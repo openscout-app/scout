@@ -209,7 +209,98 @@ test("observes the actual pane process and rejects stale records, reused PIDs, a
   expect((await observeClaudeSessionForTmuxSession({ ...base, cwd: "/foreign", probe: async () => [livePane] })).ok).toBe(false);
   expect(await findLiveClaudeSession("native-agent", { directory, probe: async () => [livePane] })).toEqual(expect.objectContaining({ sessionId: "native-agent" }));
   expect(await findLiveClaudeSession("native-agent", { directory, probe: async () => [{ ...livePane, procStart: "different" }] })).toBeNull();
-  await expect(findLiveClaudeSession("native-agent", { directory, probe: async () => { throw new Error("probe timed out"); } })).rejects.toThrow("probe timed out");
+  const timedOut = async () => { throw new Error("probe timed out"); };
+  await expect(findLiveClaudeSession("native-agent", { directory, probe: timedOut, processStart: async () => livePane.procStart }))
+    .rejects.toThrow("probe timed out");
+  // A record left by a crash is stale whatever tmux says: its process is gone, or its pid is someone else's.
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: timedOut, processStart: async () => null })).toBeNull();
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: timedOut, processStart: async () => "Tue Sep 15 09:00:00 2026" })).toBeNull();
+});
+
+test("a record whose tmux server is gone is stale, not a session that cannot be seen", async () => {
+  const directory = scratchDirectory();
+  writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "native-agent" }));
+  const noServer = async () => {
+    throw new ProbeCommandError("tmux exited with 1", { code: "exit", exitCode: 1, stderr: "error connecting to /tmp/tmux-1000/default (No such file or directory)" });
+  };
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: noServer, processStart: async () => null })).toBeNull();
+  // The process still runs with no server to show its pane: open, and no pane to type into.
+  expect(await findLiveClaudeSession("native-agent", { directory, probe: noServer, processStart: async () => livePane.procStart, processTerminal: async () => null }))
+    .toEqual(expect.objectContaining({ sessionId: "native-agent", paneUnverified: true }));
+});
+
+test("Claude started from a shell in a tmux pane is in that pane while it sits on the pane's terminal, in front", async () => {
+  const directory = scratchDirectory();
+  // The pane's own process is the shell (pid 90); Claude is its child (pid 100).
+  writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "native-shell" }));
+  const shellPane = { session: tmuxSession, window: "@16", pane: "%16", pid: 90, procStart: "Mon Sep 14 00:10:00 2026", tty: "/dev/ttys016" };
+  const started = "Mon Sep 14 00:14:35 2026";
+  const find = (
+    processStart: string | null,
+    panes: Array<typeof shellPane | Omit<typeof shellPane, "tty">> = [shellPane],
+    terminal: { tty: string | null; foreground: boolean } | null = { tty: "ttys016", foreground: true },
+  ) => findLiveClaudeSession("native-shell", {
+    directory,
+    probe: async () => panes,
+    processStart: async () => processStart,
+    processTerminal: async () => terminal,
+  });
+  const inPane = await find(started);
+  expect(inPane).toEqual(expect.objectContaining({ sessionId: "native-shell", pid: 100 }));
+  expect(inPane?.paneUnverified).toBeUndefined();
+  // The process is gone, or its pid now belongs to something started later.
+  expect(await find(null)).toBeNull();
+  expect(await find("Tue Sep 15 09:00:00 2026")).toBeNull();
+});
+
+test("a running Claude whose pane cannot be shown to hold it is open, and that pane is not a place to type", async () => {
+  const directory = scratchDirectory();
+  writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "native-shell" }));
+  const shellPane = { session: tmuxSession, window: "@16", pane: "%16", pid: 90, procStart: "Mon Sep 14 00:10:00 2026", tty: "/dev/ttys016" };
+  const started = "Mon Sep 14 00:14:35 2026";
+  const find = (input: {
+    panes?: Array<Record<string, unknown>> | Error;
+    terminal?: { tty: string | null; foreground: boolean } | null;
+    processStart?: string | null;
+  }) => findLiveClaudeSession("native-shell", {
+    directory,
+    probe: async () => {
+      if (input.panes instanceof Error) throw input.panes;
+      return (input.panes ?? [shellPane]) as never;
+    },
+    processStart: async () => input.processStart === undefined ? started : input.processStart,
+    processTerminal: async () => input.terminal === undefined ? { tty: "ttys016", foreground: true } : input.terminal,
+  });
+  const unverified = expect.objectContaining({ sessionId: "native-shell", pid: 100, paneUnverified: true });
+  // The same ids on the default server, with Claude on another server's terminal.
+  expect(await find({ terminal: { tty: "ttys044", foreground: true } })).toEqual(unverified);
+  // Suspended: the pane's shell is in front, and typed words would run there.
+  expect(await find({ terminal: { tty: "ttys016", foreground: false } })).toEqual(unverified);
+  expect(await find({ terminal: null })).toEqual(unverified);
+  // The pane gives no terminal to compare.
+  expect(await find({ panes: [{ ...shellPane, tty: null }] })).toEqual(unverified);
+  // The pane it recorded is gone, though another pane of the session remains.
+  expect(await find({ panes: [{ ...shellPane, pane: "%17" }] })).toEqual(unverified);
+  // The tmux session is not on this server at all.
+  const missing = new ProbeCommandError("tmux exited with 1", { code: "exit", exitCode: 1, stderr: "can't find session: missing" });
+  expect(await find({ panes: missing })).toEqual(unverified);
+  // None of it holds once the process is gone.
+  expect(await find({ panes: missing, processStart: null })).toBeNull();
+  expect(await find({ panes: [{ ...shellPane, pane: "%17" }], processStart: null })).toBeNull();
+});
+
+test("a record can be passed over to find another holder of the same session", async () => {
+  const directory = scratchDirectory();
+  writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "native-twice", tmux: "flat-claude-native-twice:@1.%1" }));
+  writeFileSync(join(directory, "200.json"), record({ pid: 200, sessionId: "native-twice", tmux: null, name: null }));
+  const options = {
+    directory,
+    probe: async () => [{ session: "flat-claude-native-twice", window: "@1", pane: "%1", pid: 100, procStart: "Mon Sep 14 00:14:35 2026" }],
+    processStart: async () => "Mon Sep 14 00:14:35 2026",
+  };
+  const other = await findLiveClaudeSession("native-twice", { ...options, skip: (candidate) => candidate.tmux?.session.startsWith("flat-") === true });
+  expect(other?.pid).toBe(200);
+  expect(await findLiveClaudeSession("native-twice", { ...options, skip: () => true })).toBeNull();
 });
 
 test("a session Claude Code renamed after launch still correlates; a different user-given name does not", async () => {
@@ -260,7 +351,7 @@ test("a missing tmux session is stale evidence, while command failures retain di
   writeFileSync(join(directory, "100.json"), record({ pid: 100, sessionId: "stale" }));
   const probe = async () => { throw new ProbeCommandError("tmux exited with 1", { code: "exit", exitCode: 1, stderr: "can't find window: missing" }); };
   expect(await observeClaudeSessionForTmuxSession({ tmuxSession, directory, probe })).toEqual({ ok: false, reason: "no_live_record", candidates: 0, live: 0 });
-  expect(await findLiveClaudeSession("stale", { directory, probe })).toBeNull();
+  expect(await findLiveClaudeSession("stale", { directory, probe, processStart: async () => null })).toBeNull();
   await expect(execSystemFile(process.execPath, ["-e", "process.stderr.write('diagnostic'); process.exit(7)"], { timeoutMs: 2000 }))
     .rejects.toMatchObject({ code: "exit", exitCode: 7, stderr: "diagnostic" });
 });

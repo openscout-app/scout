@@ -252,11 +252,15 @@ export function formatScoutAskReceiptError(
       ? `${receipt.next.reason} Nothing was sent.`
       : `target ${renderedTarget} matches multiple agents; nothing was sent. Re-run with a fully qualified @handle or exact session:<id> to disambiguate.`;
   }
-  if (receipt.error) {
+  if (receipt.error && receipt.error.code !== "target_unroutable") {
     return receipt.error.message;
   }
   if (receipt.next) {
     return `target ${renderedTarget} is not currently routable; nothing was sent. ${receipt.next.reason}`;
+  }
+  if (receipt.error) {
+    const why = receipt.error.message.trim();
+    return `target ${renderedTarget} is not currently routable; nothing was sent. ${why.charAt(0).toUpperCase()}${why.slice(1).replace(/\.?$/u, ".")}`;
   }
   return `target ${renderedTarget} is not currently routable; nothing was sent.`;
 }

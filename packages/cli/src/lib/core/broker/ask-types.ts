@@ -80,8 +80,10 @@ export type ScoutAskNextCall = {
 };
 
 export type ScoutAskError = {
-  code: "broker_unreachable" | "invalid_request" | "preflight_failed";
+  code: "broker_unreachable" | "invalid_request" | "preflight_failed" | "target_unroutable";
   message: string;
+  /** The runtime's own refusal code, such as session_live_unbound, when it gave one. */
+  reason?: string;
 };
 
 export type ScoutAskReceipt = {

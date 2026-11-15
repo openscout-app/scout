@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ActorIdentity, AgentEndpoint, NodeDefinition } from "@openscout/protocol";
 
@@ -17,7 +20,7 @@ import {
   type LocalSessionWakeDeps,
   type PeerSessionWakeResponse,
 } from "./broker-session-wake.js";
-import type { SessionLocateResult } from "./session-locator.js";
+import { locateHarnessSession, type SessionLocateResult } from "./session-locator.js";
 
 const NATIVE_SESSION_ID = "4fad8bb9-b4d3-4432-be75-8cfd636e78c0";
 
@@ -108,6 +111,51 @@ describe("wakeLocalHarnessSession", () => {
     expect(upsertedEndpoints).toEqual([]);
   });
 
+  test("a caller in another folder wakes the session in the session's own folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-wake-elsewhere-"));
+    try {
+      const codexRoot = join(root, "codex");
+      const day = join(codexRoot, "2026", "08", "03");
+      mkdirSync(day, { recursive: true });
+      const sessionId = "019fbee7-3333-4444-5555-666677778888";
+      writeFileSync(
+        join(day, `rollout-${sessionId}.jsonl`),
+        `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/work/blink" } })}\n`,
+      );
+      const locateInputs: Array<{ projectPath?: string | null; fallbackCwd?: string | null }> = [];
+      const { deps, upsertedEndpoints } = createLocalDeps();
+      deps.locate = (input) => {
+        locateInputs.push(input);
+        return locateHarnessSession({ ...input, codexSessionsRoot: codexRoot, claudeProjectsRoot: join(root, "claude") });
+      };
+      deps.isCodexThreadLive = async () => false;
+
+      const result = await wakeLocalHarnessSession(deps, {
+        nativeSessionId: sessionId,
+        harness: "codex",
+        fallbackCwd: "/work/openscout",
+      });
+
+      if (!result.ok) {
+        throw new Error(`expected ok result, got ${result.reason}: ${result.detail}`);
+      }
+      expect(locateInputs[0]?.projectPath).toBeUndefined();
+      expect(locateInputs[0]?.fallbackCwd).toBe("/work/openscout");
+      expect(upsertedEndpoints[0]?.cwd).toBe("/work/blink");
+
+      // Naming a project the session does not live in is still refused.
+      const named = await wakeLocalHarnessSession(deps, {
+        nativeSessionId: sessionId,
+        harness: "codex",
+        projectPath: "/work/openscout",
+        fallbackCwd: "/work/blink",
+      });
+      expect(named).toMatchObject({ ok: false, reason: "session_cwd_conflict" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("refuses harnesses without a resume command", async () => {
     const { deps } = createLocalDeps({ resumable: false });
 
@@ -196,6 +244,49 @@ describe("wakeLocalHarnessSession", () => {
     expect(result).toMatchObject({ ok: false, reason: "session_live_unbound" });
     expect(upsertedActors).toHaveLength(0);
     expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("registers a live session that is open where Scout can type, without starting anything", async () => {
+    const { deps, upsertedActors, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    const probed: unknown[] = [];
+    deps.probeInPlace = async (input) => { probed.push(input); return { live: true }; };
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.forkedSession).toBeUndefined();
+      expect(result.endpoint.metadata).toMatchObject({ flatDispatch: true, nativeSessionId: NATIVE_SESSION_ID });
+    }
+    expect(probed).toEqual([{ sessionId: NATIVE_SESSION_ID, harness: "claude", requireExactHarness: true }]);
+    expect(upsertedActors).toHaveLength(1);
+    expect(upsertedEndpoints).toHaveLength(1);
+  });
+
+  test("refuses a live session that is open where Scout cannot type, and says so", async () => {
+    const { deps, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => ({ live: false });
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
+    expect(result).toMatchObject({ ok: false, reason: "session_live_unbound" });
+    if (!result.ok) expect(result.detail).toContain("not in Herdr, Orca, tmux or a terminal Scout can type into");
+    expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("fails closed when the place a live session is open cannot be probed", async () => {
+    const { deps, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => { throw new Error("herdr timed out"); };
+    expect(await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID })).toMatchObject({ ok: false, reason: "session_runtime_unobserved" });
+    expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("a sender that asked for a fork still gets one, even when the session is reachable", async () => {
+    const { deps } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => { throw new Error("must not probe when a fork was asked for"); };
+    deps.createForkSessionId = () => "fork-session-id";
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID, forkIfLive: true });
+    expect(result).toMatchObject({ ok: true, forkedSession: { sourceSessionId: NATIVE_SESSION_ID, sessionId: "fork-session-id" } });
   });
 
   test("fails closed when process ownership cannot be inspected", async () => {
