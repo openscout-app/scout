@@ -130,6 +130,7 @@ import {
   relayAgentRuntimeDirectory,
   resolveOpenScoutSupportPaths,
 } from "./support-paths.js";
+import { sharedMcpLaunchEnvironment } from "./shared-mcp.js";
 import {
   buildInteractiveTerminalEnvironment,
   buildInteractiveTerminalShellDirectives,
@@ -2879,6 +2880,9 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
     logsDirectory: relayAgentLogsDirectory(agentName),
     env: {
       CODEX_HOME: codexHomeForEndpoint(endpoint),
+      // While the shared Scout MCP server is on, the launch points Scout MCP
+      // at it instead of starting a stdio server for this app-server.
+      ...sharedMcpLaunchEnvironment(resolveOpenScoutSupportPaths().supportDirectory),
       // Seed auth only into the Scout-owned background store; when an
       // external-thread resume routes a background endpoint to the operator
       // home, copying the operator's auth onto itself is not a thing.

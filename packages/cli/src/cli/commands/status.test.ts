@@ -127,3 +127,19 @@ test("flight status exposes observed assignee and broker-captured final answer",
   expect(row.assignee).toEqual({ harness: "codex", model: "gpt-test", cwd: "/work/project", pid: 123, sessionId: "native" });
   expect(row.answer).toContain("/pull/123");
 });
+
+test("a session handle resolves to the task that session is running, else its last one", () => {
+  const invocation = (id: string, createdAt: number) => ({ id, requesterId: "parent", requesterNodeId: "node", targetAgentId: "session-abc", action: "execute" as const, task: id, messageId: `msg-${id}`, ensureAwake: false, stream: false, createdAt });
+  const flight = (id: string, invocationId: string, state: "running" | "completed", startedAt: number) => ({ id, invocationId, requesterId: "parent", targetAgentId: "session-abc", state, startedAt });
+  const running = buildWorkStatuses(createRuntimeRegistrySnapshot({
+    invocations: { old: invocation("old", 1), now: invocation("now", 2) },
+    flights: { "flt-old": flight("flt-old", "old", "completed", 10), "flt-now": flight("flt-now", "now", "running", 5) },
+  }));
+  expect(selectWorkStatuses(running, parseStatusCommandOptions(["session-abc"]))[0]?.id).toBe("flt-now");
+  const finished = buildWorkStatuses(createRuntimeRegistrySnapshot({
+    invocations: { old: invocation("old", 1), now: invocation("now", 2) },
+    flights: { "flt-old": flight("flt-old", "old", "completed", 10), "flt-now": flight("flt-now", "now", "completed", 20) },
+  }));
+  expect(selectWorkStatuses(finished, parseStatusCommandOptions(["session-abc"]))[0]?.id).toBe("flt-now");
+  expect(() => selectWorkStatuses(finished, parseStatusCommandOptions(["session-other"]))).toThrow("no work found");
+});

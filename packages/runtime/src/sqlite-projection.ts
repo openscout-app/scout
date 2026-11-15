@@ -334,7 +334,9 @@ function* replayParentWrites(scan: ReplayParentScan): Generator<ReplayParentWrit
       value: {
         id,
         kind: "direct",
-        title: id,
+        // Seen only by reference, so it has no name yet. An id is not a name;
+        // the real definition replaces this placeholder when it arrives.
+        title: "",
         visibility: "private",
         shareMode: "local",
         authorityNodeId: anyNodeId,

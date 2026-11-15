@@ -4,6 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {fileURLToPath,pathToFileURL} from "node:url";
 import {createHash} from "node:crypto";
+import {uncoloredEnv} from "./uncolored-env.ts";
 const root=fileURLToPath(new URL("..",import.meta.url)),explicitOutput=process.argv[2];
 const out=explicitOutput??mkdtempSync(join(tmpdir(),"pairing-capsule-evidence-"));mkdirSync(out,{recursive:true});
 const ownerPath=join(root,"packages/runtime/src/pairing-security/trust-owner.ts");
@@ -72,7 +73,7 @@ expect(syncs).toBe(16);
 }finally{original.rmSync(root,{recursive:true,force:true});}
 });`;
       writeFileSync(testFile,tests);
-      const child=Bun.spawn([process.execPath,"test",testFile,"--test-name-pattern",control.test],{stdout:"pipe",stderr:"pipe"});
+      const child=Bun.spawn([process.execPath,"test",testFile,"--test-name-pattern",control.test],{env:uncoloredEnv(),stdout:"pipe",stderr:"pipe"});
       const [code,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
       const log=stdout+stderr;writeFileSync(join(out,`${control.id}-${kind}.log`),log);
       if(kind==="healthy" && code!==0 || kind==="bypass" && !(code!==0 && log.includes("(fail)") && log.includes(control.test) && !log.includes("Cannot find module"))){console.error(log);throw Error(`${control.id}:${kind} did not reach expected assertion; evidence: ${out}`);}

@@ -241,7 +241,7 @@ describe("BrokerOperatorAttentionService", () => {
     await harness.service.sendOperatorSignalAlert({
       signal: { kind: "need", blocking: true, replyExpectation: "required", question: "Should I use /private/customer-data?" },
       messageId: "msg-need", conversationId: "dm", requesterId: "agent", requesterNodeId: "node",
-      body: "Should I use /private/customer-data?", requesterName: "cajun", projectRoot: "/Users/art/dev/fab", createdAt: 7,
+      body: "Should I use /private/customer-data?", requesterName: "cajun", projectRoot: "/Users/you/dev/fab", createdAt: 7,
     });
     const { notification, ...alert } = harness.alerts[0]!;
     expect(notification).toMatchObject({

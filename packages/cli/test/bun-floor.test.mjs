@@ -8,6 +8,17 @@ import { bunVersionError, supportedBunVersion, MINIMUM_BUN_VERSION } from "../bi
 
 const root = new URL("../../../", import.meta.url);
 
+/**
+ * The caller's environment without Scout state or color requests, so a
+ * child prints the same plain stderr whatever terminal runs the suite.
+ */
+function childEnv() {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !key.startsWith("OPENSCOUT_") && !key.startsWith("SCOUT_") && key !== "FORCE_COLOR" && key !== "CLICOLOR_FORCE"));
+  env.NO_COLOR = "1";
+  return env;
+}
+
 test("Bun floor accepts stable versions at or above 1.4.4, not older or prerelease builds", () => {
   assert.equal(MINIMUM_BUN_VERSION, "1.4.4");
   for (const version of ["1.4.4", "1.4.5", "1.4.99", "1.5.0", "2.0.0", "1.4.4+revision"]) {
@@ -36,7 +47,7 @@ test("remote update and knowledge child entries enforce first, before argument o
   try {
     const preload = join(directory, "old-bun.cjs");
     writeFileSync(preload, 'Object.defineProperty(process.versions, "bun", { value: "1.4.3" });\n');
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("OPENSCOUT_") && !key.startsWith("SCOUT_")));
+    const env = childEnv();
     env.HOME = directory;
     env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = "0";
     for (const entry of ["packages/cli/src/update-helper.ts", "packages/runtime/src/knowledge-index-child.ts"]) {
@@ -57,7 +68,7 @@ test("Bun entry wrappers refuse before help, dist resolution or daemon imports",
   try {
     const preload = join(directory, "old-bun.cjs");
     writeFileSync(preload, 'Object.defineProperty(process.versions, "bun", { value: "1.4.3" });\n');
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("OPENSCOUT_") && !key.startsWith("SCOUT_")));
+    const env = childEnv();
     env.HOME = directory;
     for (const entry of ["packages/cli/bin/scout.mjs", "packages/cli/bin/openscout-runtime.mjs", "packages/runtime/bin/openscout-runtime.mjs"]) {
       const result = spawnSync(process.execPath, ["--require", preload, new URL(entry, root).pathname, "--help"], { env, encoding: "utf8", timeout: 5_000 });

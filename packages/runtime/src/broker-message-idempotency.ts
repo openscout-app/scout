@@ -1,5 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
-import type { MessageRecord } from "@openscout/protocol";
+import { submittedCompletionReply, type MessageRecord, type ScoutCompletionReply } from "@openscout/protocol";
+
+function submittedReply(message: MessageRecord): ScoutCompletionReply | null {
+  return submittedCompletionReply(message.metadata?.completionReply as ScoutCompletionReply | undefined) ?? null;
+}
 
 function clientMessageId(message: MessageRecord): string | null {
   const value = message.metadata?.clientMessageId;
@@ -18,7 +22,7 @@ export function isIdempotentMessageRetry(
     && existing.actorId === incoming.actorId
     && existing.class === incoming.class
     && existing.body === incoming.body
-    && isDeepStrictEqual(existing.metadata?.completionReply ?? null, incoming.metadata?.completionReply ?? null)
+    && isDeepStrictEqual(submittedReply(existing), submittedReply(incoming))
     && (existing.replyToMessageId ?? null) === (incoming.replyToMessageId ?? null)
     && (existing.threadConversationId ?? null) === (incoming.threadConversationId ?? null)
     && JSON.stringify(existing.mentions ?? []) === JSON.stringify(incoming.mentions ?? [])

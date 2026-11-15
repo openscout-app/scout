@@ -18,7 +18,7 @@ import {
 
 function snapshotWith(block: Block, turn: Partial<SessionState["turns"][number]> = {}): SessionState {
   return {
-    session: { id: "s1", name: "machiavelli", adapterType: "claude-code", status: "active", cwd: "/Users/art/dev/openscout" },
+    session: { id: "s1", name: "machiavelli", adapterType: "claude-code", status: "active", cwd: "/Users/you/dev/openscout" },
     turns: [{ id: "t1", status: "streaming", startedAt: 1_000, blocks: [{ block, status: "streaming" }], ...turn }],
   } as SessionState;
 }
@@ -52,7 +52,7 @@ describe("agent notification builders", () => {
     expect(n).toMatchObject({
       view: "turn.approve.command",
       command: "bash release.sh",
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       risk: "high",
       why: "Ship the build",
       sender: { name: "machiavelli" },

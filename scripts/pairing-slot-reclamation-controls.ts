@@ -4,6 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {fileURLToPath,pathToFileURL} from "node:url";
 import {createHash} from "node:crypto";
+import {uncoloredEnv} from "./uncolored-env.ts";
 const root=fileURLToPath(new URL("..",import.meta.url)),explicit=process.argv[2];
 const output=explicit??mkdtempSync(join(tmpdir(),"pairing-reclamation-controls-"));mkdirSync(output,{recursive:true});
 const original=readFileSync(join(root,"packages/runtime/src/pairing-security/trust-owner.ts"),"utf8");
@@ -32,7 +33,7 @@ try{
      .replace('"../packages/runtime/src/pairing-security/trust-owner.ts"',JSON.stringify(subject))
      .replace('"./fixtures/pairing-capsule.ts"',JSON.stringify(url("scripts/fixtures/pairing-capsule.ts")))
      .replace('"./pairing-slot-reclamation-worker.ts"',JSON.stringify(pathToFileURL(worker).href)));
-    const child=Bun.spawn([process.execPath,"test",test,"--test-name-pattern",control.test],{stdout:"pipe",stderr:"pipe"});
+    const child=Bun.spawn([process.execPath,"test",test,"--test-name-pattern",control.test],{env:uncoloredEnv(),stdout:"pipe",stderr:"pipe"});
     const [exit,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
     const log=stdout+stderr;writeFileSync(join(output,`${control.id}-${kind}.log`),log);
     if(kind==="healthy"?exit!==0:!(exit!==0 && log.includes("(fail)") && log.includes(control.test) && !/Cannot find module|fixture pause not reached|timed out/.test(log)))throw Error(`${control.id}:${kind}: invalid control evidence in ${output}`);

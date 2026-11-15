@@ -396,7 +396,7 @@
   {
     "name": "reply",
     "title": "Reply",
-    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -433,6 +433,35 @@
         },
         "failed": {
           "type": "boolean"
+        },
+        "waitingOn": {
+          "description": "Blocked: the task stays open, its flight waits on this.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "permission",
+                "question",
+                "review"
+              ]
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "requestRef": {
+              "description": "The request that unblocks the work: a permission request, question, or task ref.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "summary"
+          ],
+          "additionalProperties": false
         },
         "body": {
           "type": "string",

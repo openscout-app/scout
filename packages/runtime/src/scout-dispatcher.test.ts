@@ -152,7 +152,7 @@ describe("resolveAgentLabel", () => {
           id: "endpoint-talkie",
           agentId: talkie.id,
           harness: "claude",
-          projectRoot: "/Users/art/dev/talkie",
+          projectRoot: "/Users/you/dev/talkie",
         }),
       ],
     );
@@ -176,7 +176,7 @@ describe("resolveAgentLabel", () => {
           id: "endpoint-chopin",
           agentId: sessionId,
           harness: "codex",
-          projectRoot: "/Users/art/dev/scope",
+          projectRoot: "/Users/you/dev/scope",
           metadata: { cardless: true, handle: "project-chopin" },
         }),
       ],
@@ -205,7 +205,7 @@ describe("resolveAgentLabel", () => {
           id: "endpoint-mw-talkie",
           agentId: sessionId,
           harness: "codex",
-          projectRoot: "/Users/art/dev/talkie",
+          projectRoot: "/Users/you/dev/talkie",
           metadata: { cardless: true, handle: "project-mw-talkie" },
         }),
       ],
@@ -240,7 +240,7 @@ describe("resolveAgentLabel", () => {
           id: "endpoint-mw-talkie",
           agentId: sessionId,
           harness: "codex",
-          projectRoot: "/Users/art/dev/talkie",
+          projectRoot: "/Users/you/dev/talkie",
           metadata: { cardless: true, handle: "project-mw-talkie" },
         }),
       ],
@@ -293,7 +293,7 @@ describe("resolveAgentLabel", () => {
           agentId: olderSessionId,
           harness: "codex",
           sessionId: olderSessionId,
-          projectRoot: "/Users/art/dev/scope",
+          projectRoot: "/Users/you/dev/scope",
           metadata: {
             cardless: true,
             handle: "project-chopin",
@@ -305,7 +305,7 @@ describe("resolveAgentLabel", () => {
           agentId: newerSessionId,
           harness: "codex",
           sessionId: newerSessionId,
-          projectRoot: "/Users/art/dev/scope",
+          projectRoot: "/Users/you/dev/scope",
           metadata: {
             cardless: true,
             handle: "project-chopin",
@@ -1292,7 +1292,7 @@ describe("resolveBrokerRouteTarget", () => {
           agentId: sessionId,
           harness: "codex",
           sessionId,
-          projectRoot: "/Users/art/dev/scope",
+          projectRoot: "/Users/you/dev/scope",
           metadata: { cardless: true, handle: "project-chopin" },
         }),
       ],
@@ -1598,7 +1598,7 @@ describe("buildDispatchEnvelope", () => {
       id: "endpoint-talkie",
       agentId: talkie.id,
       harness: "claude",
-      projectRoot: "/Users/art/dev/talkie",
+      projectRoot: "/Users/you/dev/talkie",
     });
     const envelope = buildDispatchEnvelope(
       {
