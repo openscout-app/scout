@@ -1272,7 +1272,7 @@ if [ "$1" = "-axo" ] && [ "$2" = "pid=,ppid=,pgid=,tty=,command=" ]; then
   fi
   cat <<'ROWS'
 101 1 101 ttys001 /bin/zsh -l
-202 101 101 ?? /usr/bin/node /Users/art/dev/app.js
+202 101 101 ?? /usr/bin/node /Users/you/dev/app.js
 ROWS
   exit 0
 fi
@@ -1297,7 +1297,7 @@ exit 64
     writeFileSync(script, `#!/bin/sh
 if [ "$1" = "-a" ] && [ "$2" = "-p" ] && [ "$4" = "-d" ] && [ "$5" = "cwd" ] && [ "$6" = "-Fn" ]; then
   printf 'p%s\\n' "$3"
-  printf 'n/Users/art/dev/openscout\\n'
+  printf 'n/Users/you/dev/openscout\\n'
   exit 0
 fi
 if [ "$1" = "-nP" ] && [ "$3" = "-sTCP:LISTEN" ] && [ "$4" = "-Fp" ]; then
@@ -2042,7 +2042,7 @@ exit 64
     ]);
 
     expect(daemon).toEqual(local);
-    expect(daemon.value).toBe("/Users/art/dev/openscout");
+    expect(daemon.value).toBe("/Users/you/dev/openscout");
   }, SCOUTD_CONFORMANCE_TIMEOUT_MS);
 
   test("net.listeners fixture matches between scoutd and the TS local twin", async () => {

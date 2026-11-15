@@ -185,7 +185,7 @@ describe("parseAskCommandOptions", () => {
   test("--on keeps the project path as typed, for the other machine to resolve", () => {
     const parsed = parseAskCommandOptions(
       ["--on", "archie", "--project", "~/renders/arsenal-x", "--runtime", "codex/gpt-6-astra/high", "build the arsenal"],
-      "/Users/art/dev/openscout",
+      "/Users/you/dev/openscout",
     );
     expect(parsed).toEqual(expect.objectContaining({
       onHost: "archie",

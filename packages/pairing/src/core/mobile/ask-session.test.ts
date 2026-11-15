@@ -20,7 +20,7 @@ describe("mobile.askSession", () => {
   test("resumes a session nothing holds with an exact-session ask that never forks", async () => {
     const { ask, calls } = fakeAsk({ usedBroker: true, conversationId: "dm.1", messageId: "msg.1", targetSessionId: SOURCE, flight: { id: "flt.1" } as never });
     const result = await askMobileHarnessSession(
-      { sessionId: ` ${SOURCE} `, harness: "claude", cwd: "/Users/art/dev/openscout", body: " keep going ", clientMessageId: "c-1" },
+      { sessionId: ` ${SOURCE} `, harness: "claude", cwd: "/Users/you/dev/openscout", body: " keep going ", clientMessageId: "c-1" },
       { ask, senderId: "art" },
     );
     expect(calls).toEqual([{
@@ -29,7 +29,7 @@ describe("mobile.askSession", () => {
       body: "keep going",
       sessionDelivery: "in_place_or_resume",
       clientMessageId: "c-1",
-      currentDirectory: "/Users/art/dev/openscout",
+      currentDirectory: "/Users/you/dev/openscout",
       source: "scout-mobile",
     }]);
     expect(result).toEqual({ ok: true, mode: "resumed", delivery: "resumed", sessionId: SOURCE, sourceSessionId: SOURCE, conversationId: "dm.1", flightId: "flt.1", messageId: "msg.1" });

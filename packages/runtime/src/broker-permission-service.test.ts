@@ -129,6 +129,37 @@ describe("managed permission lifecycle", () => {
     expect(parseTmuxPermission(trust.replace("/tmp/project", "/other"))?.version).not.toBe(parseTmuxPermission(trust)?.version);
     expect(parseTmuxPermission(trust)?.keys.once).toBeUndefined();
   });
+
+  test("a generic tool prompt stays current across different capture histories", async () => {
+    const dialog = " Tool use\n Creates an isolated worktree\n────────────────\n Entering worktree(/work/topic)\n permission-root relocation to /work/topic\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n──────────────── session ─";
+    const first = `Reply with the PR link.\nEarlier output\n${dialog}`;
+    const next = `Different capture boundary\n${dialog}`;
+    const parsed = parseTmuxPermission(first)!;
+    expect(parsed.text).not.toContain("Reply with");
+    expect(parsed.text).toContain("Entering worktree(/work/topic)");
+    expect(parsed.version).toBe(parseTmuxPermission(next)!.version);
+    expect(parsed.version).not.toBe(parseTmuxPermission(next.replace("/work/topic", "/work/other"))!.version);
+    const prompt = tmuxPermissionPrompt({ sessionId: "pane", projectRoot: "/work", text: first,
+      alive: async () => true, capture: async () => next, send: async () => { throw new Error("must not send keys"); },
+    })!;
+    expect(await prompt.isCurrent()).toBe(true);
+    expect(parseTmuxPermission(`${next}\n❯ `)).toBeNull();
+  });
+
+  test("a blinking tool status above the dialog cannot close and reopen its permission wait", async () => {
+    const h = harness();
+    const dialog = "Tool use\nEntering worktree(/work/topic)\nDo you want to proceed?\n ❯ 1. Yes\n   2. No\nEsc to cancel";
+    let polls = 0;
+    const prompt = tmuxPermissionPrompt({ sessionId: "pane", projectRoot: "/work", text: `⏺ Earlier tool\n${dialog}`,
+      alive: async () => true,
+      capture: async () => ++polls >= 8 ? "Ready" : `${polls % 2 ? " " : "⏺"} Earlier tool\n${dialog}`,
+      send: async () => { throw new Error("must not answer the request"); },
+    })!;
+    await h.service.wait(invocation, prompt);
+    expect(polls).toBe(8);
+    expect(h.notifications).toHaveLength(1);
+    expect(h.states).toEqual(["waiting", "running"]);
+  });
 });
 
 test("cancelled flights never receive permission keys", async () => {
@@ -159,6 +190,26 @@ test("a selection redraw is not a permission acknowledgement", async () => {
     }, send: async () => { sent = true; pane = trust.replace("❯ No, exit", "  No, exit").replace("   Yes, I trust", " ❯ Yes, I trust"); },
   }));
   expect(capturesAfterSend).toBe(2);
+});
+
+test("a tool dialog with no known header keeps one version while the transcript above it redraws", () => {
+  const rule = "─".repeat(60);
+  const dashed = "╌".repeat(60);
+  const dialog = [rule, " Tool use", " │ Creates an isolated worktree and switches the session into it", dashed,
+    " Entering worktree(/tmp/project-topic)", dashed, "", " Do you want to proceed?", " ❯ 1. Yes", "   2. No", "", " Esc to cancel · Tab to amend"].join("\n");
+  const pane = (mark: string) => [`${mark} Register copy, check attachments`, "  ⎿  $ cd /tmp/project-topic && bun run check", "", dialog,
+    `${"─".repeat(30)} pane-title ─`].join("\n");
+  const shown = parseTmuxPermission(pane("⏺"), "/tmp/project")!;
+  // The progress mark blinks between captures; the prompt is the same prompt.
+  expect(parseTmuxPermission(pane(" "), "/tmp/project")!.version).toBe(shown.version);
+  expect(shown.text.startsWith(rule)).toBe(true);
+  expect(shown.text.endsWith("Esc to cancel")).toBe(true);
+  expect(parseTmuxPermission(shown.text, "/tmp/project")).toEqual(shown);
+  expect(shown.keys).toEqual({ once: ["Enter"], deny: ["2"] });
+});
+
+test("a known header keeps the version it always had", () => {
+  expect(parseTmuxPermission(`${"─".repeat(60)}\n${tool}`)?.version).toBe(parseTmuxPermission(tool)?.version);
 });
 
 test("old folder trust history does not hide the current tool permission", () => {

@@ -14,22 +14,22 @@ describe("parseHerdrSessionState", () => {
       workspaces: [
         {
           id: "w1",
-          identity_cwd: "/Users/art/dev/talkie",
+          identity_cwd: "/Users/you/dev/talkie",
           tabs: [
             {
               panes: {
-                "1": { cwd: "/Users/art/dev/talkie", agent_session: { source: "herdr:claude", agent: "claude" } },
-                "2": { cwd: "/Users/art/dev/talkie", agent_session: null },
+                "1": { cwd: "/Users/you/dev/talkie", agent_session: { source: "herdr:claude", agent: "claude" } },
+                "2": { cwd: "/Users/you/dev/talkie", agent_session: null },
               },
             },
             {
               panes: {
-                "3": { cwd: "/Users/art/dev/openscout", agent_session: { agent: "codex" } },
+                "3": { cwd: "/Users/you/dev/openscout", agent_session: { agent: "codex" } },
               },
             },
           ],
         },
-        { id: "w2", tabs: [{ panes: { "1": { cwd: "/Users/art/dev/openscout" } } }] },
+        { id: "w2", tabs: [{ panes: { "1": { cwd: "/Users/you/dev/openscout" } } }] },
       ],
     }, SAVED_AT);
 
@@ -38,7 +38,7 @@ describe("parseHerdrSessionState", () => {
       workspaces: 2,
       tabs: 3,
       panes: 4,
-      cwds: ["/Users/art/dev/talkie", "/Users/art/dev/openscout"],
+      cwds: ["/Users/you/dev/talkie", "/Users/you/dev/openscout"],
       agents: ["claude", "codex"],
     });
   });
@@ -65,11 +65,11 @@ describe("readHerdrLastKnownState", () => {
     try {
       await writeFile(join(dir, "session.json"), JSON.stringify({
         version: 3,
-        workspaces: [{ tabs: [{ panes: { "1": { cwd: "/Users/art/dev/talkie" } } }] }],
+        workspaces: [{ tabs: [{ panes: { "1": { cwd: "/Users/you/dev/talkie" } } }] }],
       }));
       const summary = await readHerdrLastKnownState(dir);
       expect(summary?.panes).toBe(1);
-      expect(summary?.cwds).toEqual(["/Users/art/dev/talkie"]);
+      expect(summary?.cwds).toEqual(["/Users/you/dev/talkie"]);
       expect(summary?.savedAt).toBeGreaterThan(0);
     } finally {
       await rm(dir, { recursive: true, force: true });

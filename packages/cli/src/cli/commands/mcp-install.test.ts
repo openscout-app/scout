@@ -3,10 +3,153 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { drainSharedMcpOptIn, readSharedMcpOptIn, writeSharedMcpOptIn } from "@openscout/runtime/shared-mcp";
+
 import {
+  enableSharedScoutMcp,
   installScoutMcpForHosts,
   parseMcpInstallCommandOptions,
 } from "./mcp-install.ts";
+
+const SHARED_URL = "http://127.0.0.1:43115/mcp";
+type Call = { command: string; args: string[] };
+
+function recordingRunner(calls: Call[], getStatus = 0) {
+  return (command: string, args: string[]) => {
+    calls.push({ command, args });
+    return { status: args[1] === "get" ? getStatus : 0, stdout: "", stderr: "" };
+  };
+}
+
+describe("shared Scout MCP install", () => {
+  const noStdio = () => {
+    throw new Error("a shared install needs no stdio launcher");
+  };
+
+  test("points Codex and Claude Code at the shared URL, replacing their entries, and leaves Zed alone", () => {
+    const calls: Call[] = [];
+    const outcomes = installScoutMcpForHosts({
+      env: process.env,
+      hosts: ["codex", "claude", "zed"],
+      force: false,
+      dryRun: false,
+      sharedUrl: SHARED_URL,
+      resolveHostPath: (host) => `/tmp/${host}`,
+      resolveLaunchCommand: noStdio,
+      run: recordingRunner(calls),
+    });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["installed", "installed", "skipped"]);
+    expect(outcomes[2]?.detail).toBe("Skipped zed: it keeps its own Scout MCP server.");
+    expect(calls).toEqual([
+      { command: "/tmp/codex", args: ["mcp", "get", "scout"] },
+      { command: "/tmp/codex", args: ["mcp", "remove", "scout"] },
+      { command: "/tmp/codex", args: ["mcp", "add", "scout", "--url", SHARED_URL] },
+      { command: "/tmp/claude", args: ["mcp", "get", "scout"] },
+      { command: "/tmp/claude", args: ["mcp", "remove", "--scope", "user", "scout"] },
+      { command: "/tmp/claude", args: ["mcp", "add", "--scope", "user", "--transport", "http", "scout", SHARED_URL] },
+    ]);
+  });
+
+  test("adds without removing when a host has no scout entry", () => {
+    const calls: Call[] = [];
+    installScoutMcpForHosts({
+      env: process.env, hosts: ["codex"], force: false, dryRun: false, sharedUrl: SHARED_URL,
+      resolveHostPath: () => "/tmp/codex", resolveLaunchCommand: noStdio, run: recordingRunner(calls, 1),
+    });
+    expect(calls.map((call) => call.args[1])).toEqual(["get", "add"]);
+  });
+
+  function sharedInput(supportDirectory: string, calls: Call[], overrides: Partial<Parameters<typeof enableSharedScoutMcp>[0]> = {}) {
+    return {
+      env: process.env,
+      hosts: ["codex", "claude"] as Array<"codex" | "claude">,
+      dryRun: false,
+      supportDirectory,
+      instance: { name: "prod", isProd: true },
+      port: 43115,
+      resolveHostPath: (host: string) => `/tmp/${host}`,
+      run: recordingRunner(calls),
+      waitForServer: async () => true,
+      ...overrides,
+    };
+  }
+
+  test("refuses on a development instance, since the host configs are global", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    const calls: Call[] = [];
+    await expect(enableSharedScoutMcp(sharedInput(dir, calls, { instance: { name: "dev2", isProd: false } })))
+      .rejects.toThrow('only on the main instance (this is "dev2")');
+    expect(readSharedMcpOptIn(dir)).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  test("takes back its opt-in and changes no host when the server never answers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    const calls: Call[] = [];
+    let sawOptIn = false;
+    await expect(enableSharedScoutMcp(sharedInput(dir, calls, {
+      waitForServer: async () => {
+        sawOptIn = readSharedMcpOptIn(dir) !== null;
+        return false;
+      },
+    }))).rejects.toThrow("so no host config was changed");
+    expect(sawOptIn).toBe(true);
+    expect(readSharedMcpOptIn(dir)).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  test("keeps an earlier opt-in when the server does not answer this time", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115, 1);
+    await expect(enableSharedScoutMcp(sharedInput(dir, [], { waitForServer: async () => false }))).rejects.toThrow();
+    expect(readSharedMcpOptIn(dir)?.enabledAt).toBe(1);
+  });
+
+  test("a failed re-enable leaves a draining opt-in draining", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115, 1);
+    drainSharedMcpOptIn(dir);
+    let stateWhileWaiting: string | undefined;
+    await expect(enableSharedScoutMcp(sharedInput(dir, [], {
+      waitForServer: async () => {
+        stateWhileWaiting = readSharedMcpOptIn(dir)?.state;
+        return false;
+      },
+    }))).rejects.toThrow();
+    expect(stateWhileWaiting).toBe("on");
+    expect(readSharedMcpOptIn(dir)?.state).toBe("draining");
+  });
+
+  test("writes the opt-in, waits for the server, then switches the hosts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    const calls: Call[] = [];
+    const lines = await enableSharedScoutMcp(sharedInput(dir, calls, {
+      waitForServer: async (port) => {
+        expect(calls).toEqual([]);
+        return port === 43115;
+      },
+    }));
+    expect(readSharedMcpOptIn(dir)).toMatchObject({ port: 43115, url: SHARED_URL });
+    expect(calls.filter((call) => call.args[1] === "add").length).toBe(2);
+    expect(lines[0]).toBe(`The shared Scout MCP server is on at ${SHARED_URL}, run by scout-base.`);
+    expect(lines.at(-1)).toContain("New Codex and Claude Code sessions use it.");
+  });
+
+  test("dry-run writes nothing and shows the commands", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    const calls: Call[] = [];
+    const lines = await enableSharedScoutMcp(sharedInput(dir, calls, {
+      dryRun: true,
+      waitForServer: async () => {
+        throw new Error("dry-run does not wait for the server");
+      },
+    }));
+    expect(readSharedMcpOptIn(dir)).toBeNull();
+    expect(existsSync(join(dir, "shared-mcp.json"))).toBe(false);
+    expect(calls.every((call) => call.args[1] === "get")).toBe(true);
+    expect(lines).toContain(`[codex] Would run: /tmp/codex mcp add scout --url ${SHARED_URL}`);
+  });
+});
 
 describe("parseMcpInstallCommandOptions", () => {
   test("parses repeated hosts and flags", () => {
@@ -19,7 +162,9 @@ describe("parseMcpInstallCommandOptions", () => {
       hosts: ["codex", "claude"],
       force: true,
       dryRun: true,
+      shared: false,
     });
+    expect(parseMcpInstallCommandOptions(["--shared", "--host", "codex"], process.env).shared).toBe(true);
   });
 
   test("accepts zed and rejects unknown hosts", () => {

@@ -19,7 +19,7 @@ function event(overrides: Partial<TailEvent>): TailEvent {
     pid: 1,
     parentPid: null,
     project: "blink",
-    cwd: "/Users/art/dev/blink",
+    cwd: "/Users/you/dev/blink",
     harness: "unattributed",
     kind: "system",
     summary: "phase · waiting_for_model",
@@ -101,17 +101,17 @@ describe("tail plain rendering", () => {
   const tool = event({
     id: "work",
     kind: "tool-result",
-    summary: "Read · /Users/art/dev/blink/packages/local/src/ui/app/main.js · success",
+    summary: "Read · /Users/you/dev/blink/packages/local/src/ui/app/main.js · success",
   });
   const longTool = event({
     id: "long",
     kind: "tool-result",
-    summary: "Read · /Users/art/dev/blink/packages/local/src/ui/app/main.js --extra-flag-that-would-wrap-a-herd-pane-and-dump-argv · success",
+    summary: "Read · /Users/you/dev/blink/packages/local/src/ui/app/main.js --extra-flag-that-would-wrap-a-herd-pane-and-dump-argv · success",
   });
   const toolStart = event({
     id: "start",
     kind: "tool",
-    summary: "Read · /Users/art/dev/blink/packages/local/src/ui/app/main.js",
+    summary: "Read · /Users/you/dev/blink/packages/local/src/ui/app/main.js",
   });
 
   test("filters grok lifecycle noise from plain output", () => {
@@ -160,7 +160,7 @@ describe("tail plain rendering", () => {
 
     expect(line.length).toBeLessThanOrEqual(146);
     expect(line).toMatch(/^\d{2}:\d{2}  grok\s+read main\.js/);
-    expect(line).not.toContain("/Users/art/dev/blink/packages/local/src/ui/app/main.js");
+    expect(line).not.toContain("/Users/you/dev/blink/packages/local/src/ui/app/main.js");
     expect(line).not.toContain("success");
   });
 
@@ -183,7 +183,7 @@ describe("tail plain rendering", () => {
   test("raw payload dump keeps the first line width-bounded", () => {
     const output = renderTailEvent({
       ...longTool,
-      raw: { tool_name: "Read", path: "/Users/art/dev/blink/packages/local/src/ui/app/main.js" },
+      raw: { tool_name: "Read", path: "/Users/you/dev/blink/packages/local/src/ui/app/main.js" },
     }, { raw: true, columns: 120 });
     const [first = ""] = output.split("\n");
 

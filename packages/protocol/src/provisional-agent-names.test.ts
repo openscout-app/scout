@@ -48,7 +48,7 @@ describe("provisional agent names", () => {
   });
 
   test("derives a deterministic pool offset from caller, receiver, and index seeds", () => {
-    const seed = ["operator", "/Users/art/dev/openscout", "codex", 3];
+    const seed = ["operator", "/Users/you/dev/openscout", "codex", 3];
     const first = provisionalAgentNameStartIndexForSeed(seed);
     expect(provisionalAgentNameStartIndexForSeed(seed)).toBe(first);
     expect(first).toBeGreaterThanOrEqual(0);
@@ -58,7 +58,7 @@ describe("provisional agent names", () => {
       Array.from({ length: 8 }, (_, index) =>
         provisionalAgentNameStartIndexForSeed([
           "operator",
-          "/Users/art/dev/openscout",
+          "/Users/you/dev/openscout",
           "codex",
           index,
         ])
@@ -74,7 +74,7 @@ describe("provisional agent names", () => {
       const name = PROVISIONAL_AGENT_NAMES[provisionalAgentNameStartIndexForSeed([
         "cardless-project-session",
         "operator",
-        "/Users/art/dev/openscout",
+        "/Users/you/dev/openscout",
         "codex",
         index,
       ])]!;
