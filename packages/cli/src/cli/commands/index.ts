@@ -21,6 +21,7 @@ export type ScoutCommandName =
   | "channel"
   | "chat"
   | "config"
+  | "settings"
   | "diff"
   | "down"
   | "doctor"
@@ -106,6 +107,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./channel.ts")).runChannelCommand;
     case "config":
       return (await import("./config.ts")).runConfigCommand;
+    case "settings":
+      return async (context, args) => (await import("./settings.ts")).runSettingsCommand(context, args);
     case "diff":
       return (await import("./diff.ts")).runDiffCommand;
     case "down":

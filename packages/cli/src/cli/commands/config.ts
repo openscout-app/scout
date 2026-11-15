@@ -1,6 +1,5 @@
 import {
-  applyUserConfigField,
-  clearUserConfigField,
+  createSettingsService,
   defaultProvisionalAgentNamesPath,
   describeProvisionalAgentNamePool,
   findUserConfigField,
@@ -11,25 +10,16 @@ import {
   listUserConfigFieldIds,
   listUserConfigSummaryLines,
   loadUserConfig,
+  operatorCliActor,
   parseUserConfigFieldValue,
-  registerUserConfigFieldAfterSet,
   resolveProvisionalAgentNamePool,
-  runUserConfigFieldAfterSet,
   saveUserConfig,
   seedProvisionalAgentNamesInUserConfig,
   writeProvisionalAgentNamesFile,
 } from "@openscout/runtime";
-import { saveOpenScoutOnboardingIdentity } from "@openscout/runtime/onboarding";
+import "./profile-hooks.ts";
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";
-
-registerUserConfigFieldAfterSet("name", async (context, value) => {
-  if (typeof value !== "string" || !value.trim()) return;
-  await saveOpenScoutOnboardingIdentity({
-    currentDirectory: context.currentDirectory ?? process.cwd(),
-    name: value.trim(),
-  });
-});
 
 async function runAgentNamesConfig(args: string[]): Promise<void> {
   const [action, ...rest] = args;
@@ -106,16 +96,18 @@ export async function runConfigCommand(context: ScoutCommandContext, args: strin
       process.exit(1);
     }
 
-    const config = loadUserConfig();
-    if (value === undefined) {
-      clearUserConfigField(config, field);
-    } else {
-      applyUserConfigField(config, field, value);
+    // `scout config set` is the profile part of `scout settings`: the same
+    // service validates the value, writes it, and records it in the change log.
+    try {
+      await createSettingsService().set(field.id, value ?? null, {
+        actor: operatorCliActor("scout config"),
+        context: { currentDirectory: defaultScoutContextDirectory(context) },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(message);
+      process.exit(1);
     }
-    saveUserConfig(config);
-    await runUserConfigFieldAfterSet(field, {
-      currentDirectory: defaultScoutContextDirectory(context),
-    }, value);
     console.log(formatUserConfigSetMessage(field, value));
     return;
   }
