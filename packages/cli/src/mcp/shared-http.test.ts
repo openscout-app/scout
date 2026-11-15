@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -382,6 +382,20 @@ describe.if(process.platform === "darwin")("shared server", () => {
     await Bun.sleep(400);
     expect(handle.connections()).toHaveLength(0);
     expect((await rpc(handle.url, { jsonrpc: "2.0", id: 9, method: "tools/list" }, { "mcp-session-id": sessionId })).status).toBe(404);
+    // Still a client: it reconnects on its next call, so a draining server stays up for it.
+    const stats = await (await fetch(handle.url.replace(/\/mcp$/, "/stats"))).json() as { clientPids: number[] };
+    expect(stats.clientPids).toEqual([process.pid]);
+    await client.close().catch(() => {});
+  });
+
+  test("registers each process it serves on disk before answering, for a drain", async () => {
+    const clientsDir = join(mkdtempSync(join(tmpdir(), "scout-shared-clients-")), "clients");
+    handle = startSharedScoutMcpServer({
+      log: () => {}, resolveIdentity: stubIdentity(),
+      env: { ...process.env, OPENSCOUT_MCP_SHARED_CLIENTS_DIR: clientsDir },
+    });
+    const { client } = await connectClient(handle.url);
+    expect(readdirSync(clientsDir)).toEqual([String(process.pid)]);
     await client.close().catch(() => {});
   });
 

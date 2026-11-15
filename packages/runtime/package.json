@@ -199,6 +199,12 @@
       "import": "./dist/instance-checkout-bootstrap.js",
       "default": "./dist/instance-checkout-bootstrap.js"
     },
+    "./shared-mcp": {
+      "bun": "./src/shared-mcp.ts",
+      "types": "./dist/shared-mcp.d.ts",
+      "import": "./dist/shared-mcp.js",
+      "default": "./dist/shared-mcp.js"
+    },
     "./support-paths": {
       "bun": "./src/support-paths.ts",
       "types": "./dist/support-paths.d.ts",
