@@ -20,8 +20,8 @@ const brokerAskPrompt =
 
 describe("tmux prompt delivery", () => {
   test("quotes launch scripts with spaces", () => {
-    expect(buildTmuxLaunchShellCommand("/Users/arach/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"))
-      .toBe('exec bash "/Users/arach/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"');
+    expect(buildTmuxLaunchShellCommand("/Users/guest/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"))
+      .toBe('exec bash "/Users/guest/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"');
   });
 
   test("pastes prompts as bracketed raw input before sending one submit key", () => {
@@ -304,7 +304,7 @@ describe("tmux prompt-fragment detection", () => {
         "  New broker ask from operator. Task: please refactor the dispatch",
         "  path so it submits the prompt.",
         "",
-        "⏺ Read(/Users/arach/dev/openscout/packages/runtime/src/local-agents.ts)",
+        "⏺ Read(/Users/guest/dev/openscout/packages/runtime/src/local-agents.ts)",
         "  ⎿  Read 30 lines",
         "",
         "───────────────────────────── openscout-review-relay-agent ──",
@@ -344,7 +344,7 @@ const claudeFolderTrustDialog = paneTail([
   "────────────────────────────────────────────────────────────────────────────────",
   " Accessing workspace:",
   "",
-  " /Users/art/Library/Application Support/Linea/Scout",
+  " /Users/you/Library/Application Support/Linea/Scout",
   "",
   " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not,",
   " take a moment to review what's in this folder first.",
@@ -366,7 +366,7 @@ describe("Claude folder-trust dialog", () => {
 
   test("is reported as a blocking dialog that names the folder", () => {
     const blocked = tmuxPaneTailBlockingHarnessDialog(claudeFolderTrustDialog);
-    expect(blocked).toContain("folder-trust prompt for /Users/art/Library/Application Support/Linea/Scout");
+    expect(blocked).toContain("folder-trust prompt for /Users/you/Library/Application Support/Linea/Scout");
   });
 
   test("an ordinary ready composer is not blocking", () => {

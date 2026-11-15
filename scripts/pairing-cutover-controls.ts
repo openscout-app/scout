@@ -4,6 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {createHash} from "node:crypto";
+import {uncoloredEnv} from "./uncolored-env.ts";
 const project = fileURLToPath(new URL("..", import.meta.url)), explicit = process.argv[2];
 const output = explicit ?? mkdtempSync(join(tmpdir(), "pairing-cutover-controls-")); mkdirSync(output, {recursive: true});
 const ownerPath = "packages/runtime/src/pairing-security/trust-owner.ts";
@@ -87,7 +88,7 @@ for (const control of controls) {
       tests = tests.replace('fileURLToPath(new URL("..", import.meta.url))', JSON.stringify(project))
         .replace('join(project, "scripts/pairing-cutover-worker.ts")', JSON.stringify(worker));
       const file = join(scratch, `${kind}.test.ts`); writeFileSync(file, tests);
-      const child = Bun.spawn([process.execPath, "test", file, "--test-name-pattern", control.test], {cwd: project, stdout: "pipe", stderr: "pipe"});
+      const child = Bun.spawn([process.execPath, "test", file, "--test-name-pattern", control.test], {env: uncoloredEnv(), cwd: project, stdout: "pipe", stderr: "pipe"});
       const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
       const log = out + err; writeFileSync(join(output, `${control.id}-${kind}.log`), log);
       if (kind === "healthy" ? code !== 0 : !(code !== 0 && log.includes("(fail)") && log.includes(control.test)
