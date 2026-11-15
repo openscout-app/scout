@@ -456,8 +456,16 @@ describe("runtime mismatch", () => {
   test("the same runtime spelled differently is not a mismatch", () => {
     expect(runtimeMismatch(server, { OPENSCOUT_BROKER_URL: "http://localhost:43110/" }, "http://127.0.0.1:43110")).toBeNull();
     expect(runtimeMismatch(server, {}, "http://127.0.0.1:43110")).toBeNull();
+    // Agents the runtime starts get its LAN address, as seen on live Codex app-servers.
+    const local = new Set(["localhost", "127.0.0.1", "::1", "192.0.2.25", "host-a"]);
+    expect(runtimeMismatch(server, { OPENSCOUT_BROKER_URL: "https://192.0.2.25:43110" }, "http://127.0.0.1:43110", local)).toBeNull();
+    expect(runtimeMismatch(server, { OPENSCOUT_BROKER_URL: "http://host-a:43110" }, "http://127.0.0.1:43110", local)).toBeNull();
+    // This machine's real addresses count without being listed.
+    expect(runtimeMismatch(server, { OPENSCOUT_BROKER_URL: "http://[::1]:43110" }, "http://127.0.0.1:43110")).toBeNull();
   });
   test("another runtime or another instance is", () => {
+    const local = new Set(["localhost", "127.0.0.1", "::1", "192.0.2.25"]);
+    expect(runtimeMismatch(server, { OPENSCOUT_BROKER_URL: "https://192.0.2.40:43110" }, "http://127.0.0.1:43110", local)).toContain("192.0.2.40");
     expect(runtimeMismatch(server, { OPENSCOUT_BROKER_URL: "http://127.0.0.1:24400" }, "http://127.0.0.1:43110")).toContain("24400");
     expect(runtimeMismatch({}, { OPENSCOUT_INSTANCE: "dev" }, "http://127.0.0.1:43110")).toContain("instance dev");
     expect(runtimeMismatch({}, { OPENSCOUT_INSTANCE: "default" }, "http://127.0.0.1:43110")).toBeNull();

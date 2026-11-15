@@ -20,7 +20,7 @@
  * as a number instead of a guess.
  */
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -148,11 +148,30 @@ export function sessionEnvironment(base: NodeJS.ProcessEnv, peer: Record<string,
   return env;
 }
 
-function normalizeRuntimeUrl(value: string): string {
+/** Names and addresses of this machine. */
+export function localHostNames(): Set<string> {
+  const names = new Set(["localhost", "127.0.0.1", "::1"]);
+  const host = hostname().toLowerCase();
+  names.add(host);
+  names.add(host.endsWith(".local") ? host.slice(0, -".local".length) : `${host}.local`);
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) names.add(address.address.toLowerCase());
+  }
+  return names;
+}
+
+/**
+ * A runtime is a listener, so a URL is reduced to host and port, and any
+ * address of this machine is the same host. The runtime advertises itself on
+ * the LAN (https://192.168.x.y:43110) to the agents it starts, and listens
+ * for this server on 127.0.0.1: both are the same runtime.
+ */
+function normalizeRuntimeUrl(value: string, localHosts: Set<string>): string {
   try {
     const url = new URL(value.trim());
-    const host = ["localhost", "[::1]", "::1"].includes(url.hostname.toLowerCase()) ? "127.0.0.1" : url.hostname.toLowerCase();
-    return `${url.protocol}//${host}${url.port ? `:${url.port}` : ""}${url.pathname.replace(/\/+$/, "")}`;
+    const name = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    return `${localHosts.has(name) ? "127.0.0.1" : name}:${port}`;
   } catch {
     return value.trim();
   }
@@ -168,10 +187,15 @@ function instanceName(value: string | undefined): string {
  * another runtime (or another Scout instance) would act on the wrong one
  * here, so it is refused instead of quietly served.
  */
-export function runtimeMismatch(server: NodeJS.ProcessEnv, peer: Record<string, string>, serverUrl: string): string | null {
+export function runtimeMismatch(
+  server: NodeJS.ProcessEnv,
+  peer: Record<string, string>,
+  serverUrl: string,
+  localHosts: Set<string> = localHostNames(),
+): string | null {
   const peerUrl = peer.OPENSCOUT_BROKER_URL?.trim();
   if (peerUrl) {
-    return normalizeRuntimeUrl(peerUrl) === normalizeRuntimeUrl(serverUrl)
+    return normalizeRuntimeUrl(peerUrl, localHosts) === normalizeRuntimeUrl(serverUrl, localHosts)
       ? null
       : `this session uses the runtime at ${peerUrl}; this server serves ${serverUrl}`;
   }
