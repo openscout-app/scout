@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import { buildScoutAskRoute } from "./ask.ts";
+import { buildScoutAskReceipt, buildScoutAskRoute } from "./ask.ts";
 
 describe("buildScoutAskRoute", () => {
   test("keeps direct --to values as existing agent-label routes", () => {
@@ -89,5 +89,88 @@ describe("buildScoutAskRoute", () => {
       host: "arts-mini",
       value: "session:sess.6773faf3c863ce885044@arts-mini",
     });
+  });
+});
+
+describe("buildScoutAskReceipt", () => {
+  const sessionId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000";
+  const sessionTarget = {
+    target: { kind: "session_id" as const, sessionId, value: `session:${sessionId}` },
+    display: `session:${sessionId}`,
+  };
+
+  test("a refused exact session says why, with the runtime's code", () => {
+    const receipt = buildScoutAskReceipt({
+      target: sessionTarget,
+      currentDirectory: "/tmp/openscout",
+      result: {
+        usedBroker: true,
+        targetDiagnostic: {
+          agentId: `session:${sessionId}`,
+          state: "unknown",
+          registrationKind: null,
+          projectRoot: null,
+          detail: `session ${sessionId} is already running without a verified Scout endpoint`,
+          sessionWakeReason: "session_live_unbound",
+        },
+      },
+    });
+
+    expect(receipt.ok).toBe(false);
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error).toEqual({
+      code: "target_unroutable",
+      message: `session ${sessionId} is already running without a verified Scout endpoint`,
+      reason: "session_live_unbound",
+    });
+    // An agent search cannot find another route to an exact session id.
+    expect(receipt.next).toBeUndefined();
+  });
+
+  test("a refusal with a code and no detail still reports the code", () => {
+    const receipt = buildScoutAskReceipt({
+      target: sessionTarget,
+      currentDirectory: "/tmp/openscout",
+      result: {
+        usedBroker: true,
+        targetDiagnostic: {
+          agentId: `session:${sessionId}`,
+          state: "unknown",
+          registrationKind: null,
+          projectRoot: null,
+          sessionWakeReason: "session_unknown",
+        },
+      },
+    });
+    expect(receipt.error).toEqual({ code: "target_unroutable", message: "session_unknown", reason: "session_unknown" });
+  });
+
+  test("an unknown agent label keeps its search hint and gains the reason", () => {
+    const receipt = buildScoutAskReceipt({
+      target: { target: { kind: "agent_label", label: "@nobody" }, display: "@nobody" },
+      currentDirectory: "/tmp/openscout",
+      result: {
+        usedBroker: true,
+        targetDiagnostic: {
+          agentId: "@nobody",
+          state: "unknown",
+          registrationKind: null,
+          projectRoot: null,
+          detail: "no agent matches @nobody",
+        },
+      },
+    });
+    expect(receipt.next?.tool).toBe("agents_search");
+    expect(receipt.error).toEqual({ code: "target_unroutable", message: "no agent matches @nobody" });
+  });
+
+  test("an accepted ask carries no error", () => {
+    const receipt = buildScoutAskReceipt({
+      target: sessionTarget,
+      currentDirectory: "/tmp/openscout",
+      result: { usedBroker: true, accepted: true, conversationId: "c1", messageId: "m1" },
+    });
+    expect(receipt.ok).toBe(true);
+    expect(receipt.error).toBeUndefined();
   });
 });

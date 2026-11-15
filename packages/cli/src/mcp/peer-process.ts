@@ -92,8 +92,11 @@ export async function readProcessEnvironment(pid: number): Promise<Record<string
   return parseProcArgs2(buffer.subarray(0, Number(size[0]))).env;
 }
 
+// A stuck lsof or ps must not hold a session open.
+const PROBE_TIMEOUT_MS = 3_000;
+
 async function run(command: string[]): Promise<string> {
-  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "ignore" });
+  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "ignore", timeout: PROBE_TIMEOUT_MS, killSignal: "SIGKILL" });
   const text = await new Response(proc.stdout).text();
   await proc.exited;
   return text;

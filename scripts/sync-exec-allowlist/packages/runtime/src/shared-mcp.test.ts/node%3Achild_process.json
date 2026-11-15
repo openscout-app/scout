@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/shared-mcp.test.ts",
+  "symbol": "node:child_process",
+  "category": "test",
+  "reason": "type-only ChildProcess import for the fake child handed to the supervisor; the test spawns nothing",
+  "owner": "tests"
+}

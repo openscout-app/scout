@@ -46,6 +46,7 @@ import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 import { isRequesterWaitTimeoutError } from "./requester-timeout.js";
 import { isDispatchStalledError } from "./dispatch-stalled.js";
 import { isDeliveryBlockedError } from "./delivery-blocked.js";
+import { IN_PLACE_CHECKPOINT_KEY, readInPlaceCheckpoint, type InPlaceCheckpoint } from "./in-place/checkpoint.js";
 import { isCodexAppServerExitError, isCodexThreadHeldExternallyError } from "./codex-app-server.js";
 import { sessionAliasAckSummary } from "./session-alias.js";
 import { createInvocationResultReplyIntent, invocationResultMessageId } from "./broker-invocation-result-delivery-service.js";
@@ -92,6 +93,10 @@ type LocalAgentInvocationResult = {
 
 type LocalAgentInvocationHooks = {
   onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
+  onProgress?: (summary: string) => Promise<void> | void;
+  shouldContinue?: () => boolean;
+  inPlaceCheckpoint?: () => InPlaceCheckpoint | null;
+  saveInPlaceCheckpoint?: (checkpoint: InPlaceCheckpoint | null) => Promise<void> | void;
 };
 
 type InvocationExecutorResult =
@@ -543,6 +548,23 @@ export class BrokerLocalInvocationService {
                 liveEndpoint,
                 this.now(),
               ),
+            });
+          },
+          // A delivery that waits (for a busy session, then for its answer)
+          // says so on the task, so a follower sees why it has not finished.
+          onProgress: async (summary) => {
+            if (this.currentFlightIsTerminal(invocation.id)) return;
+            await this.options.transitionInvocation(invocation.id, { state: "running", summary });
+          },
+          shouldContinue: () => !this.currentFlightIsTerminal(invocation.id),
+          // A delivery into an open session keeps its place on the flight, so
+          // a runtime that restarts can pick it up (see in-place/checkpoint.ts).
+          inPlaceCheckpoint: () => readInPlaceCheckpoint(this.options.runtime.flightForInvocation(invocation.id)?.metadata),
+          saveInPlaceCheckpoint: async (checkpoint) => {
+            if (this.currentFlightIsTerminal(invocation.id)) return;
+            await this.options.transitionInvocation(invocation.id, {
+              state: "running",
+              metadata: { [IN_PLACE_CHECKPOINT_KEY]: checkpoint ?? undefined },
             });
           },
         },

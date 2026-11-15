@@ -117,11 +117,27 @@ test("scope, schema, count, session binding, duplicate and nested malformed resp
     { ...v, digests: [{ ...d, live: true, savedAt: 90 }] }, { ...v, digests: [{ ...d, groups: [{ ...d.groups[0], panes: [{}] }] }] },
     { ...v, digests: [{ ...d, session: "../outside" }] }, { ...v, availability: "not_scanned" },
     { ...v, digests: [{ ...d, live: false }] }, { ...v, digests: [{ ...d, notes: Array(129).fill("x") }] },
-    { ...v, digests: Array(9).fill(d), count: 9 }, { ...v, credential: "never accept" }]) {
+    { ...v, digests: Array(9).fill(d), count: 9 }]) {
     await expect(read(Response.json(bad))).rejects.toMatchObject({ code: "invalid_herdr_workspaces_response" });
   }
   await expect(read(Response.json(v), "alpha")).rejects.toThrow();
   await expect(read(Response.json({ ...v, requestedSession: "alpha", digests: [{ ...d, session: "beta" }] }), "alpha")).rejects.toThrow();
+});
+
+test("fields a newer runtime adds are dropped at every level, never refused and never passed on", async () => {
+  const v = value(), d = v.digests[0]!, pane = d.needsYou[0]!, group = d.groups[0]!, shape = d.shapes[0]!;
+  const newer = { ...v, credential: "never pass on", coverage: { ...v.coverage, added: 1, limits: { ...v.coverage.limits, added: 1 } },
+    digests: [{ ...d, added: "x", totals: { ...d.totals, added: 1 }, counts: { ...d.counts, added: 1 },
+      needsYou: [{ ...pane, added: "x", agentSession: pane.agentSession ? { ...pane.agentSession, added: "x" } : pane.agentSession }],
+      groups: [{ ...group, added: "x", omittedCounts: { ...group.omittedCounts, added: 1 },
+        panes: group.panes.map(p => ({ ...p, added: "x" })) }],
+      shapes: [{ ...shape, added: "x" }] }] };
+  const result = await read(Response.json(newer));
+  expect(result).toEqual(v);
+  expect(JSON.stringify(result)).not.toContain("added");
+  expect(JSON.stringify(result)).not.toContain("never pass on");
+  // A known field with the wrong type is still refused.
+  await expect(read(Response.json({ ...newer, nodeId: 7 }))).rejects.toMatchObject({ code: "invalid_herdr_workspaces_response" });
 });
 
 test("declared/streamed oversize, invalid UTF8 and redirects refuse and cancel their streams", async () => {

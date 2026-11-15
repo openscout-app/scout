@@ -1,6 +1,45 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatScoutAskRoutingError, renderAskCommandHelp, renderScoutAskReceipt } from "./ask.ts";
+import { formatScoutAskReceiptError, formatScoutAskRoutingError, renderAskCommandHelp, renderScoutAskReceipt } from "./ask.ts";
+
+describe("formatScoutAskReceiptError", () => {
+  const sessionId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000";
+
+  test("a refused exact session prints the runtime's reason", () => {
+    expect(formatScoutAskReceiptError({
+      ok: false,
+      state: "failed",
+      ids: {},
+      error: {
+        code: "target_unroutable",
+        message: `session ${sessionId} is already running without a verified Scout endpoint`,
+        reason: "session_live_unbound",
+      },
+    }, `session:${sessionId}`)).toBe(
+      `target session:${sessionId} is not currently routable; nothing was sent. Session ${sessionId} is already running without a verified Scout endpoint.`,
+    );
+  });
+
+  test("a search hint that already carries the reason is not repeated", () => {
+    const rendered = formatScoutAskReceiptError({
+      ok: false,
+      state: "failed",
+      ids: {},
+      next: { tool: "agents_search", arguments: {}, reason: "No agent matches @nobody. Find a routable target, then retry the ask." },
+      error: { code: "target_unroutable", message: "no agent matches @nobody" },
+    }, "@nobody");
+    expect(rendered.match(/o agent matches @nobody/gu)).toHaveLength(1);
+  });
+
+  test("other errors keep their own message", () => {
+    expect(formatScoutAskReceiptError({
+      ok: false,
+      state: "failed",
+      ids: {},
+      error: { code: "broker_unreachable", message: "broker is not reachable" },
+    }, "@nobody")).toBe("broker is not reachable");
+  });
+});
 
 describe("renderAskCommandHelp", () => {
   test("documents owned-work semantics and DM default routing", () => {
