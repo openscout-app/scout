@@ -40,6 +40,9 @@ const GIT_LOG_LAST_COMMIT_UNIX_ID: &str = "git.logLastCommitUnix";
 const GIT_WORKTREE_LIST_PORCELAIN_ID: &str = "git.worktreeListPorcelain";
 const PS_RUNTIME_ID: &str = "ps.runtime";
 const PS_DISCOVERY_ID: &str = "ps.discovery";
+/// The runtime's local fallback runs the same columns
+/// (`packages/runtime/src/system-probes/ps.ts`); keep both in step.
+const PS_DISCOVERY_COLUMNS: &str = "pid=,ppid=,etime=,pcpu=,rss=,command=";
 const PS_CWD_ID: &str = "ps.cwd";
 const NET_LISTENERS_ID: &str = "net.listeners";
 const TMUX_SESSIONS_ID: &str = "tmux.sessions";
@@ -1621,7 +1624,7 @@ impl ProbeEngine {
         let timeout = effective_probe_timeout(self.options.ps_timeout, op_timeout_ms);
         match run_capped_command(
             &self.options.ps_bin,
-            &["-axww", "-o", "pid=,ppid=,etime=,command="],
+            &["-axww", "-o", PS_DISCOVERY_COLUMNS],
             None,
             timeout,
             32 * 1024 * 1024,
@@ -3055,20 +3058,37 @@ fn parse_process_discovery_rows(output: &str) -> Vec<Value> {
             let (pid_raw, rest) = take_token(line)?;
             let (ppid_raw, rest) = take_token(rest)?;
             let (etime, rest) = take_token(rest)?;
+            let (pcpu_raw, rest) = take_token(rest)?;
+            let (rss_raw, rest) = take_token(rest)?;
             let pid = parse_process_number(Some(pid_raw))?;
             let ppid = parse_process_number(Some(ppid_raw))?;
             let command = rest.trim();
             if etime.is_empty() || command.is_empty() {
                 return None;
             }
-            Some(json!({
+            let mut row = json!({
                 "pid": pid,
                 "ppid": ppid,
                 "etime": etime,
                 "command": command,
-            }))
+            });
+            // `pcpu` is a decaying average on macOS, not an instantaneous
+            // reading; `rss` is KiB. Both are optional on the wire.
+            if let Some(cpu) = parse_non_negative_f64(pcpu_raw) {
+                row["cpuPct"] = json!(cpu);
+            }
+            if let Some(rss) = parse_non_negative_f64(rss_raw) {
+                row["rssKb"] = json!(rss.round() as u64);
+            }
+            Some(row)
         })
         .collect()
+}
+
+fn parse_non_negative_f64(raw: &str) -> Option<f64> {
+    // Some locales print the decimal separator as a comma.
+    let value = raw.replace(',', ".").parse::<f64>().ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
@@ -4392,6 +4412,27 @@ mod tests {
             native_read_poll_interval: Duration::from_millis(50),
             native_read_subscription_workers: 16,
         }
+    }
+
+    #[test]
+    fn process_discovery_rows_carry_cpu_and_rss() {
+        let rows = super::parse_process_discovery_rows(concat!(
+            "  303   202    01:02:03  12.5  204800 claude --resume abc\n",
+            "  404   202       00:04   0,0    1024 /bin/sh -c echo hello world\n",
+            "  505   202       00:05     -       - /usr/bin/python3 worker.py\n",
+            "garbage\n",
+        ));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["pid"], 303);
+        assert_eq!(rows[0]["etime"], "01:02:03");
+        assert_eq!(rows[0]["cpuPct"], 12.5);
+        assert_eq!(rows[0]["rssKb"], 204800);
+        assert_eq!(rows[0]["command"], "claude --resume abc");
+        assert_eq!(rows[1]["cpuPct"], 0.0);
+        assert_eq!(rows[1]["command"], "/bin/sh -c echo hello world");
+        assert!(rows[2].get("cpuPct").is_none());
+        assert!(rows[2].get("rssKb").is_none());
+        assert_eq!(rows[2]["command"], "/usr/bin/python3 worker.py");
     }
 
     #[test]

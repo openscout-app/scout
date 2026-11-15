@@ -12,6 +12,7 @@ export {
   readRecentLiveEvents,
   readRecentTranscriptEvents,
   readTailEventsForSession,
+  readTailSessionUsage,
   snapshotRecentEvents,
   subscribeTail,
 } from "./service.js";
@@ -32,3 +33,10 @@ export type {
   TailHarness,
   TranscriptSource,
 } from "./types.js";
+
+export type {
+  TailSessionLastTurn,
+  TailSessionTokenTotals,
+  TailSessionUsage,
+  TailSessionUsageReply,
+} from "./session-usage.js";

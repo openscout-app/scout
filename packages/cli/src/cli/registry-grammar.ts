@@ -65,6 +65,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "install": node("-f --candidate= --check --dmg= --force --no-restart --tag= --version="),
   "uninstall": node("-y --delete-data --dry-run --yes"),
   "update": node("--candidate= --check --dmg= --force --ssh-user= --version="),
+  "settings": node("--dry-run", { "list": node(), "get": node(), "set": node(), "unset": node(), "apply": node() }),
   "config": node("--empty --extend", { "show": node(), "list": node(), "get": node(), "set": node(), "agent-names": node("", { "show": node(), "init": node() }) }),
   "machines": node("", { "scan": node(), "show": node(), "name": node(), "note": node(), "pin": node(), "unpin": node(), "forget": node() }),
   "extensions": node("", { "install": node(), "update": node(), "remove": node() }),

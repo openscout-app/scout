@@ -20,6 +20,7 @@ export const scoutBrokerPaths = {
     meshNodeState: "/v1/mesh/node-state",
     tailDiscover: "/v1/tail/discover",
     tailRecent: "/v1/tail/recent",
+    tailUsage: "/v1/tail/usage",
     repoWatchSnapshot: "/v1/repo-watch/snapshot",
     machines: "/v1/machines",
     machinesScan: "/v1/machines/scan",

@@ -1,4 +1,5 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { open as openFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, relative } from "node:path";
 
@@ -82,15 +83,7 @@ function listJsonlFiles(dir: string): string[] {
   return entries.filter((entry) => entry.endsWith(".jsonl"));
 }
 
-function listClaudeSubagentFiles(dir: string): string[] {
-  let entries: string[] = [];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  return entries.filter((entry) => /^agent-[a-zA-Z0-9_-]+\.jsonl$/u.test(entry));
-}
+const CLAUDE_SUBAGENT_FILE = /^agent-[a-zA-Z0-9_-]+\.jsonl$/u;
 
 function pickMostRecentJsonl(dir: string): string | null {
   const files = listJsonlFiles(dir);
@@ -179,6 +172,30 @@ function readFileTail(file: TranscriptFileStat): { content: string; startsAtBegi
   }
 }
 
+async function readFileRange(filePath: string, start: number, length: number): Promise<string> {
+  let handle: Awaited<ReturnType<typeof openFile>> | null = null;
+  try {
+    handle = await openFile(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function readFileHeadAsync(filePath: string): Promise<string> {
+  return await readFileRange(filePath, 0, HEAD_READ_BYTES);
+}
+
+async function readFileTailAsync(file: TranscriptFileStat): Promise<{ content: string; startsAtBeginning: boolean }> {
+  const start = Math.max(0, file.size - TAIL_READ_BYTES);
+  const content = await readFileRange(file.path, start, Math.min(file.size, TAIL_READ_BYTES));
+  return content ? { content, startsAtBeginning: start === 0 } : { content: "", startsAtBeginning: false };
+}
+
 function parseJsonRecord(line: string): Record<string, unknown> | null {
   try {
     const value = JSON.parse(line) as unknown;
@@ -190,12 +207,30 @@ function parseJsonRecord(line: string): Record<string, unknown> | null {
   }
 }
 
-function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
+function cachedClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata | null {
   const cached = metadataCache.get(file.path);
-  if (cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size) {
-    return cached;
-  }
+  return cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size ? cached : null;
+}
 
+function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
+  return cachedClaudeMetadata(file)
+    ?? buildClaudeMetadata(file, readFileHead(file.path), readFileTail(file));
+}
+
+/** As readClaudeMetadata, without blocking the event loop on the reads. */
+async function readClaudeMetadataAsync(file: TranscriptFileStat): Promise<TranscriptMetadata> {
+  const cached = cachedClaudeMetadata(file);
+  if (cached) return cached;
+  const [head, tail] = await Promise.all([readFileHeadAsync(file.path), readFileTailAsync(file)]);
+  return buildClaudeMetadata(file, head, tail);
+}
+
+function buildClaudeMetadata(
+  file: TranscriptFileStat,
+  head: string,
+  tail: { content: string; startsAtBeginning: boolean },
+): TranscriptMetadata {
+  const cached = metadataCache.get(file.path);
   const titles: Pick<TranscriptMetadata, "aiTitle" | "customTitle" | "agentName"> =
     cached && cached.size <= file.size
       ? { aiTitle: cached.aiTitle, customTitle: cached.customTitle, agentName: cached.agentName }
@@ -207,7 +242,6 @@ function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
     const value = record[key] ?? record.title;
     if (typeof value === "string" && value.trim()) titles[key] = value.trim();
   };
-  const head = readFileHead(file.path);
   let cwd: string | null = cached && cached.size <= file.size ? cached.cwd : null;
   let sessionId: string | null = null;
   for (const line of head.split(/\r?\n/)) {
@@ -225,7 +259,6 @@ function readClaudeMetadata(file: TranscriptFileStat): TranscriptMetadata {
           : null;
   }
 
-  const tail = readFileTail(file);
   const tailLines = tail.content.split(/\r?\n/);
   if (!tail.startsAtBeginning) tailLines.shift();
   for (const line of tailLines) {
@@ -271,21 +304,40 @@ function fallbackCwdForPath(filePath: string): string | null {
   }
 }
 
+async function fallbackCwdForPathAsync(filePath: string): Promise<string | null> {
+  const dirName = projectDirNameForPath(filePath);
+  const guessed = dirName ? decodeProjectDir(dirName) : null;
+  if (!guessed) return null;
+  try {
+    return (await stat(guessed)).isDirectory() ? guessed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function listJsonlFilesAsync(dir: string, pattern: RegExp = /\.jsonl$/u): Promise<string[]> {
+  try {
+    return (await readdir(dir)).filter((entry) => pattern.test(entry));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Session transcripts live directly under each encoded project dir. Claude's
  * child workers live under `<session>/subagents/agent-*.jsonl`; they are
  * distinct active harness sessions and must be surfaced independently rather
  * than being folded into their parent's lane.
  */
-function listRecentClaudeProjectTranscripts(
+async function listRecentClaudeProjectTranscripts(
   root: string,
   scope: TailDiscoveryScope,
-): ClaudeTranscriptFile[] {
+): Promise<ClaudeTranscriptFile[]> {
   const cutoff = Date.now() - discoveryWindowMs(scope);
   const found: ClaudeTranscriptFile[] = [];
   let projectDirs: string[] = [];
   try {
-    projectDirs = readdirSync(root);
+    projectDirs = await readdir(root);
   } catch {
     return [];
   }
@@ -293,27 +345,27 @@ function listRecentClaudeProjectTranscripts(
   for (const entry of projectDirs) {
     const projectDir = join(root, entry);
     try {
-      if (!statSync(projectDir).isDirectory()) continue;
+      if (!(await stat(projectDir)).isDirectory()) continue;
     } catch {
       continue;
     }
-    for (const file of listJsonlFiles(projectDir)) {
+    for (const file of await listJsonlFilesAsync(projectDir)) {
       const path = join(projectDir, file);
       try {
-        const stats = statSync(path);
+        const stats = await stat(path);
         const subagentsDir = join(projectDir, basename(path, ".jsonl"), "subagents");
         const activeSubagents: Array<{ path: string; mtimeMs: number; size: number; id: string; workflowRunId?: string }> = [];
         const directories: Array<{ path: string; workflowRunId?: string }> = [{ path: subagentsDir }];
         try {
-          for (const run of readdirSync(join(subagentsDir, "workflows"), { withFileTypes: true })) {
+          for (const run of await readdir(join(subagentsDir, "workflows"), { withFileTypes: true })) {
             if (run.isDirectory()) directories.push({ path: join(subagentsDir, "workflows", run.name), workflowRunId: run.name });
           }
         } catch { /* No workflow directory on most sessions. */ }
         for (const directory of directories) {
-          for (const subagentFile of listClaudeSubagentFiles(directory.path)) {
+          for (const subagentFile of await listJsonlFilesAsync(directory.path, CLAUDE_SUBAGENT_FILE)) {
             const subagentPath = join(directory.path, subagentFile);
             try {
-              const subagentStats = statSync(subagentPath);
+              const subagentStats = await stat(subagentPath);
               if (subagentStats.mtimeMs < cutoff) continue;
               activeSubagents.push({
                 path: subagentPath,
@@ -331,9 +383,9 @@ function listRecentClaudeProjectTranscripts(
 
         // Reading a Claude transcript head is comparatively expensive. Do it
         // only after the parent or a child has passed the activity window.
-        const parentMeta = readClaudeMetadata({ path, mtimeMs: stats.mtimeMs, size: stats.size });
+        const parentMeta = await readClaudeMetadataAsync({ path, mtimeMs: stats.mtimeMs, size: stats.size });
         const parentSessionId = parentMeta.sessionId ?? basename(path).replace(/\.jsonl$/u, "");
-        const cwd = parentMeta.cwd ?? fallbackCwdForPath(path);
+        const cwd = parentMeta.cwd ?? await fallbackCwdForPathAsync(path);
         if (stats.mtimeMs >= cutoff) {
           found.push({ path, mtimeMs: stats.mtimeMs, size: stats.size, cwd });
         }
@@ -595,10 +647,12 @@ export const ClaudeSource: TranscriptSource = {
   discoverProcesses(): Promise<DiscoveredProcess[]> {
     return discoverClaudeProcesses();
   },
-  discoverTranscripts(_processes: DiscoveredProcess[], scope: TailDiscoveryScope = "shallow"): DiscoveredTranscript[] {
-    const root = projectsRoot();
-    if (!existsSync(root)) return [];
-    return listRecentClaudeProjectTranscripts(root, scope).map(claudeTranscriptForFile);
+  async discoverTranscripts(_processes: DiscoveredProcess[], scope: TailDiscoveryScope = "shallow"): Promise<DiscoveredTranscript[]> {
+    // Async so a scan of many project folders never blocks the broker.
+    const files = await listRecentClaudeProjectTranscripts(projectsRoot(), scope);
+    const out: DiscoveredTranscript[] = [];
+    for (const file of files) out.push(await claudeTranscriptForFileAsync(file));
+    return out;
   },
   parseLine(line: string, ctx: TailContext): TailEvent | null {
     return parseClaudeLine(line, ctx);
@@ -609,7 +663,19 @@ export const ClaudeSource: TranscriptSource = {
 function claudeTranscriptForFile(file: ClaudeTranscriptFile): DiscoveredTranscript {
   const meta = readClaudeMetadata(file);
   // A child agent's file.cwd is its parent's; it keeps that folder.
-  const cwd = file.cwd ?? meta.cwd ?? fallbackCwdForPath(file.path);
+  return claudeTranscriptFromMetadata(file, meta, file.cwd ?? meta.cwd ?? fallbackCwdForPath(file.path));
+}
+
+async function claudeTranscriptForFileAsync(file: ClaudeTranscriptFile): Promise<DiscoveredTranscript> {
+  const meta = await readClaudeMetadataAsync(file);
+  return claudeTranscriptFromMetadata(file, meta, file.cwd ?? meta.cwd ?? await fallbackCwdForPathAsync(file.path));
+}
+
+function claudeTranscriptFromMetadata(
+  file: ClaudeTranscriptFile,
+  meta: TranscriptMetadata,
+  cwd: string | null,
+): DiscoveredTranscript {
   const sessionId = file.subagentId
     ?? meta.sessionId
     ?? basename(file.path).replace(/\.jsonl$/, "");
