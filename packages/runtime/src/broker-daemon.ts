@@ -237,6 +237,7 @@ import {
   getTailDiscovery,
   readRecentLiveEvents,
   readRecentTranscriptEvents,
+  readTailSessionUsage,
 } from "./tail/index.js";
 import {
   getRepoWatchSnapshot,
@@ -3549,6 +3550,7 @@ const routeRequest = createBrokerHttpRouter({
   brokerRepoTailService,
   getHarnessTopologySnapshot,
   getTailDiscovery,
+  readTailSessionUsage,
   nudgeHarnessTopologyScan,
   deliveryHttpService,
   durableActionHttpService,

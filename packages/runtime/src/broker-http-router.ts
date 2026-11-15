@@ -140,6 +140,7 @@ import type { BrokerRendezvousService } from "./broker-rendezvous-service.js";
 import type { BrokerWebControlService } from "./broker-web-control-service.js";
 import { buildCollaborationInvocation } from "./collaboration-invocations.js";
 import type { DiscoverySnapshot, TailDiscoveryOptions, TailDiscoveryScope } from "./tail/types.js";
+import { TAIL_SESSION_USAGE_MAX_REFS, type TailSessionUsageReply } from "./tail/session-usage.js";
 import type {
   MeshCollaborationEventBundle,
   MeshCollaborationRecordBundle,
@@ -257,6 +258,8 @@ export type BrokerHttpRouterDeps = {
   brokerRepoTailService: BrokerRepoTailService<RuntimeRegistrySnapshot>;
   getHarnessTopologySnapshot: (force: boolean) => unknown | Promise<unknown>;
   getTailDiscovery: (options?: boolean | TailDiscoveryOptions) => DiscoverySnapshot | Promise<DiscoverySnapshot>;
+  /** Absent in hosts that do not tail transcripts; the route then answers 404. */
+  readTailSessionUsage?: (sessionRefs: readonly string[]) => Promise<TailSessionUsageReply>;
   nudgeHarnessTopologyScan: () => unknown | Promise<unknown>;
   deliveryHttpService: BrokerDeliveryHttpService;
   durableActionHttpService: BrokerDurableActionHttpService;
@@ -449,6 +452,43 @@ function trimTailDiscoverySnapshot(
   };
 }
 
+function parseTailDiscoveryPid(value: string | null): number | undefined {
+  if (!value?.trim() || !/^\d+$/u.test(value.trim())) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * `parentChain=0` keeps each process's `parentChain` as an empty array (up to
+ * ten ancestors per process, each with its full command line); `pid=<n>` keeps
+ * only that process and the transcripts in its folder. Totals still describe
+ * the whole host.
+ */
+function shapeTailDiscoverySnapshot(
+  snapshot: DiscoverySnapshot,
+  options: { includeParentChain: boolean; pid: number | undefined },
+): DiscoverySnapshot {
+  if (options.includeParentChain && options.pid === undefined) return snapshot;
+  let processes = snapshot.processes;
+  let transcripts = snapshot.transcripts;
+  if (options.pid !== undefined) {
+    processes = processes.filter((process) => process.pid === options.pid);
+    const keys = new Set(
+      processes
+        .map((process) => tailDiscoveryProcessKey(process.source, process.cwd))
+        .filter((key): key is string => Boolean(key)),
+    );
+    transcripts = transcripts.filter((transcript) => {
+      const key = tailDiscoveryProcessKey(transcript.source, transcript.cwd);
+      return key !== null && keys.has(key);
+    });
+  }
+  if (!options.includeParentChain) {
+    processes = processes.map((process) => ({ ...process, parentChain: [] }));
+  }
+  return { ...snapshot, processes, transcripts };
+}
+
 function trustEnrollmentFailure(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TrustEnrollmentError) {
     json(response, 400, {
@@ -494,6 +534,7 @@ export function createBrokerHttpRouter(
     brokerRepoTailService,
     getHarnessTopologySnapshot,
     getTailDiscovery,
+    readTailSessionUsage,
     nudgeHarnessTopologyScan,
     deliveryHttpService,
     durableActionHttpService,
@@ -1634,8 +1675,12 @@ export function createBrokerHttpRouter(
       ...(limit !== undefined ? { limit } : {}),
     };
     const timingDesc = [scope, limit ? `limit-${limit}` : null].filter(Boolean).join("-");
+    const parentChainParam = url.searchParams.get("parentChain")?.trim().toLowerCase();
     const payload = trimTailDiscoverySnapshot(
-      await getTailDiscovery(discoveryOptions),
+      shapeTailDiscoverySnapshot(await getTailDiscovery(discoveryOptions), {
+        includeParentChain: !(parentChainParam === "0" || parentChainParam === "false"),
+        pid: parseTailDiscoveryPid(url.searchParams.get("pid")),
+      }),
       limit,
     );
     jsonWithHeaders(response, 200, payload, {
@@ -1645,6 +1690,27 @@ export function createBrokerHttpRouter(
         ...(timingDesc ? { desc: timingDesc } : {}),
       }]),
     });
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/v1/tail/usage") {
+    if (!readTailSessionUsage) {
+      notFound(response);
+      return;
+    }
+    const refs = url.searchParams.getAll("sessionId")
+      .flatMap((value) => value.split(","))
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (refs.length === 0) {
+      badRequest(response, new Error("sessionId is required"));
+      return;
+    }
+    if (refs.length > TAIL_SESSION_USAGE_MAX_REFS) {
+      badRequest(response, new Error(`at most ${TAIL_SESSION_USAGE_MAX_REFS} sessionId values`));
+      return;
+    }
+    json(response, 200, await readTailSessionUsage(refs));
     return;
   }
 
