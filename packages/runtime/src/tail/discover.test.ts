@@ -1,12 +1,38 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { parseEtimeSeconds, readCwd, resetDiscoverCachesForTest } from "./discover.js";
+import { listProcesses, withProcessListPass, parseEtimeSeconds, readCwd, resetDiscoverCachesForTest } from "./discover.js";
 
 afterEach(() => {
   resetDiscoverCachesForTest();
 });
 
 describe("tail process discovery", () => {
+  test("pins one slow pass but refreshes expired rows for the next pass", async () => {
+    const originalNow = Date.now;
+    let now = 10_000;
+    let reads = 0;
+    Date.now = () => now;
+    resetDiscoverCachesForTest(undefined, async () => [
+      { pid: ++reads, ppid: 1, etime: "00:01", command: "claude" },
+    ]);
+    try {
+      await withProcessListPass(async () => {
+        expect((await listProcesses())[0]?.pid).toBe(1);
+        now += 60_000;
+        await withProcessListPass(async () => {
+          expect((await listProcesses())[0]?.pid).toBe(1);
+        });
+        expect((await listProcesses())[0]?.pid).toBe(1);
+      });
+      await withProcessListPass(async () => {
+        expect((await listProcesses())[0]?.pid).toBe(2);
+      });
+      expect(reads).toBe(2);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("parses every ps etime form", () => {
     expect(parseEtimeSeconds("00:05")).toBe(5);
     expect(parseEtimeSeconds("12:34")).toBe(754);

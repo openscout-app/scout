@@ -27,6 +27,7 @@ export type RawProcess = {
 
 let processListCache: { expiresAt: number; promise: Promise<RawProcess[]> } | null = null;
 let processListPins = 0;
+let processReader = () => readProcessDiscoveryRows(PROCESS_LIST_CACHE_MS);
 
 type CwdCacheEntry = { startedAtSec: number | null; cwd: string | null; readAt: number };
 const cwdCache = new Map<number, CwdCacheEntry>();
@@ -38,7 +39,7 @@ function readNonNegativeIntEnv(name: string, fallback: number): number {
 }
 
 async function readProcessListUncached(): Promise<RawProcess[]> {
-  const rows = await readProcessDiscoveryRows(PROCESS_LIST_CACHE_MS);
+  const rows = await processReader();
   pruneCwdCache(rows);
   return rows;
 }
@@ -69,6 +70,9 @@ export async function listProcesses(): Promise<RawProcess[]> {
  * next source runs `ps` again and sees a slightly different process table.
  */
 export async function withProcessListPass<T>(run: () => Promise<T>): Promise<T> {
+  if (processListPins === 0 && processListCache && Date.now() >= processListCache.expiresAt) {
+    processListCache = null;
+  }
   processListPins++;
   try {
     return await run();
@@ -147,9 +151,13 @@ export async function readCwd(pid: number, etime?: string): Promise<string | nul
 }
 
 /** Test seam: forget cached process lists and working directories, and optionally replace the cwd reader. */
-export function resetDiscoverCachesForTest(reader?: (pid: number) => Promise<string | null>): void {
+export function resetDiscoverCachesForTest(
+  reader?: (pid: number) => Promise<string | null>,
+  readProcesses?: () => Promise<RawProcess[]>,
+): void {
   processListCache = null;
   processListPins = 0;
+  processReader = readProcesses ?? (() => readProcessDiscoveryRows(PROCESS_LIST_CACHE_MS));
   cwdCache.clear();
   cwdReader = reader ?? ((pid) => readProcessCwd(pid, 1_000));
 }
