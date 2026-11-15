@@ -15,6 +15,7 @@ import {
   isRetiredLocalAgent,
   latestEndpointForAgent,
 } from "./broker-endpoint-selection.js";
+import { isResumableInPlaceFlight } from "./in-place/checkpoint.js";
 import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 
 export {
@@ -348,6 +349,13 @@ export function staleWorkingFlightReason(
   if (agent?.metadata?.staleLocalRegistration === true) {
     return staleLocalEndpointReason(latestEndpointForAgent(snapshot, flight.targetAgentId))
       ?? `target agent ${flight.targetAgentId} is a superseded local registration replaced by current setup`;
+  }
+
+  // A delivery into a session open in the operator's own place is picked up
+  // by dispatch recovery. Its endpoint says nothing about it: the endpoint
+  // sweep marks such an endpoint offline whenever Scout runs no copy of it.
+  if (isResumableInPlaceFlight(flight)) {
+    return null;
   }
 
   const dispatchEndpointReason = flightDispatchEndpointUnavailableReason(snapshot, flight);

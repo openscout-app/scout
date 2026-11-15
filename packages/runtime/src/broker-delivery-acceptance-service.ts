@@ -158,6 +158,7 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
     options: {
       requesterId?: string;
       currentDirectory?: string;
+      projectPath?: string;
       reason: string;
     },
   ) => Promise<InvocationResolution>;
@@ -1052,6 +1053,7 @@ export class BrokerDeliveryAcceptanceService {
         }, {
           requesterId,
           currentDirectory: payload.caller?.currentDirectory?.trim() || projectPath,
+          projectPath,
           reason: "project delivery target",
         });
     throwIfAborted(options.signal);

@@ -170,7 +170,13 @@ function createHarness(input: {
   invokeEndpoint?: (
     endpoint: AgentEndpoint,
     invocation: InvocationRequest,
-    hooks?: { onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void },
+    hooks?: {
+      onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
+      onProgress?: (summary: string) => Promise<void> | void;
+      shouldContinue?: () => boolean;
+      inPlaceCheckpoint?: () => unknown;
+      saveInPlaceCheckpoint?: (checkpoint: never) => Promise<void> | void;
+    },
   ) => Promise<{ output: string; externalSessionId?: string; metadata?: Record<string, unknown> }>;
   ensureResult?: { externalSessionId?: string | null; metadata?: Record<string, unknown> };
   ensureEndpoint?: (endpoint: AgentEndpoint) => Promise<{ externalSessionId?: string | null; metadata?: Record<string, unknown> }>;
@@ -1699,6 +1705,65 @@ describe("tmux session observation across the invocation boundary", () => {
       pendingExternalSession: false,
       observedSessionId: nativeId,
     }));
+  });
+
+  test("a transport that is holding an ask reports it on the task, and is told when the task was cancelled", async () => {
+    const seen: Array<{ summary: string | undefined; go: boolean | undefined }> = [];
+    const harness = createHarness({
+      endpoint: testEndpoint({ transport: "tmux", harness: "claude" }),
+      async invokeEndpoint(_endpoint, _invocation, hooks) {
+        await hooks?.onProgress?.("Held until the turn ends.");
+        seen.push({ summary: harness.flightForInvocation("invocation-1")?.summary, go: hooks?.shouldContinue?.() });
+
+        harness.seedFlight(testFlight({ state: "cancelled", summary: "Cancelled by the sender" }));
+        await hooks?.onProgress?.("Delivered. Waiting for its reply.");
+        seen.push({ summary: harness.flightForInvocation("invocation-1")?.summary, go: hooks?.shouldContinue?.() });
+        return { output: "" };
+      },
+    });
+    harness.seedFlight(testFlight());
+
+    await harness.service.execute(testInvocation());
+
+    expect(seen).toEqual([
+      { summary: "Held until the turn ends.", go: true },
+      // Progress never reopens a cancelled task.
+      { summary: "Cancelled by the sender", go: false },
+    ]);
+    expect(harness.flightForInvocation("invocation-1")?.state).toBe("cancelled");
+    expect(harness.postedMessages).toEqual([]);
+  });
+
+  test("a delivery into an open session keeps its place on the flight, and reads back what an earlier runtime left", async () => {
+    const held = { phase: "held", since: 1_000 };
+    const typed = { phase: "typed", since: 1_000, at: 5_000, via: "tmux", location: "tmux work · %3", transcriptOffset: 4_096 };
+    const seen: unknown[] = [];
+    const harness = createHarness({
+      endpoint: testEndpoint({ transport: "tmux", harness: "claude" }),
+      async invokeEndpoint(_endpoint, _invocation, hooks) {
+        const save = hooks?.saveInPlaceCheckpoint as (checkpoint: unknown) => Promise<void>;
+        // Left by the runtime that ran this task before.
+        seen.push(hooks?.inPlaceCheckpoint?.());
+        await save(typed);
+        seen.push(hooks?.inPlaceCheckpoint?.());
+        seen.push(harness.flightForInvocation("invocation-1")?.state);
+        await save(null);
+        seen.push(hooks?.inPlaceCheckpoint?.());
+
+        // A cancelled task keeps its record and is never reopened by a write.
+        await save(held);
+        harness.seedFlight(testFlight({ state: "cancelled", summary: "Cancelled by the sender", metadata: { inPlace: held } }));
+        await save(typed);
+        seen.push(hooks?.inPlaceCheckpoint?.());
+        return { output: "" };
+      },
+    });
+    harness.seedFlight(testFlight({ metadata: { inPlace: held } }));
+
+    await harness.service.execute(testInvocation());
+
+    expect(seen).toEqual([held, typed, "running", null, held]);
+    expect(harness.flightForInvocation("invocation-1")?.state).toBe("cancelled");
   });
 });
 
