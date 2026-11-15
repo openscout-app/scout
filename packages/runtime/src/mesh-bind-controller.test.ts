@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
@@ -516,5 +516,131 @@ describe("remote request under force enforce", () => {
       nonceClaim,
     });
     expect(allowed.action).toBe("allow");
+  });
+});
+
+describe("mesh bind address changes", () => {
+  function rebindController(port: number, support: string, addresses: { current: string[] }, options: {
+    addressPollMs?: number;
+    stateChanges?: string[][];
+  } = {}) {
+    const keyId = nodeKeyId(loadOrCreateNodeIdentity(support).publicKey);
+    return createMeshBindController({
+      port,
+      keyId,
+      supportDirectory: support,
+      loopbackBrokerUrl: `http://127.0.0.1:${port}`,
+      // 127.0.0.1 stands in for the LAN address and ::1 for a Tailscale
+      // address that appears after boot.
+      resolveTlsAddresses: () => addresses.current,
+      loadTlsIdentity: () => loadOrCreateTlsIdentity(support, { nodeKeyId: keyId }),
+      env: { OPENSCOUT_MDNS_ENABLED: "0" },
+      addressPollMs: options.addressPollMs ?? 0,
+      handleHttp: (_req, res) => {
+        res.writeHead(200);
+        res.end("ok");
+      },
+      onStateChange: (state) => {
+        options.stateChanges?.push(state.tlsAddresses);
+      },
+    });
+  }
+
+  test("queued start and stop clear the address watcher, including after restart", async () => {
+    const controller = rebindController(await freePort(), tempSupportDir(), { current: [] }, { addressPollMs: 60_000 });
+    const intervals = spyOn(globalThis, "setInterval");
+    const clears = spyOn(globalThis, "clearInterval");
+    try {
+      for (let cycle = 0; cycle < 2; cycle++) {
+        const starting = controller.start("local");
+        const stopping = controller.stop();
+        await Promise.all([starting, stopping]);
+        const timer = intervals.mock.results.at(-1)!.value;
+        expect(timer).toBeDefined();
+        expect(clears).toHaveBeenCalledWith(timer);
+      }
+      expect(intervals).toHaveBeenCalledTimes(2);
+      expect(clears).toHaveBeenCalledTimes(2);
+    } finally {
+      await controller.stop();
+      intervals.mockRestore();
+      clears.mockRestore();
+    }
+  });
+
+  test("re-applying mesh with an added address keeps the open listener", async () => {
+    const support = tempSupportDir();
+    const port = await freePort();
+    const addresses = { current: ["127.0.0.1"] };
+    const controller = rebindController(port, support, addresses);
+
+    expect((await controller.start("mesh")).tlsAddresses).toEqual(["127.0.0.1"]);
+
+    // Before the fix this reopened 127.0.0.1 next to its own listener and
+    // failed with "port in use".
+    addresses.current = ["127.0.0.1", "::1"];
+    const state = await controller.applyScope("mesh");
+    expect(state.tlsAddresses).toEqual(["127.0.0.1", "::1"]);
+    expect(await httpsGetViaOpenssl(port, "/health")).toContain("HTTP/1.1 200");
+
+    addresses.current = ["127.0.0.1"];
+    expect((await controller.applyScope("mesh")).tlsAddresses).toEqual(["127.0.0.1"]);
+    expect(await httpsGetViaOpenssl(port, "/health")).toContain("HTTP/1.1 200");
+
+    await controller.stop();
+  });
+
+  test("refreshAddresses rebinds only when the interface set changed", async () => {
+    const support = tempSupportDir();
+    const port = await freePort();
+    const addresses = { current: ["127.0.0.1"] };
+    const stateChanges: string[][] = [];
+    const controller = rebindController(port, support, addresses, { stateChanges });
+
+    await controller.start("mesh");
+    expect(stateChanges).toEqual([["127.0.0.1"]]);
+
+    await controller.refreshAddresses();
+    expect(stateChanges).toHaveLength(1);
+
+    addresses.current = ["127.0.0.1", "::1"];
+    const state = await controller.refreshAddresses();
+    expect(state.tlsAddresses).toEqual(["127.0.0.1", "::1"]);
+    expect(stateChanges).toEqual([["127.0.0.1"], ["127.0.0.1", "::1"]]);
+
+    await controller.stop();
+  });
+
+  test("local scope ignores address changes", async () => {
+    const support = tempSupportDir();
+    const port = await freePort();
+    const addresses = { current: ["127.0.0.1"] };
+    const controller = rebindController(port, support, addresses);
+
+    await controller.start("local");
+    addresses.current = ["127.0.0.1", "::1"];
+    const state = await controller.refreshAddresses();
+    expect(state.scope).toBe("local");
+    expect(state.tlsAddresses).toEqual([]);
+
+    await controller.stop();
+  });
+
+  test("the address watch picks up an interface that appears after start", async () => {
+    const support = tempSupportDir();
+    const port = await freePort();
+    const addresses = { current: ["127.0.0.1"] };
+    const controller = rebindController(port, support, addresses, { addressPollMs: 20 });
+
+    await controller.start("mesh");
+    addresses.current = ["127.0.0.1", "::1"];
+
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && controller.getState().tlsAddresses.length < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(controller.getState().tlsAddresses).toEqual(["127.0.0.1", "::1"]);
+
+    await controller.stop();
   });
 });
