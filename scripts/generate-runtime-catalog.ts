@@ -56,6 +56,11 @@ export async function renderCatalogOutputs(root: string): Promise<CatalogOutput[
     { path: RUNTIME_CATALOG_TS_OUTPUT, content: renderRuntimeCatalogTs(catalog) },
     { path: RUNTIME_MODEL_WINDOWS_OUTPUT, content: renderModelContextWindows(catalog) },
   ];
+  const tastePath = resolve(root, "packages/protocol/src/model-taste.v1.json");
+  if (existsSync(tastePath)) {
+    const taste = JSON.parse(await readFile(tastePath, "utf8"));
+    outputs.push({ path: "packages/protocol/src/model-taste.generated.ts", content: `// Generated from model-taste.v1.json. Do not edit.\n\nexport const SCOUT_MODEL_TASTE_DATA = ${JSON.stringify(taste, null, 2)} as const;\n` });
+  }
   if (existsSync(resolve(root, LANDING_MIRROR_DIR))) {
     outputs.push({ path: RUNTIME_CATALOG_LANDING_OUTPUT, content: renderLandingMirror(catalog) });
   }

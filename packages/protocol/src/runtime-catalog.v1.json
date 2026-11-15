@@ -1,6 +1,6 @@
 {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-11-10.1",
+  "revision": "2026-11-10.2",
   "harnesses": [
     {
       "id": "claude",
@@ -35,6 +35,7 @@
       "models": [
         { "id": "gpt-6-astra", "label": "6 Astra", "enabled": true, "default": true, "description": "Most capable for complex reasoning, coding, computer use, research, and document creation", "family": "GPT", "version": "6 Astra", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"], "defaultReasoningEffort": "low", "presentation": { "detail": "Most capable" } },
         { "id": "gpt-6.1-sol", "label": "6.1 Sol", "enabled": true, "description": "Complex coding, computer use, and professional work at a lower cost than Astra", "family": "GPT", "version": "6.1 Sol", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "medium", "presentation": { "detail": "Latest" } },
+        {"id": "gpt-6.1-terra", "label": "6.1 Terra", "enabled": true, "family": "GPT", "version": "6.1 Terra", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "medium"},
         { "id": "gpt-6-sol", "label": "6 Sol", "enabled": true, "description": "Complex coding and agentic workflows", "family": "GPT", "version": "6 Sol", "contextWindowTokens": 272000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "presentation": { "detail": "Coding" } },
         { "id": "gpt-6-luna", "label": "6 Luna", "enabled": true, "description": "Efficient focused coding and repeatable tasks", "family": "GPT", "version": "6 Luna", "contextWindowTokens": 272000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"], "presentation": { "detail": "Efficient" } },
         { "id": "gpt-5.6-sol", "label": "5.6 Sol", "enabled": true, "family": "GPT", "version": "5.6 Sol", "reasoningEfforts": ["low", "medium", "high", "xhigh", "ultra"], "presentation": { "detail": "Frontier" } },
@@ -53,7 +54,8 @@
       "defaultReasoningEffort": "high",
       "presentation": { "short": "Grok", "monogram": "✕" },
       "models": [
-        { "id": "grok-4.6", "label": "Grok 4.6", "enabled": true, "default": true, "family": "Grok", "version": "4.6", "contextWindowTokens": 500000, "presentation": { "detail": "Latest" } },
+        {"id": "grok-4.7", "label": "Grok 4.7", "enabled": true, "default": true, "family": "Grok", "version": "4.7"},
+        { "id": "grok-4.6", "label": "Grok 4.6", "enabled": true, "family": "Grok", "version": "4.6", "contextWindowTokens": 500000, "presentation": { "detail": "Latest" } },
         { "id": "grok-4.5", "label": "Grok 4.5", "enabled": true, "family": "Grok", "version": "4.5", "contextWindowTokens": 500000 }
       ]
     },
@@ -65,7 +67,8 @@
       "defaultReasoningEffort": "high",
       "presentation": { "short": "Grok", "monogram": "✕" },
       "models": [
-        { "id": "grok-4.6", "label": "Grok 4.6", "enabled": true, "default": true, "family": "Grok", "version": "4.6", "contextWindowTokens": 500000, "presentation": { "detail": "Latest" } },
+        {"id": "grok-4.7", "label": "Grok 4.7", "enabled": true, "default": true, "family": "Grok", "version": "4.7"},
+        { "id": "grok-4.6", "label": "Grok 4.6", "enabled": true, "family": "Grok", "version": "4.6", "contextWindowTokens": 500000, "presentation": { "detail": "Latest" } },
         { "id": "grok-4.5", "label": "Grok 4.5", "enabled": true, "family": "Grok", "version": "4.5", "contextWindowTokens": 500000 }
       ]
     },
@@ -78,7 +81,11 @@
       "enabled": true,
       "reasoningEfforts": null,
       "models": [
-        { "id": "opencode-go/glm-5.2", "label": "GLM-5.2", "enabled": true, "default": true, "family": "GLM", "version": "5.2" },
+        {"id": "opencode-go/glm-5.3", "label": "GLM-5.3", "enabled": true, "default": true, "family": "GLM", "version": "5.3"},
+        {"id": "opencode-go/minimax-m3.1-flash", "label": "MiniMax M3.1 Flash", "enabled": true, "family": "MiniMax", "version": "M3.1 Flash"},
+        {"id": "opencode-go/kimi-k3.1-pro", "label": "Kimi K3.1 Pro", "enabled": true, "family": "Kimi", "version": "K3.1 Pro"},
+        {"id": "opencode-go/grok-4.7", "label": "Grok 4.7", "enabled": true, "family": "Grok", "version": "4.7"},
+        { "id": "opencode-go/glm-5.2", "label": "GLM-5.2", "enabled": true, "family": "GLM", "version": "5.2" },
         { "id": "opencode-go/glm-5.1", "label": "GLM-5.1", "enabled": true, "family": "GLM", "version": "5.1" },
         { "id": "opencode-go/kimi-k3", "label": "Kimi K3", "enabled": true, "family": "Kimi", "version": "K3" },
         { "id": "opencode-go/qwen3.8-max", "label": "Qwen3.8 Max", "enabled": true, "family": "Qwen", "version": "3.8 Max" },

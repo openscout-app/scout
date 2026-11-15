@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { FAMILY_TIER_PICKS_REVIEWED_AT } from "./model-economics.js";
 import {
   assertValidModelWorldview,
   buildModelWorldview,
@@ -62,4 +63,14 @@ describe("model-worldview.json", () => {
       /duplicate inexpensive model pick/u,
     );
   });
+});
+
+test("public inventory is additive, resolves the same taste, and dates economics by the picks' review", () => {
+  const published = buildModelWorldview("2026-11-10");
+  expect(published.schema).toBe(1);
+  expect(published.economicsReviewedAt).toBe(FAMILY_TIER_PICKS_REVIEWED_AT);
+  expect(published.inventory.taste.factsReviewedAt).toBe("2026-11-10");
+  expect(published.inventory.shorthand.sol?.route.model).toBe("gpt-6.1-sol");
+  expect(published.inventory.shorthand.glm?.route.model).toBe("opencode-go/glm-5.3");
+  expect(published.inventory.note).toContain("not account access");
 });

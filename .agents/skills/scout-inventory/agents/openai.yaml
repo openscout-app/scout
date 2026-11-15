@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scout agent inventory"
+  short_description: "Inventory and set up your other coding agents"
+  default_prompt: "Use $scout-inventory to inventory my coding agents and connected providers, then complete the setup I requested."
