@@ -1314,11 +1314,12 @@ export class CodexAppServerTransport {
     } else {
       const launchArgs = normalizeCodexAppServerLaunchArgs(this.options.launchArgs);
       const codexExecutable = resolveCodexExecutable(env);
-      const scoutMcp = resolveScoutMcpCodexLaunch({
+      const scoutMcp = await resolveScoutMcpCodexLaunch({
         currentDirectory: this.options.cwd,
         env,
         codexExecutable,
       });
+      signal.throwIfAborted();
       if (scoutMcp.unknownReason) {
         this.writeLog(this.stderrLogPath, `[openscout] ${scoutMcp.unknownReason}\n`);
       }
