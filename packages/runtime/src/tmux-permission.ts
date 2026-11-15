@@ -22,7 +22,9 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
     // built-in tools has no header above). Start there at the latest, so the
     // transcript above the dialog (a progress mark that blinks, a line that
     // scrolls) never enters the fingerprint and the prompt keeps one version.
-    const start = Math.max(header, lastRuleLine(prefix));
+    const rule = lastRuleLine(prefix);
+    const start = rule >= 0 && header >= rule && !/^(?:Bash command|Edit file|Write file)[ \t]*$/im.test(prefix.slice(header))
+      ? rule : Math.max(header, rule);
     const end = clean.indexOf("Esc to cancel", question);
     if (start >= 0 && end >= 0) clean = clean.slice(start, end + "Esc to cancel".length).trim();
   }
