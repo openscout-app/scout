@@ -40,7 +40,7 @@ export function renderMcpCommandHelp(): string {
     "Usage:",
     "  scout mcp [--context-root <path>] [--notifications]",
     "  scout mcp install [--host <codex|claude|zed>] [--force] [--dry-run]",
-    "  scout mcp serve [--port <n>] [--host 127.0.0.1]",
+    "  scout mcp serve [--port <n>] [--host 127.0.0.1] [--notifications]",
     "                   one shared server for every local session (Streamable HTTP)",
     "",
     "Run or install the Scout MCP server.",
@@ -109,6 +109,7 @@ export async function runMcpCommand(
       host: flag("--host") ?? "127.0.0.1",
       port: Number(flag("--port") ?? 0),
       env: context.env,
+      notifications: rest.includes("--notifications") || rest.includes("--enable-notifications"),
     });
     return;
   }

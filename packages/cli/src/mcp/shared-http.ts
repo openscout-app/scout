@@ -4,9 +4,11 @@
  * Each harness connects by URL (Streamable HTTP) instead of launching its
  * own `scout mcp` child. On a connection's first request the server finds
  * the local process on the other end of the socket, resolves the harness
- * session behind it (see peer-process.ts) and builds a Scout MCP server for
- * that connection with the environment and directory a stdio child would
- * have had. Later requests carry `Mcp-Session-Id` and reach the same server.
+ * session behind it (see peer-process.ts) and opens a protocol endpoint for
+ * that connection. Every endpoint runs one shared set of tool definitions
+ * (see shared-tools.ts) with the environment and directory a stdio child
+ * would have had. Later requests carry `Mcp-Session-Id` and reach the same
+ * endpoint. One shared server serves one runtime.
  *
  * Tool handlers mostly await the runtime, so one event loop serves many
  * sessions; the stats endpoint reports event-loop delay so a stall shows up
@@ -14,17 +16,25 @@
  */
 import { randomUUID } from "node:crypto";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createScoutMcpServer } from "./scout-mcp.ts";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { findLoopbackPeerPid, isProcessAlive, resolvePeerIdentity, type PeerIdentity } from "./peer-process.ts";
+import { createSharedScoutTools, type ScoutSessionContext } from "./shared-tools.ts";
 
 /** Keys that name one session. The shared process's own values never leak into a connection. */
 const SESSION_KEYS = /^(CLAUDE_|CODEX_|OPENSCOUT_AGENT$|OPENSCOUT_SESSION_ID$|OPENSCOUT_REPLY_CONTEXT|OPENSCOUT_MCP_ENABLE_NOTIFICATIONS$|TMUX|TERM_PROGRAM|GHOSTTY_|HERDR_|PWD$)/;
 
+/**
+ * Keys that choose the runtime. A shared server serves one runtime: its own
+ * values win in every session, so tools that read them at call time agree
+ * with the ones that read them when the shared tools were built.
+ */
+const RUNTIME_KEYS = /^(OPENSCOUT_BROKER_|OPENSCOUT_WEB_|SCOUT_WEB_|OPENSCOUT_INSTANCE|OPENSCOUT_CLIENT_INSTANCE$|OPENSCOUT_EXPOSE_)/;
+
 type Connection = {
   id: string;
   transport: WebStandardStreamableHTTPServerTransport;
-  server: McpServer;
+  server: Server;
+  lifetime: AbortController;
   identity: PeerIdentity;
   openedAt: number;
   lastRequestAt: number;
@@ -40,6 +50,8 @@ export type SharedMcpServerOptions = {
   maxInFlightPerConnection?: number;
   /** How often to drop connections whose harness process has exited. */
   reapIntervalMs?: number;
+  /** Send notifications/scout/reply on every connection (stdio's `--notifications`). */
+  notifications?: boolean;
   log?: (message: string) => void;
 };
 
@@ -100,7 +112,8 @@ function describe(connection: Connection, now = Date.now()) {
 export function sessionEnvironment(base: NodeJS.ProcessEnv, peer: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(base)) if (!SESSION_KEYS.test(key)) env[key] = value;
-  return { ...env, ...peer };
+  for (const [key, value] of Object.entries(peer)) if (!RUNTIME_KEYS.test(key)) env[key] = value;
+  return env;
 }
 
 export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}): SharedMcpServerHandle {
@@ -109,10 +122,13 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
   const maxInFlight = options.maxInFlightPerConnection ?? 32;
   const connections = new Map<string, Connection>();
   const lag = createLagSampler();
+  // Built once: every connection runs these tool definitions and handlers.
+  const tools = createSharedScoutTools(baseEnv);
 
   const close = async (connection: Connection, reason: string) => {
     if (!connections.delete(connection.id)) return;
     log(`closed ${connection.id} (${connection.identity.harness} ${connection.identity.sessionId ?? "?"}): ${reason}; ${connections.size} open`);
+    connection.lifetime.abort();
     await connection.server.close().catch(() => {});
   };
 
@@ -121,16 +137,29 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
     if (!peerPid) return new Response("could not find the local process for this connection", { status: 403 });
     const identity = await resolvePeerIdentity(peerPid);
     const env = sessionEnvironment(baseEnv, identity.env);
-    const server = createScoutMcpServer({
-      defaultCurrentDirectory: identity.cwd ?? env.HOME ?? "/",
+    if (options.notifications) env.OPENSCOUT_MCP_ENABLE_NOTIFICATIONS = "1";
+    const peerRuntime = identity.env.OPENSCOUT_BROKER_URL;
+    if (peerRuntime && peerRuntime !== env.OPENSCOUT_BROKER_URL) {
+      log(`session ${identity.sessionId ?? identity.pid} expects runtime ${peerRuntime}; this server serves ${env.OPENSCOUT_BROKER_URL ?? "the default runtime"}`);
+    }
+    const lifetime = new AbortController();
+    let server: Server | undefined;
+    const context: ScoutSessionContext = {
       env,
-    });
+      currentDirectory: identity.cwd ?? env.HOME ?? "/",
+      scope: {
+        lifetime: lifetime.signal,
+        flights: new Set(),
+        notify: (params) => server!.notification({ method: "notifications/scout/reply", params }),
+      },
+    };
+    server = tools.connect(context);
     let connection: Connection | undefined;
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         connection = {
-          id, transport, server, identity,
+          id, transport, server: server!, lifetime, identity,
           openedAt: Date.now(), lastRequestAt: Date.now(), requests: 1, inFlight: 0,
         };
         connections.set(id, connection);
@@ -143,7 +172,10 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
     });
     await server.connect(transport);
     const response = await transport.handleRequest(request);
-    if (!connection) await server.close().catch(() => {});
+    if (!connection) {
+      lifetime.abort();
+      await server.close().catch(() => {});
+    }
     return response;
   };
 

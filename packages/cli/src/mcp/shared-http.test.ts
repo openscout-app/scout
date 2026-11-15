@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createSharedScoutTools } from "./shared-tools.ts";
 import { parseLsofPeer, parseProcArgs2, readProcessEnvironment, resolvePeerIdentity } from "./peer-process.ts";
 import { sessionEnvironment, startSharedScoutMcpServer, type SharedMcpServerHandle } from "./shared-http.ts";
 
@@ -59,6 +61,76 @@ describe("session environment", () => {
       { CLAUDE_CODE_SESSION_ID: "peer-session", PWD: "/p" },
     );
     expect(env).toEqual({ HOME: "/h", OPENSCOUT_BROKER_URL: "http://runtime", CLAUDE_CODE_SESSION_ID: "peer-session", PWD: "/p" });
+  });
+
+  test("the server's runtime wins over the one a session names", () => {
+    const env = sessionEnvironment(
+      { OPENSCOUT_BROKER_URL: "http://runtime", OPENSCOUT_WEB_PORT: "1" },
+      { OPENSCOUT_BROKER_URL: "http://other", OPENSCOUT_WEB_PORT: "2", OPENSCOUT_AGENT: "peer" },
+    );
+    expect(env).toEqual({ OPENSCOUT_BROKER_URL: "http://runtime", OPENSCOUT_WEB_PORT: "1", OPENSCOUT_AGENT: "peer" });
+  });
+});
+
+describe("shared tool definitions", () => {
+  test("nothing that names a session is read while the shared tools are built", () => {
+    const tools = createSharedScoutTools({ HOME: "/h", PATH: process.env.PATH });
+    const sessionKeys = [...tools.buildTimeReads].filter((key) => !/^(OPENSCOUT_BROKER_|OPENSCOUT_WEB_|SCOUT_WEB_|OPENSCOUT_EXPOSE_)/.test(key));
+    expect(sessionKeys).toEqual([]);
+    expect(tools.methods).toContain("tools/call");
+  });
+
+  test("concurrent calls on two connections each see their own session", async () => {
+    // The runtime holds every request open and records what each call sent,
+    // so calls from both connections are suspended at the same time.
+    const bodies: any[] = [];
+    let open = 0;
+    let maxOpen = 0;
+    const runtime = Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch: async (request) => {
+        open += 1; maxOpen = Math.max(maxOpen, open);
+        if (request.method === "POST") bodies.push(await request.json());
+        await Bun.sleep(150);
+        open -= 1;
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const runtimeUrl = `http://127.0.0.1:${runtime.port}`;
+      const tools = createSharedScoutTools({ HOME: "/h", PATH: process.env.PATH, OPENSCOUT_BROKER_URL: runtimeUrl });
+      const connect = async (name: string) => {
+        const context = {
+          env: { HOME: "/h", PATH: process.env.PATH, OPENSCOUT_BROKER_URL: runtimeUrl, OPENSCOUT_AGENT: `agent-${name}`, CLAUDE_CODE_SESSION_ID: `session-${name}` },
+          currentDirectory: `/work/${name}`,
+          scope: { lifetime: new AbortController().signal, flights: new Set<string>(), notify: async () => {} },
+        };
+        const server = tools.connect(context);
+        const [a, b] = InMemoryTransport.createLinkedPair();
+        await server.connect(b);
+        const client = new Client({ name, version: "0" });
+        await client.connect(a);
+        return client;
+      };
+      const [one, two] = await Promise.all([connect("one"), connect("two")]);
+      // `show` reads the session on both sides of an await, then posts the caller.
+      const show = (client: Client, caption: string) => client.callTool({ name: "show", arguments: { path: "/work/shot.png", caption } });
+      await Promise.all([show(one, "one-a"), show(two, "two-a"), show(one, "one-b"), show(two, "two-b")]);
+      expect(maxOpen).toBeGreaterThanOrEqual(2);
+      const seen = bodies
+        .map((b) => [b.caption, b.caller.actorId, b.caller.currentDirectory, b.caller.metadata.sessionId, b.caller.metadata.harness])
+        .sort((x, y) => String(x[0]).localeCompare(String(y[0])));
+      expect(seen).toEqual([
+        ["one-a", "agent-one", "/work/one", "session-one", "claude"],
+        ["one-b", "agent-one", "/work/one", "session-one", "claude"],
+        ["two-a", "agent-two", "/work/two", "session-two", "claude"],
+        ["two-b", "agent-two", "/work/two", "session-two", "claude"],
+      ]);
+      expect((await one.listTools()).tools.length).toBe((await two.listTools()).tools.length);
+      await Promise.all([one.close(), two.close()]);
+    } finally {
+      runtime.stop(true);
+    }
   });
 });
 
