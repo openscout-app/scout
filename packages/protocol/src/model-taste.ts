@@ -57,7 +57,9 @@ export function resolveScoutModelTaste(taste: ScoutModelTaste, catalog: ScoutOwn
     const candidates = harness.models.filter(m => m.enabled && (slot.selector.tier ? m.id.endsWith(`-${slot.selector.tier}`) : slot.selector.family ? m.family === slot.selector.family : false));
     const model = candidates.find(m => m.default) ?? candidates[0];
     if (wantsModel && !model) return [];
-    const label = model ? (slot.selector.tier ? `GPT-${model.version ?? model.label}` : model.label) : slot.label;
+    // Name the runtime when the model label alone does not ("SWE-2 High" is Devin's).
+    const named = (text: string) => text.toLowerCase().startsWith(slot.label.toLowerCase()) ? text : `${slot.label} ${text}`;
+    const label = model ? (slot.selector.tier ? `GPT-${model.version ?? model.label}` : named(model.label)) : slot.label;
     return [[key, { label, route: { providerId: slot.providerId, harness: slot.harness, model: model?.id ?? null, effort: slot.effort, profile: slot.profile }, capability: slot.capability, caution: slot.caution }] as const];
   }));
 }
