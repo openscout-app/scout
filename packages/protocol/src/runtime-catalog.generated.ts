@@ -2,7 +2,7 @@
 
 export const SCOUT_RUNTIME_CATALOG_DATA = {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-11-10.1",
+  "revision": "2026-11-10.2",
   "harnesses": [
     {
       "id": "claude",
@@ -185,6 +185,23 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
           }
         },
         {
+          "id": "gpt-6.1-terra",
+          "label": "6.1 Terra",
+          "enabled": true,
+          "family": "GPT",
+          "version": "6.1 Terra",
+          "contextWindowTokens": 1050000,
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "defaultReasoningEffort": "medium"
+        },
+        {
           "id": "gpt-6-sol",
           "label": "6 Sol",
           "enabled": true,
@@ -304,10 +321,17 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
       },
       "models": [
         {
+          "id": "grok-4.7",
+          "label": "Grok 4.7",
+          "enabled": true,
+          "default": true,
+          "family": "Grok",
+          "version": "4.7"
+        },
+        {
           "id": "grok-4.6",
           "label": "Grok 4.6",
           "enabled": true,
-          "default": true,
           "family": "Grok",
           "version": "4.6",
           "contextWindowTokens": 500000,
@@ -342,10 +366,17 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
       },
       "models": [
         {
+          "id": "grok-4.7",
+          "label": "Grok 4.7",
+          "enabled": true,
+          "default": true,
+          "family": "Grok",
+          "version": "4.7"
+        },
+        {
           "id": "grok-4.6",
           "label": "Grok 4.6",
           "enabled": true,
-          "default": true,
           "family": "Grok",
           "version": "4.6",
           "contextWindowTokens": 500000,
@@ -396,10 +427,38 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
       "reasoningEfforts": null,
       "models": [
         {
+          "id": "opencode-go/glm-5.3",
+          "label": "GLM-5.3",
+          "enabled": true,
+          "default": true,
+          "family": "GLM",
+          "version": "5.3"
+        },
+        {
+          "id": "opencode-go/minimax-m3.1-flash",
+          "label": "MiniMax M3.1 Flash",
+          "enabled": true,
+          "family": "MiniMax",
+          "version": "M3.1 Flash"
+        },
+        {
+          "id": "opencode-go/kimi-k3.1-pro",
+          "label": "Kimi K3.1 Pro",
+          "enabled": true,
+          "family": "Kimi",
+          "version": "K3.1 Pro"
+        },
+        {
+          "id": "opencode-go/grok-4.7",
+          "label": "Grok 4.7",
+          "enabled": true,
+          "family": "Grok",
+          "version": "4.7"
+        },
+        {
           "id": "opencode-go/glm-5.2",
           "label": "GLM-5.2",
           "enabled": true,
-          "default": true,
           "family": "GLM",
           "version": "5.2"
         },

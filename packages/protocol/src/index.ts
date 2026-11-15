@@ -21,6 +21,7 @@ export * from "./work-claims.js";
 export * from "./assigned-roles.js";
 export * from "./orchestrator-prompt.js";
 export * from "./orchestration-provider-map.js";
+export * from "./model-taste.js";
 export * from "./messages.js";
 export * from "./message-reactions.js";
 export * from "./read-receipts.js";

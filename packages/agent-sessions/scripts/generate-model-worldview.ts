@@ -37,12 +37,15 @@ export async function generateModelWorldviewFile(
 }
 
 async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  if (args.length && (args.length !== 2 || args[0] !== "--output" || !args[1]?.trim() || args[1].startsWith("--"))) throw new Error("Use --output <site JSON path> to project into the private website.");
+  const outputPath = args[1] ?? PUBLISHED_MODEL_WORLDVIEW;
   const worldview = await generateModelWorldviewFile(
-    PUBLISHED_MODEL_WORLDVIEW,
+    outputPath,
     new Date().toISOString().slice(0, 10),
   );
   console.log(
-    `wrote ${PUBLISHED_MODEL_WORLDVIEW} (${worldview.families.length} families)`,
+    `wrote ${outputPath} (${worldview.families.length} families)`,
   );
 }
 
