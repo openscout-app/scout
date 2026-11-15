@@ -36,7 +36,7 @@ describe("runtime provisional agent names", () => {
   test("uses seed parts as a stable allocation offset", () => {
     const input = {
       occupied: new Set<string>(),
-      seedParts: ["operator", "/Users/art/dev/openscout", "codex", 2],
+      seedParts: ["operator", "/Users/you/dev/openscout", "codex", 2],
     };
     const allocated = resolveProvisionalAgentName(input);
     expect(resolveProvisionalAgentName(input)).toBe(allocated);

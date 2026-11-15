@@ -482,6 +482,25 @@ export function resolveMeshHost(input: {
 }
 
 /**
+ * The peers an `--on` ask would be routed to, for checks made before dispatch.
+ * Only the node routing picks counts: a stale record that shares the name (an
+ * old mini-local advertising "mini") must not refuse an ask the live node can
+ * take. An ambiguous name keeps every match; routing refuses it anyway.
+ */
+export function meshHostDispatchPeers(resolution: MeshHostResolution): NodeDefinition[] {
+  switch (resolution.kind) {
+    case "peer":
+    case "not_trusted":
+    case "unreachable":
+      return [resolution.node];
+    case "ambiguous":
+      return resolution.nodes;
+    default:
+      return [];
+  }
+}
+
+/**
  * When a project path is not on this node, find the peer that knows a repo of
  * the same folder name, so the error can say exactly which `--on` to add.
  * Only exact last-segment matches count; a guess that might be wrong is worse
