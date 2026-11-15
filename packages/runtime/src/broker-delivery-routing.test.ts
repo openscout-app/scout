@@ -475,4 +475,44 @@ describe("broker delivery routing", () => {
     expect(wakeInputs[0]?.forkIfLive).toBeUndefined();
     expect(result).toMatchObject({ kind: "unknown", detail: "session is already running", sessionWakeReason: "session_live_unbound" });
   });
+
+  test("the caller's folder reaches wake as a fallback, never as the project the session must match", async () => {
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    const sessionId = "4fad8bb9-b4d3-4432-be75-8cfd636e78c0";
+    const wakeInputs: Array<{ projectPath?: string; fallbackCwd?: string }> = [];
+    const router = new BrokerDeliveryRouter({
+      runtimeSnapshot: () => runtime.snapshot(),
+      nodeId: "node-1",
+      isInactiveLocalAgent: () => false,
+      wakeExactHarnessSession: async (input) => {
+        wakeInputs.push(input);
+        return { ok: false, reason: "session_unknown", detail: "not here" };
+      },
+    });
+
+    await router.resolveWithImplicitProjectAgent({
+      target: { kind: "session_id", sessionId, harness: "codex" },
+    }, { requesterId: "operator", currentDirectory: "/work/elsewhere", reason: "ask from another folder" });
+    expect(wakeInputs[0]?.projectPath).toBeUndefined();
+    expect(wakeInputs[0]?.fallbackCwd).toBe("/work/elsewhere");
+
+    await router.resolveWithImplicitProjectAgent({
+      target: { kind: "session_id", sessionId, harness: "codex" },
+    }, {
+      requesterId: "operator",
+      currentDirectory: "/work/elsewhere",
+      projectPath: "/work/blink",
+      reason: "ask that names a project",
+    });
+    expect(wakeInputs[1]?.projectPath).toBe("/work/blink");
+    expect(wakeInputs[1]?.fallbackCwd).toBe("/work/elsewhere");
+
+    // An invocation with no project and no caller folder names neither.
+    await router.resolveInvocationTarget({
+      target: { kind: "session_id", sessionId, harness: "codex" },
+      requesterId: "operator",
+    } as Parameters<BrokerDeliveryRouter["resolveInvocationTarget"]>[0]);
+    expect(wakeInputs[2]?.projectPath).toBeUndefined();
+    expect(wakeInputs[2]?.fallbackCwd).toBeUndefined();
+  });
 });

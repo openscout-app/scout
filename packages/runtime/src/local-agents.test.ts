@@ -35,11 +35,14 @@ import {
   startLocalAgent,
   stripLocalAgentReplyMetadata,
   waitForLocalAgentReply,
+  continuedSessionReplyWaitSeconds,
+  flatSessionWasTypedInPlace,
   waitForReadyComposer,
 } from "./local-agents";
 import { buildCardlessSessionEndpoint } from "./broker-cardless-session";
 import { DEFAULT_BROKER_URL } from "./broker-process-manager";
 import { shutdownCodexAppServerAgent } from "./codex-app-server";
+import { DeliveryBlockedError } from "./delivery-blocked";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scoutCli = `bun ${JSON.stringify(join(repoRoot, "packages", "cli", "bin", "scout.mjs"))}`;
@@ -1384,6 +1387,43 @@ describe("terminal broker reply capture", () => {
     expect(output).toBe("done");
     expect(reads).toBe(2);
   });
+  test("the session's own transcript answers when the worker posts no reply", async () => {
+    const answers: Array<string | null> = [null, null, "It passes."];
+    let reads = 0;
+    const output = await waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => ({ messages: {} }),
+      transcriptReply: async () => answers[Math.min(reads++, answers.length - 1)]!,
+    });
+    expect(output).toBe("It passes.");
+    expect(reads).toBe(3);
+  });
+  test("a turn the transcript shows was interrupted ends the wait with the reason", async () => {
+    const interrupted = new DeliveryBlockedError({
+      stage: "in_place_turn_aborted",
+      summary: "its turn was interrupted before it answered.",
+      message: "The turn was interrupted before it answered.",
+    });
+    await expect(waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => ({ messages: {} }),
+      transcriptReply: async () => { throw interrupted; },
+    })).rejects.toBe(interrupted);
+  });
+
+  test("a reply the worker posts itself still wins, and a transcript that cannot be read is not an answer", async () => {
+    const reply = { class: "agent", actorId: input.agentRuntimeId, conversationId: "chn-smoke", replyToMessageId: "msg-smoke", body: "posted", createdAt: 11_000 };
+    let snapshots = 0;
+    const output = await waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => (snapshots++ === 0 ? { messages: {} } : { messages: { reply } }),
+      transcriptReply: async () => { throw new Error("transcript moved"); },
+    });
+    expect(output).toBe("posted");
+  });
 });
 
 describe("local agent reply cleanup", () => {
@@ -1593,4 +1633,29 @@ test("canonical task images expose authorized attachment reads instead of invent
   expect(prompt).toContain('"messageId":"msg-image"');
   expect(prompt).toContain('"conversationId":"conversation"');
   expect(prompt).not.toContain("/api/blobs/");
+});
+
+describe("a session Scout continues itself", () => {
+  const twoHours = 2 * 60 * 60_000;
+
+  test("is waited on for the whole turn when its answer is read from the transcript", () => {
+    // Nothing reads the transcript after the wait ends, so the short wait would lose the answer.
+    expect(continuedSessionReplyWaitSeconds({ transcriptRead: true, transcriptWaitMs: twoHours })).toBe(7_200);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 60_000, transcriptRead: true, transcriptWaitMs: twoHours })).toBe(7_200);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 3 * twoHours, transcriptRead: true, transcriptWaitMs: twoHours })).toBe(21_600);
+  });
+
+  test("keeps the sender's wait when the worker replies through Scout", () => {
+    expect(continuedSessionReplyWaitSeconds({ transcriptRead: false, transcriptWaitMs: twoHours })).toBe(300);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 5_000, transcriptRead: false, transcriptWaitMs: twoHours })).toBe(30);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 90_000, transcriptRead: false, transcriptWaitMs: twoHours })).toBe(90);
+  });
+
+  test("an ask already typed where the session was open is only watched, and a held one is not", () => {
+    expect(flatSessionWasTypedInPlace(null)).toBe(false);
+    expect(flatSessionWasTypedInPlace({ phase: "held", since: 1 })).toBe(false);
+    const place = { via: "scout-app", location: "the ChatGPT app", transcriptOffset: 10 } as const;
+    expect(flatSessionWasTypedInPlace({ phase: "typing", since: 1, at: 2, ...place })).toBe(true);
+    expect(flatSessionWasTypedInPlace({ phase: "typed", since: 1, at: 2, ...place })).toBe(true);
+  });
 });
