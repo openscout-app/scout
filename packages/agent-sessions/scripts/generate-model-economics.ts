@@ -15,6 +15,11 @@
 import { join } from "node:path";
 
 const SOURCE = "https://models.dev/api.json";
+
+/** Model ids of labs with a native provider in PROVIDER_PRECEDENCE, as hosts resell them. */
+function resold(id: string): boolean {
+  return /^(glm|kimi|deepseek|minimax|claude|gpt|gemini|grok|llama|command)-/u.test(id.trim().toLowerCase());
+}
 const OUT = join(import.meta.dir, "../src/model-economics.generated.ts");
 
 /**
@@ -34,9 +39,11 @@ export const PROVIDER_PRECEDENCE = [
     accepts: (id: string) => id.trim().toLowerCase().startsWith("gemini-"),
   },
   { providerId: "minimax", family: "minimax" },
-  { providerId: "mistral", family: "mistral" },
+  // Mistral and Alibaba also resell other labs' models; those rows belong to
+  // the native provider listed below (GLM is Z.ai's).
+  { providerId: "mistral", family: "mistral", accepts: (id: string) => !resold(id) },
   { providerId: "deepseek", family: "deepseek" },
-  { providerId: "alibaba", family: "alibaba" },
+  { providerId: "alibaba", family: "alibaba", accepts: (id: string) => !resold(id) },
   { providerId: "moonshotai", family: "moonshotai" },
   { providerId: "zai", family: "zai" },
   { providerId: "groq", family: "groq" },

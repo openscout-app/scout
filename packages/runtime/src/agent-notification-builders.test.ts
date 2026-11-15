@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { parseTmuxPermission } from "./tmux-permission.js";
 
 import type { Block, SessionState } from "@openscout/agent-sessions";
@@ -11,6 +15,7 @@ import {
   agentNotificationForSessionAttention,
   countDiffLines,
   notificationHostName,
+  notificationProjectName,
   permissionDialogView,
   pushDeliveryForLevel,
   type AttentionNotificationItem,
@@ -18,7 +23,7 @@ import {
 
 function snapshotWith(block: Block, turn: Partial<SessionState["turns"][number]> = {}): SessionState {
   return {
-    session: { id: "s1", name: "machiavelli", adapterType: "claude-code", status: "active", cwd: "/Users/art/dev/openscout" },
+    session: { id: "s1", name: "machiavelli", adapterType: "claude-code", status: "active", cwd: "/Users/you/dev/openscout" },
     turns: [{ id: "t1", status: "streaming", startedAt: 1_000, blocks: [{ block, status: "streaming" }], ...turn }],
   } as SessionState;
 }
@@ -52,7 +57,7 @@ describe("agent notification builders", () => {
     expect(n).toMatchObject({
       view: "turn.approve.command",
       command: "bash release.sh",
-      cwd: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
       risk: "high",
       why: "Ship the build",
       sender: { name: "machiavelli" },
@@ -218,5 +223,39 @@ describe("permission request notifications", () => {
     const text = dialog([" Bash command", "", "   gh pr list --state open", "   List open pull requests", "", " Permission rule Bash requires confirmation for this command."]);
     const n = agentNotificationForPermissionRequest({ requestId: "p", text, agentName: "pike", agentId: "agent.pike", project: "scout", createdAt: 1 });
     expect(collapseAgentNotification(n)).toMatchObject({ title: "pike wants to run a command", subtitle: "scout on arts-mini", body: "List open pull requests", level: "active" });
+  });
+});
+
+describe("notification project names", () => {
+  test("a worktree reads as the repository it belongs to, never its folder", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "scout-project-name-")));
+    try {
+      const main = join(root, "webshop");
+      mkdirSync(join(main, ".git", "worktrees", "canvas"), { recursive: true });
+      mkdirSync(join(main, "packages", "web"), { recursive: true });
+      // A sibling linked worktree, named <repo>-<branch>.
+      const sibling = join(root, "webshop-canvas");
+      mkdirSync(sibling);
+      writeFileSync(join(sibling, ".git"), `gitdir: ${join(main, ".git", "worktrees", "canvas")}\n`);
+      // A nested worktree with a generated folder name.
+      const nested = join(main, ".scout-worktrees", "project-hawking-12");
+      mkdirSync(nested, { recursive: true });
+      writeFileSync(join(nested, ".git"), `gitdir: ${join(main, ".git", "worktrees", "project-hawking-12")}\n`);
+
+      expect(notificationProjectName(main)).toBe("webshop");
+      expect(notificationProjectName(join(main, "packages", "web"))).toBe("webshop");
+      expect(notificationProjectName(sibling)).toBe("webshop");
+      expect(notificationProjectName(nested)).toBe("webshop");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a path that is not on this host falls back to its folder names", () => {
+    expect(notificationProjectName("/nowhere/dev/webshop/.scout-worktrees/project-hawking-12")).toBe("webshop");
+    expect(notificationProjectName("/nowhere/dev/scout/.claude/worktrees/runtime-memory-guard")).toBe("scout");
+    expect(notificationProjectName("/nowhere/dev/lattices/")).toBe("lattices");
+    expect(notificationProjectName("")).toBeNull();
+    expect(notificationProjectName(null)).toBeNull();
   });
 });

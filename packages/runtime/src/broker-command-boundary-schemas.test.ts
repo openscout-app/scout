@@ -25,6 +25,17 @@ test("session-input wire intent is required and normalizes to the existing consu
   expect(brokerDeliverRequestSchema.safeParse({ body: "ordinary", intent: "consult" }).success).toBe(true);
 });
 
+test("a task ask carries its callback through the boundary, and the task object stays strict", () => {
+  const code = "async ({ result, scout }) => scout.open(result.files[0])";
+  const payload = { requestId: "ask-1", body: "write the study", intent: "task_ask",
+    task: { version: 1, callback: { code } }, target: { kind: "agent_id", agentId: "ranger" } };
+  expect(brokerDeliverRequestSchema.parse(payload)).toMatchObject({ intent: "consult", task: { callback: { code } } });
+  for (const callback of [{ code: "  " }, "open", { code, run: "now" }, { code: "x".repeat(16_001) }]) {
+    expect(brokerDeliverRequestSchema.safeParse({ ...payload, task: { version: 1, callback } }).success).toBe(false);
+  }
+  expect(brokerDeliverRequestSchema.safeParse({ ...payload, task: { version: 1, onDone: "open it" } }).success).toBe(false);
+});
+
 describe("brokerInvocationRequestSchema execution.turnBudgetMs", () => {
   test("accepts an execution turn budget up to the 6 h bound", () => {
     const parsed = brokerInvocationRequestSchema.safeParse({

@@ -46,6 +46,7 @@ import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 import { isRequesterWaitTimeoutError } from "./requester-timeout.js";
 import { isDispatchStalledError } from "./dispatch-stalled.js";
 import { isDeliveryBlockedError } from "./delivery-blocked.js";
+import { IN_PLACE_CHECKPOINT_KEY, readInPlaceCheckpoint, type InPlaceCheckpoint } from "./in-place/checkpoint.js";
 import { isCodexAppServerExitError, isCodexThreadHeldExternallyError } from "./codex-app-server.js";
 import { sessionAliasAckSummary } from "./session-alias.js";
 import { createInvocationResultReplyIntent, invocationResultMessageId } from "./broker-invocation-result-delivery-service.js";
@@ -92,6 +93,10 @@ type LocalAgentInvocationResult = {
 
 type LocalAgentInvocationHooks = {
   onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
+  onProgress?: (summary: string) => Promise<void> | void;
+  shouldContinue?: () => boolean;
+  inPlaceCheckpoint?: () => InPlaceCheckpoint | null;
+  saveInPlaceCheckpoint?: (checkpoint: InPlaceCheckpoint | null) => Promise<void> | void;
 };
 
 type InvocationExecutorResult =
@@ -534,6 +539,33 @@ export class BrokerLocalInvocationService {
           onSessionObserved: async (metadata) => {
             liveEndpoint = promoteLocalEndpointProviderSession(liveEndpoint, { metadata });
             await this.options.persistEndpoint(liveEndpoint);
+            // The session's own report of model and effort belongs on the
+            // flight as soon as it exists, not only when the turn returns.
+            await this.recordObservedExecution(invocation.id, {
+              ...dispatchAck,
+              executionResolution: executionResolutionWithObservedEndpoint(
+                invocation.executionResolution,
+                liveEndpoint,
+                this.now(),
+              ),
+            });
+          },
+          // A delivery that waits (for a busy session, then for its answer)
+          // says so on the task, so a follower sees why it has not finished.
+          onProgress: async (summary) => {
+            if (this.currentFlightIsTerminal(invocation.id)) return;
+            await this.options.transitionInvocation(invocation.id, { state: "running", summary });
+          },
+          shouldContinue: () => !this.currentFlightIsTerminal(invocation.id),
+          // A delivery into an open session keeps its place on the flight, so
+          // a runtime that restarts can pick it up (see in-place/checkpoint.ts).
+          inPlaceCheckpoint: () => readInPlaceCheckpoint(this.options.runtime.flightForInvocation(invocation.id)?.metadata),
+          saveInPlaceCheckpoint: async (checkpoint) => {
+            if (this.currentFlightIsTerminal(invocation.id)) return;
+            await this.options.transitionInvocation(invocation.id, {
+              state: "running",
+              metadata: { [IN_PLACE_CHECKPOINT_KEY]: checkpoint ?? undefined },
+            });
           },
         },
       );
@@ -558,6 +590,9 @@ export class BrokerLocalInvocationService {
       };
 
       if (this.currentFlightIsTerminal(invocation.id)) {
+        // A broker reply can close the flight before the turn returns. What
+        // the session reported about itself is still a fact about this flight.
+        await this.recordObservedExecution(invocation.id, completedDispatchAck);
         await this.options.persistEndpoint({ ...completedEndpoint, state: "idle" });
         return;
       }
@@ -977,6 +1012,28 @@ export class BrokerLocalInvocationService {
 
     if (failedFlight) {
       await this.options.postInvocationStatusMessage(invocation, failedFlight);
+    }
+  }
+
+  /**
+   * Write a dispatch acknowledgement whose execution resolution now carries
+   * the session's observed runtime. Metadata only: it never changes flight
+   * state, so it also enriches a flight a broker reply already completed.
+   * Observation is evidence; failing to record it never fails the turn.
+   */
+  private async recordObservedExecution(
+    invocationId: string,
+    dispatchAck: { executionResolution: ScoutExecutionResolution | null } & Record<string, unknown>,
+  ): Promise<void> {
+    const current = this.options.runtime.flightForInvocation(invocationId);
+    const recorded = (current?.metadata?.dispatchAck as { executionResolution?: unknown } | undefined)?.executionResolution;
+    if (!current || !dispatchAck.executionResolution
+      || JSON.stringify(recorded ?? null) === JSON.stringify(dispatchAck.executionResolution)) return;
+    try {
+      await this.options.transitionInvocation(invocationId, { metadata: { dispatchAck } });
+    } catch (error) {
+      this.options.warn?.(`[openscout-runtime] could not record the observed runtime for ${invocationId}: ${
+        error instanceof Error ? error.message : String(error)}`);
     }
   }
 

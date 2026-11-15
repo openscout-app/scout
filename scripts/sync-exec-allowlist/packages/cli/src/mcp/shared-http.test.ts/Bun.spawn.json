@@ -1,0 +1,7 @@
+{
+  "path": "packages/cli/src/mcp/shared-http.test.ts",
+  "symbol": "Bun.spawn",
+  "category": "test",
+  "reason": "short-lived bun children acting as a second peer process: one is killed in finally, one exits after a single request",
+  "owner": "cli-tests"
+}

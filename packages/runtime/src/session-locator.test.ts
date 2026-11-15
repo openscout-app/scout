@@ -37,6 +37,27 @@ describe("locateHarnessSession", () => {
     if (result.ok) expect(result.session.cwd).toBe("");
   });
 
+  test("reads a long transcript's head only, and still finds its session and folder", () => {
+    const root = makeRoot("claude-long");
+    const dir = join(root, "-work-app");
+    mkdirSync(dir);
+    const cwd = makeRoot("claude-long-cwd");
+    const sessionId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000";
+    const head = JSON.stringify({ type: "user", sessionId, cwd }) + "\n";
+    // A body far past the head, in multi-byte text so the cut can land mid-character.
+    const body = (JSON.stringify({ type: "assistant", text: "é".repeat(4_000) }) + "\n").repeat(200);
+    writeFileSync(join(dir, "another-name.jsonl"), head + body);
+
+    const result = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "claude",
+      claudeProjectsRoot: root,
+      codexSessionsRoot: makeRoot("codex-empty"),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.session).toMatchObject({ nativeSessionId: sessionId, cwd, match: "jsonl" });
+  });
+
 
   test("finds a Codex rollout by session id and cwd", () => {
     const codexRoot = makeRoot("codex-sessions");
@@ -51,7 +72,7 @@ describe("locateHarnessSession", () => {
         payload: {
           id: sessionId,
           session_id: sessionId,
-          cwd: "/Users/art/dev/blink",
+          cwd: "/Users/you/dev/blink",
         },
       })}\n`,
     );
@@ -67,7 +88,7 @@ describe("locateHarnessSession", () => {
     if (!result.ok) return;
     expect(result.session.harness).toBe("codex");
     expect(result.session.nativeSessionId).toBe(sessionId);
-    expect(result.session.cwd).toBe("/Users/art/dev/blink");
+    expect(result.session.cwd).toBe("/Users/you/dev/blink");
     expect(result.session.path).toBe(path);
   });
 
@@ -80,14 +101,14 @@ describe("locateHarnessSession", () => {
       join(day, `rollout-${sessionId}.jsonl`),
       `${JSON.stringify({
         type: "session_meta",
-        payload: { id: sessionId, cwd: "/Users/art/dev/blink" },
+        payload: { id: sessionId, cwd: "/Users/you/dev/blink" },
       })}\n`,
     );
 
     const result = locateHarnessSession({
       nativeSessionId: sessionId,
       harness: "codex",
-      projectPath: "/Users/art/dev/openscout",
+      projectPath: "/Users/you/dev/openscout",
       codexSessionsRoot: codexRoot,
       claudeProjectsRoot: makeRoot("claude-empty-2"),
     });
@@ -119,12 +140,82 @@ describe("locateHarnessSession", () => {
     const withProject = locateHarnessSession({
       nativeSessionId: sessionId,
       harness: "codex",
-      projectPath: "/Users/art/dev/blink",
+      projectPath: "/Users/you/dev/blink",
       codexSessionsRoot: codexRoot,
       claudeProjectsRoot: makeRoot("claude-empty-4"),
     });
     expect(withProject.ok).toBe(true);
-    if (withProject.ok) expect(withProject.session.cwd).toBe("/Users/art/dev/blink");
+    if (withProject.ok) expect(withProject.session.cwd).toBe("/Users/you/dev/blink");
+  });
+
+  test("the caller's own folder never conflicts with the session's folder", () => {
+    const codexRoot = makeRoot("codex-caller-elsewhere");
+    const day = join(codexRoot, "2026", "08", "03");
+    mkdirSync(day, { recursive: true });
+    const sessionId = "019fbee7-7777-8888-9999-aaaabbbbcccc";
+    writeFileSync(
+      join(day, `rollout-${sessionId}.jsonl`),
+      `${JSON.stringify({
+        type: "session_meta",
+        payload: { id: sessionId, cwd: "/work/blink" },
+      })}\n`,
+    );
+
+    const result = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      fallbackCwd: "/work/openscout",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-1"),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.session.cwd).toBe("/work/blink");
+
+    // A project the request names still has to match.
+    const named = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      projectPath: "/work/openscout",
+      fallbackCwd: "/work/blink",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-2"),
+    });
+    expect(named.ok).toBe(false);
+    if (!named.ok) expect(named.reason).toBe("session_cwd_conflict");
+  });
+
+  test("the caller's folder fills in a cwd the store does not have", () => {
+    const codexRoot = makeRoot("codex-caller-fallback");
+    const day = join(codexRoot, "2026", "08", "03");
+    mkdirSync(day, { recursive: true });
+    const sessionId = "019fbee7-dddd-eeee-ffff-000011112222";
+    writeFileSync(
+      join(day, `rollout-${sessionId}.jsonl`),
+      `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`,
+    );
+
+    const fromCaller = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      fallbackCwd: "/work/openscout",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-3"),
+    });
+    expect(fromCaller.ok).toBe(true);
+    if (fromCaller.ok) expect(fromCaller.session.cwd).toBe("/work/openscout");
+
+    // The named project wins over where the caller is.
+    const named = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "codex",
+      projectPath: "/work/blink",
+      fallbackCwd: "/work/openscout",
+      codexSessionsRoot: codexRoot,
+      claudeProjectsRoot: makeRoot("claude-empty-caller-4"),
+    });
+    expect(named.ok).toBe(true);
+    if (named.ok) expect(named.session.cwd).toBe("/work/blink");
   });
 
   test("returns session_unknown when absent", () => {
@@ -147,7 +238,7 @@ describe("locateHarnessSession", () => {
       join(day, `rollout-2026-08-01T15-57-28-${sessionId}.jsonl`),
       `${JSON.stringify({
         type: "session_meta",
-        payload: { id: sessionId, cwd: "/Users/art/dev/blink" },
+        payload: { id: sessionId, cwd: "/Users/you/dev/blink" },
       })}\n`,
     );
 

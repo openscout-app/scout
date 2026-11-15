@@ -14,8 +14,8 @@
  * Only declared things become notifications. Inferred attention never does.
  *
  * Every kind reads by one formula (see {@link collapseAgentNotification}):
- *   title    who wants what       "pike wants to run a command"
- *   subtitle the project          "openscout"
+ *   title    who wants what       "Codex 012 wants to run a command"
+ *   subtitle where                "webshop on studio"
  *   body     what it is about     "Show working tree status"
  * The body is one plain line taken from a summary, a question, or the start
  * of a note. Markdown is stripped. It is never a slice from inside a body.
@@ -90,8 +90,14 @@ export type AgentNotification = AgentNotificationView & {
   v: typeof AGENT_NOTIFICATION_VERSION;
   /** Stable id of the thing that wants attention (inbox item, message, request). */
   itemId: string;
-  /** The agent, as the operator knows it: its display name, never a raw id. */
-  sender: { name: string; agentId?: string };
+  /**
+   * The agent, as the operator knows it: its display name, never a raw id.
+   * `code` is its roster number ("012") when it holds one; `harness` names a
+   * session whose name is only a generated handle. The lock screen shows the
+   * short form from {@link notificationSenderLabel}.
+   */
+  sender: { name: string; agentId?: string; code?: string; harness?: string };
+  /** The project's name: the repository, never a worktree folder or a path. */
   project?: string;
   /** The host it happened on. */
   host?: string;
@@ -246,6 +252,57 @@ export function nativeActorName(actorId: string): string | null {
   return HARNESS_NAMES[harness] ?? `${harness.charAt(0).toUpperCase()}${harness.slice(1)}`;
 }
 
+function harnessName(value: string | null | undefined): string | null {
+  const key = value?.trim().toLowerCase();
+  if (!key) return null;
+  const known = HARNESS_NAMES[key] ?? HARNESS_NAMES[key.split(/[-_]/u)[0]!];
+  return known ?? `${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+}
+
+const NAME_MAX = 24;
+const ID_TAIL = 4;
+
+/** A handle the runtime made up: `session-mw00fkgt-qbus4s`, a uuid, a long hex run. */
+function isGeneratedHandle(handle: string): boolean {
+  return /^session-/iu.test(handle)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-/iu.test(handle)
+    || /^[0-9a-f]{12,}$/iu.test(handle);
+}
+
+/** The last characters of a session's own id, "us4s": enough to tell two apart. */
+function idTail(id: string): string {
+  const native = /^native:[^:]+:(.+)$/u.exec(id.trim());
+  const token = native ? native[1]! : id.trim().split(".")[0]!;
+  return token.replace(/[^0-9a-z]/giu, "").slice(-ID_TAIL).toLowerCase();
+}
+
+/**
+ * Who sent it, in a few characters: a name, then the roster number.
+ *   "pike.main.studio" with roster 005   -> "pike 005"
+ *   "session-mw00fkgt-qbus4s.studio", Codex      -> "Codex 012", or "Codex us4s" unnumbered
+ *   "native:claude:6f1c…a3b9"                  -> "Claude a3b9"
+ * A dotted id loses its branch and host: the subtitle says where. A generated
+ * handle reads as its harness. Without a roster number, a generated handle
+ * keeps the last characters of its id so two sessions stay apart.
+ */
+export function notificationSenderLabel(sender: AgentNotification["sender"]): string {
+  const raw = sender.name.trim();
+  const native = nativeActorName(raw);
+  const code = sender.code?.trim() ?? "";
+  if (/\s/u.test(raw) && !native) {
+    const name = cutLine(raw, NAME_MAX);
+    return code ? `${name} ${code}` : name;
+  }
+  const handle = native ? "" : raw.split(".")[0]!.trim();
+  const generated = !handle || isGeneratedHandle(handle);
+  const harness = harnessName(sender.harness) ?? native;
+  let name: string;
+  if (generated) name = harness ?? "Agent";
+  else name = HARNESS_NAMES[handle.toLowerCase()] ?? cutLine(handle, NAME_MAX);
+  const tail = code || (generated ? idTail(raw || sender.agentId || "") : "");
+  return tail ? `${name} ${tail}` : name;
+}
+
 /** Where it happened, as one phrase: "scout-apps on mini". */
 function whereLine(n: AgentNotification): string {
   const project = n.project?.trim();
@@ -254,7 +311,7 @@ function whereLine(n: AgentNotification): string {
 }
 
 export function collapseAgentNotification(n: AgentNotification): AgentNotificationCollapse {
-  const who = nativeActorName(n.sender.name) ?? (n.sender.name.trim() || "An agent");
+  const who = notificationSenderLabel(n.sender);
   const want = wantPhrase(n);
   return {
     title: want ? `${who} ${want}` : who,

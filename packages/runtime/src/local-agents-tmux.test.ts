@@ -8,6 +8,8 @@ import {
   tmuxPaneTailContainsPromptFragment,
   tmuxPaneTailHarnessLoginError,
   tmuxPaneTailShowsReadyComposer,
+  tmuxPaneTailUnsentComposerText,
+  tmuxPaneTailComposerState,
   tmuxVerifyDeadlineMs,
 } from "./local-agents";
 
@@ -20,8 +22,8 @@ const brokerAskPrompt =
 
 describe("tmux prompt delivery", () => {
   test("quotes launch scripts with spaces", () => {
-    expect(buildTmuxLaunchShellCommand("/Users/arach/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"))
-      .toBe('exec bash "/Users/arach/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"');
+    expect(buildTmuxLaunchShellCommand("/Users/guest/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"))
+      .toBe('exec bash "/Users/guest/Library/Application Support/OpenScout/runtime/agents/spectator/launch.sh"');
   });
 
   test("pastes prompts as bracketed raw input before sending one submit key", () => {
@@ -304,7 +306,7 @@ describe("tmux prompt-fragment detection", () => {
         "  New broker ask from operator. Task: please refactor the dispatch",
         "  path so it submits the prompt.",
         "",
-        "⏺ Read(/Users/arach/dev/openscout/packages/runtime/src/local-agents.ts)",
+        "⏺ Read(/Users/guest/dev/openscout/packages/runtime/src/local-agents.ts)",
         "  ⎿  Read 30 lines",
         "",
         "───────────────────────────── openscout-review-relay-agent ──",
@@ -344,7 +346,7 @@ const claudeFolderTrustDialog = paneTail([
   "────────────────────────────────────────────────────────────────────────────────",
   " Accessing workspace:",
   "",
-  " /Users/art/Library/Application Support/Linea/Scout",
+  " /Users/you/Library/Application Support/Linea/Scout",
   "",
   " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not,",
   " take a moment to review what's in this folder first.",
@@ -366,7 +368,7 @@ describe("Claude folder-trust dialog", () => {
 
   test("is reported as a blocking dialog that names the folder", () => {
     const blocked = tmuxPaneTailBlockingHarnessDialog(claudeFolderTrustDialog);
-    expect(blocked).toContain("folder-trust prompt for /Users/art/Library/Application Support/Linea/Scout");
+    expect(blocked).toContain("folder-trust prompt for /Users/you/Library/Application Support/Linea/Scout");
   });
 
   test("an ordinary ready composer is not blocking", () => {
@@ -415,5 +417,44 @@ describe("Claude login error", () => {
   test("a working pane is not logged out", () => {
     const working = claudeLoggedOutPane.replace("❯ \n", "❯ \n✻ Thinking… (esc to interrupt)\n");
     expect(tmuxPaneTailHarnessLoginError(working)).toBeNull();
+  });
+});
+
+describe("unsent composer text", () => {
+  const ESC = "\u001b";
+  const rule = "─".repeat(40);
+  // The composer line as `tmux capture-pane -e` shows it in Claude Code.
+  const pane = (composer: string) => [
+    "⏺ DONE",
+    rule,
+    `${ESC}[39m❯ ${composer}`,
+    rule,
+    "  -- INSERT -- ⏵⏵ auto mode on",
+  ].join("\n");
+
+  test("an empty composer has none", () => {
+    expect(tmuxPaneTailUnsentComposerText(pane(""))).toBeNull();
+    expect(tmuxPaneTailUnsentComposerText("no composer here")).toBeNull();
+    expect(tmuxPaneTailComposerState("no composer here")).toBeUndefined();
+    expect(tmuxPaneTailComposerState(pane(""))).toBeNull();
+  });
+
+  test("typed text is found", () => {
+    expect(tmuxPaneTailUnsentComposerText(pane("an unsent draft"))).toBe("an unsent draft");
+  });
+
+  test("Claude Code's dim prompt suggestion is not typed text", () => {
+    expect(tmuxPaneTailUnsentComposerText(pane(`${ESC}[2mrun it in the background${ESC}[0m`))).toBeNull();
+    expect(tmuxPaneTailUnsentComposerText(pane(`${ESC}[2;37mTry "fix lint errors"${ESC}[22m`))).toBeNull();
+  });
+
+  test("typed text in a colour is still typed text", () => {
+    // A truecolour sequence carries a 2 that is not the dim attribute.
+    expect(tmuxPaneTailUnsentComposerText(pane(`${ESC}[38;2;120;130;140m/review${ESC}[39m the diff`))).toBe("/review the diff");
+    expect(tmuxPaneTailUnsentComposerText(pane(`${ESC}[38;5;2mgreen words${ESC}[0m`))).toBe("green words");
+  });
+
+  test("typed text after a dim run is found", () => {
+    expect(tmuxPaneTailUnsentComposerText(pane(`${ESC}[2mhint${ESC}[0m mine`))).toBe("mine");
   });
 });

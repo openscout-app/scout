@@ -28,7 +28,7 @@ import { brokerDeliverRequestSchema } from "./broker-command-boundary-schemas.js
 import { deliverScoutRequest, prepareScoutSessionReply } from "./delivery-client.js";
 import { createHash } from "node:crypto";
 import { canonicalRequest } from "./broker-request-receipts.js";
-import { BrokerDeliveryAcceptanceService, validateTaskDelivery, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
+import { BrokerDeliveryAcceptanceService, defaultTaskWorkItemTitle, validateTaskDelivery, type BrokerDeliveryAcceptanceServiceOptions } from "./broker-delivery-acceptance-service.js";
 import type { InvocationResolution } from "./broker-delivery-routing.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
@@ -1215,9 +1215,10 @@ describe("BrokerDeliveryAcceptanceService", () => {
     });
     expect(harness.acceptedInvocations[0]?.executionResolution).toEqual(expect.objectContaining({
       schemaVersion: "openscout.execution-resolution.v1",
-      harness: expect.objectContaining({ resolved: "claude", source: "profile", drift: "unknown" }),
-      model: expect.objectContaining({ resolved: "claude-opus-5-5", source: "profile", drift: "unknown" }),
-      reasoningEffort: expect.objectContaining({ resolved: "high", source: "profile", drift: "unknown" }),
+      // A profile chose these values; the ask requested none, so there is no drift to compute.
+      harness: expect.objectContaining({ resolved: "claude", source: "profile", drift: "not_requested" }),
+      model: expect.objectContaining({ resolved: "claude-opus-5-5", source: "profile", drift: "not_requested" }),
+      reasoningEffort: expect.objectContaining({ resolved: "high", source: "profile", drift: "not_requested" }),
     }));
   });
 
@@ -1716,10 +1717,45 @@ describe("two-verb acceptance", () => {
     expect(h.acceptedInvocations).toHaveLength(0); expect(h.recordedWorkItemPayloads).toHaveLength(0);
     expect(h.postedMessages[0]?.metadata?.notificationPolicy).toEqual({ requested: notify, priority: "interrupting" });
   });
+  test("an agent task carries the asker's reason to the worker without --operator", async () => {
+    const h = createHarness();
+    const result = await h.service.accept({ requestId: "because", intent: "consult", body: "Rerun the release checks", requesterId: "operator",
+      task: { version: 1, because: "the release branch went red after the merge" }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(result).toMatchObject({ accepted: true });
+    // Invocation context is rendered into the worker's prompt by every harness adapter.
+    expect(h.acceptedInvocations[0]).toMatchObject({
+      context: { because: "the release branch went red after the merge" },
+      metadata: { taskVersion: 1, because: "the release branch went red after the merge" },
+    });
+    expect(h.acceptedInvocations[0]?.metadata).not.toHaveProperty("humanOwned");
+    expect(h.operatorSignals).toHaveLength(0);
+    const plain = createHarness();
+    await plain.service.accept({ requestId: "plain", intent: "consult", body: "Rerun the release checks", requesterId: "operator",
+      task: { version: 1 }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(plain.acceptedInvocations[0]).not.toHaveProperty("context");
+  });
+  test("an agent ask with --notify is accepted and returns on acceptance", async () => {
+    const h = createHarness();
+    const result = await h.service.accept({ requestId: "notify", intent: "consult", body: "Review the diff", requesterId: "operator",
+      task: { version: 1, notify: true }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(result).toMatchObject({ accepted: true });
+    expect(h.acceptedInvocations).toHaveLength(1);
+    expect(h.operatorSignals).toHaveLength(0);
+  });
+  test("an agent task stores its closing step on the invocation", async () => {
+    const h = createHarness();
+    await h.service.accept({ requestId: "callback", intent: "consult", body: "Write the study", requesterId: "operator",
+      task: { version: 1, callback: { code: "() => {}" } }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(h.acceptedInvocations[0]).toMatchObject({ metadata: { taskVersion: 1, callback: { code: "() => {}" } } });
+    const plain = createHarness();
+    await plain.service.accept({ requestId: "plain", intent: "consult", body: "Write the study", requesterId: "operator",
+      task: { version: 1 }, target: { kind: "agent_id", agentId: "agent-1" } });
+    expect(plain.acceptedInvocations[0]?.metadata).not.toHaveProperty("callback");
+  });
   test("validation precedes receipt reservation and every routing effect", async () => {
     const h = createHarness();
     await expect(h.service.accept({ requestId: "bad", intent: "consult", body: "Please review",
-      task: { version: 1, notify: true }, target: { kind: "agent_id", agentId: "agent-1" } })).rejects.toThrow("--notify now pushes");
+      task: { version: 1, permission: true }, target: { kind: "agent_id", agentId: "agent-1" } })).rejects.toThrow("--permission requires --operator");
     expect(h.ensuredActors).toHaveLength(0); expect(h.localAgentSyncReasons).toHaveLength(0);
     expect(h.acceptedInvocations).toHaveLength(0); expect(h.postedMessages).toHaveLength(0);
   });
@@ -1802,4 +1838,11 @@ test("a task ref may repeat itself as the rendered ref label", () => {
     target: { kind: "binding_ref", ref: "other-ref" },
     targetLabel: "ref:abcd1234",
   })).toThrow("another recipient route");
+});
+
+test("titles a task's default work item by its first line, and a continued task by its successor", () => {
+  expect(defaultTaskWorkItemTitle("## Fix the room title\n\nSteps follow.")).toBe("Fix the room title");
+  expect(defaultTaskWorkItemTitle("Previous task inv-1 (completed):\nShipped.\n\nSuccessor task:\nLand the follow-up"))
+    .toBe("Land the follow-up");
+  expect(defaultTaskWorkItemTitle("```\n```")).toBe("```\n```");
 });

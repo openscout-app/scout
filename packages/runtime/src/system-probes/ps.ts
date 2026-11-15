@@ -6,6 +6,8 @@ const PS_TTL_MS = 5_000;
 const PS_TIMEOUT_MS = 1_500;
 const DEFAULT_PS_DISCOVERY_MAX_ROWS = 4_096;
 const PS_DISCOVERY_MAX_COMMAND_CHARS = 1_024;
+/** scoutd runs the same columns; keep `crates/scoutd/src/probes.rs` in step. */
+export const PS_DISCOVERY_COLUMNS = "pid=,ppid=,etime=,pcpu=,rss=,command=";
 
 export type ProcessRow = {
   pid: number;
@@ -23,6 +25,14 @@ export type ProcessDiscoveryRow = {
   pid: number;
   ppid: number;
   etime: string;
+  /**
+   * `ps -o pcpu`: percent of one core. On macOS this is a decaying average
+   * over roughly the last minute, not an instantaneous reading, and it can
+   * exceed 100 for a multi-threaded process. Absent when ps did not report it.
+   */
+  cpuPct?: number;
+  /** `ps -o rss`: resident set size in KiB. Absent when ps did not report it. */
+  rssKb?: number;
   command: string;
 };
 
@@ -41,6 +51,12 @@ export type PsRuntimeSnapshot = {
 function parseProcessNumber(value: string | undefined): number | null {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseNonNegativeNumber(value: string | undefined): number | null {
+  // Some locales print the decimal separator as a comma.
+  const parsed = Number.parseFloat((value ?? "").replace(",", "."));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function normalizeTty(value: string | null | undefined): string | null {
@@ -120,13 +136,23 @@ function parseDiscoveryRows(output: string): ProcessDiscoveryRow[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/u);
+      const match = line.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/u);
       if (!match) return null;
       const pid = parseProcessNumber(match[1]);
       const ppid = parseProcessNumber(match[2]);
       const etime = match[3]?.trim() ?? "";
-      const command = match[4]?.trim() ?? "";
-      return pid && ppid && etime && command ? { pid, ppid, etime, command } : null;
+      const cpuPct = parseNonNegativeNumber(match[4]);
+      const rssKb = parseNonNegativeNumber(match[5]);
+      const command = match[6]?.trim() ?? "";
+      if (!pid || !ppid || !etime || !command) return null;
+      return {
+        pid,
+        ppid,
+        etime,
+        ...(cpuPct !== null ? { cpuPct } : {}),
+        ...(rssKb !== null ? { rssKb: Math.round(rssKb) } : {}),
+        command,
+      };
     })
     .filter((row): row is ProcessDiscoveryRow => Boolean(row));
 }
@@ -184,7 +210,7 @@ export const psRuntimeProbe = defineProbe<PsRuntimeSnapshot>({
 
 async function readPsDiscoveryLocal(ctx: ProbeCtx): Promise<ProcessDiscoverySnapshot> {
   try {
-    const { stdout } = await execProbeFile(ctx, psBin(), ["-axww", "-o", "pid=,ppid=,etime=,command="], {
+    const { stdout } = await execProbeFile(ctx, psBin(), ["-axww", "-o", PS_DISCOVERY_COLUMNS], {
       maxStdoutBytes: 32 * 1024 * 1024,
       maxStderrBytes: 128 * 1024,
     });

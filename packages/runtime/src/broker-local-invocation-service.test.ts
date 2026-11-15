@@ -170,7 +170,13 @@ function createHarness(input: {
   invokeEndpoint?: (
     endpoint: AgentEndpoint,
     invocation: InvocationRequest,
-    hooks?: { onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void },
+    hooks?: {
+      onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
+      onProgress?: (summary: string) => Promise<void> | void;
+      shouldContinue?: () => boolean;
+      inPlaceCheckpoint?: () => unknown;
+      saveInPlaceCheckpoint?: (checkpoint: never) => Promise<void> | void;
+    },
   ) => Promise<{ output: string; externalSessionId?: string; metadata?: Record<string, unknown> }>;
   ensureResult?: { externalSessionId?: string | null; metadata?: Record<string, unknown> };
   ensureEndpoint?: (endpoint: AgentEndpoint) => Promise<{ externalSessionId?: string | null; metadata?: Record<string, unknown> }>;
@@ -579,6 +585,58 @@ describe("BrokerLocalInvocationService", () => {
     }));
   });
 
+  test("the session's own model and effort reach the flight mid-turn and after a broker reply closed it", async () => {
+    const endpoint = testEndpoint({
+      harness: "claude",
+      transport: "tmux",
+      sessionId: "session-tmux-claude",
+      metadata: { agentName: "agent-one", sessionBacked: true, pendingExternalSession: true },
+    });
+    const observation: LocalEndpointSessionObservation = {
+      sessionId: "native-claude-session",
+      runtime: { harness: "claude", model: "claude-opus-5-5", reasoningEffort: "high" },
+      runtimeSource: "claude-statusline",
+      evidence: { source: "claude-session-record" },
+      observedAt: 19_000,
+    };
+    // The ask requested only the harness; model and effort come from the session.
+    const executionResolution = createScoutExecutionResolution({
+      requested: { harness: "claude" }, resolved: { harness: "claude" }, source: { harness: "flag" }, resolvedAt: 10_000,
+    });
+    const midTurnResolutions: unknown[] = [];
+    let harness!: ReturnType<typeof createHarness>;
+    harness = createHarness({
+      endpoint,
+      now: 20_000,
+      async invokeEndpoint(nextEndpoint, _invocation, hooks) {
+        await hooks?.onSessionObserved?.(sessionObservationMetadata(nextEndpoint, observation));
+        midTurnResolutions.push((harness.flightForInvocation("invocation-1")?.metadata?.dispatchAck as any)?.executionResolution);
+        // The worker answers with `reply`, which completes the flight before the turn returns.
+        harness.seedFlight({ ...harness.flightForInvocation("invocation-1")!, state: "completed", completedAt: 19_500,
+          metadata: { ...harness.flightForInvocation("invocation-1")!.metadata, completedByBrokerReply: true } });
+        return { output: "", metadata: sessionObservationMetadata(nextEndpoint, observation) };
+      },
+    });
+
+    harness.seedFlight(testFlight());
+    await harness.service.execute(testInvocation({ executionResolution }));
+
+    const sessionReport = {
+      harness: expect.objectContaining({ requested: "claude", observed: "claude", drift: "match" }),
+      model: { observed: "claude-opus-5-5", observedAt: 19_000, drift: "not_requested" },
+      reasoningEffort: { observed: "high", observedAt: 19_000, drift: "not_requested" },
+      sessionId: "native-claude-session",
+    };
+    expect(midTurnResolutions[0]).toEqual(expect.objectContaining(sessionReport));
+    const flight = harness.flightForInvocation("invocation-1")!;
+    expect(flight.state).toBe("completed");
+    expect((flight.metadata?.dispatchAck as any)?.executionResolution).toEqual(expect.objectContaining(sessionReport));
+    expect((flight.metadata?.sessionTrace as any[]).at(-1)?.executionResolution).toEqual(expect.objectContaining(sessionReport));
+    // The session record carries the same observation.
+    expect(harness.persistedEndpoints.at(-1)?.metadata?.observedRuntime)
+      .toEqual({ harness: "claude", model: "claude-opus-5-5", reasoningEffort: "high" });
+  });
+
   test("records which Codex app-server served an attached session in the dispatch trace", async () => {
     const endpoint = testEndpoint({
       harness: "codex",
@@ -782,8 +840,8 @@ describe("BrokerLocalInvocationService", () => {
       transport: "codex_app_server",
       harness: "codex",
       sessionId: sessionActor.id,
-      projectRoot: "/Users/art/dev/scope",
-      cwd: "/Users/art/dev/scope",
+      projectRoot: "/Users/you/dev/scope",
+      cwd: "/Users/you/dev/scope",
       metadata: {
         cardless: true,
         handle: "project-chopin",
@@ -822,8 +880,8 @@ describe("BrokerLocalInvocationService", () => {
       transport: "codex_app_server",
       harness: "codex",
       sessionId: sessionActor.id,
-      projectRoot: "/Users/art/dev/openscout-derived-state-retention",
-      cwd: "/Users/art/dev/openscout-derived-state-retention",
+      projectRoot: "/Users/you/dev/openscout-derived-state-retention",
+      cwd: "/Users/you/dev/openscout-derived-state-retention",
       metadata: {
         cardless: true,
         handle: "project-spinoza-2",
@@ -1515,8 +1573,8 @@ describe("tmux session observation across the invocation boundary", () => {
       harness: "claude",
       state: "active",
       sessionId: "session-mtus22pe-emx8hl",
-      cwd: "/Users/art/dev/openscout",
-      projectRoot: "/Users/art/dev/openscout",
+      cwd: "/Users/you/dev/openscout",
+      projectRoot: "/Users/you/dev/openscout",
       metadata: {
         source: "scout-isolated-agent-session",
         sessionBacked: true,
@@ -1647,6 +1705,65 @@ describe("tmux session observation across the invocation boundary", () => {
       pendingExternalSession: false,
       observedSessionId: nativeId,
     }));
+  });
+
+  test("a transport that is holding an ask reports it on the task, and is told when the task was cancelled", async () => {
+    const seen: Array<{ summary: string | undefined; go: boolean | undefined }> = [];
+    const harness = createHarness({
+      endpoint: testEndpoint({ transport: "tmux", harness: "claude" }),
+      async invokeEndpoint(_endpoint, _invocation, hooks) {
+        await hooks?.onProgress?.("Held until the turn ends.");
+        seen.push({ summary: harness.flightForInvocation("invocation-1")?.summary, go: hooks?.shouldContinue?.() });
+
+        harness.seedFlight(testFlight({ state: "cancelled", summary: "Cancelled by the sender" }));
+        await hooks?.onProgress?.("Delivered. Waiting for its reply.");
+        seen.push({ summary: harness.flightForInvocation("invocation-1")?.summary, go: hooks?.shouldContinue?.() });
+        return { output: "" };
+      },
+    });
+    harness.seedFlight(testFlight());
+
+    await harness.service.execute(testInvocation());
+
+    expect(seen).toEqual([
+      { summary: "Held until the turn ends.", go: true },
+      // Progress never reopens a cancelled task.
+      { summary: "Cancelled by the sender", go: false },
+    ]);
+    expect(harness.flightForInvocation("invocation-1")?.state).toBe("cancelled");
+    expect(harness.postedMessages).toEqual([]);
+  });
+
+  test("a delivery into an open session keeps its place on the flight, and reads back what an earlier runtime left", async () => {
+    const held = { phase: "held", since: 1_000 };
+    const typed = { phase: "typed", since: 1_000, at: 5_000, via: "tmux", location: "tmux work · %3", transcriptOffset: 4_096 };
+    const seen: unknown[] = [];
+    const harness = createHarness({
+      endpoint: testEndpoint({ transport: "tmux", harness: "claude" }),
+      async invokeEndpoint(_endpoint, _invocation, hooks) {
+        const save = hooks?.saveInPlaceCheckpoint as (checkpoint: unknown) => Promise<void>;
+        // Left by the runtime that ran this task before.
+        seen.push(hooks?.inPlaceCheckpoint?.());
+        await save(typed);
+        seen.push(hooks?.inPlaceCheckpoint?.());
+        seen.push(harness.flightForInvocation("invocation-1")?.state);
+        await save(null);
+        seen.push(hooks?.inPlaceCheckpoint?.());
+
+        // A cancelled task keeps its record and is never reopened by a write.
+        await save(held);
+        harness.seedFlight(testFlight({ state: "cancelled", summary: "Cancelled by the sender", metadata: { inPlace: held } }));
+        await save(typed);
+        seen.push(hooks?.inPlaceCheckpoint?.());
+        return { output: "" };
+      },
+    });
+    harness.seedFlight(testFlight({ metadata: { inPlace: held } }));
+
+    await harness.service.execute(testInvocation());
+
+    expect(seen).toEqual([held, typed, "running", null, held]);
+    expect(harness.flightForInvocation("invocation-1")?.state).toBe("cancelled");
   });
 });
 

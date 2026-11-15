@@ -185,7 +185,7 @@ describe("parseAskCommandOptions", () => {
   test("--on keeps the project path as typed, for the other machine to resolve", () => {
     const parsed = parseAskCommandOptions(
       ["--on", "archie", "--project", "~/renders/arsenal-x", "--runtime", "codex/gpt-6-astra/high", "build the arsenal"],
-      "/Users/art/dev/openscout",
+      "/Users/you/dev/openscout",
     );
     expect(parsed).toEqual(expect.objectContaining({
       onHost: "archie",
@@ -637,9 +637,9 @@ describe("parseImplicitAskCommandOptions", () => {
       expect(() => parseImplicitAskCommandOptions(args, "/tmp/workspace")).toThrow("exactly one routing mode");
     }
   });
-  test("unknown flags and the old notify meaning fail in shortcuts too", () => {
+  test("unknown flags fail in shortcuts too; --notify on an agent ask is accepted", () => {
     expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--message-file", "brief.md"], "/tmp/workspace")).toThrow("unknown flag");
-    expect(() => parseImplicitAskCommandOptions(["--to", "worker", "--notify", "review"], "/tmp/workspace")).toThrow("--notify now pushes");
+    expect(parseImplicitAskCommandOptions(["--to", "worker", "--notify", "review"], "/tmp/workspace").task).toMatchObject({ notify: true });
   });
 });
 
@@ -829,6 +829,27 @@ describe("explicit completion ask options", () => {
     expect(() => parseAskCommandOptions(["--join-to", "one", "--continue-for", "two", "hi"], "/tmp"))
       .toThrow("mutually exclusive");
     expect(() => parseAskCommandOptions(["--join-to=", "hi"], "/tmp")).toThrow();
+  });
+});
+
+describe("ask --callback", () => {
+  test("takes a file, resolved now and read when the ask is sent", () => {
+    const parsed = parseAskCommandOptions(["--to", "researcher", "--callback", "open-page.js", "Write the study"], "/tmp/work");
+    expect(parsed).toMatchObject({ callbackFile: "/tmp/work/open-page.js", targetLabel: "researcher", message: "Write the study" });
+    expect(parsed.task).not.toHaveProperty("callback");
+    expect(parseAskCommandOptions(["--project", ".", "--callback=/hooks/open-page.js", "Run the suite"], "/tmp"))
+      .toMatchObject({ callbackFile: "/hooks/open-page.js", message: "Run the suite" });
+  });
+
+  test("refuses an empty, repeated or misplaced callback", () => {
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "", "hi"], "/tmp")).toThrow();
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback", "a.js", "--callback", "b.js", "hi"], "/tmp"))
+      .toThrow("--callback may appear only once");
+    expect(() => parseAskCommandOptions(["--to", "a", "--callback-file", "a.js", "hi"], "/tmp")).toThrow();
+    expect(() => parseAskCommandOptions(["--ref", "task-1", "--callback", "a.js", "hi"], "/tmp"))
+      .toThrow("--callback belongs");
+    expect(() => parseAskCommandOptions(["--operator", "--callback", "a.js", "hi"], "/tmp"))
+      .toThrow("--callback belongs");
   });
 });
 

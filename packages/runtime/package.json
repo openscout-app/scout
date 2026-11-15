@@ -199,11 +199,23 @@
       "import": "./dist/instance-checkout-bootstrap.js",
       "default": "./dist/instance-checkout-bootstrap.js"
     },
+    "./shared-mcp": {
+      "bun": "./src/shared-mcp.ts",
+      "types": "./dist/shared-mcp.d.ts",
+      "import": "./dist/shared-mcp.js",
+      "default": "./dist/shared-mcp.js"
+    },
     "./support-paths": {
       "bun": "./src/support-paths.ts",
       "types": "./dist/support-paths.d.ts",
       "import": "./dist/support-paths.js",
       "default": "./dist/support-paths.js"
+    },
+    "./memory-snapshot": {
+      "bun": "./src/memory-snapshot.ts",
+      "types": "./dist/memory-snapshot.d.ts",
+      "import": "./dist/memory-snapshot.js",
+      "default": "./dist/memory-snapshot.js"
     },
     "./pairing-security": {
       "bun": "./src/pairing-security/index.ts",
@@ -615,6 +627,7 @@
     "postpublish": "node ../../scripts/restore-publish-manifest.mjs ."
   },
   "dependencies": {
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
     "@noble/ciphers": "^2.1.1",
@@ -628,6 +641,7 @@
     "drizzle-orm": "^0.45.2",
     "ipaddr.js": "2.2.0",
     "protobufjs": "7.6.6",
+    "quickjs-emscripten-core": "0.32.0",
     "smol-toml": "^1.6.1",
     "standardwebhooks": "1.0.0",
     "varlock": "^1.16.0",

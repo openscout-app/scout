@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ActorIdentity, AgentEndpoint, NodeDefinition } from "@openscout/protocol";
 
@@ -7,6 +10,7 @@ import {
   MESH_SESSION_WAKE_PATH,
   rankPeersForProjectPath,
   resolveMeshHost,
+  meshHostDispatchPeers,
   suggestHostForProjectPath,
   startSessionOnPeers,
   flatDispatchSessionId,
@@ -16,7 +20,7 @@ import {
   type LocalSessionWakeDeps,
   type PeerSessionWakeResponse,
 } from "./broker-session-wake.js";
-import type { SessionLocateResult } from "./session-locator.js";
+import { locateHarnessSession, type SessionLocateResult } from "./session-locator.js";
 
 const NATIVE_SESSION_ID = "4fad8bb9-b4d3-4432-be75-8cfd636e78c0";
 
@@ -26,8 +30,8 @@ function locatedSession(): SessionLocateResult {
     session: {
       harness: "claude",
       nativeSessionId: NATIVE_SESSION_ID,
-      cwd: "/Users/art/dev/openscout",
-      path: `/Users/art/.claude/projects/-Users-art-dev-openscout/${NATIVE_SESSION_ID}.jsonl`,
+      cwd: "/Users/you/dev/openscout",
+      path: `/Users/you/.claude/projects/-Users-you-dev-openscout/${NATIVE_SESSION_ID}.jsonl`,
       lastActivityAt: 100,
       match: "filename",
     },
@@ -105,6 +109,51 @@ describe("wakeLocalHarnessSession", () => {
       remediation: "check the id",
     });
     expect(upsertedEndpoints).toEqual([]);
+  });
+
+  test("a caller in another folder wakes the session in the session's own folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-wake-elsewhere-"));
+    try {
+      const codexRoot = join(root, "codex");
+      const day = join(codexRoot, "2026", "08", "03");
+      mkdirSync(day, { recursive: true });
+      const sessionId = "019fbee7-3333-4444-5555-666677778888";
+      writeFileSync(
+        join(day, `rollout-${sessionId}.jsonl`),
+        `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/work/blink" } })}\n`,
+      );
+      const locateInputs: Array<{ projectPath?: string | null; fallbackCwd?: string | null }> = [];
+      const { deps, upsertedEndpoints } = createLocalDeps();
+      deps.locate = (input) => {
+        locateInputs.push(input);
+        return locateHarnessSession({ ...input, codexSessionsRoot: codexRoot, claudeProjectsRoot: join(root, "claude") });
+      };
+      deps.isCodexThreadLive = async () => false;
+
+      const result = await wakeLocalHarnessSession(deps, {
+        nativeSessionId: sessionId,
+        harness: "codex",
+        fallbackCwd: "/work/openscout",
+      });
+
+      if (!result.ok) {
+        throw new Error(`expected ok result, got ${result.reason}: ${result.detail}`);
+      }
+      expect(locateInputs[0]?.projectPath).toBeUndefined();
+      expect(locateInputs[0]?.fallbackCwd).toBe("/work/openscout");
+      expect(upsertedEndpoints[0]?.cwd).toBe("/work/blink");
+
+      // Naming a project the session does not live in is still refused.
+      const named = await wakeLocalHarnessSession(deps, {
+        nativeSessionId: sessionId,
+        harness: "codex",
+        projectPath: "/work/openscout",
+        fallbackCwd: "/work/blink",
+      });
+      expect(named).toMatchObject({ ok: false, reason: "session_cwd_conflict" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("refuses harnesses without a resume command", async () => {
@@ -195,6 +244,49 @@ describe("wakeLocalHarnessSession", () => {
     expect(result).toMatchObject({ ok: false, reason: "session_live_unbound" });
     expect(upsertedActors).toHaveLength(0);
     expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("registers a live session that is open where Scout can type, without starting anything", async () => {
+    const { deps, upsertedActors, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    const probed: unknown[] = [];
+    deps.probeInPlace = async (input) => { probed.push(input); return { live: true }; };
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.forkedSession).toBeUndefined();
+      expect(result.endpoint.metadata).toMatchObject({ flatDispatch: true, nativeSessionId: NATIVE_SESSION_ID });
+    }
+    expect(probed).toEqual([{ sessionId: NATIVE_SESSION_ID, harness: "claude", requireExactHarness: true }]);
+    expect(upsertedActors).toHaveLength(1);
+    expect(upsertedEndpoints).toHaveLength(1);
+  });
+
+  test("refuses a live session that is open where Scout cannot type, and says so", async () => {
+    const { deps, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => ({ live: false });
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
+    expect(result).toMatchObject({ ok: false, reason: "session_live_unbound" });
+    if (!result.ok) expect(result.detail).toContain("not in Herdr, Orca, tmux or a terminal Scout can type into");
+    expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("fails closed when the place a live session is open cannot be probed", async () => {
+    const { deps, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => { throw new Error("herdr timed out"); };
+    expect(await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID })).toMatchObject({ ok: false, reason: "session_runtime_unobserved" });
+    expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("a sender that asked for a fork still gets one, even when the session is reachable", async () => {
+    const { deps } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => { throw new Error("must not probe when a fork was asked for"); };
+    deps.createForkSessionId = () => "fork-session-id";
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID, forkIfLive: true });
+    expect(result).toMatchObject({ ok: true, forkedSession: { sourceSessionId: NATIVE_SESSION_ID, sessionId: "fork-session-id" } });
   });
 
   test("fails closed when process ownership cannot be inspected", async () => {
@@ -373,8 +465,8 @@ describe("startSessionOnPeers", () => {
     const peerActor = { id: peerEndpoint.agentId, kind: "session", displayName: "agentlist.io" } as ActorIdentity;
     const { deps, posts, upsertedActors, upsertedEndpoints } = createStartDeps({
       roots: {
-        "node-air": ["/Users/art/dev/openscout"],
-        "node-mini": ["/Users/arach/dev/talkie"],
+        "node-air": ["/Users/you/dev/openscout"],
+        "node-mini": ["/Users/guest/dev/talkie"],
       },
       responses: {
         "http://mini.example:43110": { ok: true, endpoint: peerEndpoint, actor: peerActor },
@@ -386,14 +478,14 @@ describe("startSessionOnPeers", () => {
         node({ id: "node-air", brokerUrl: "http://air.example:43110" }),
         node({ id: "node-mini", brokerUrl: "http://mini.example:43110" }),
       ] },
-      { projectPath: "/Users/arach/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
+      { projectPath: "/Users/guest/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
     );
 
     expect(result).toEqual({ ok: true, peerNodeId: "node-mini", endpoint: peerEndpoint, actor: peerActor });
     expect(posts).toEqual([{
       brokerBaseUrl: "http://mini.example:43110",
       path: MESH_SESSION_START_PATH,
-      payload: { projectPath: "/Users/arach/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
+      payload: { projectPath: "/Users/guest/dev/agentlist.io", harness: "claude", model: "claude-opus-5-5" },
     }]);
     expect(upsertedActors).toEqual([peerActor]);
     expect(upsertedEndpoints).toEqual([peerEndpoint]);
@@ -449,9 +541,9 @@ describe("startSessionOnPeers", () => {
 
   test("ranks peers by shared path depth, then id", () => {
     const peers = [node({ id: "node-c" }), node({ id: "node-b" }), node({ id: "node-a" })];
-    const ranked = rankPeersForProjectPath(peers, "/Users/arach/dev/x", (id) => ({
-      "node-b": ["/Users/arach/dev/talkie"],
-      "node-c": ["/Users/art/dev/openscout"],
+    const ranked = rankPeersForProjectPath(peers, "/Users/guest/dev/x", (id) => ({
+      "node-b": ["/Users/guest/dev/talkie"],
+      "node-c": ["/Users/you/dev/openscout"],
     })[id] ?? []);
 
     expect(ranked.map((peer) => peer.id)).toEqual(["node-b", "node-c", "node-a"]);
@@ -467,8 +559,8 @@ function locatedCodexSession(): SessionLocateResult {
     session: {
       harness: "codex",
       nativeSessionId: CODEX_THREAD_ID,
-      cwd: "/Users/art/dev/blink",
-      path: `/Users/art/.codex/sessions/2026/09/24/rollout-${CODEX_THREAD_ID}.jsonl`,
+      cwd: "/Users/you/dev/blink",
+      path: `/Users/you/.codex/sessions/2026/09/24/rollout-${CODEX_THREAD_ID}.jsonl`,
       lastActivityAt: 100,
       match: "session_meta id",
     },
@@ -573,14 +665,14 @@ describe("suggestHostForProjectPath", () => {
   const archie = { id: "archie-openscout", meshId: "openscout", name: "archie" } as NodeDefinition;
   const hutch = { id: "hutch-openscout", meshId: "openscout", name: "hutch" } as NodeDefinition;
   const roots: Record<string, string[]> = {
-    "archie-openscout": ["/home/arach/renders/arsenal-x", "/home/arach/dev/peal"],
+    "archie-openscout": ["/home/guest/renders/arsenal-x", "/home/guest/dev/peal"],
     "hutch-openscout": ["/root/dev/peal"],
   };
   const lookup = (id: string) => roots[id] ?? [];
 
   test("names the one peer holding a repo with that folder name", () => {
-    expect(suggestHostForProjectPath("/Users/art/renders/arsenal-x/", [archie, hutch], lookup))
-      .toEqual({ host: "archie", root: "/home/arach/renders/arsenal-x" });
+    expect(suggestHostForProjectPath("/Users/you/renders/arsenal-x/", [archie, hutch], lookup))
+      .toEqual({ host: "archie", root: "/home/guest/renders/arsenal-x" });
   });
 
   test("stays quiet when the name is ambiguous or unknown", () => {
@@ -618,6 +710,18 @@ describe("resolveMeshHost", () => {
       expect(resolve("mini-local", { nodes: order, trustedNodeIds: new Set([mini.id, stale.id]) }))
         .toEqual({ kind: "peer", node: stale });
     }
+  });
+
+  test("the pre-dispatch check sees only the node routing picks, not a stale record that shares its name", () => {
+    const mini = node({ id: "mini-mesh-1", name: "mini", hostName: "mini.local" });
+    const stale = node({ id: "mini-local-mesh-1", name: "mini", hostName: "mini" });
+    for (const order of [[stale, mini], [mini, stale]]) {
+      expect(meshHostDispatchPeers(resolve("mini", { nodes: order, trustedNodeIds: new Set([mini.id, stale.id]) })))
+        .toEqual([mini]);
+    }
+    expect(meshHostDispatchPeers(resolve("arts-mini"))).toEqual([]);
+    expect(meshHostDispatchPeers(resolve("nowhere"))).toEqual([]);
+    expect(meshHostDispatchPeers({ kind: "ambiguous", nodes: [mini, stale] })).toEqual([mini, stale]);
   });
 
   test("normalized host aliases remain usable when no exact qualifier matches", () => {

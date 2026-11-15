@@ -8,6 +8,7 @@ import {
   classifyAttribution,
   commandBasename,
   listProcesses,
+  processResourceFields,
   readCwd,
   type RawProcess,
 } from "./discover.js";
@@ -104,13 +105,14 @@ export async function discoverDevinProcesses(): Promise<DiscoveredProcess[]> {
   const out: DiscoveredProcess[] = [];
   await Promise.all(
     matches.map(async (proc) => {
-      const cwd = await readCwd(proc.pid);
+      const cwd = await readCwd(proc.pid, proc.etime);
       const parentChain = buildParentChain(proc.pid, byPid);
       out.push({
         pid: proc.pid,
         ppid: proc.ppid,
         command: proc.command,
         etime: proc.etime,
+        ...processResourceFields(proc),
         cwd,
         harness: classifyAttribution(parentChain),
         parentChain,

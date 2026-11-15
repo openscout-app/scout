@@ -35,11 +35,14 @@ import {
   startLocalAgent,
   stripLocalAgentReplyMetadata,
   waitForLocalAgentReply,
+  continuedSessionReplyWaitSeconds,
+  flatSessionWasTypedInPlace,
   waitForReadyComposer,
 } from "./local-agents";
 import { buildCardlessSessionEndpoint } from "./broker-cardless-session";
 import { DEFAULT_BROKER_URL } from "./broker-process-manager";
 import { shutdownCodexAppServerAgent } from "./codex-app-server";
+import { DeliveryBlockedError } from "./delivery-blocked";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const scoutCli = `bun ${JSON.stringify(join(repoRoot, "packages", "cli", "bin", "scout.mjs"))}`;
@@ -594,15 +597,15 @@ describe("local agent prompts", () => {
   });
 
   test("system prompt composes shared base, project context, and broker-backed protocol", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
-    const prompt = buildLocalAgentSystemPrompt("shaper", "shaper", "/Users/arach/dev/shaper");
+    const prompt = buildLocalAgentSystemPrompt("shaper", "shaper", "/Users/guest/dev/shaper");
 
     expect(prompt).toContain('You are "shaper", a relay agent for the shaper project.');
     expect(prompt).toContain("Project context:");
-    expect(prompt).toContain("Codebase root: /Users/arach/dev/shaper");
-    expect(prompt).toContain("Projects root: /Users/arach/dev");
+    expect(prompt).toContain("Codebase root: /Users/guest/dev/shaper");
+    expect(prompt).toContain("Projects root: /Users/guest/dev");
     expect(prompt).toContain(`${scoutCli} inbox --as shaper --latest 20 --json`);
     expect(prompt).toContain(`${scoutCli} channel <name> --latest 20 --json`);
     expect(prompt).toContain(`${scoutCli} send --to <agent> --as shaper "your message"`);
@@ -633,29 +636,29 @@ describe("local agent prompts", () => {
         agentId: "shaper",
         displayName: "Shaper",
         projectName: "shaper",
-        projectPath: "/Users/arach/dev/shaper",
+        projectPath: "/Users/guest/dev/shaper",
         brokerUrl: DEFAULT_BROKER_URL,
         relayCommand: `node ${JSON.stringify(join(repoRoot, "packages", "cli", "bin", "scout.mjs"))}`,
-        projectsRoot: "/Users/arach/dev",
-        relayHub: "/Users/arach/.openscout/relay",
+        projectsRoot: "/Users/guest/dev",
+        relayHub: "/Users/guest/.openscout/relay",
         openscoutRoot: repoRoot,
         scoutSkill: scoutSkillPath,
       },
     );
 
     expect(
-      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/arach/dev/shaper", legacyPrompt),
+      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/guest/dev/shaper", legacyPrompt),
     ).toBeUndefined();
   });
 
   test("direct claude runtime prompt forbids reply tools for final-response capture", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "shaper",
       "shaper",
-      "/Users/arach/dev/shaper",
+      "/Users/guest/dev/shaper",
       { transport: "claude_stream_json" },
     );
 
@@ -665,13 +668,13 @@ describe("local agent prompts", () => {
   });
 
   test("direct Pi RPC runtime prompt captures final responses through the broker", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "minimax",
       "openscout",
-      "/Users/arach/dev/openscout",
+      "/Users/guest/dev/openscout",
       { transport: "pi_rpc" },
     );
 
@@ -681,13 +684,13 @@ describe("local agent prompts", () => {
   });
 
   test("tmux claude runtime remains the default local agent context", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "shaper",
       "shaper",
-      "/Users/arach/dev/shaper",
+      "/Users/guest/dev/shaper",
     );
 
     expect(prompt).toContain("Relay protocol:");
@@ -697,25 +700,25 @@ describe("local agent prompts", () => {
   });
 
   test("explicit tmux generated prompts normalize away as current defaults", () => {
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = buildLocalAgentSystemPrompt(
       "shaper",
       "shaper",
-      "/Users/arach/dev/shaper",
+      "/Users/guest/dev/shaper",
       { transport: "tmux" },
     );
 
     expect(
-      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/arach/dev/shaper", prompt),
+      normalizeLocalAgentSystemPrompt("shaper", "shaper", "/Users/guest/dev/shaper", prompt),
     ).toBeUndefined();
   });
 
   test("system prompt template renders shared fragments, path aliases, and env variables at wake time", () => {
     process.env.OPENSCOUT_TEST_PROMPT_VAR = "broker-ready";
-    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/arach/dev";
-    process.env.OPENSCOUT_RELAY_HUB = "/Users/arach/.openscout/relay";
+    process.env.OPENSCOUT_PROJECTS_ROOT = "/Users/guest/dev";
+    process.env.OPENSCOUT_RELAY_HUB = "/Users/guest/.openscout/relay";
 
     const prompt = renderLocalAgentSystemPromptTemplate(
       [
@@ -731,21 +734,21 @@ describe("local agent prompts", () => {
         agentId: "shaper",
         displayName: "Shaper",
         projectName: "shaper",
-        projectPath: "/Users/arach/dev/shaper",
+        projectPath: "/Users/guest/dev/shaper",
         brokerUrl: DEFAULT_BROKER_URL,
         relayCommand: "bun relay",
-        projectsRoot: "/Users/arach/dev",
-        relayHub: "/Users/arach/.openscout/relay",
+        projectsRoot: "/Users/guest/dev",
+        relayHub: "/Users/guest/.openscout/relay",
         openscoutRoot: repoRoot,
         scoutSkill: scoutSkillPath,
       },
     );
 
     expect(prompt).toContain('You are "shaper", a relay agent for the shaper project.');
-    expect(prompt).toContain("Codebase root: /Users/arach/dev/shaper");
-    expect(prompt).toContain("Projects root: /Users/arach/dev");
-    expect(prompt).toContain("Base path: /Users/arach/dev");
-    expect(prompt).toContain("Workspace root: /Users/arach/dev/shaper");
+    expect(prompt).toContain("Codebase root: /Users/guest/dev/shaper");
+    expect(prompt).toContain("Projects root: /Users/guest/dev");
+    expect(prompt).toContain("Base path: /Users/guest/dev");
+    expect(prompt).toContain("Workspace root: /Users/guest/dev/shaper");
     expect(prompt).not.toContain(`Broker URL: ${DEFAULT_BROKER_URL}`);
     expect(prompt).toContain("Use the Scout CLI for broker reads and writes");
     expect(prompt).toContain("bun relay inbox --as shaper --latest 20 --json");
@@ -1384,6 +1387,43 @@ describe("terminal broker reply capture", () => {
     expect(output).toBe("done");
     expect(reads).toBe(2);
   });
+  test("the session's own transcript answers when the worker posts no reply", async () => {
+    const answers: Array<string | null> = [null, null, "It passes."];
+    let reads = 0;
+    const output = await waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => ({ messages: {} }),
+      transcriptReply: async () => answers[Math.min(reads++, answers.length - 1)]!,
+    });
+    expect(output).toBe("It passes.");
+    expect(reads).toBe(3);
+  });
+  test("a turn the transcript shows was interrupted ends the wait with the reason", async () => {
+    const interrupted = new DeliveryBlockedError({
+      stage: "in_place_turn_aborted",
+      summary: "its turn was interrupted before it answered.",
+      message: "The turn was interrupted before it answered.",
+    });
+    await expect(waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => ({ messages: {} }),
+      transcriptReply: async () => { throw interrupted; },
+    })).rejects.toBe(interrupted);
+  });
+
+  test("a reply the worker posts itself still wins, and a transcript that cannot be read is not an answer", async () => {
+    const reply = { class: "agent", actorId: input.agentRuntimeId, conversationId: "chn-smoke", replyToMessageId: "msg-smoke", body: "posted", createdAt: 11_000 };
+    let snapshots = 0;
+    const output = await waitForLocalAgentReply({
+      ...input,
+      timeoutSeconds: 5,
+      readSnapshot: async () => (snapshots++ === 0 ? { messages: {} } : { messages: { reply } }),
+      transcriptReply: async () => { throw new Error("transcript moved"); },
+    });
+    expect(output).toBe("posted");
+  });
 });
 
 describe("local agent reply cleanup", () => {
@@ -1593,4 +1633,29 @@ test("canonical task images expose authorized attachment reads instead of invent
   expect(prompt).toContain('"messageId":"msg-image"');
   expect(prompt).toContain('"conversationId":"conversation"');
   expect(prompt).not.toContain("/api/blobs/");
+});
+
+describe("a session Scout continues itself", () => {
+  const twoHours = 2 * 60 * 60_000;
+
+  test("is waited on for the whole turn when its answer is read from the transcript", () => {
+    // Nothing reads the transcript after the wait ends, so the short wait would lose the answer.
+    expect(continuedSessionReplyWaitSeconds({ transcriptRead: true, transcriptWaitMs: twoHours })).toBe(7_200);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 60_000, transcriptRead: true, transcriptWaitMs: twoHours })).toBe(7_200);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 3 * twoHours, transcriptRead: true, transcriptWaitMs: twoHours })).toBe(21_600);
+  });
+
+  test("keeps the sender's wait when the worker replies through Scout", () => {
+    expect(continuedSessionReplyWaitSeconds({ transcriptRead: false, transcriptWaitMs: twoHours })).toBe(300);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 5_000, transcriptRead: false, transcriptWaitMs: twoHours })).toBe(30);
+    expect(continuedSessionReplyWaitSeconds({ timeoutMs: 90_000, transcriptRead: false, transcriptWaitMs: twoHours })).toBe(90);
+  });
+
+  test("an ask already typed where the session was open is only watched, and a held one is not", () => {
+    expect(flatSessionWasTypedInPlace(null)).toBe(false);
+    expect(flatSessionWasTypedInPlace({ phase: "held", since: 1 })).toBe(false);
+    const place = { via: "scout-app", location: "the ChatGPT app", transcriptOffset: 10 } as const;
+    expect(flatSessionWasTypedInPlace({ phase: "typing", since: 1, at: 2, ...place })).toBe(true);
+    expect(flatSessionWasTypedInPlace({ phase: "typed", since: 1, at: 2, ...place })).toBe(true);
+  });
 });

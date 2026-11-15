@@ -8,27 +8,29 @@ const id = z.string().min(1).max(1024).regex(/^[^\x00-\x1f\x7f]+$/u);
 const session = z.string().min(1).max(128).refine(value => value === value.trim()
   && value !== "." && value !== ".." && !/[/\\\x00-\x1f\x7f]/u.test(value));
 const text = z.string().max(4096);
-const counts = z.object({ blocked: integer, working: integer, idle: integer, done: integer, unknown: integer }).strict();
+// Objects are not strict: a field a newer runtime adds is dropped, so an older
+// client keeps reading. Only fields named here are validated and returned.
+const counts =z.object({ blocked: integer, working: integer, idle: integer, done: integer, unknown: integer });
 const pane = z.object({
   target: id.nullable(), paneId: id, workspaceId: id, tabId: id,
   name: text.nullable().optional(), label: text.nullable(),
-  agentSession: z.object({ agent: id, kind: id, source: id, value: text }).strict().nullable().optional(),
+  agentSession: z.object({ agent: id, kind: id, source: id, value: text }).nullable().optional(),
   agent: text.nullable(), status: z.enum(["idle", "working", "blocked", "done", "unknown"]),
   directory: text.nullable(), focused: z.boolean(), backlog: integer.nullable(),
   gitBranch: text.nullable().optional(),
-}).strict();
+});
 const digest = z.object({
   session, live: z.boolean(), observedAt: z.number().finite(), savedAt: z.number().finite().nullable(),
   unavailable: z.enum(["not_running", "unreadable"]).nullable(), availability,
   clients: integer.optional(), apps: z.array(text).max(256).optional(),
-  totals: z.object({ workspaces: integer, tabs: integer, panes: integer, agents: integer }).strict(), counts,
+  totals: z.object({ workspaces: integer, tabs: integer, panes: integer, agents: integer }), counts,
   needsYou: z.array(pane).max(12), working: z.array(pane).max(12),
   groups: z.array(z.object({ directory: text.nullable(), name: text, counts,
-    panes: z.array(pane).max(40), omitted: integer, omittedCounts: counts }).strict()).max(256),
+    panes: z.array(pane).max(40), omitted: integer, omittedCounts: counts })).max(256),
   shapes: z.array(z.object({ workspaceId: id, workspaceLabel: text, tabId: id, tabLabel: text,
-    paneCount: integer, arrangement: text, zoomed: z.boolean(), focused: z.boolean() }).strict()).max(64),
+    paneCount: integer, arrangement: text, zoomed: z.boolean(), focused: z.boolean() })).max(64),
   truncated: z.boolean(), notes: z.array(text).max(128),
-}).strict();
+});
 const schema = z.object({
   schema: z.literal("scout.herdr-workspaces/v1"), nodeId: id, scannedAt: z.number().finite().nullable(),
   availability, reason: z.enum(["not_scanned", "session_list_unavailable"]).nullable(),
@@ -38,9 +40,9 @@ const schema = z.object({
       sessions: z.literal(8), enumeratedSessions: z.literal(256), workspacesPerSession: z.literal(16),
       tabsPerSession: z.literal(64), inputPanesPerSession: z.literal(256), emittedPanesPerSession: z.literal(40),
       leadsPerSession: z.literal(12), concurrentSessions: z.literal(2),
-    }).strict(),
-  }).strict(),
-}).strict();
+    }),
+  }),
+});
 
 export class HerdrWorkspacesReadError extends Error {
   constructor(readonly status: number | null, readonly code: string) {

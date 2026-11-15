@@ -22,9 +22,10 @@ import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
-import { deliverInPlace, isScoutBackgroundCopy } from "./in-place/deliver.js";
+import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
+import { permissionWaitPatch } from "./broker-blocked-reply.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
 import { requireProtectedAccessState, protectAccessDirectories, removeLocalAdminEnvironment } from "./mesh-access-startup.js";
@@ -88,6 +89,7 @@ import {
   mintChannelId,
   OPENSCOUT_COORDINATOR_AGENT_ID,
   SCOUT_DISPATCHER_AGENT_ID,
+  rosterNumberText,
 } from "@openscout/protocol";
 
 import { createInMemoryControlRuntime } from "./broker.js";
@@ -196,7 +198,8 @@ import {
   ObservedSessionReducer,
   subscribeObservedSessionReducer,
 } from "./observed-session-reducer.js";
-import { replacePersistedActiveObservedSessionSeeds } from "./tail/service.js";
+import { replacePersistedActiveObservedSessionSeeds, tailMemoryStats } from "./tail/service.js";
+import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
@@ -225,6 +228,7 @@ import {
 import { clearGitBranchCache, readRelayAgentOverrides, resolveRuntimeScoutCliInvocation, writeRelayAgentOverrides } from "./setup.js";
 import { HarnessHooks } from "./harness-hooks.js";
 import { broadcastApnsAlertToActiveMobileDevices } from "./mobile-push.js";
+import { describeTaskCallbackRun, runTaskCallback } from "./task-callback.js";
 import {
   getHarnessTopologySnapshot,
   nudgeHarnessTopologyScan,
@@ -233,6 +237,7 @@ import {
   getTailDiscovery,
   readRecentLiveEvents,
   readRecentTranscriptEvents,
+  readTailSessionUsage,
 } from "./tail/index.js";
 import {
   getRepoWatchSnapshot,
@@ -292,6 +297,7 @@ import {
 } from "./broker-mesh-forwarding-service.js";
 import {
   resolveMeshHost,
+  meshHostDispatchPeers,
   suggestHostForProjectPath,
   startSessionOnPeers,
   wakeLocalHarnessSession,
@@ -438,6 +444,8 @@ const healthResponder = new BrokerHealthResponder({
   socketPath: brokerHealthSocketPath(brokerSocketPath),
   log: (message) => console.warn(`[openscout-runtime] ${message}`),
 });
+// scoutd watches the runtime's memory; when it asks, the runtime says what it holds.
+installMemorySnapshot({ role: "scout-broker", probes: { tail: () => tailMemoryStats() } });
 let nodeId = process.env.OPENSCOUT_NODE_ID?.trim() ?? "";
 const tailnetWebHosts = readTailscaleSelfWebHostsSync();
 // The named web doorway this node answers for — same resolution the local edge
@@ -1047,6 +1055,7 @@ const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalS
     actorFor: (actorId) => runtime.peek().actors[actorId],
     harnessSupportsResume: (harness) => Boolean(findHarnessEntry(harness)?.resume),
     observeEndpointSession: observeLocalAgentEndpointSession,
+    probeInPlace: (probe) => probeInPlaceConfirmed(probe),
     log: (message) => console.log(message),
   }, input);
 
@@ -1561,6 +1570,17 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
       .catch(error => console.error("[openscout-runtime] T3 cancellation unconfirmed", error));
     if (invocation) void externalSessionService.forwardResult(invocation, flight)
       .catch((error) => console.error("[openscout-runtime] external result delivery failed", error));
+    // `ask --callback`: the asker's sandboxed function, run only on the
+    // worker's runtime, once per terminal transition.
+    if (invocation) void runTaskCallback({
+      flight,
+      invocation,
+      nodeId,
+      targetAgent: runtime.agent(invocation.targetAgentId),
+      targetEndpointNodeId: homeEndpointForAgent(runtime.snapshot(), invocation.targetAgentId)?.nodeId,
+    })
+      .then((run) => { if (run) for (const line of describeTaskCallbackRun(invocation.id, run)) console.log(line); })
+      .catch((error) => console.error("[openscout-runtime] task callback failed", error));
     // Role lifecycle (orchestrator post_ask_summary, etc.). Best-effort; never
     // fail the flight record path. Uses a short-lived SQLite connection so we
     // don't hold the projection store lock.
@@ -2105,6 +2125,8 @@ const localEndpointResolver = new BrokerLocalEndpointResolver({
   isLocalAgentEndpointAliveAsync,
   ensureLocalSessionEndpointOnline,
   observeLocalEndpointSession: observeLocalAgentEndpointSession,
+  // The resolver restarts a session on one answer, so the answer is confirmed.
+  probeInPlace: (probe) => probeInPlaceConfirmed(probe),
   ensureLocalAgentBindingOnline,
   createIsolatedAgentEndpoint: createIsolatedAgentEndpointForInvocation,
   upsertActor: upsertActorDurably,
@@ -3092,6 +3114,14 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
     const name = brokerActorDisplayName(snapshot, actorId);
     return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
   },
+  agentRosterCode: (actorId) => {
+    const entry = agentRosterService?.entry(actorId);
+    return entry ? rosterNumberText(entry.number) : null;
+  },
+  agentHarness: (actorId) => {
+    const endpoints = Object.values(runtime.snapshot().endpoints).filter((endpoint) => endpoint.agentId === actorId);
+    return (endpoints.find((endpoint) => endpoint.preferred) ?? endpoints[0])?.harness ?? null;
+  },
   warn: (message) => console.warn(message),
 });
 
@@ -3111,10 +3141,8 @@ const permissionService = new BrokerPermissionService({
   },
   // A native session's request has no tmux pane to rebind: its hook went with the old runtime.
   reattach: request => request.native ? Promise.resolve({ sessionOpen: false }) : reattachTmuxPermission(request),
-  transition: (id, state, requestId) => transitionInvocation(id, {
-    state, summary: requestId ? "Waiting on permission" : "Permission wait resolved; continuing live session.",
-    metadata: { permissionRequestId: requestId, waitingOnPermission: Boolean(requestId), nextMoveOwnerId: requestId ? operatorActorId : null },
-  }),
+  transition: (id, state, requestId) => transitionInvocation(id,
+    permissionWaitPatch(runtime.flightForInvocation(id), state, requestId, operatorActorId, Date.now())),
   // A harness dialog, not a question an agent put to the operator: it reads
   // and rings as a permission request, and a tap opens the request.
   notify: (invocation, record, prompt) => {
@@ -3122,7 +3150,7 @@ const permissionService = new BrokerPermissionService({
     const context = shapeAttentionContext(invocation.task, "task");
     const view = permissionDialogView(prompt.text);
     if (context) {
-      if (view.view === "turn.approve.command" || view.view === "turn.approve.tool") view.why = context.text;
+      if (view.view === "turn.approve.command" && !view.why) view.why = context.text;
       if (view.view === "turn.approve.edit") view.summary = context.text;
     }
     operatorAttentionService.queuePermissionRequest({
@@ -3237,7 +3265,14 @@ const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDel
     const actorId = target?.kind === "agent_id" ? target.agentId : target?.kind === "agent_label"
       ? Object.values(snapshot.agents).find(agent => [agent.id, agent.handle, agent.displayName].includes(target.label))?.id : undefined;
     const endpoint = actorId ? homeEndpointForAgent(snapshot, actorId) : undefined;
-    const peers = host ? Object.values(snapshot.nodes).filter(node => [node.id, node.name, node.hostName].includes(host))
+    // Check the node routing will pick, not every record that shares the name.
+    const peers = host ? meshHostDispatchPeers(resolveMeshHost({
+      host,
+      localNode: snapshot.nodes[nodeId],
+      nodes: Object.values(snapshot.nodes).filter((node) => node.meshId === meshId),
+      trustedNodeIds: new Set(trustedPeerStore?.listTrustedPeers().flatMap((peer) => peer.nodeId ? [peer.nodeId] : []) ?? []),
+      isReachable: isReachableMeshNode,
+    }))
       : endpoint ? [snapshot.nodes[endpoint.nodeId]].filter((node): node is NodeDefinition => Boolean(node)) : [];
     for (const peer of peers) if (peer.id !== nodeId && !peer.capabilities?.includes(SCOUT_TASKS_CAPABILITY))
       throw new Error(`target runtime does not advertise ${SCOUT_TASKS_CAPABILITY}; upgrade it before dispatch`);
@@ -3515,6 +3550,7 @@ const routeRequest = createBrokerHttpRouter({
   brokerRepoTailService,
   getHarnessTopologySnapshot,
   getTailDiscovery,
+  readTailSessionUsage,
   nudgeHarnessTopologyScan,
   deliveryHttpService,
   durableActionHttpService,

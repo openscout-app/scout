@@ -269,7 +269,7 @@ describe("broker delivery routing", () => {
       execution: { harness: "codex" },
     }, {
       requesterId: "operator",
-      currentDirectory: "/Users/art/dev/blink",
+      currentDirectory: "/Users/you/dev/blink",
       reason: "blink incident guard",
     });
 
@@ -308,8 +308,8 @@ describe("broker delivery routing", () => {
           harness: "codex",
           transport: "codex_app_server",
           state: "idle",
-          cwd: "/Users/art/dev/blink",
-          projectRoot: "/Users/art/dev/blink",
+          cwd: "/Users/you/dev/blink",
+          projectRoot: "/Users/you/dev/blink",
           sessionId: scoutSessionId,
           metadata: {
             cardless: true,
@@ -331,7 +331,7 @@ describe("broker delivery routing", () => {
       },
     }, {
       requesterId: "operator",
-      currentDirectory: "/Users/art/dev/blink",
+      currentDirectory: "/Users/you/dev/blink",
       reason: "wake resume",
     });
 
@@ -369,8 +369,8 @@ describe("broker delivery routing", () => {
           harness: "codex",
           transport: "codex_app_server",
           state: "idle",
-          cwd: "/Users/art/dev/blink-worktree",
-          projectRoot: "/Users/art/dev/blink-worktree",
+          cwd: "/Users/you/dev/blink-worktree",
+          projectRoot: "/Users/you/dev/blink-worktree",
           sessionId: scoutSessionId,
           metadata: { cardless: true, flatDispatch: true, externalSessionId: sessionId, nativeSessionId: sessionId },
         });
@@ -381,14 +381,14 @@ describe("broker delivery routing", () => {
     // A sibling worktree path that no project is registered at, as an older
     // composer sent it: the path says where, the execution names the session.
     const input = {
-      target: { kind: "project_path" as const, projectPath: "/Users/art/dev/blink-worktree" },
+      target: { kind: "project_path" as const, projectPath: "/Users/you/dev/blink-worktree" },
       execution: { harness: "codex" as const, session: "existing" as const, targetSessionId: sessionId },
     };
     expect(exactSessionRouteTarget(input)).toMatchObject({ nativeSessionId: sessionId, harness: "codex" });
 
     const result = await router.resolveWithImplicitProjectAgent(input, {
       requesterId: "operator",
-      currentDirectory: "/Users/art/dev/blink-worktree",
+      currentDirectory: "/Users/you/dev/blink-worktree",
       reason: "project path continues a session",
     });
 
@@ -434,8 +434,8 @@ describe("broker delivery routing", () => {
           harness: "claude",
           transport: "tmux",
           state: "idle",
-          cwd: "/Users/art/dev/openscout",
-          projectRoot: "/Users/art/dev/openscout",
+          cwd: "/Users/you/dev/openscout",
+          projectRoot: "/Users/you/dev/openscout",
           sessionId: scoutSessionId,
           metadata: { cardless: true, flatDispatch: true, externalSessionId: forkId, nativeSessionId: forkId, forkedFromSessionId: sourceId },
         });
@@ -474,5 +474,45 @@ describe("broker delivery routing", () => {
 
     expect(wakeInputs[0]?.forkIfLive).toBeUndefined();
     expect(result).toMatchObject({ kind: "unknown", detail: "session is already running", sessionWakeReason: "session_live_unbound" });
+  });
+
+  test("the caller's folder reaches wake as a fallback, never as the project the session must match", async () => {
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    const sessionId = "4fad8bb9-b4d3-4432-be75-8cfd636e78c0";
+    const wakeInputs: Array<{ projectPath?: string; fallbackCwd?: string }> = [];
+    const router = new BrokerDeliveryRouter({
+      runtimeSnapshot: () => runtime.snapshot(),
+      nodeId: "node-1",
+      isInactiveLocalAgent: () => false,
+      wakeExactHarnessSession: async (input) => {
+        wakeInputs.push(input);
+        return { ok: false, reason: "session_unknown", detail: "not here" };
+      },
+    });
+
+    await router.resolveWithImplicitProjectAgent({
+      target: { kind: "session_id", sessionId, harness: "codex" },
+    }, { requesterId: "operator", currentDirectory: "/work/elsewhere", reason: "ask from another folder" });
+    expect(wakeInputs[0]?.projectPath).toBeUndefined();
+    expect(wakeInputs[0]?.fallbackCwd).toBe("/work/elsewhere");
+
+    await router.resolveWithImplicitProjectAgent({
+      target: { kind: "session_id", sessionId, harness: "codex" },
+    }, {
+      requesterId: "operator",
+      currentDirectory: "/work/elsewhere",
+      projectPath: "/work/blink",
+      reason: "ask that names a project",
+    });
+    expect(wakeInputs[1]?.projectPath).toBe("/work/blink");
+    expect(wakeInputs[1]?.fallbackCwd).toBe("/work/elsewhere");
+
+    // An invocation with no project and no caller folder names neither.
+    await router.resolveInvocationTarget({
+      target: { kind: "session_id", sessionId, harness: "codex" },
+      requesterId: "operator",
+    } as Parameters<BrokerDeliveryRouter["resolveInvocationTarget"]>[0]);
+    expect(wakeInputs[2]?.projectPath).toBeUndefined();
+    expect(wakeInputs[2]?.fallbackCwd).toBeUndefined();
   });
 });

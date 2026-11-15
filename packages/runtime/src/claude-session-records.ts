@@ -42,6 +42,12 @@ export type ClaudeSessionRecord = {
   waitingFor?: string | null;
   /** A background session's job id (`kind: "bg"`): `claude attach <jobId>` opens it in a terminal. */
   jobId?: string | null;
+  /**
+   * The process runs, but the tmux pane its record names could not be shown to
+   * hold it: another tmux server, a pane that is gone, or a process no longer
+   * in the pane's foreground. The session is open; that pane is not a place to type.
+   */
+  paneUnverified?: boolean;
   recordPath: string;
 };
 
@@ -173,7 +179,13 @@ export async function readClaudeSessionRecords(options: { directory?: string } =
   return records;
 }
 
-export type ClaudeLivePane = { session: string; window: string; pane: string; pid: number; procStart: string };
+export type ClaudeLivePane = {
+  session: string; window: string; pane: string; pid: number; procStart: string;
+  /** The pane's terminal device, as tmux names it. */
+  tty?: string | null;
+};
+/** The terminal a process sits on, and whether it is that terminal's foreground job. */
+export type ClaudeProcessTerminal = { tty: string | null; foreground: boolean };
 export type ClaudePaneProbe = (tmuxSession: string) => Promise<ClaudeLivePane[]>;
 
 /** Compare both the pane's current process and its birth time: kill(pid, 0) alone permits PID reuse. */
@@ -181,23 +193,43 @@ async function probeClaudePanes(tmuxSession: string): Promise<ClaudeLivePane[]> 
   // -u: without a UTF-8 locale (launchd gives the broker none) tmux prints
   // tabs as "_", so every row would fail to split.
   const output = await execSystemFile("tmux", ["-u", "list-panes", "-s", "-t", `=${tmuxSession}`,
-    "-F", "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}"],
+    "-F", "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}"],
     { timeoutMs: 2000, maxStdoutBytes: 16384 });
   const rows = output.stdout.trim().split("\n").filter(Boolean);
   if (rows.length > 32) throw new Error("Claude tmux pane inspection limit exceeded");
   return Promise.all(rows.map(async (row) => {
-    const [session, window, pane, rawPid] = row.split("\t");
+    const [session, window, pane, rawPid, tty] = row.split("\t");
     const pid = Number(rawPid);
     if (!session || !window || !pane || !Number.isInteger(pid) || pid <= 0) throw new Error("Invalid tmux pane identity");
     const processResult = await execSystemFile("ps", ["-p", String(pid), "-o", "lstart="],
       { timeoutMs: 2000, env: { ...process.env, TZ: "UTC", LC_ALL: "C" }, maxStdoutBytes: 1024 });
-    return { session, window, pane, pid, procStart: processResult.stdout.trim() };
+    return { session, window, pane, pid, procStart: processResult.stdout.trim(), tty: tty?.trim() || null };
   }));
+}
+
+function terminalName(tty: string): string {
+  return tty.trim().replace(/^\/dev\//u, "");
+}
+
+async function readProcessTerminal(pid: number): Promise<ClaudeProcessTerminal | null> {
+  try {
+    const result = await execSystemFile("ps", ["-p", String(pid), "-o", "tty=,pgid=,tpgid="],
+      { timeoutMs: 2000, env: { ...process.env, LC_ALL: "C" }, maxStdoutBytes: 1024 });
+    const [tty, pgid, tpgid] = result.stdout.trim().split(/\s+/u);
+    if (!tty || !pgid || !tpgid) return null;
+    return {
+      tty: tty === "??" || tty === "?" ? null : terminalName(tty),
+      foreground: Number(pgid) > 0 && Number(pgid) === Number(tpgid),
+    };
+  } catch (error) {
+    if ((error as { exitCode?: number }).exitCode !== 1) throw error;
+    return null;
+  }
 }
 
 function missingTmuxSession(error: unknown): boolean {
   const stderr = (error as { stderr?: unknown })?.stderr;
-  return /can't find (?:session|window|pane)|no server running|no sessions/u.test(`${String(error)}\n${typeof stderr === "string" ? stderr : ""}`);
+  return /can't find (?:session|window|pane)|no server running|no sessions|error connecting to/u.test(`${String(error)}\n${typeof stderr === "string" ? stderr : ""}`);
 }
 
 function sameProcess(record: ClaudeSessionRecord, pane: ClaudeLivePane): boolean {
@@ -229,29 +261,66 @@ export async function observeClaudeSessionForTmuxSession(input: {
   return correlateClaudeSessionForTmuxSession({ ...input, records, isProcessAlive: () => true });
 }
 
+/** When the process started, as `ps` prints it; null when no such process runs. */
+async function readProcessStart(pid: number): Promise<string | null> {
+  try {
+    const result = await execSystemFile("ps", ["-p", String(pid), "-o", "lstart="],
+      { timeoutMs: 2000, env: { ...process.env, TZ: "UTC", LC_ALL: "C" }, maxStdoutBytes: 1024 });
+    return result.stdout.trim() || null;
+  } catch (error) {
+    if ((error as { exitCode?: number }).exitCode !== 1) throw error;
+    return null;
+  }
+}
+
 export async function findLiveClaudeSession(nativeSessionId: string, options: {
   directory?: string; probe?: ClaudePaneProbe;
+  processStart?: (pid: number) => Promise<string | null>;
+  processTerminal?: (pid: number) => Promise<ClaudeProcessTerminal | null>;
+  /** Records to pass over, so a second holder of the same session can be found. */
+  skip?: (record: ClaudeSessionRecord) => boolean;
 } = {}): Promise<ClaudeSessionRecord | null> {
   const matches = (await readClaudeSessionRecords(options)).filter(record => record.sessionId === nativeSessionId);
+  const normalized = (value: string) => value.trim().replace(/\s+/gu, " ");
+  // The record's own start time tells its process from a later one with the same pid.
+  const stillRunning = async (record: ClaudeSessionRecord) => {
+    const started = await (options.processStart ?? readProcessStart)(record.pid);
+    return Boolean(record.procStart && started && normalized(started) === normalized(record.procStart));
+  };
   for (const record of matches) {
+    if (options.skip?.(record)) continue;
     // A live non-tmux Claude also owns its native session: never start a competing resume.
     if (!record.tmux) {
-      try {
-        const result = await execSystemFile("ps", ["-p", String(record.pid), "-o", "lstart="],
-          { timeoutMs: 2000, env: { ...process.env, TZ: "UTC", LC_ALL: "C" }, maxStdoutBytes: 1024 });
-        if (record.procStart && result.stdout.trim().replace(/\s+/gu, " ") === record.procStart.trim().replace(/\s+/gu, " ")) return record;
-      } catch (error) {
-        if ((error as { exitCode?: number }).exitCode !== 1) throw error;
-      }
+      if (await stillRunning(record)) return record;
       continue;
     }
+    let panes: ClaudeLivePane[] = [];
     try {
-      const panes = await (options.probe ?? probeClaudePanes)(record.tmux.session);
-      if (panes.some(pane => sameProcess(record, pane))) return record;
+      panes = await (options.probe ?? probeClaudePanes)(record.tmux.session);
     } catch (error) {
-      // Missing tmux sessions are stale records; timeouts and unavailable probes fail closed.
-      if (!missingTmuxSession(error)) throw error;
+      // A missing tmux session or server leaves no pane to match. A probe that
+      // timed out or is unavailable fails closed, but only for a process that
+      // still runs: a record left by a crash is stale whatever tmux says.
+      if (!missingTmuxSession(error)) {
+        if (!await stillRunning(record)) continue;
+        throw error;
+      }
     }
+    if (panes.some(pane => sameProcess(record, pane))) return record;
+    const pane = panes.find(candidate => candidate.session === record.tmux?.session
+      && candidate.window === record.tmux.window && candidate.pane === record.tmux.pane);
+    // The pane's own process has this pid and another birth time: the pid was reused.
+    if (pane && pane.pid === record.pid) continue;
+    if (!await stillRunning(record)) continue;
+    // Claude started from a shell is a child of the pane's process, not the
+    // pane's process itself. Ids alone do not place it there: they repeat
+    // across tmux servers, and a suspended Claude leaves the pane to its
+    // shell. It is in the pane when it sits on the pane's terminal, in front.
+    if (pane?.tty) {
+      const terminal = await (options.processTerminal ?? readProcessTerminal)(record.pid);
+      if (terminal?.foreground && terminal.tty === terminalName(pane.tty)) return record;
+    }
+    return { ...record, paneUnverified: true };
   }
   return null;
 }
@@ -301,8 +370,15 @@ export function correlateClaudeSessionForTmuxSession(input: {
   }
   const launchName = input.launchName?.trim() || null;
   const cwd = input.cwd?.trim() || null;
-  const narrowed = live.filter(record => (!launchName || (record.name === launchName && record.nameSource === "user"))
-    && (!cwd || record.cwd === cwd) && record.kind === "interactive");
+  const eligible = live.filter(record => (!cwd || record.cwd === cwd) && record.kind === "interactive");
+  // Claude Code replaces the `--name` Scout launched with by its own title
+  // (`nameSource: "auto"`) moments after start. An auto title says nothing
+  // about the launch, so it cannot contradict the launch name; only a
+  // different user-given name can. Prefer an exact launch-name match first.
+  const named = eligible.filter(record => record.name === launchName && record.nameSource === "user");
+  const narrowed = !launchName ? eligible
+    : named.length > 0 ? named
+    : eligible.filter(record => record.nameSource !== "user");
   if (narrowed.length !== 1) {
     return { ok: false, reason: "ambiguous", candidates: candidates.length, live: live.length };
   }

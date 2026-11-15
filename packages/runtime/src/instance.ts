@@ -41,6 +41,7 @@ export const OPENSCOUT_INSTANCES_DIRECTORY = "instances";
 export const OPENSCOUT_PROD_PORTS = {
   broker: 43110,
   roomListening: 43112,
+  mcp: 43115,
   web: 43120,
   webTerminalRelay: 43121,
   vite: 43122,

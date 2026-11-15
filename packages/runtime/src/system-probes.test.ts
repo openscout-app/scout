@@ -1272,17 +1272,17 @@ if [ "$1" = "-axo" ] && [ "$2" = "pid=,ppid=,pgid=,tty=,command=" ]; then
   fi
   cat <<'ROWS'
 101 1 101 ttys001 /bin/zsh -l
-202 101 101 ?? /usr/bin/node /Users/art/dev/app.js
+202 101 101 ?? /usr/bin/node /Users/you/dev/app.js
 ROWS
   exit 0
 fi
-if [ "$1" = "-axww" ] && [ "$2" = "-o" ] && [ "$3" = "pid=,ppid=,etime=,command=" ]; then
+if [ "$1" = "-axww" ] && [ "$2" = "-o" ] && [ "$3" = "pid=,ppid=,etime=,pcpu=,rss=,command=" ]; then
   cat <<'ROWS'
-101 1 00:01 /bin/zsh -l
-202 101 00:02 /usr/bin/node /Users/art/dev/app.js
-303 202 00:03 claude --dangerously-skip-permissions
-404 202 00:04 /bin/sh -c echo hello
-505 202 00:05 /usr/bin/python3 worker.py
+101 1 00:01 0.0 2048 /bin/zsh -l
+202 101 00:02 1,5 65536 /usr/bin/node /example/app.js
+303 202 01-02:03:04 112.5 524288 claude --dangerously-skip-permissions
+404 202 00:04 0.1 900 /bin/sh -c echo hello
+505 202 00:05 2.0 1200 /usr/bin/python3 worker.py
 ROWS
   exit 0
 fi
@@ -1297,7 +1297,7 @@ exit 64
     writeFileSync(script, `#!/bin/sh
 if [ "$1" = "-a" ] && [ "$2" = "-p" ] && [ "$4" = "-d" ] && [ "$5" = "cwd" ] && [ "$6" = "-Fn" ]; then
   printf 'p%s\\n' "$3"
-  printf 'n/Users/art/dev/openscout\\n'
+  printf 'n/Users/you/dev/openscout\\n'
   exit 0
 fi
 if [ "$1" = "-nP" ] && [ "$3" = "-sTCP:LISTEN" ] && [ "$4" = "-Fp" ]; then
@@ -2002,6 +2002,11 @@ exit 64
       returnedCount: 3,
     });
     expect(daemon.value.rows.map((row: any) => row.pid)).toEqual([101, 202, 303]);
+    expect(daemon.value.rows.map((row: any) => [row.etime, row.cpuPct, row.rssKb])).toEqual([
+      ["00:01", 0, 2048],
+      ["00:02", 1.5, 65536],
+      ["01-02:03:04", 112.5, 524288],
+    ]);
   }, SCOUTD_CONFORMANCE_TIMEOUT_MS);
 
   test("ps probes missing-binary fixtures match between scoutd and the TS local twin", async () => {
@@ -2037,7 +2042,7 @@ exit 64
     ]);
 
     expect(daemon).toEqual(local);
-    expect(daemon.value).toBe("/Users/art/dev/openscout");
+    expect(daemon.value).toBe("/Users/you/dev/openscout");
   }, SCOUTD_CONFORMANCE_TIMEOUT_MS);
 
   test("net.listeners fixture matches between scoutd and the TS local twin", async () => {

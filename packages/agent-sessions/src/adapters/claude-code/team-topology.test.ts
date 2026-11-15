@@ -30,7 +30,7 @@ describe("readClaudeAgentTeamTopology", () => {
 
     writeFileSync(join(teamDir, "config.json"), JSON.stringify({
       name: "todo-cli-review",
-      cwd: "/Users/art/dev/todo-cli",
+      cwd: "/Users/you/dev/todo-cli",
       lead: {
         sessionId: "lead-session-1",
       },
@@ -60,7 +60,7 @@ describe("readClaudeAgentTeamTopology", () => {
 
     const topology = readClaudeAgentTeamTopology({
       homeDir: home,
-      cwd: "/Users/art/dev/todo-cli",
+      cwd: "/Users/you/dev/todo-cli",
       claudeSessionId: "lead-session-1",
       now: () => new Date("2026-05-05T12:00:00.000Z"),
     });
@@ -125,7 +125,7 @@ describe("readClaudeAgentTeamTopology", () => {
 
     expect(readClaudeAgentTeamTopology({
       homeDir: home,
-      cwd: "/Users/art/dev/todo-cli",
+      cwd: "/Users/you/dev/todo-cli",
       claudeSessionId: "lead-session-1",
     })).toBeNull();
 

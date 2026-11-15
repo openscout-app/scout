@@ -59,6 +59,43 @@ describe("adapter cost estimates", () => {
     }
   });
 
+  test("prices a model only from the card its id is listed under", () => {
+    const priced = (model: string | null) => estimateAdapterCost({
+      provider: "anthropic",
+      model,
+      usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+      capturedAt: 1,
+    });
+    for (const [model, total] of [
+      ["claude-opus-4-7", 30],
+      ["claude-opus-4-8", 30],
+      ["claude-opus-5", 30],
+      ["claude-sonnet-5", 12],
+      ["claude-haiku-4-5-20251001", 6],
+      ["claude-3-7-sonnet-20250219", 18],
+    ] as const) {
+      expect(priced(model).totalUsd, model).toBeCloseTo(total, 6);
+    }
+    // No listed id, no price: never an older model's rates guessed from the name.
+    for (const model of ["claude-haiku-6", "claude-haiku-5-5-20990101", "claude-sonnet-next", null]) {
+      const estimate = priced(model);
+      expect(estimate.rateCardSource, String(model)).toBe("unknown");
+      expect(estimate.totalUsd, String(model)).toBeNull();
+    }
+  });
+
+  test("the provider comes from the model's card when nothing else names it", () => {
+    const usage = { inputTokens: 1_000_000, outputTokens: 1_000_000 };
+    const fromCard = estimateAdapterCost({ model: "claude-haiku-4-5-20251001", usage, capturedAt: 1 });
+    expect(fromCard.provider).toBe("anthropic");
+    expect(fromCard.totalUsd).toBeCloseTo(6, 6);
+    expect(estimateAdapterCost({ model: "gpt-5-mini", usage, capturedAt: 1 }).provider).toBe("openai");
+    // A name no card lists is not assigned a provider by its prefix.
+    expect(estimateAdapterCost({ model: "claude-haiku-6", usage, capturedAt: 1 }).provider).toBe("unknown");
+    // A card is used only for its own provider.
+    expect(estimateAdapterCost({ provider: "openai", model: "claude-haiku-4-5", usage, capturedAt: 1 }).totalUsd).toBeNull();
+  });
+
   test("marks subscription-covered usage down while preserving API-equivalent cost", () => {
     const estimate = estimateAdapterCost({
       provider: "openai",

@@ -72,7 +72,8 @@ describe("model economics (models.dev-backed + curated picks)", () => {
   test("known current ids resolve with expected prices", () => {
     expect(modelEconomics("claude-haiku-4-5")).toMatchObject({ input: 1, output: 5 });
     expect(modelEconomics("gpt-5.6-luna")?.input).toBe(0.2);
-    expect(modelEconomics("deepseek-v4-flash")).toMatchObject({ input: 0.14, output: 0.28 });
+    expect(modelEconomics("claude-haiku-5-5")).toMatchObject({ input: 0.1, output: 0.5 });
+    expect(modelEconomics("deepseek-v4-flash")).toMatchObject({ input: 0.15, output: 0.6 });
     expect(modelEconomics("MiniMax-M3")).toMatchObject({ input: 0.3, output: 1.2 });
     expect(modelEconomics("openai/gpt-oss-20b")?.structuredOutput).toBe(true);
   });
@@ -171,5 +172,17 @@ describe("model economics generation", () => {
     expect(() => buildModelEconomicsRows(fixture)).toThrow(
       /cross-family canonical model collision.*anthropic.*openai/u,
     );
+  });
+
+  test("hosts that resell another lab's model do not claim it", () => {
+    const fixture: SourceCatalog = {
+      mistral: { models: { "glm-5.2": { cost: { input: 9, output: 9 } }, "mistral-small-latest": { cost: { input: 0.1, output: 0.3 } } } },
+      alibaba: { models: { "glm-5-2": { cost: { input: 8, output: 8 } }, "qwen-flash": { cost: { input: 0.05, output: 0.4 } } } },
+      zai: { models: { "glm-5.2": { cost: { input: 1, output: 3 } } } },
+    };
+    const rows = buildModelEconomicsRows(fixture);
+    expect(rows.get("glm-5-2")).toMatchObject({ family: "zai", input: 1, output: 3 });
+    expect(rows.get("mistral-small-latest")?.family).toBe("mistral");
+    expect(rows.get("qwen-flash")?.family).toBe("alibaba");
   });
 });

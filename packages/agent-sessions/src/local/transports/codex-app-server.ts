@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { buildScoutMcpCodexLaunchArgs } from "../../codex-launch-config.js";
+import { registerSharedScoutMcpClient, resolveScoutMcpCodexLaunch } from "../../codex-launch-config.js";
 import { resolveCodexExecutable } from "../../codex-executable.js";
 import { redactSecrets } from "../../secret-redaction.js";
 import { writeCodexMetadata } from "./codex-metadata-file.js";
@@ -1313,20 +1313,33 @@ export class CodexAppServerTransport {
       }
     } else {
       const launchArgs = normalizeCodexAppServerLaunchArgs(this.options.launchArgs);
+      const codexExecutable = resolveCodexExecutable(env);
+      const scoutMcp = await resolveScoutMcpCodexLaunch({
+        currentDirectory: this.options.cwd,
+        env,
+        codexExecutable,
+      });
+      signal.throwIfAborted();
+      if (scoutMcp.unknownReason) {
+        this.writeLog(this.stderrLogPath, `[openscout] ${scoutMcp.unknownReason}\n`);
+      }
       connection = spawnCodexAppServerStdioConnection({
-        executable: resolveCodexExecutable(env),
+        executable: codexExecutable,
         args: [
           "app-server",
-          ...buildScoutMcpCodexLaunchArgs({
-            currentDirectory: this.options.cwd,
-            env,
-          }),
+          ...scoutMcp.args,
           ...launchArgs,
         ],
         cwd: this.options.cwd,
         env,
         handlers,
       });
+      if (scoutMcp.usesUrl) {
+        const failure = registerSharedScoutMcpClient(env, connection.pid);
+        if (failure) {
+          this.writeLog(this.stderrLogPath, `[openscout] could not register this app-server with the shared Scout MCP server: ${failure}\n`);
+        }
+      }
     }
 
     this.connectionGeneration++;

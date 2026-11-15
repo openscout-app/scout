@@ -4,7 +4,7 @@
  * A session known to its harness but not to the broker is still addressable:
  * resolve live endpoints first, then fall back here before declaring unknown.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -43,6 +43,12 @@ export type SessionLocateInput = {
   harness?: AgentHarness | string | null;
   /** Caller-supplied project/cwd (--project). Required for Codex when store cwd missing. */
   projectPath?: string | null;
+  /**
+   * Where the caller happens to be. Used only when the store has no cwd and
+   * no project was named. It is never compared with the session's own cwd: a
+   * session is reachable from any folder.
+   */
+  fallbackCwd?: string | null;
   homeDir?: string;
   /** Test seam: override roots instead of ~/.codex/sessions and ~/.claude/projects. */
   codexSessionsRoot?: string;
@@ -98,12 +104,20 @@ function walkFiles(root: string, predicate: (name: string) => boolean, into: str
   return into;
 }
 
+const SESSION_HEAD_BYTES = 256_000;
+
 function readFirstJsonlRecords(path: string, maxLines = 8): unknown[] {
   let text: string;
   try {
-    // Session meta is always near the top; avoid reading multi-MB rollouts fully.
-    const fdChunk = readFileSync(path, { encoding: "utf8" });
-    text = fdChunk.length > 256_000 ? fdChunk.slice(0, 256_000) : fdChunk;
+    // Session meta is always near the top. Read only the head: a lookup visits
+    // every transcript on the host, and they run to gigabytes in total.
+    const fd = openSync(path, "r");
+    try {
+      const head = Buffer.allocUnsafe(SESSION_HEAD_BYTES);
+      text = head.toString("utf8", 0, readSync(fd, head, 0, head.length, 0));
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return [];
   }
@@ -295,9 +309,11 @@ export function locateHarnessSession(input: SessionLocateInput): SessionLocateRe
   candidates.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   const session = { ...candidates[0]! };
 
-  // Codex resume requires cwd; prefer store cwd, then caller project.
-  if (!session.cwd && projectPath) {
-    session.cwd = resolve(expandHomePath(projectPath));
+  // Codex resume requires cwd; prefer store cwd, then the named project,
+  // then the caller's own folder.
+  const assumedCwd = projectPath ?? (input.fallbackCwd?.trim() || undefined);
+  if (!session.cwd && assumedCwd) {
+    session.cwd = resolve(expandHomePath(assumedCwd));
   }
   if (session.harness === CODEX_HARNESS && !session.cwd) {
     return {

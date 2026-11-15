@@ -4,6 +4,7 @@ import {
   AGENT_HARNESSES,
   SCOUT_PERMISSION_PROFILES,
   SCOUT_REASONING_EFFORTS,
+  SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH,
   validateScoutRuntimeTuple,
   validateInvocationExecutionPreference,
   type InvocationRequest,
@@ -203,7 +204,7 @@ export const brokerDeliverRequestSchema: z.ZodType<ScoutDeliverRequest> = z.obje
   // A previous broker rejects this new discriminant instead of ignoring the
   // option and silently starting ordinary consult execution.
   intent: z.enum(["tell", "consult", "session_input", "explicit_consult", "task_ask"]),
-  task: z.object({ version: z.literal(1), ref: nonEmptyString.optional(), continue: nonEmptyString.optional(), successor: z.object({ host: nonEmptyString.optional(), projectPath: nonEmptyString.optional() }).strict().optional(), cancel: z.boolean().optional(), fyi: z.boolean().optional(), operator: z.boolean().optional(), notify: z.boolean().optional(), defaultAction: nonEmptyString.optional(), window: z.number().positive().optional(), options: z.array(nonEmptyString).optional(), permission: z.boolean().optional(), because: nonEmptyString.optional() }).strict().optional(),
+  task: z.object({ version: z.literal(1), ref: nonEmptyString.optional(), continue: nonEmptyString.optional(), successor: z.object({ host: nonEmptyString.optional(), projectPath: nonEmptyString.optional() }).strict().optional(), cancel: z.boolean().optional(), fyi: z.boolean().optional(), operator: z.boolean().optional(), notify: z.boolean().optional(), defaultAction: nonEmptyString.optional(), window: z.number().positive().optional(), options: z.array(nonEmptyString).optional(), permission: z.boolean().optional(), because: nonEmptyString.optional(), callback: z.object({ code: z.string().trim().min(1).max(SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH) }).strict().optional() }).strict().optional(),
   completion: z.object({ mode: z.literal("explicit") }).strict().optional(),
   relation: z.object({ parentFlightId: nonEmptyString, kind: z.enum(["joined", "continuation"]) }).strict().optional(),
   operatorSignal: brokerOperatorSignalSchema.optional(),

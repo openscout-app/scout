@@ -1118,7 +1118,7 @@ describe("broker daemon delivery routing", () => {
       handle: "arach",
       labels: ["relay", "project", "agent", "local-agent"],
       metadata: {
-        projectRoot: "/Users/arach",
+        projectRoot: "/Users/guest",
       },
       agentClass: "general",
       capabilities: ["chat", "invoke", "deliver"],

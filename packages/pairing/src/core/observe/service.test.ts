@@ -12,7 +12,7 @@ describe("buildObserveDataFromSnapshot", () => {
         name: "Claude Session",
         adapterType: "claude-code",
         status: "idle",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
       },
       turns: [
         {
@@ -122,7 +122,7 @@ describe("buildObserveDataFromSnapshot", () => {
         name: "Codex Session",
         adapterType: "codex",
         status: "active",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
       },
       turns: [
         {
@@ -186,7 +186,7 @@ describe("buildObserveDataFromSnapshot", () => {
         name: "Claude Session",
         adapterType: "claude-code",
         status: "idle",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         model: "claude-opus-test",
         providerMeta: {
           externalSessionId: "upstream-123",
@@ -218,7 +218,7 @@ describe("buildObserveDataFromSnapshot", () => {
       session: {
         adapterType: "claude-code",
         model: "claude-opus-test",
-        cwd: "/Users/arach/dev/openscout",
+        cwd: "/Users/guest/dev/openscout",
         sessionStart: expect.any(Number),
         externalSessionId: "upstream-123",
         gitBranch: "master",

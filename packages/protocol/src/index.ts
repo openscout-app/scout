@@ -73,6 +73,7 @@ export * from "./chat-message-corrections.js";
 export * from "./chat-mentions.js";
 
 export * from "./agent-notifications.js";
+export * from "./session-task.js";
 
 export * from "./mcp-core-tools.js";
 

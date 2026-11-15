@@ -78,7 +78,7 @@ describe("scoutbot prefilter", () => {
           nodeId: "node-1",
           transport: "codex_app_server",
           state: "idle",
-          projectRoot: "/Users/art/dev/openscout",
+          projectRoot: "/Users/you/dev/openscout",
         },
       },
       conversations: {},

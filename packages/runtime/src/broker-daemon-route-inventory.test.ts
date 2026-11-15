@@ -114,6 +114,7 @@ const expectedRouteInventory = [
   "GET /v1/supervision-handoff",
   "GET /v1/tail/discover",
   "GET /v1/tail/recent",
+  "GET /v1/tail/usage",
   "GET /v1/terminal-hosts/herdr/workspaces",
   "GET /v1/thread-watches/:id/stream",
   "GET /v1/topology/snapshot",

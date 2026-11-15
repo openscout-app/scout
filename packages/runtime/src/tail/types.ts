@@ -52,9 +52,22 @@ export type DiscoveredProcess = {
   ppid: number;
   command: string;
   etime: string;
+  /**
+   * `ps -o pcpu` at discovery time: percent of one core, so a busy
+   * multi-threaded process can exceed 100. On macOS this is a decaying average
+   * over roughly the last minute, not an instantaneous reading. Absent when ps
+   * did not report it (for example an older scoutd).
+   */
+  cpuPct?: number;
+  /** `ps -o rss` at discovery time: resident set size in KiB. Absent when not reported. */
+  rssKb?: number;
   cwd: string | null;
   /** Launch attribution; retained as `harness` for wire compatibility. */
   harness: TailHarness;
+  /**
+   * Up to ten ancestors, nearest first. Empty in a `/v1/tail/discover` reply
+   * that asked for `parentChain=0`; the full chain is still used server-side.
+   */
   parentChain: { pid: number; command: string }[];
   /** Runtime harness/source name, e.g. "claude", "codex", "quad". */
   source: string;

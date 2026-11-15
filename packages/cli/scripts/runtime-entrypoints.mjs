@@ -17,6 +17,8 @@ export function bundleRuntimeEntrypoints(repoRoot, outputDirectory) {
     ["sqlite projection worker", "sqlite-projection-worker-entry.ts", "sqlite-projection-worker-entry.js"],
     // BrokerHealthResponder resolves this sibling name the same way.
     ["health responder worker", "broker-health-responder-worker-entry.ts", "broker-health-responder-worker-entry.js"],
+    // runSandboxedFunction resolves this sibling name the same way.
+    ["callback sandbox worker", "task-callback-sandbox-worker-entry.ts", "task-callback-sandbox-worker-entry.js"],
   ];
   for (const [label, source, output] of entries) {
     const entryFile = resolve(repoRoot, "packages", "runtime", "src", source);
