@@ -478,6 +478,13 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 
+// The launch first asks "codex mcp get scout --json". A real Codex answers
+// at once; this home has no scout entry. Only the app-server hangs.
+if (process.argv[2] === "mcp") {
+  console.error("No MCP server named 'scout' found.");
+  process.exit(1);
+}
+
 setInterval(() => {}, 1_000);
 
 const rl = readline.createInterface({
