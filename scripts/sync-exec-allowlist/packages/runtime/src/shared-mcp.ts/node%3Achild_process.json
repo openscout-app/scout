@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/shared-mcp.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "type-only ChildProcess import for the shared MCP supervisor; scout-base injects the spawn and terminate, and this file runs no process",
+  "owner": "runtime"
+}
