@@ -89,6 +89,7 @@ import {
   mintChannelId,
   OPENSCOUT_COORDINATOR_AGENT_ID,
   SCOUT_DISPATCHER_AGENT_ID,
+  rosterNumberText,
 } from "@openscout/protocol";
 
 import { createInMemoryControlRuntime } from "./broker.js";
@@ -3111,6 +3112,14 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
     const snapshot = runtime.snapshot();
     const name = brokerActorDisplayName(snapshot, actorId);
     return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
+  },
+  agentRosterCode: (actorId) => {
+    const entry = agentRosterService?.entry(actorId);
+    return entry ? rosterNumberText(entry.number) : null;
+  },
+  agentHarness: (actorId) => {
+    const endpoints = Object.values(runtime.snapshot().endpoints).filter((endpoint) => endpoint.agentId === actorId);
+    return (endpoints.find((endpoint) => endpoint.preferred) ?? endpoints[0])?.harness ?? null;
   },
   warn: (message) => console.warn(message),
 });
