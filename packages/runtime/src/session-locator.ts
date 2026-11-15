@@ -4,7 +4,7 @@
  * A session known to its harness but not to the broker is still addressable:
  * resolve live endpoints first, then fall back here before declaring unknown.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -104,12 +104,20 @@ function walkFiles(root: string, predicate: (name: string) => boolean, into: str
   return into;
 }
 
+const SESSION_HEAD_BYTES = 256_000;
+
 function readFirstJsonlRecords(path: string, maxLines = 8): unknown[] {
   let text: string;
   try {
-    // Session meta is always near the top; avoid reading multi-MB rollouts fully.
-    const fdChunk = readFileSync(path, { encoding: "utf8" });
-    text = fdChunk.length > 256_000 ? fdChunk.slice(0, 256_000) : fdChunk;
+    // Session meta is always near the top. Read only the head: a lookup visits
+    // every transcript on the host, and they run to gigabytes in total.
+    const fd = openSync(path, "r");
+    try {
+      const head = Buffer.allocUnsafe(SESSION_HEAD_BYTES);
+      text = head.toString("utf8", 0, readSync(fd, head, 0, head.length, 0));
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return [];
   }

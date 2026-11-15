@@ -535,6 +535,36 @@ describe("broker local invocation helpers", () => {
     expect(reasonFor("tmux")).toBeNull();
   });
 
+  test("a delivery into an open session is not reconciled by its endpoint going offline", () => {
+    // The endpoint sweep marks an endpoint offline when Scout runs no copy of
+    // the session, which is always the case for one open in the operator's pane.
+    const reasonFor = (metadata: Record<string, unknown>) => {
+      const working = testFlight({
+        id: "working",
+        invocationId: "invocation-1",
+        targetAgentId: "agent-1",
+        state: "running",
+        startedAt: 900,
+        metadata: { dispatchAck: { endpointId: "swept" }, ...metadata },
+      });
+      const snapshot = createInMemoryControlRuntime({
+        agents: { "agent-1": testAgent() },
+        endpoints: {
+          swept: testEndpoint({ id: "swept", transport: "tmux", state: "offline", metadata: { lastInvocationId: "invocation-1", lastStartedAt: 1_000, lastFailedAt: 2_000 } }),
+        },
+        flights: { working },
+      }, { localNodeId: "node-1" }).snapshot();
+      return staleWorkingFlightReason(snapshot, working, { isInvocationActive: () => false });
+    };
+    const typed = { phase: "typed", since: 1_000, at: 1_500, via: "tmux", location: "tmux work · %3", transcriptOffset: 0 };
+
+    expect(reasonFor({})).toContain("moved to offline");
+    expect(reasonFor({ inPlace: { phase: "held", since: 1_000 } })).toBeNull();
+    expect(reasonFor({ inPlace: typed })).toBeNull();
+    // Once its reply wait ran out nothing picks it up, so it reconciles as before.
+    expect(reasonFor({ inPlace: typed, requesterTimedOut: true })).toContain("moved to offline");
+  });
+
   test("a requester timeout keeps a runtime-owned turn open only within the process that started it", () => {
     const timedOut = testFlight({
       id: "timed-out",

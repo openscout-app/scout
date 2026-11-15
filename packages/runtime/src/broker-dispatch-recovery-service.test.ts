@@ -669,4 +669,83 @@ describe("BrokerDispatchRecoveryService", () => {
       expect(h.harness.service.endpointWaits().size).toBe(0);
     });
   });
+
+  describe("deliveries into an open session that no process is running", () => {
+    const typed = { phase: "typed", since: 1_000, at: 5_000, via: "tmux", location: "tmux work · %3", transcriptOffset: 4_096 };
+    const running = (metadata: Record<string, unknown>, input: Partial<FlightRecord> = {}) =>
+      flight({ state: "running", metadata, ...input });
+
+    test("a held and a typed task are launched again, each once per process", async () => {
+      const harness = createService({
+        flights: {
+          "flight-1": running({ inPlace: { phase: "held", since: 1_000 } }),
+          "flight-2": running({ inPlace: typed }, { id: "flight-2", invocationId: "invocation-2", startedAt: 2_000 }),
+        },
+        invocations: { "invocation-1": invocation(), "invocation-2": invocation({ id: "invocation-2" }) },
+        // Their scheduler jobs finished when the first runtime launched them.
+        dispatchJobs: [],
+        allDispatchJobs: [dispatchJob({ state: "completed" })],
+      });
+
+      const result = await harness.service.recoverQueuedFlights({ reason: "startup" });
+      expect(result).toMatchObject({ considered: 2, dispatched: 2, failed: 0 });
+      expect(harness.dispatched.map((entry) => entry.id)).toEqual(["invocation-1", "invocation-2"]);
+      expect(harness.logs[0]).toContain("resuming in-place delivery of flight flight-1");
+
+      // The launch failed to take, or ended without finishing the flight:
+      // this process does not launch it a second time.
+      expect((await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" })).dispatched).toBe(0);
+      expect(harness.dispatched).toHaveLength(2);
+    });
+
+    test("a delivery this process is running is left alone, and is picked up if its task dies", async () => {
+      const active = new Set(["invocation-1"]);
+      const harness = createService({ flights: { "flight-1": running({ inPlace: typed }) }, activeInvocationIds: active });
+      expect(await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" }))
+        .toMatchObject({ considered: 0, dispatched: 0, skippedActive: 0 });
+
+      active.clear();
+      expect((await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" })).dispatched).toBe(1);
+    });
+
+    test("a finished flight, a flight whose reply wait ran out and a flight with no checkpoint are not launched", async () => {
+      const harness = createService({
+        flights: {
+          done: running({ inPlace: typed }, { id: "done", state: "completed" }),
+          cancelled: running({ inPlace: { phase: "held", since: 1_000 } }, { id: "cancelled", state: "cancelled" }),
+          waitedOut: running({ inPlace: typed, requesterTimedOut: true }, { id: "waitedOut" }),
+          plain: running({}, { id: "plain" }),
+          cleared: running({ inPlace: undefined }, { id: "cleared" }),
+        },
+      });
+      expect(await harness.service.recoverQueuedFlights({ reason: "startup" })).toMatchObject({ considered: 0, dispatched: 0 });
+      expect(harness.dispatched).toEqual([]);
+    });
+
+    test("a flight that finishes while an earlier one is launched is not launched", async () => {
+      const flights: Record<string, FlightRecord> = {
+        "flight-1": running({ inPlace: typed }),
+        "flight-2": running({ inPlace: typed }, { id: "flight-2", invocationId: "invocation-2", startedAt: 2_000 }),
+      };
+      const harness = createService({
+        flights,
+        invocations: { "invocation-1": invocation(), "invocation-2": invocation({ id: "invocation-2" }) },
+        onDispatch: () => { flights["flight-2"] = { ...flights["flight-2"]!, state: "cancelled" }; },
+      });
+      await harness.service.recoverQueuedFlights({ reason: "startup" });
+      expect(harness.dispatched.map((entry) => entry.id)).toEqual(["invocation-1"]);
+    });
+
+    test("only the named agent's deliveries are picked up when an endpoint comes online", async () => {
+      const harness = createService({
+        flights: {
+          "flight-1": running({ inPlace: typed }),
+          "flight-2": running({ inPlace: typed }, { id: "flight-2", invocationId: "invocation-2", targetAgentId: "agent-2" }),
+        },
+        invocations: { "invocation-1": invocation(), "invocation-2": invocation({ id: "invocation-2", targetAgentId: "agent-2" }) },
+      });
+      await harness.service.recoverQueuedFlights({ reason: "endpoint_online", agentId: "agent-2" });
+      expect(harness.dispatched.map((entry) => entry.id)).toEqual(["invocation-2"]);
+    });
+  });
 });

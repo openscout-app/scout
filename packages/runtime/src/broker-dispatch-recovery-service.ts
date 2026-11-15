@@ -8,6 +8,7 @@ import {
   type BrokerInvocationDispatchJob,
 } from "./broker-dispatch-job.js";
 import { isTerminalFlightState } from "./broker-local-invocation-helpers.js";
+import { isResumableInPlaceFlight } from "./in-place/checkpoint.js";
 
 type DispatchRecoverySnapshot = {
   flights: Record<string, FlightRecord>;
@@ -95,6 +96,8 @@ export class BrokerDispatchRecoveryService {
   readonly #deferredInvocations = new Map<string, number>();
   /** In memory only: a restart retries every park once, at startup. */
   readonly #endpointWaits = new Map<string, EndpointWait>();
+  /** In memory only: each process picks up an interrupted in-place delivery once. */
+  readonly #resumedInPlace = new Set<string>();
 
   constructor(private readonly deps: BrokerDispatchRecoveryServiceDeps) {}
 
@@ -182,8 +185,20 @@ export class BrokerDispatchRecoveryService {
       .filter((flight) => !this.#isDeferred(flight.invocationId, now))
       .filter((flight) => this.#endpointWaitAllows(flight.invocationId, flight.targetAgentId, flight, now, input.reason))
       .sort((left, right) => flightSortTime(left) - flightSortTime(right));
+    // A delivery into an open session that no process is running: the runtime
+    // stopped while the task was held or awaiting its answer. Its flight says
+    // how far it got, so launching it again never types the words twice. Once
+    // per process: a delivery that keeps failing here is not relaunched forever.
+    const interrupted = this.deps.dispatchAcceptedInvocation
+      ? Object.values(snapshot.flights)
+        .filter((flight) => isResumableInPlaceFlight(flight))
+        .filter((flight) => !input.agentId || flight.targetAgentId === input.agentId)
+        .filter((flight) => !this.#resumedInPlace.has(flight.invocationId))
+        .filter((flight) => !this.deps.isInvocationActive(flight.invocationId))
+        .sort((left, right) => flightSortTime(left) - flightSortTime(right))
+      : [];
     const result: BrokerDispatchRecoveryResult = {
-      considered: jobs.length + queued.length,
+      considered: jobs.length + queued.length + interrupted.length,
       dispatched: 0,
       failed: 0,
       skippedActive: 0,
@@ -282,6 +297,41 @@ export class BrokerDispatchRecoveryService {
         );
         this.#noteEndpointAttempt(invocation.id, flight.targetAgentId, currentFlight, now);
         await this.deps.dispatchAcceptedInvocation(invocation);
+        result.dispatched += 1;
+      } catch (error) {
+        failedRecovery(flight.id, invocation.id, error);
+      } finally {
+        this.#recoveringInvocationIds.delete(invocation.id);
+      }
+    }
+
+    for (const flight of interrupted) {
+      const currentFlight = this.deps.runtimeSnapshot().flights[flight.id];
+      if (!isResumableInPlaceFlight(currentFlight)) continue;
+      const invocation = this.deps.invocationFor(flight.invocationId);
+      if (!invocation) {
+        result.skippedMissingInvocation += 1;
+        this.deps.warn?.(
+          `[openscout-runtime] interrupted in-place flight ${flight.id} has no invocation ${flight.invocationId}; recovery skipped`,
+        );
+        continue;
+      }
+      if (
+        this.deps.isInvocationActive(invocation.id)
+        || this.#recoveringInvocationIds.has(invocation.id)
+        || this.#resumedInPlace.has(invocation.id)
+      ) {
+        result.skippedActive += 1;
+        continue;
+      }
+
+      this.#recoveringInvocationIds.add(invocation.id);
+      this.#resumedInPlace.add(invocation.id);
+      try {
+        this.deps.log?.(
+          `[openscout-runtime] resuming in-place delivery of flight ${flight.id} for ${flight.targetAgentId} (${input.reason})`,
+        );
+        await this.deps.dispatchAcceptedInvocation!(invocation);
         result.dispatched += 1;
       } catch (error) {
         failedRecovery(flight.id, invocation.id, error);

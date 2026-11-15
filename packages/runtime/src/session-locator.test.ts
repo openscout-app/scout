@@ -37,6 +37,27 @@ describe("locateHarnessSession", () => {
     if (result.ok) expect(result.session.cwd).toBe("");
   });
 
+  test("reads a long transcript's head only, and still finds its session and folder", () => {
+    const root = makeRoot("claude-long");
+    const dir = join(root, "-work-app");
+    mkdirSync(dir);
+    const cwd = makeRoot("claude-long-cwd");
+    const sessionId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000";
+    const head = JSON.stringify({ type: "user", sessionId, cwd }) + "\n";
+    // A body far past the head, in multi-byte text so the cut can land mid-character.
+    const body = (JSON.stringify({ type: "assistant", text: "é".repeat(4_000) }) + "\n").repeat(200);
+    writeFileSync(join(dir, "another-name.jsonl"), head + body);
+
+    const result = locateHarnessSession({
+      nativeSessionId: sessionId,
+      harness: "claude",
+      claudeProjectsRoot: root,
+      codexSessionsRoot: makeRoot("codex-empty"),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.session).toMatchObject({ nativeSessionId: sessionId, cwd, match: "jsonl" });
+  });
+
 
   test("finds a Codex rollout by session id and cwd", () => {
     const codexRoot = makeRoot("codex-sessions");

@@ -27,6 +27,8 @@ import {
   clearEndpointFailureMetadata,
   type LocalAgentBinding,
 } from "./local-agents.js";
+import type { InPlaceProbe } from "./in-place/deliver.js";
+import { inPlaceSessionForEndpoint } from "./in-place/invoke.js";
 import {
   discardAdoptedSessionEvidence,
   endpointSessionIdIsUnverified,
@@ -73,6 +75,12 @@ export type BrokerLocalEndpointResolverOptions = {
    * harness record exists for that endpoint.
    */
   observeLocalEndpointSession?: (endpoint: AgentEndpoint) => Promise<LocalEndpointSessionObservation | null>;
+  /**
+   * Where an exact harness session is open outside Scout, if anywhere. With
+   * it, an endpoint for a session the operator has open is used as it is
+   * instead of being restarted.
+   */
+  probeInPlace?: (input: { sessionId: string; harness: string; requireExactHarness: true }) => Promise<InPlaceProbe>;
   upsertActor: (actor: ActorIdentity) => Promise<void>;
   upsertAgent: (agent: AgentDefinition) => Promise<void>;
   persistEndpoint: (endpoint: AgentEndpoint) => Promise<void>;
@@ -260,6 +268,10 @@ export class BrokerLocalEndpointResolver {
     if (invocation.ensureAwake && shouldUseExistingSession) {
       for (const endpoint of staleEndpoints) {
         assertEndpointPlacementMatches(endpoint, invocation);
+        // A session the operator has open is reached there. This comes before
+        // any revive, which would start a second copy beside it.
+        const openInPlace = await this.sessionEndpointOpenInPlace(endpoint);
+        if (openInPlace) return openInPlace;
         try {
           const checked = endpoint.transport === "tmux" && endpoint.harness === "claude"
             ? await this.withObservedSessionEvidence(endpoint, { verifyIdentity: true, invocation })
@@ -269,6 +281,17 @@ export class BrokerLocalEndpointResolver {
           }
           if (endpoint.transport === "tmux" && endpoint.harness === "claude" && hasExplicitRuntime) {
             assertEndpointObservedRuntimeMatches(checked.endpoint, invocation, this.now(), checked.resumeHarness);
+          }
+          if (checked.resumeHarness) {
+            // A stopped session is resumed by the delivery itself. Its endpoint
+            // only has to be routable again.
+            const resumable: AgentEndpoint = {
+              ...checked.endpoint,
+              state: "idle",
+              metadata: clearEndpointFailureMetadata(checked.endpoint.metadata),
+            };
+            await this.options.persistEndpoint(resumable);
+            return resumable;
           }
           const revived = await this.reviveExactSessionEndpoint(checked.endpoint);
           if (revived) return revived;
@@ -502,6 +525,47 @@ ForInvocation` settles that debt for the transports that can be asked directly
     // concrete harness session as soon as the running flight is acknowledged.
     await this.options.persistEndpoint(preparedEndpoint);
     return preparedEndpoint;
+  }
+
+  /**
+   * An endpoint made for an exact harness session, whose session is open
+   * where the operator works. It is returned routable and nothing is started:
+   * the delivery types into that place. Null when the session is not open
+   * anywhere. Throws when it is running where Scout cannot reach it, or when
+   * that cannot be checked, so that it is never resumed beside itself.
+   */
+  private async sessionEndpointOpenInPlace(endpoint: AgentEndpoint): Promise<AgentEndpoint | null> {
+    const session = inPlaceSessionForEndpoint(endpoint);
+    if (!session || !this.options.probeInPlace) return null;
+    let probe: InPlaceProbe;
+    try {
+      probe = await this.options.probeInPlace({ ...session, requireExactHarness: true });
+    } catch (error) {
+      throw new Error(
+        `session_runtime_unobserved: could not check where ${session.harness} session ${session.sessionId} is open `
+          + `(${error instanceof Error ? error.message : String(error)}); nothing was started`,
+      );
+    }
+    if (!probe.live) {
+      if (probe.code !== "not_live") {
+        throw new Error(`${probe.code}: could not verify which pane holds ${session.harness} session ${session.sessionId}; nothing was started`);
+      }
+      // Codex guards its own thread: the revive below parks on the lock.
+      if (probe.held && session.harness === "claude") {
+        throw new Error(
+          `session_live_unbound: Claude session ${session.sessionId} is running, but not in Herdr, Orca, tmux or a terminal `
+            + "Scout can type into; nothing was started",
+        );
+      }
+      return null;
+    }
+    const open: AgentEndpoint = {
+      ...endpoint,
+      state: "idle",
+      metadata: clearEndpointFailureMetadata(endpoint.metadata),
+    };
+    await this.options.persistEndpoint(open);
+    return open;
   }
 
   private async reviveExactSessionEndpoint(endpoint: AgentEndpoint): Promise<AgentEndpoint | null> {

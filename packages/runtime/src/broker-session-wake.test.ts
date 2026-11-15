@@ -246,6 +246,49 @@ describe("wakeLocalHarnessSession", () => {
     expect(upsertedEndpoints).toHaveLength(0);
   });
 
+  test("registers a live session that is open where Scout can type, without starting anything", async () => {
+    const { deps, upsertedActors, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    const probed: unknown[] = [];
+    deps.probeInPlace = async (input) => { probed.push(input); return { live: true }; };
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.forkedSession).toBeUndefined();
+      expect(result.endpoint.metadata).toMatchObject({ flatDispatch: true, nativeSessionId: NATIVE_SESSION_ID });
+    }
+    expect(probed).toEqual([{ sessionId: NATIVE_SESSION_ID, harness: "claude", requireExactHarness: true }]);
+    expect(upsertedActors).toHaveLength(1);
+    expect(upsertedEndpoints).toHaveLength(1);
+  });
+
+  test("refuses a live session that is open where Scout cannot type, and says so", async () => {
+    const { deps, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => ({ live: false });
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
+    expect(result).toMatchObject({ ok: false, reason: "session_live_unbound" });
+    if (!result.ok) expect(result.detail).toContain("not in Herdr, Orca, tmux or a terminal Scout can type into");
+    expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("fails closed when the place a live session is open cannot be probed", async () => {
+    const { deps, upsertedEndpoints } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => { throw new Error("herdr timed out"); };
+    expect(await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID })).toMatchObject({ ok: false, reason: "session_runtime_unobserved" });
+    expect(upsertedEndpoints).toHaveLength(0);
+  });
+
+  test("a sender that asked for a fork still gets one, even when the session is reachable", async () => {
+    const { deps } = createLocalDeps();
+    deps.findLiveClaudeSession = async () => ({ sessionId: NATIVE_SESSION_ID });
+    deps.probeInPlace = async () => { throw new Error("must not probe when a fork was asked for"); };
+    deps.createForkSessionId = () => "fork-session-id";
+    const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID, forkIfLive: true });
+    expect(result).toMatchObject({ ok: true, forkedSession: { sourceSessionId: NATIVE_SESSION_ID, sessionId: "fork-session-id" } });
+  });
+
   test("fails closed when process ownership cannot be inspected", async () => {
     const { deps, upsertedEndpoints } = createLocalDeps();
     deps.findLiveClaudeSession = async () => { throw new Error("tmux unavailable"); };

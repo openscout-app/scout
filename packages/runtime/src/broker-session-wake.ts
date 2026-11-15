@@ -55,6 +55,12 @@ export type LocalSessionWakeDeps = {
   observeEndpointSession?: (endpoint: AgentEndpoint) => Promise<LocalEndpointSessionObservation | null>;
   findLiveClaudeSession?: (nativeSessionId: string) => Promise<{ sessionId: string } | null>;
   /**
+   * Whether a live session is open in a place Scout can type into. With it, a
+   * live Claude session there gets an endpoint and the ask is delivered in
+   * place; without it, every live Claude session is refused as before.
+   */
+  probeInPlace?: (input: { sessionId: string; harness: string; requireExactHarness: true }) => Promise<{ live: boolean }>;
+  /**
    * Whether a Codex thread is held open by another writer (its CLI, desktop
    * app, or another app-server). Only consulted when the caller opts into
    * `forkIfLive`; plain exact-session wakes keep the park-until-released path.
@@ -207,7 +213,24 @@ export async function wakeLocalHarnessSession(
         if (input.forkIfLive) {
           return forkLiveClaudeSession(deps, { sourceSessionId: session.nativeSessionId, cwd, endpoints });
         }
-        return { ok: false, reason: "session_live_unbound", detail: `session ${session.nativeSessionId} is already running without a verified Scout endpoint`, remediation: "attach the existing session before retrying its exact continuation" };
+        // Open where Scout can type: register the session and let delivery
+        // put the ask there. Delivery checks again before it types, and never
+        // resumes a copy beside a session that is still running.
+        const reachable = deps.probeInPlace
+          ? (await deps.probeInPlace({ sessionId: session.nativeSessionId, harness: "claude", requireExactHarness: true })).live
+          : false;
+        if (!reachable) {
+          return {
+            ok: false,
+            reason: "session_live_unbound",
+            detail: deps.probeInPlace
+              ? `session ${session.nativeSessionId} is running, but not in Herdr, Orca, tmux or a terminal Scout can type into`
+              : `session ${session.nativeSessionId} is already running without a verified Scout endpoint`,
+            remediation: deps.probeInPlace
+              ? "close it so Scout can resume it, open it in Herdr, Orca or tmux, or attach it from where it runs"
+              : "attach the existing session before retrying its exact continuation",
+          };
+        }
       }
     } catch (error) {
       return { ok: false, reason: "session_runtime_unobserved", detail: `cannot verify live ownership of session ${session.nativeSessionId}: ${error instanceof Error ? error.message : String(error)}` };
