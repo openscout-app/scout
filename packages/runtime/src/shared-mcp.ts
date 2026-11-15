@@ -30,7 +30,17 @@ export type SharedMcpOptIn = {
   enabledAt: number;
   /** "draining": off for new launches, kept up while a registered client is alive. */
   state: "on" | "draining";
+  /** When the drain started; set only while draining. */
+  drainingSince?: number;
 };
+
+/**
+ * A drain ends no sooner than this after it starts. A launch that read the
+ * shared URL just before the drain registers its pid only after it spawns
+ * (Codex config inspection and the spawn come first), so without this wait a
+ * tick in between could stop the server the new session points at.
+ */
+export const SHARED_MCP_DRAIN_GRACE_MS = 30_000;
 
 export const SHARED_MCP_CLIENTS_DIRECTORY = "shared-mcp-clients";
 
@@ -92,6 +102,7 @@ export function readSharedMcpOptIn(supportDirectory: string): SharedMcpOptIn | n
       port: value.port,
       enabledAt: Number(value.enabledAt) || 0,
       state: value.state === "draining" ? "draining" : "on",
+      ...(value.state === "draining" ? { drainingSince: Number(value.drainingSince) || 0 } : {}),
     };
   } catch {
     return null;
@@ -123,10 +134,10 @@ export function restoreSharedMcpOptIn(supportDirectory: string, optIn: SharedMcp
 }
 
 /** Off for new launches; scout-base stops the server once its clients have exited. False when it was not on. */
-export function drainSharedMcpOptIn(supportDirectory: string): boolean {
+export function drainSharedMcpOptIn(supportDirectory: string, now = Date.now()): boolean {
   const optIn = readSharedMcpOptIn(supportDirectory);
   if (!optIn) return false;
-  if (optIn.state !== "draining") saveOptIn(supportDirectory, { ...optIn, state: "draining" });
+  if (optIn.state !== "draining") saveOptIn(supportDirectory, { ...optIn, state: "draining", drainingSince: now });
   return true;
 }
 
@@ -141,18 +152,20 @@ export function isSharedMcpClientAlive(pid: number): boolean {
 
 /**
  * One scout-base step before reconcile: a draining opt-in with no registered
- * client alive is removed, so reconcile stops the server. The opt-in is read
+ * client alive, and past SHARED_MCP_DRAIN_GRACE_MS, is removed, so reconcile
+ * stops the server. The opt-in is read
  * again after the clients are listed, so a `scout mcp install --shared` that
  * ran meanwhile wins.
  */
 export function settleSharedMcpOptIn(
   supportDirectory: string,
-  options: { isAlive?: (pid: number) => boolean; log?: (message: string, detail?: unknown) => void } = {},
+  options: { isAlive?: (pid: number) => boolean; log?: (message: string, detail?: unknown) => void; now?: () => number } = {},
 ): SharedMcpOptIn | null {
   const optIn = readSharedMcpOptIn(supportDirectory);
   if (!optIn) return null;
   const live = liveSharedMcpClients(supportDirectory, options.isAlive);
   if (optIn.state !== "draining" || live.length > 0) return optIn;
+  if ((options.now ?? Date.now)() - (optIn.drainingSince ?? 0) < SHARED_MCP_DRAIN_GRACE_MS) return optIn;
   if (readSharedMcpOptIn(supportDirectory)?.state !== "draining") return readSharedMcpOptIn(supportDirectory);
   removeSharedMcpOptIn(supportDirectory);
   options.log?.("shared MCP server drained: no process pointed at it is still running");

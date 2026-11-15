@@ -19,6 +19,7 @@ import {
   sharedMcpPort,
   settleSharedMcpOptIn,
   sharedMcpClientsDirectory,
+  SHARED_MCP_DRAIN_GRACE_MS,
   SHARED_MCP_MAX_RESTART_MS,
   SHARED_MCP_STABLE_AFTER_MS,
   writeSharedMcpOptIn,
@@ -84,27 +85,41 @@ describe("draining the shared server", () => {
     registerSharedMcpClient(clients(dir), 200);
     expect(settleSharedMcpOptIn(dir, { isAlive: alive([200]) })?.state).toBe("on");
 
-    expect(drainSharedMcpOptIn(dir)).toBe(true);
+    expect(drainSharedMcpOptIn(dir, 1_000)).toBe(true);
     expect(sharedMcpLaunchEnvironment(dir)).toEqual({});
+    const later = () => 1_000 + SHARED_MCP_DRAIN_GRACE_MS;
     // Whether or not the server is up, a live registered client keeps the drain going.
-    expect(settleSharedMcpOptIn(dir, { isAlive: alive([200]) })?.state).toBe("draining");
+    expect(settleSharedMcpOptIn(dir, { isAlive: alive([200]), now: later })?.state).toBe("draining");
 
     let drained = false;
-    expect(settleSharedMcpOptIn(dir, { isAlive: alive([]), log: () => { drained = true; } })).toBeNull();
+    expect(settleSharedMcpOptIn(dir, { isAlive: alive([]), now: later, log: () => { drained = true; } })).toBeNull();
     expect(readSharedMcpOptIn(dir)).toBeNull();
     expect(drained).toBe(true);
+  });
+
+  test("a drain with no client left still waits out the grace, for launches that have not registered yet", () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
+    writeSharedMcpOptIn(dir, 43115);
+    drainSharedMcpOptIn(dir, 1_000);
+    expect(readSharedMcpOptIn(dir)).toMatchObject({ state: "draining", drainingSince: 1_000 });
+    const at = (ms: number) => ({ isAlive: alive([]), now: () => ms });
+    expect(settleSharedMcpOptIn(dir, at(1_000 + SHARED_MCP_DRAIN_GRACE_MS - 1))?.state).toBe("draining");
+    // A second drain does not restart the grace.
+    drainSharedMcpOptIn(dir, 9_000);
+    expect(readSharedMcpOptIn(dir)?.drainingSince).toBe(1_000);
+    expect(settleSharedMcpOptIn(dir, at(1_000 + SHARED_MCP_DRAIN_GRACE_MS))).toBeNull();
   });
 
   test("a re-enable that lands while the clients are listed wins over the drain", () => {
     const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
     writeSharedMcpOptIn(dir, 43115);
-    drainSharedMcpOptIn(dir);
+    drainSharedMcpOptIn(dir, 1_000);
     registerSharedMcpClient(clients(dir), 200);
     const reenableWhileListing = () => {
       writeSharedMcpOptIn(dir, 43115);
       return false;
     };
-    expect(settleSharedMcpOptIn(dir, { isAlive: reenableWhileListing })?.state).toBe("on");
+    expect(settleSharedMcpOptIn(dir, { isAlive: reenableWhileListing, now: () => 1_000 + SHARED_MCP_DRAIN_GRACE_MS })?.state).toBe("on");
     expect(readSharedMcpOptIn(dir)?.state).toBe("on");
   });
 
@@ -119,7 +134,7 @@ describe("draining the shared server", () => {
     writeSharedMcpOptIn(dir, 43115, 5);
     drainSharedMcpOptIn(dir);
     writeSharedMcpOptIn(dir, 43115, 9);
-    expect(readSharedMcpOptIn(dir)).toMatchObject({ state: "on", enabledAt: 5 });
+    expect(readSharedMcpOptIn(dir)).toEqual({ url: "http://127.0.0.1:43115/mcp", port: 43115, enabledAt: 5, state: "on" });
   });
 });
 
