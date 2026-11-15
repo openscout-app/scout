@@ -1376,6 +1376,27 @@ export function subscribeTailInternal(handler: InternalSubscriber): () => void {
   };
 }
 
+/** What the tail holds, for the memory guard's snapshot. Counts only: cheap enough to read under pressure. */
+export function tailMemoryStats() {
+  let emittedIds = 0, carryChars = 0, sessionEvents = 0;
+  for (const watcher of watchers.values()) { emittedIds += watcher.emittedEventIds.size; carryChars += watcher.carry.length; }
+  for (const bucket of perSessionBuffer.values()) sessionEvents += bucket.length;
+  return {
+    watchers: watchers.size,
+    knownTranscripts: knownTranscripts.size,
+    emittedIds,
+    carryChars,
+    sessionBuffers: perSessionBuffer.size,
+    sessionEvents,
+    assistantEvents: assistantBuffer.length,
+    publicSubscribers: publicSubscriberCount(),
+    internalSubscribers: internalSubscribers.size,
+    pumpsActive: activeWatcherPumps,
+    pumpsQueued: watcherPumpQueue.length,
+    persistedSessions: persistedObservedSessions.size,
+  };
+}
+
 export function snapshotRecentEvents(limit = 500): TailEvent[] {
   return aggregateBuffer.recent(limit);
 }

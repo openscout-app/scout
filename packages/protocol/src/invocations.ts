@@ -150,6 +150,64 @@ export interface FlightRecord {
   completedAt?: number;
   labels?: string[];
   metadata?: MetadataMap;
+  /**
+   * Projection of `metadata.waitingOn`: what a waiting flight is blocked on.
+   * Runtimes derive it with {@link projectFlightRecord}; writers set the
+   * metadata key, never this field.
+   */
+  waitingOn?: FlightWaitingOn;
+  /** Projection of the latest session in the session trace. */
+  sessionId?: ScoutId;
+}
+
+export type FlightWaitingOnKind = "permission" | "question" | "review";
+export const FLIGHT_WAITING_ON_KINDS: readonly FlightWaitingOnKind[] = ["permission", "question", "review"];
+export const FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH = 500;
+
+/** What a reply says it is blocked on. */
+export interface ReplyWaitingOn {
+  kind: FlightWaitingOnKind;
+  summary: string;
+  /** The record that unblocks the work: a permission request, question, or task ref. */
+  requestRef?: ScoutId;
+}
+
+/** What a waiting flight is blocked on. */
+export interface FlightWaitingOn extends ReplyWaitingOn {
+  since: number;
+  /** The blocked reply that set it. Absent when the runtime set it itself. */
+  replyMessageId?: ScoutId;
+}
+
+export function parseReplyWaitingOn(value: unknown): ReplyWaitingOn | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (!FLIGHT_WAITING_ON_KINDS.includes(v.kind as FlightWaitingOnKind)) return undefined;
+  if (typeof v.summary !== "string" || !v.summary.trim() || v.summary.length > FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH) return undefined;
+  if (v.requestRef !== undefined && (typeof v.requestRef !== "string" || !v.requestRef)) return undefined;
+  return { kind: v.kind as FlightWaitingOnKind, summary: v.summary, ...(v.requestRef ? { requestRef: v.requestRef as string } : {}) };
+}
+
+/** Reads `metadata.waitingOn`, the canonical store of a flight's blocker. */
+export function flightWaitingOn(flight: Pick<FlightRecord, "metadata"> | null | undefined): FlightWaitingOn | undefined {
+  const value = flight?.metadata?.waitingOn as Record<string, unknown> | undefined;
+  const parsed = parseReplyWaitingOn(value);
+  if (!parsed || typeof value?.since !== "number" || !Number.isFinite(value.since)) return undefined;
+  const replyMessageId = typeof value.replyMessageId === "string" && value.replyMessageId ? value.replyMessageId : undefined;
+  return { ...parsed, since: value.since, ...(replyMessageId ? { replyMessageId } : {}) };
+}
+
+/**
+ * Sets the typed `waitingOn` and `sessionId` fields from metadata. Only a
+ * waiting flight carries `waitingOn`. Returns the same object when nothing
+ * changes.
+ */
+export function projectFlightRecord(flight: FlightRecord): FlightRecord {
+  const waitingOn = flight.state === "waiting" ? flightWaitingOn(flight) : undefined;
+  const sessionId = flightSessionTrace(flight).at(-1)?.sessionId;
+  if (JSON.stringify(flight.waitingOn) === JSON.stringify(waitingOn) && flight.sessionId === sessionId) return flight;
+  const { waitingOn: _waitingOn, sessionId: _sessionId, ...rest } = flight;
+  return { ...rest, ...(waitingOn ? { waitingOn } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 /**

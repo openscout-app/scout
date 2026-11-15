@@ -1,3 +1,4 @@
+import { FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH, parseReplyWaitingOn } from "./invocations.js";
 /** Versioned ask/reply semantics. Old peers must be refused before dispatch. */
 export const SCOUT_TASKS_CAPABILITY = "ask-reply/1";
 export type ScoutTaskAsk = {
@@ -15,6 +16,10 @@ export type ScoutTaskAsk = {
   window?: number;
   options?: string[];
   permission?: boolean;
+  /**
+   * Why the asker is asking. For an operator question it is the blocked
+   * reason; for an agent task it rides to the worker as context.
+   */
   because?: string;
   /**
    * JavaScript that the runtime on the worker's host runs when the task ends.
@@ -42,6 +47,8 @@ export type ScoutTaskReply = {
   body: string;
   progress?: boolean;
   failed?: boolean;
+  /** The work is blocked: the task stays open and its flight waits on this. */
+  waitingOn?: import("./invocations.js").ReplyWaitingOn;
   attachments?: import("./messages.js").MessageAttachment[];
   image?: import("./attachments.js").AttachmentUpload;
 };
@@ -61,20 +68,29 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   if (task.continue && route.relation) throw new Error("--continue cannot be combined with --continue-for or --join-to");
   if (task.options?.length && (!task.operator || task.fyi)) throw new Error("--option requires an operator task expecting an answer");
   if (task.options?.some(option => !option.trim())) throw new Error("--option cannot be empty");
-  if (task.notify && !task.operator) throw new Error("--notify now pushes to the operator; asks return on acceptance by default");
+  // --notify on an agent ask is honored as written: the ask returns on
+  // acceptance and the reply arrives later. Only operator asks push.
   if (task.defaultAction !== undefined && (!task.defaultAction.trim() || !task.operator || task.fyi)) throw new Error("--default-action requires an operator task expecting an answer");
   if (task.defaultAction !== undefined && task.permission) throw new Error("--default-action cannot be combined with --permission: permission requests block");
   if (task.defaultAction && task.options?.length && !task.options.includes(task.defaultAction)) throw new Error("--default-action must be one of the options");
-  if ((task.permission || task.because) && !task.operator) throw new Error("--permission and --because require --operator");
+  // A permission request is an approval only the operator can grant. A reason
+  // (--because) is context the receiver reads, so it rides on any ask.
+  if (task.permission && !task.operator) throw new Error("--permission requires --operator: only the operator can grant a permission request");
+  if (task.because !== undefined && !task.because.trim()) throw new Error("--because cannot be empty");
   if (route.channel && !task.fyi) throw new Error("--channel requires --fyi until task ownership for channels is defined");
   if (task.window !== undefined && (!task.defaultAction || !task.operator || task.fyi || !Number.isFinite(task.window) || task.window <= 0)) throw new Error("--window requires --default-action and a positive number of seconds");
   if (task.callback !== undefined && (typeof task.callback?.code !== "string" || !task.callback.code.trim() || task.callback.code.length > SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH)) throw new Error(`--callback takes a JavaScript module file of up to ${SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH} characters`);
   if (task.callback !== undefined && (task.fyi || task.ref || task.cancel || task.operator || route.channel)) throw new Error("--callback belongs to a new task an agent carries out; it cannot be combined with --fyi, --ref, --cancel, --operator or --channel");
 }
-export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed">): void {
+export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed" | "waitingOn">): void {
   if (Number(Boolean(reply.ref)) + Number(Boolean(reply.to)) !== 1) throw new Error("reply requires exactly one of --ref <task> or --to <message>");
-  if (reply.progress && reply.failed) throw new Error("--progress and --failed cannot be combined");
-  if (reply.to && (reply.progress || reply.failed)) throw new Error("--progress and --failed require --ref <task>");
+  if (Number(Boolean(reply.progress)) + Number(Boolean(reply.failed)) + Number(reply.waitingOn !== undefined) > 1) {
+    throw new Error("--progress, --failed and --waiting-on cannot be combined");
+  }
+  if (reply.to && (reply.progress || reply.failed || reply.waitingOn !== undefined)) throw new Error("--progress, --failed and --waiting-on require --ref <task>");
+  if (reply.waitingOn !== undefined && !parseReplyWaitingOn(reply.waitingOn)) {
+    throw new Error(`--waiting-on takes permission, question or review, and a summary of up to ${FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH} characters`);
+  }
 }
 export function taskNotificationPolicy(task: ScoutTaskAsk): ScoutNotificationPolicy {
   return { requested: !task.fyi || Boolean(task.notify), priority: task.defaultAction ? "normal" : "interrupting" };

@@ -331,7 +331,7 @@ export function messageVisibilityForConversation(conversation?: ConversationDefi
   }
 }
 
-/** Legacy replies are final; explicit progress/final semantics belong here. */
+/** Legacy replies are final; explicit progress, blocked and final semantics belong here. */
 export function isFinalReplyForInvocation(message: MessageRecord, invocation: InvocationRequest): boolean {
   if (invocation.action === "wake") {
     return false;
@@ -341,7 +341,8 @@ export function isFinalReplyForInvocation(message: MessageRecord, invocation: In
   }
   const explicit = completionReply(message);
   if (message.metadata?.completionReply !== undefined && !explicit) return false;
-  if (explicit?.kind === "progress" || (hasExplicitCompletion(invocation) && explicit?.kind !== "final")) return false;
+  if (explicit?.kind === "progress" || explicit?.kind === "blocked"
+    || (hasExplicitCompletion(invocation) && explicit?.kind !== "final")) return false;
   if (explicit && explicit.invocationId !== invocation.id) return false;
   return message.class === "agent"
     && message.actorId === invocation.targetAgentId
@@ -359,15 +360,17 @@ export function completedFlightFromBrokerReply(
   targetDisplayName?: string,
 ): FlightRecord {
   const replySource = metadataStringValue(reply.metadata, "source");
+  const { waitingOn: _waitingOn, ...metadata } = flight.metadata ?? {};
+  const { waitingOn: _projected, ...record } = flight;
   return {
-    ...flight,
+    ...record,
     state: completionReply(reply)?.outcome === "failed" ? "failed" : "completed",
     summary: `${targetDisplayName ?? invocation.targetAgentId} replied.`,
     output: reply.body,
     error: completionReply(reply)?.outcome === "failed" ? reply.body : undefined,
     completedAt: reply.createdAt,
     metadata: {
-      ...(flight.metadata ?? {}),
+      ...metadata,
       completedByBrokerReply: true,
       ...(invocation.metadata?.humanOwned === true ? { operatorOutcome: "answered" } : {}),
       replyMessageId: reply.id,

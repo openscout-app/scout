@@ -36,7 +36,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "hooks": node("--json", { "status": node(), "apply": node(), "remove": node() }),
   "speak": node("--alias-host= --alias-project= --as= --body-file= --channel= --context-root= --harness= --message-file= --ref= --speak --to= --wake"),
   "voice": node("--thread=", { "status": node(), "talk": node(), "mic": node("", { "on": node(), "off": node(), "toggle": node() }), "speakers": node("", { "on": node(), "off": node(), "toggle": node() }), "stop": node() }),
-  "reply": node("--ref= --to= --progress --failed --image= --request-id= --as= --cwd="),
+  "reply": node("--ref= --to= --progress --failed --waiting-on= --waiting-ref= --image= --request-id= --as= --cwd="),
   "ask": node("--operator --fyi --cancel --continue= --default-action= --window= --option= --because= --permission --image= --alias-host= --alias-project= --as= --background --body-file= --channel= --completion= --context-root= --continue-for= --effort= --foreground --harness= --host= --join-to= --label= --labels= --model= --new --no-wait --notify --on= --placement= --profile= --project= --prompt-file= --reasoning-effort= --ref= --reply-mode= --request-id= --runtime= --session= --timeout= --to="),
   "roster": node("--dry-run --reset", { "list": node(), "ls": node(), "project": node(), "import": node(), "resolve": node() }),
   "show": node("--caption="),

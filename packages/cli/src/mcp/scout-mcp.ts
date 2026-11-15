@@ -7,6 +7,7 @@ import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
+import { registerDiffTools } from "./diff-tools.ts";
 import { loadScoutMeshOverview, renderScoutMeshOverviewLines, type ScoutMeshMachine, type ScoutMeshOverview } from "../lib/core/mesh/overview.ts";
 import {
   detectCurrentLiveTerminalSession,
@@ -2067,6 +2068,19 @@ const notificationLifetimes = new WeakMap<McpServer, AbortSignal>();
 // of the same canonical flight must not create more infinite polling tasks.
 const notificationFlights = new WeakMap<McpServer, Set<string>>();
 
+/**
+ * The connection a tool call belongs to, when one server's tools serve many
+ * connections (the shared HTTP server). Reply notifications go to that
+ * connection, its flights are tracked per connection, and they stop when it
+ * closes. Without a scope the server itself is the connection.
+ */
+export type ScoutMcpSessionScope = {
+  notify: (params: ScoutReplyNotificationParams) => Promise<void>;
+  lifetime: AbortSignal;
+  flights: Set<string>;
+};
+const sessionScopeResolvers = new WeakMap<McpServer, () => ScoutMcpSessionScope | undefined>();
+
 function scheduleScoutReplyNotification(input: {
   server: McpServer;
   deps: ScoutMcpDependencies;
@@ -2082,10 +2096,17 @@ function scheduleScoutReplyNotification(input: {
   // while waiting. Current flight state is read back by its durable identifiers.
   const flightId = input.flight.id;
   const invocationId = input.flight.invocationId;
-  const signal = notificationLifetimes.get(server);
+  const scope = sessionScopeResolvers.get(server)?.();
+  const signal = scope?.lifetime ?? notificationLifetimes.get(server);
   if (signal?.aborted) return;
-  const active = notificationFlights.get(server) ?? new Set<string>();
-  notificationFlights.set(server, active);
+  let active = scope?.flights;
+  if (!active) {
+    active = notificationFlights.get(server) ?? new Set<string>();
+    notificationFlights.set(server, active);
+  }
+  const notify = scope
+    ? scope.notify
+    : (params: ScoutReplyNotificationParams) => sendScoutReplyNotification(server, params);
   if (active.has(flightId)) return;
   active.add(flightId);
   void (async () => {
@@ -2106,7 +2127,7 @@ function scheduleScoutReplyNotification(input: {
           await delay(2_000, undefined, { signal });
         }
       }
-      await sendScoutReplyNotification(server, {
+      await notify({
         ...context,
         status: "completed",
         flight: completedFlight,
@@ -2115,7 +2136,7 @@ function scheduleScoutReplyNotification(input: {
       });
     } catch (error) {
       if (signal?.aborted) return;
-      await sendScoutReplyNotification(server, {
+      await notify({
         ...context,
         status: "failed",
         flight: null,
@@ -3353,6 +3374,8 @@ export function createScoutMcpServer(options: {
   env?: NodeJS.ProcessEnv;
   dependencies?: Partial<ScoutMcpDependencies>;
   toolFilter?: (toolName: string) => boolean;
+  /** For a server whose tools serve many connections: the connection of the current call. */
+  sessionScope?: () => ScoutMcpSessionScope | undefined;
 }): McpServer {
   const env = options.env ?? process.env;
   const deps: ScoutMcpDependencies = {
@@ -3367,6 +3390,7 @@ export function createScoutMcpServer(options: {
     instructions: SCOUT_MCP_INSTRUCTIONS,
   });
 
+  if (options.sessionScope) sessionScopeResolvers.set(server, options.sessionScope);
   const notificationLifetime = new AbortController();
   notificationLifetimes.set(server, notificationLifetime.signal);
   const previousOnClose = server.server.onclose;
@@ -3414,6 +3438,7 @@ export function createScoutMcpServer(options: {
   };
 
   registerIntegrationTools(server, aliasBrokerRequest);
+  registerDiffTools(server, aliasBrokerRequest);
 
   registerChatListeningTools(server, (operation, body) => chatListeningRequest(
     { env },
@@ -4070,20 +4095,25 @@ export function createScoutMcpServer(options: {
 
   server.registerTool("reply", {
     title: "Reply",
-    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     inputSchema: z.object({
       requestId: z.string().min(1).max(256).optional().describe("Reuse after an uncertain receipt."),
       ref: z.string().min(1).optional(), to: z.string().min(1).optional(),
       sessionId: z.string().min(1).optional().describe("External mailbox return address, copied from the task."),
       deliveryId: z.string().min(1).optional(), replyToken: z.string().min(1).max(256).optional(),
-      progress: z.boolean().optional(), failed: z.boolean().optional(), body: z.string().trim().min(1),
+      progress: z.boolean().optional(), failed: z.boolean().optional(),
+      waitingOn: z.object({ kind: z.enum(["permission", "question", "review"]), summary: z.string().trim().min(1).max(500),
+        requestRef: z.string().min(1).optional().describe("The request that unblocks the work: a permission request, question, or task ref.") })
+        .strict().optional().describe("Blocked: the task stays open, its flight waits on this."),
+      body: z.string().trim().min(1),
       senderId: z.string().optional(), currentDirectory: z.string().optional(),
       image: z.string().optional().describe("Local image path."), attachments: attachmentsInputSchema,
     }).strict(),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
-  }, async ({ requestId, ref, to, progress, failed, body, senderId, currentDirectory, image, attachments, sessionId, deliveryId, replyToken }) => {
-    validateTaskReply({ ref, to, progress, failed });
+  }, async ({ requestId, ref, to, progress, failed, waitingOn, body, senderId, currentDirectory, image, attachments, sessionId, deliveryId, replyToken }) => {
+    validateTaskReply({ ref, to, progress, failed, waitingOn });
     if (sessionId || deliveryId || replyToken) {
+      if (waitingOn) throw new Error("waitingOn is not available on external mailbox replies");
       if (!ref || !sessionId || !deliveryId)
         throw new Error("external reply requires the task ref and its exact sessionId/deliveryId return address");
       const ownerId = await resolveMcpSenderId(deps, undefined, options.defaultCurrentDirectory, env);
@@ -4098,7 +4128,7 @@ export function createScoutMcpServer(options: {
     const directory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
     const actor = await resolveMcpSenderId(deps, senderId, directory, env);
     const result = await deps.replyTask({ requestId: requestId ?? `reply-${randomUUID()}`, senderId: actor,
-      ref, to, progress, failed, body,
+      ref, to, progress, failed, body, ...(waitingOn ? { waitingOn } : {}),
       ...(image ? { image: await readTaskImage(resolve(directory, image)) } : {}),
       ...(attachments ? { attachments: attachments.map((attachment, index) => ({ ...attachment, id: `attachment-${index}` })) } : {}) });
     return { content: createTextContent(result) };

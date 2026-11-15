@@ -44,7 +44,7 @@ function session(id: string, surfaces: TerminalSurface[]): TerminalSessionRecord
     id,
     harness: "claude",
     sourceSessionId: `${id}-source`,
-    cwd: "/Users/art/dev/openscout",
+    cwd: "/Users/you/dev/openscout",
     resumeCommand: "claude --resume abc",
     origin: "registry",
     surfaces,

@@ -15,8 +15,13 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
     const question = clean.lastIndexOf("Do you want to proceed?");
     const prefix = clean.slice(0, question);
     const header = Math.max(prefix.lastIndexOf("Bash command"), prefix.lastIndexOf("Edit file"), prefix.lastIndexOf("Write file"));
+    // Every tool's dialog opens under a full-width rule ("Tool use" for MCP and
+    // built-in tools has no header above). Start there at the latest, so the
+    // transcript above the dialog (a progress mark that blinks, a line that
+    // scrolls) never enters the fingerprint and the prompt keeps one version.
+    const start = Math.max(header, lastRuleLine(prefix));
     const end = clean.indexOf("Esc to cancel", question);
-    if (header >= 0 && end >= 0) clean = clean.slice(header, end + "Esc to cancel".length).trim();
+    if (start >= 0 && end >= 0) clean = clean.slice(start, end + "Esc to cancel".length).trim();
   }
   let keys: Partial<Record<PermissionDecision, string[]>> = {};
   if (/Yes,\s*I\s*trust\s*this\s*folder/i.test(clean)) {
@@ -42,6 +47,14 @@ export function parseTmuxPermission(text: string, projectRoot?: string): { versi
   }
   return { text: clean, version: createHash("sha256").update(clean).digest("hex"),
     identity: createHash("sha256").update(clean.replace(/^\s*❯?\s*(?=\d+\.|No, exit|Yes, I trust this folder)/gm, "")).digest("hex"), keys };
+}
+
+/** Where the last line made only of a horizontal rule (a dialog's top border) starts in `text`; -1 when there is none. */
+function lastRuleLine(text: string): number {
+  const rule = /^[ \t]*─{20,}[ \t]*$/gmu;
+  let at = -1;
+  for (let match = rule.exec(text); match; match = rule.exec(text)) at = match.index;
+  return at;
 }
 
 type TmuxPermissionPane = {

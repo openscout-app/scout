@@ -28,7 +28,7 @@ describe("readClaudeSubagentTopology", () => {
   test("normalizes Claude direct subagents into observed topology", () => {
     const home = makeTempHome();
     const sessionId = "9fb91ece-a1de-4701-88af-949218efc3d7";
-    const projectDir = join(home, ".claude", "projects", "-Users-art-dev-openscout");
+    const projectDir = join(home, ".claude", "projects", "-Users-you-dev-openscout");
     const subagentsDir = join(projectDir, sessionId, "subagents");
     mkdirSync(subagentsDir, { recursive: true });
 
@@ -169,7 +169,7 @@ describe("readClaudeSubagentTopology", () => {
   test("can filter direct subagent topology by parent session id", () => {
     const home = makeTempHome();
     for (const [sessionId, agentId] of [["session-a", "a111"], ["session-b", "b222"]] as const) {
-      const projectDir = join(home, ".claude", "projects", "-Users-art-dev-openscout");
+      const projectDir = join(home, ".claude", "projects", "-Users-you-dev-openscout");
       const subagentsDir = join(projectDir, sessionId, "subagents");
       mkdirSync(subagentsDir, { recursive: true });
       writeFileSync(join(projectDir, `${sessionId}.jsonl`), jsonl([{ type: "system", sessionId, cwd: "/repo" }]), "utf8");

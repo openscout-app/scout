@@ -1272,14 +1272,14 @@ if [ "$1" = "-axo" ] && [ "$2" = "pid=,ppid=,pgid=,tty=,command=" ]; then
   fi
   cat <<'ROWS'
 101 1 101 ttys001 /bin/zsh -l
-202 101 101 ?? /usr/bin/node /Users/art/dev/app.js
+202 101 101 ?? /usr/bin/node /Users/you/dev/app.js
 ROWS
   exit 0
 fi
 if [ "$1" = "-axww" ] && [ "$2" = "-o" ] && [ "$3" = "pid=,ppid=,etime=,command=" ]; then
   cat <<'ROWS'
 101 1 00:01 /bin/zsh -l
-202 101 00:02 /usr/bin/node /Users/art/dev/app.js
+202 101 00:02 /usr/bin/node /Users/you/dev/app.js
 303 202 00:03 claude --dangerously-skip-permissions
 404 202 00:04 /bin/sh -c echo hello
 505 202 00:05 /usr/bin/python3 worker.py
@@ -1297,7 +1297,7 @@ exit 64
     writeFileSync(script, `#!/bin/sh
 if [ "$1" = "-a" ] && [ "$2" = "-p" ] && [ "$4" = "-d" ] && [ "$5" = "cwd" ] && [ "$6" = "-Fn" ]; then
   printf 'p%s\\n' "$3"
-  printf 'n/Users/art/dev/openscout\\n'
+  printf 'n/Users/you/dev/openscout\\n'
   exit 0
 fi
 if [ "$1" = "-nP" ] && [ "$3" = "-sTCP:LISTEN" ] && [ "$4" = "-Fp" ]; then
@@ -2037,7 +2037,7 @@ exit 64
     ]);
 
     expect(daemon).toEqual(local);
-    expect(daemon.value).toBe("/Users/art/dev/openscout");
+    expect(daemon.value).toBe("/Users/you/dev/openscout");
   }, SCOUTD_CONFORMANCE_TIMEOUT_MS);
 
   test("net.listeners fixture matches between scoutd and the TS local twin", async () => {
