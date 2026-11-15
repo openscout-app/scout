@@ -2067,6 +2067,19 @@ const notificationLifetimes = new WeakMap<McpServer, AbortSignal>();
 // of the same canonical flight must not create more infinite polling tasks.
 const notificationFlights = new WeakMap<McpServer, Set<string>>();
 
+/**
+ * The connection a tool call belongs to, when one server's tools serve many
+ * connections (the shared HTTP server). Reply notifications go to that
+ * connection, its flights are tracked per connection, and they stop when it
+ * closes. Without a scope the server itself is the connection.
+ */
+export type ScoutMcpSessionScope = {
+  notify: (params: ScoutReplyNotificationParams) => Promise<void>;
+  lifetime: AbortSignal;
+  flights: Set<string>;
+};
+const sessionScopeResolvers = new WeakMap<McpServer, () => ScoutMcpSessionScope | undefined>();
+
 function scheduleScoutReplyNotification(input: {
   server: McpServer;
   deps: ScoutMcpDependencies;
@@ -2082,10 +2095,17 @@ function scheduleScoutReplyNotification(input: {
   // while waiting. Current flight state is read back by its durable identifiers.
   const flightId = input.flight.id;
   const invocationId = input.flight.invocationId;
-  const signal = notificationLifetimes.get(server);
+  const scope = sessionScopeResolvers.get(server)?.();
+  const signal = scope?.lifetime ?? notificationLifetimes.get(server);
   if (signal?.aborted) return;
-  const active = notificationFlights.get(server) ?? new Set<string>();
-  notificationFlights.set(server, active);
+  let active = scope?.flights;
+  if (!active) {
+    active = notificationFlights.get(server) ?? new Set<string>();
+    notificationFlights.set(server, active);
+  }
+  const notify = scope
+    ? scope.notify
+    : (params: ScoutReplyNotificationParams) => sendScoutReplyNotification(server, params);
   if (active.has(flightId)) return;
   active.add(flightId);
   void (async () => {
@@ -2106,7 +2126,7 @@ function scheduleScoutReplyNotification(input: {
           await delay(2_000, undefined, { signal });
         }
       }
-      await sendScoutReplyNotification(server, {
+      await notify({
         ...context,
         status: "completed",
         flight: completedFlight,
@@ -2115,7 +2135,7 @@ function scheduleScoutReplyNotification(input: {
       });
     } catch (error) {
       if (signal?.aborted) return;
-      await sendScoutReplyNotification(server, {
+      await notify({
         ...context,
         status: "failed",
         flight: null,
@@ -3353,6 +3373,8 @@ export function createScoutMcpServer(options: {
   env?: NodeJS.ProcessEnv;
   dependencies?: Partial<ScoutMcpDependencies>;
   toolFilter?: (toolName: string) => boolean;
+  /** For a server whose tools serve many connections: the connection of the current call. */
+  sessionScope?: () => ScoutMcpSessionScope | undefined;
 }): McpServer {
   const env = options.env ?? process.env;
   const deps: ScoutMcpDependencies = {
@@ -3367,6 +3389,7 @@ export function createScoutMcpServer(options: {
     instructions: SCOUT_MCP_INSTRUCTIONS,
   });
 
+  if (options.sessionScope) sessionScopeResolvers.set(server, options.sessionScope);
   const notificationLifetime = new AbortController();
   notificationLifetimes.set(server, notificationLifetime.signal);
   const previousOnClose = server.server.onclose;
