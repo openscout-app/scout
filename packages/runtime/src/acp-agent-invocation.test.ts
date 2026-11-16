@@ -87,6 +87,7 @@ test("returns the provider ACP session id and loads it on a follow-up invocation
 import { appendFileSync } from "node:fs";
 import readline from "node:readline";
 const log = process.env.METHOD_LOG;
+appendFileSync(log, "identity:" + JSON.stringify({ agent: process.env.OPENSCOUT_AGENT, managed: process.env.OPENSCOUT_MANAGED_AGENT, cwd: process.env.OPENSCOUT_SETUP_CWD }) + "\\n");
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of rl) {
   const message = JSON.parse(line);
@@ -129,6 +130,8 @@ for await (const line of rl) {
   try {
     const first = await invokeAcpAgent(common);
     expect(first.sessionId).toBe("provider-session-42");
+    const identity = JSON.parse(readFileSync(logPath, "utf8").split("\n").find(line => line.startsWith("identity:"))!.slice("identity:".length));
+    expect(identity).toEqual({ agent: common.sessionId, managed: "1", cwd: tempRoot });
 
     const second = await invokeAcpAgent({ ...common, prompt: "hello again" });
     expect(second.sessionId).toBe("provider-session-42");

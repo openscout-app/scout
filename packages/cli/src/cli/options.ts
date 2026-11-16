@@ -934,7 +934,7 @@ export function parseAskCommandOptions(
     if (taskValue) {
       const value = parseAskFlagValue(parsed.args, index, taskValue);
       if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(taskValue);
-      if (taskValue === "--continue") { if (task.continue) throw new ScoutCliError("--continue may appear only once"); task.continue = value.value; }
+      if (taskValue === "--continue") { if (task.continue) throw new ScoutCliError("--continue may appear only once"); task.continue = value.value.trim().replace(/^ref:/, ""); }
       if (taskValue === "--default-action") task.defaultAction = value.value;
       if (taskValue === "--window") task.window = Number(value.value);
       if (taskValue === "--option") (task.options ??= []).push(value.value);

@@ -6,6 +6,7 @@ import {
 } from "@openscout/agent-sessions/local";
 
 import type { RuntimeTimer } from "./portable-types.js";
+import { buildManagedAgentEnvironment } from "./managed-agent-environment.js";
 import { bindManagedPermissionRequester } from "./managed-permission.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
@@ -130,6 +131,13 @@ async function createPoolEntry(options: AcpAgentInvocationOptions): Promise<AcpP
     sessionId: options.sessionId,
     reuseKey: options.resumeSessionId,
     adapterOptions: options.adapterOptions,
+    // ACP shells need the same exact Scout identity as Claude/Codex shells.
+    // Provider session ids are separate; the runtime session owns the sender.
+    env: buildManagedAgentEnvironment({
+      agentName: options.sessionId,
+      currentDirectory: options.cwd,
+      baseEnv: process.env,
+    }),
     warmth: "lazy",
   });
   return {
