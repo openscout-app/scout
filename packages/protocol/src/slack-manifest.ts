@@ -1,3 +1,43 @@
+export function slackClientAppManifest(appName = "Scout Client"): Record<string, unknown> {
+  return {
+    display_information: {
+      name: appName,
+      description: "Read and respond to Slack conversations through Scout",
+      background_color: "#171717",
+    },
+    oauth_config: {
+      scopes: {
+        user: [
+          "channels:history",
+          "channels:read",
+          "channels:write",
+          "chat:write",
+          "emoji:read",
+          "files:read",
+          "files:write",
+          "groups:history",
+          "groups:read",
+          "groups:write",
+          "im:history",
+          "im:read",
+          "im:write",
+          "mpim:history",
+          "mpim:read",
+          "mpim:write",
+          "reactions:read",
+          "reactions:write",
+          "users:read",
+        ],
+      },
+    },
+    settings: {
+      org_deploy_enabled: false,
+      socket_mode_enabled: false,
+      token_rotation_enabled: false,
+    },
+  };
+}
+
 export function slackAppManifest(appName = "Scout", mode: "generic" | "project" = "generic"): Record<string, unknown> {
   return {
     display_information: {

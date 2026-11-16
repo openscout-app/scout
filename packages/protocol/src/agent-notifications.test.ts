@@ -6,6 +6,7 @@ import {
   collapseAgentNotification,
   nativeActorName,
   notificationPlainLine,
+  notificationSenderLabel,
   sealedAgentNotification,
   type AgentNotification,
 } from "./agent-notifications.js";
@@ -48,9 +49,40 @@ describe("agent notifications", () => {
       view: "turn.approve.command",
       command: "rm -rf dist",
     };
-    expect(collapseAgentNotification(n).title).toBe("Claude wants to run a command");
+    expect(collapseAgentNotification(n).title).toBe("Claude 3d4e wants to run a command");
     expect(nativeActorName("native:codex:abc")).toBe("Codex");
     expect(nativeActorName("agent.machiavelli")).toBeNull();
+  });
+
+  test("the sender reads as a short name and its roster number, never a handle", () => {
+    // A dotted agent id loses its branch and host; the subtitle says where.
+    expect(notificationSenderLabel({ name: "pike.main.studio", code: "005" })).toBe("pike 005");
+    expect(notificationSenderLabel({ name: "pike.main.studio" })).toBe("pike");
+    // A generated handle reads as its harness, then its roster number.
+    expect(notificationSenderLabel({ name: "session-mwfxl324-wqoium.feat-canvas.studio", harness: "codex", code: "012" }))
+      .toBe("Codex 012");
+    // Unnumbered, it keeps the last characters of its own id.
+    expect(notificationSenderLabel({ name: "session-mw00fkgt-qbus4s.studio", harness: "claude-code" })).toBe("Claude us4s");
+    expect(notificationSenderLabel({ name: "session-mw00fkgt-qbus4s.studio" })).toBe("Agent us4s");
+    // A display name the operator chose stays as written.
+    expect(notificationSenderLabel({ name: "Release captain", code: "007" })).toBe("Release captain 007");
+    expect(notificationSenderLabel({ name: "codex" })).toBe("Codex");
+    expect(notificationSenderLabel({ name: "a-very-long-agent-handle-that-goes-on-and-on.main.host" }).length).toBeLessThanOrEqual(24);
+
+    const n: AgentNotification = {
+      ...base,
+      sender: { name: "session-mwfxl324-wqoium.feat-canvas.studio", harness: "codex", code: "012" },
+      project: "webshop",
+      host: "studio",
+      view: "turn.approve.command",
+      command: "git status",
+      why: "Show working tree status",
+    };
+    expect(collapseAgentNotification(n)).toMatchObject({
+      title: "Codex 012 wants to run a command",
+      subtitle: "webshop on studio",
+      body: "Show working tree status",
+    });
   });
 
   test("the subtitle says where: the project on its host, or whichever is known", () => {

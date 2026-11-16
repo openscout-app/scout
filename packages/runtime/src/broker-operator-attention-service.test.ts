@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import type {
-  ConversationDefinition,
-  MessageRecord,
+import {
+  collapseAgentNotification,
+  type ConversationDefinition,
+  type MessageRecord,
 } from "@openscout/protocol";
 
 import {
@@ -57,6 +58,8 @@ function createHarness(input: {
   conversation?: ConversationDefinition;
   originConversation?: ConversationDefinition;
   agentDisplayName?: (actorId: string) => string | undefined;
+  agentRosterCode?: (actorId: string) => string | null | undefined;
+  agentHarness?: (actorId: string) => string | null | undefined;
 } = {}) {
   const ensuredActors: string[] = [];
   const conversationRequests: Array<{ requesterId: string; targetAgentId?: string; channel?: string }> = [];
@@ -89,6 +92,8 @@ function createHarness(input: {
       return input.broadcastResult ?? broadcastResult();
     },
     ...(input.agentDisplayName ? { agentDisplayName: input.agentDisplayName } : {}),
+    ...(input.agentRosterCode ? { agentRosterCode: input.agentRosterCode } : {}),
+    ...(input.agentHarness ? { agentHarness: input.agentHarness } : {}),
     warn: (message) => warnings.push(message),
     now: () => 10_000,
   });
@@ -291,6 +296,25 @@ describe("BrokerOperatorAttentionService", () => {
       messageId: "msg-need", conversationId: "dm", requesterId: "session-abc", requesterNodeId: "node", body: "Deploy?",
     });
     expect(harness.alerts[0]?.notification?.sender).toEqual({ name: "pike", agentId: "session-abc" });
+  });
+
+  test("the lock screen names the agent by harness and roster number, and the project by its repository", async () => {
+    const harness = createHarness({
+      agentDisplayName: () => "session-mwfxl324-wqoium.feat-canvas.studio",
+      agentRosterCode: () => "012",
+      agentHarness: () => "codex",
+    });
+    await harness.service.sendOperatorSignalAlert({
+      signal: { kind: "need", blocking: true, replyExpectation: "required", question: "Deploy?" },
+      messageId: "msg-need", conversationId: "dm", requesterId: "session-mwfxl324-wqoium", requesterNodeId: "node", body: "Deploy?",
+      projectRoot: "/nowhere/dev/webshop/.scout-worktrees/project-hawking-12",
+    });
+    const notification = harness.alerts[0]!.notification!;
+    expect(notification.sender).toMatchObject({ code: "012", harness: "codex" });
+    expect(collapseAgentNotification(notification)).toMatchObject({
+      title: "Codex 012 is waiting on your answer",
+      subtitle: expect.stringMatching(/^webshop on /u),
+    });
   });
 
   test("pushes a generic non-blocking alert for an agent-authored operator signal", async () => {

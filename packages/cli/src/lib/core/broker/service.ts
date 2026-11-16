@@ -258,6 +258,8 @@ export type ScoutTargetDiagnostic =
       projectRoot: string | null;
       /** Why the broker found no target, such as an unknown roster code. */
       detail?: string;
+      /** The runtime's refusal code for an exact session, such as session_live_unbound. */
+      sessionWakeReason?: string;
     }
   | {
       agentId: string;
@@ -1219,6 +1221,7 @@ function scoutTargetDiagnosticFromDeliveryFailure(
       registrationKind: null,
       projectRoot: null,
       ...(dispatch.detail ? { detail: dispatch.detail } : {}),
+      ...(dispatch.sessionWakeReason ? { sessionWakeReason: dispatch.sessionWakeReason } : {}),
     };
   }
   if (delivery.kind === "rejected" && dispatch.kind === "unparseable") {

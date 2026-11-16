@@ -302,7 +302,7 @@ describe("providers command", () => {
         ],
       });
     expect(map.assignments.find((assignment) => assignment.role === "adversarial_critique"))
-      .toMatchObject({ modelLabel: "Grok 4.6" });
+      .toMatchObject({ modelLabel: "Grok 4.7" });
     expect(map.assignments.find((assignment) => assignment.role === "implementation"))
       .toMatchObject({ modelLabel: "GPT-6.1 Sol" });
     expect(map.models.find((model) => model.modelLabel === "Kimi Code")).toMatchObject({
@@ -312,14 +312,14 @@ describe("providers command", () => {
       strengths: [expect.stringContaining("Dense repository")],
       cautions: [expect.stringContaining("quota telemetry can be stale")],
     });
-    expect(map.models.find((model) => model.modelLabel === "Grok 4.6"))
+    expect(map.models.find((model) => model.modelLabel === "Grok 4.7"))
       .toMatchObject({ guidance: "use_now" });
 
 
     const quotaBiasedMap = buildOrchestrationProviderMap(report, { now: NOW, bias: "quota" });
     expect(quotaBiasedMap.bias).toBe("quota");
     expect(quotaBiasedMap.assignments.find((assignment) => assignment.role === "product_judgment"))
-      .toMatchObject({ modelLabel: "Grok 4.6" });
+      .toMatchObject({ modelLabel: "Grok 4.7" });
 
     const capabilityBiasedMap = buildOrchestrationProviderMap(report, { now: NOW, bias: "capability" });
     expect(capabilityBiasedMap.bias).toBe("capability");
@@ -495,11 +495,11 @@ describe("providers command", () => {
       quota: { confidence: "fresh", minimumRemainingPercent: 50 },
     });
     expect(assignment.alternatives[1]).toMatchObject({
-      label: "MiniMax M3",
+      label: "MiniMax M3.1 Flash",
       quotaRisk: false,
       quota: { confidence: "unknown", minimumRemainingPercent: null },
     });
-    expect(map.models.find((model) => model.modelLabel === "MiniMax M3"))
+    expect(map.models.find((model) => model.modelLabel === "MiniMax M3.1 Flash"))
       .toMatchObject({ guidance: "probe_first", quotaRisk: false });
   });
 

@@ -3,6 +3,7 @@ import { defaultScoutContextDirectory } from "../context.ts";
 import { parseContextRootCommandOptions } from "../options.ts";
 import { runScoutMcpServer } from "../../mcp/scout-mcp.ts";
 import { renderMcpInstallHelp, runMcpInstallCommand } from "./mcp-install.ts";
+import { ScoutCliError } from "../errors.ts";
 
 export type ScoutMcpCommandOptions = {
   currentDirectory: string;
@@ -39,8 +40,8 @@ export function renderMcpCommandHelp(): string {
   return [
     "Usage:",
     "  scout mcp [--context-root <path>] [--notifications]",
-    "  scout mcp install [--host <codex|claude|zed>] [--force] [--dry-run]",
-    "  scout mcp serve [--port <n>] [--host 127.0.0.1] [--notifications]",
+    "  scout mcp install [--host <codex|claude|zed>] [--shared] [--force] [--dry-run]",
+    "  scout mcp serve [--port <n>] [--host 127.0.0.1] [--idle-timeout <seconds>] [--notifications]",
     "                   one shared server for every local session (Streamable HTTP)",
     "",
     "Run or install the Scout MCP server.",
@@ -107,11 +108,18 @@ export async function runMcpCommand(
       const index = rest.indexOf(name);
       return index === -1 ? undefined : rest[index + 1];
     };
+    const host = flag("--host") ?? "127.0.0.1";
+    // Identity comes from the local process on the other end of the socket.
+    if (!["127.0.0.1", "localhost", "::1"].includes(host)) {
+      throw new ScoutCliError("scout mcp serve listens on loopback only (127.0.0.1, localhost or ::1).");
+    }
+    const idleSeconds = flag("--idle-timeout");
     const { runSharedScoutMcpServer } = await import("../../mcp/shared-http.ts");
     await runSharedScoutMcpServer({
-      host: flag("--host") ?? "127.0.0.1",
+      host,
       port: Number(flag("--port") ?? 0),
       env: context.env,
+      idleTimeoutMs: idleSeconds === undefined ? undefined : Number(idleSeconds) * 1000,
       notifications: rest.includes("--notifications") || rest.includes("--enable-notifications"),
     });
     return;

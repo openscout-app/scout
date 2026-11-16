@@ -1,8 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
+import { codexActivityFromRollout, codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
 import { parseOrcaWorktreeAgents } from "./orca.js";
 import { innermostProcessHost, parseProcessHostEnv, processHostLocations } from "./process-host.js";
 
@@ -38,6 +41,67 @@ test("strict session input accepts a correlated Herdr native id and harness, and
     .toEqual({ ok: false, code: "session_runtime_unobserved" });
 });
 
+test("a Claude record that cannot be read, or a pane that cannot be shown to hold it, is never typed into", async () => {
+  const strict = { sessionId: SESSION, harness: "claude", body: "input", requireExactHarness: true };
+  expect(await deliverInPlace(strict, noHosts({ findClaudeRecord: async () => { throw new Error("ps timed out"); } })))
+    .toEqual({ ok: false, code: "session_runtime_unobserved" });
+  const unverified = noHosts({
+    findClaudeRecord: async () => claudeRecord({ status: "idle", paneUnverified: true, tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+    ttyForPid: async () => "ttys004",
+  });
+  expect(await deliverInPlace(strict, unverified)).toEqual({ ok: false, code: "not_live" });
+});
+
+describe("codexActivityFromRollout", () => {
+  let folder: string | null = null;
+  afterEach(async () => {
+    if (folder) await rm(folder, { recursive: true, force: true });
+    folder = null;
+  });
+  const row = (type: string) => `${JSON.stringify({ type: "event_msg", payload: { type } })}\n`;
+
+  test("each reading takes in only what the rollout gained, and a line still being written is not idle", async () => {
+    folder = await mkdtemp(join(tmpdir(), "scout-codex-activity-"));
+    const path = join(folder, "rollout.jsonl");
+    await writeFile(path, row("task_started") + row("task_complete"));
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+
+    // The start of the next turn, half written.
+    const started = row("task_started");
+    await appendFile(path, started.slice(0, 20));
+    expect(await codexActivityFromRollout(path)).toBe("unknown");
+    await appendFile(path, started.slice(20));
+    expect(await codexActivityFromRollout(path)).toBe("busy");
+
+    await appendFile(path, "not json\n");
+    expect(await codexActivityFromRollout(path)).toBe("unknown");
+    await appendFile(path, row("turn_aborted"));
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+
+    await rm(path);
+    expect(await codexActivityFromRollout(path)).toBe("unknown");
+  });
+
+  test("two probes at once leave the next reading right", async () => {
+    folder = await mkdtemp(join(tmpdir(), "scout-codex-activity-"));
+    const path = join(folder, "rollout.jsonl");
+    await writeFile(path, row("task_started") + row("task_complete"));
+    expect(await Promise.all([codexActivityFromRollout(path), codexActivityFromRollout(path)])).toEqual(["idle", "idle"]);
+    await appendFile(path, row("task_started"));
+    expect(await codexActivityFromRollout(path)).toBe("busy");
+  });
+
+  test("a rollout that was replaced is read from its start", async () => {
+    folder = await mkdtemp(join(tmpdir(), "scout-codex-activity-"));
+    const path = join(folder, "rollout.jsonl");
+    await writeFile(path, row("task_started") + row("task_complete") + row("task_started"));
+    expect(await codexActivityFromRollout(path)).toBe("busy");
+    await writeFile(path, row("task_started") + row("task_complete"));
+    expect(await codexActivityFromRollout(path)).toBe("idle");
+  });
+});
+
 function claudeRecord(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
   return {
     pid: 77085,
@@ -67,9 +131,12 @@ function noHosts(overrides: Partial<DeliverInPlaceDeps> = {}): DeliverInPlaceDep
     self: [],
     selfTty: async () => null,
     readOrcaAgents: async () => [],
+    composerEmpty: async () => true,
     promptHerdr: never,
     promptOrca: never,
     promptTmux: never,
+    tmuxComposerDraft: async () => null,
+    scoutLaunchedTmuxSessions: async () => new Set<string>(),
     ttyForPid: async () => null,
     typeIntoTty: never,
     codexHeldByApp: async () => false,
@@ -201,6 +268,65 @@ describe("deliverInPlace", () => {
       .toMatchObject({ ok: true, via: "tmux", location: "tmux work · %3" });
   });
 
+  test("a tmux composer holding unsent text is not typed into", async () => {
+    const typed: string[] = [];
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      findClaudeRecord: async () => claudeRecord({ tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+      tmuxComposerDraft: async () => "half a thought",
+      promptTmux: async (_target, body) => { typed.push(body); },
+    }));
+    expect(result).toEqual({
+      ok: false,
+      code: "busy",
+      via: "tmux",
+      location: "tmux work · %3",
+      detail: "The composer holds unsent text. Nothing was typed.",
+    });
+    expect(typed).toEqual([]);
+  });
+
+  test("the caller is told just before the first keystroke, and only when every check has passed", async () => {
+    const events: string[] = [];
+    const tmuxPane = (overrides: Partial<DeliverInPlaceDeps> = {}) => noHosts({
+      findClaudeRecord: async () => claudeRecord({ tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+      promptTmux: async () => { events.push("keystroke"); },
+      ...overrides,
+    });
+    const before = (place: { via: string; location: string }) => { events.push(`before ${place.via} ${place.location}`); };
+
+    expect(await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x", beforeKeystroke: before }, tmuxPane()))
+      .toEqual({ ok: true, via: "tmux", location: "tmux work · %3" });
+    expect(events).toEqual(["before tmux tmux work · %3", "keystroke"]);
+
+    // A composer holding a draft is refused before the caller is told anything.
+    events.length = 0;
+    await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x", beforeKeystroke: before }, tmuxPane({ tmuxComposerDraft: async () => "half a thought" }));
+    expect(events).toEqual([]);
+  });
+
+  test("a caller that refuses the keystroke stops it, and the refusal says nothing was sent", async () => {
+    const typed: string[] = [];
+    const result = await deliverInPlace({
+      sessionId: SESSION,
+      harness: "claude",
+      body: "x",
+      beforeKeystroke: () => { throw new Error("journal unavailable"); },
+    }, noHosts({
+      findClaudeRecord: async () => claudeRecord(),
+      locateProcess: async () => ({ host: "herdr", session: "fab", paneId: "w2:p2" }),
+      promptHerdr: async (_match, body) => { typed.push(body); },
+    }));
+    expect(result).toEqual({
+      ok: false,
+      code: "in_place_failed",
+      via: "herdr",
+      location: "Herdr fab · w2:p2",
+      nothingSent: true,
+      detail: "journal unavailable",
+    });
+    expect(typed).toEqual([]);
+  });
+
   test("Scout's own background copies are never targets", async () => {
     const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
       findClaudeRecord: async () => claudeRecord({ tmux: { session: "flat-claude-1", pane: "%1" } as ClaudeSessionRecord["tmux"] }),
@@ -329,4 +455,39 @@ test("native lifecycle uses harness events, fails closed on partial tails", () =
   expect(codexActivityFromTranscript(event("turn_aborted"))).toBe("idle");
   expect(codexActivityFromTranscript(event("task_complete") + event("task_started"))).toBe("busy");
   expect(codexActivityFromTranscript(event("task_complete") + "{partial")).toBe("unknown");
+});
+
+
+test("unsafe surfaces refuse without positive empty-composer evidence before checkpoint or input", async () => {
+  let touched = 0;
+  const touch = async () => { touched++; };
+  const surfaces: Partial<DeliverInPlaceDeps>[] = [
+    { findHerdrPane: async () => ({ session: "herdr", paneId: "p1", status: "idle" }) },
+    { findClaudeRecord: async () => claudeRecord({ status: "idle" }),
+      locateProcess: async () => ({ host: "orca", terminalHandle: "t1", paneKey: null }) },
+    { findClaudeRecord: async () => claudeRecord({ status: "idle" }), ttyForPid: async () => "ttys004" },
+  ];
+  for (const surface of surfaces) {
+    for (const composerEmpty of [undefined, async () => false, async () => { throw new Error("read failed"); }]) {
+      const result = await deliverInPlace({
+        sessionId: SESSION, harness: "claude", body: "task", beforeKeystroke: touch,
+      }, noHosts({ ...surface, composerEmpty, promptHerdr: touch, promptOrca: touch, typeIntoTty: touch }));
+      expect(result).toMatchObject({ ok: false, code: "in_place_failed", nothingSent: true });
+    }
+  }
+  expect(touched).toBe(0);
+});
+
+test("tmux refuses failed or missing composer observations before checkpoint or paste", async () => {
+  let touched = 0;
+  for (const read of [async () => undefined, async () => { throw new Error("capture timeout"); }]) {
+    const result = await deliverInPlace({
+      sessionId: SESSION, harness: "claude", body: "task", beforeKeystroke: async () => { touched++; },
+    }, noHosts({
+      findClaudeRecord: async () => claudeRecord({ status: "idle", tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+      tmuxComposerDraft: read, promptTmux: async () => { touched++; },
+    }));
+    expect(result).toMatchObject({ ok: false, code: "in_place_failed", nothingSent: true });
+  }
+  expect(touched).toBe(0);
 });

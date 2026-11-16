@@ -76,6 +76,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "install", summary: "Download and install the Scout Mac app" },
   { name: "update", summary: "Update this machine, or report on named machines" },
   { name: "uninstall", summary: "Remove Scout from this machine; keeps collected data unless --delete-data" },
+  { name: "settings", summary: "List, read and change Scout settings through one checked, logged entry point" },
   { name: "config", summary: "View or set user config (name, handle, agent name pool, etc.)" },
   { name: "machines", summary: "The computers Scout can see — mesh nodes, tailnet peers, LAN neighbours" },
   { name: "extensions", summary: "List installed CLI extensions" },

@@ -1395,8 +1395,9 @@ const askReceiptSchema = z.object({
     .optional(),
   error: z
     .object({
-      code: z.enum(["broker_unreachable", "invalid_request", "preflight_failed"]),
+      code: z.enum(["broker_unreachable", "invalid_request", "preflight_failed", "target_unroutable"]),
       message: z.string(),
+      reason: z.string().optional(),
     })
     .optional(),
 });

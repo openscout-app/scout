@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { buildScoutMcpCodexLaunchArgs } from "../../codex-launch-config.js";
+import { registerSharedScoutMcpClient, resolveScoutMcpCodexLaunch } from "../../codex-launch-config.js";
 import { resolveCodexExecutable } from "../../codex-executable.js";
 import { redactSecrets } from "../../secret-redaction.js";
 import { writeCodexMetadata } from "./codex-metadata-file.js";
@@ -137,7 +137,22 @@ export type CodexAppServerSessionOptions = {
   connection?: CodexAppServerConnectionConfig;
   /** Optional title set with `thread/name/set` when Scout starts a new thread. */
   threadName?: string;
+  /**
+   * Stop a spawned app-server after this long with nothing to do; every
+   * interaction restarts the window. The thread is kept, and the next message
+   * resumes it. Default 60 minutes, or OPENSCOUT_CODEX_IDLE_PARK_MS; 0 keeps it.
+   */
+  idleParkMs?: number;
 };
+
+export const DEFAULT_CODEX_IDLE_PARK_MS = 60 * 60 * 1000;
+
+export function resolveCodexIdleParkMs(value: number | undefined, env: Record<string, string | undefined> = process.env): number {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  const fromEnv = Number(env.OPENSCOUT_CODEX_IDLE_PARK_MS);
+  if (env.OPENSCOUT_CODEX_IDLE_PARK_MS?.trim() && Number.isFinite(fromEnv) && fromEnv >= 0) return fromEnv;
+  return DEFAULT_CODEX_IDLE_PARK_MS;
+}
 
 /**
  * Which Codex this session is talking to. Captured from `initialize` and, for
@@ -966,6 +981,10 @@ export class CodexAppServerTransport {
   private threadPath: string | null = null;
   private durableThreadId: string | null = null;
   private proactiveShutdown: ProactiveCodexAppServerShutdown | null = null;
+  /** Stopped for idleness with its thread kept; the next request starts it again. */
+  private parked = false;
+  /** The stop under way for a park; a wake waits for it before launching. */
+  private parking: Promise<void> | null = null;
   private lastConfigSignature: string;
   private readonly notificationListeners = new Set<(message: CodexAppServerNotification) => void>();
   private readonly errorListeners = new Set<(error: Error) => void>();
@@ -1024,7 +1043,8 @@ export class CodexAppServerTransport {
     // A generated provider ID promoted onto the broker endpoint names this
     // same live session. Only normalize identity; runtime/launch settings
     // remain strict so an actual requested change still replaces the client.
-    if (!this.isAlive() || !this.threadId
+    // A parked session still names its thread: replacing it would reset that thread.
+    if (!(this.isAlive() || this.parked) || !this.threadId
       || (this.options.threadId && this.options.threadId !== this.threadId)
       || (options.threadId && options.threadId !== this.threadId)) return false;
     const liveIdentity = { threadId: this.threadId, requireExistingThread: true };
@@ -1091,6 +1111,25 @@ export class CodexAppServerTransport {
 
   get ownedLive(): boolean { return this.isAlive() && this.connection?.mode !== "attached"; }
 
+  get isParked(): boolean { return this.parked; }
+
+  /** A launch or a park is under way; the thread is not ready for writes. */
+  get isTransitioning(): boolean { return Boolean(this.starting || this.parking); }
+
+  /**
+   * Stop an idle spawned app-server and keep its thread. Attached servers are
+   * not Scout's to stop, so they are left alone. Returns whether it parked.
+   */
+  async park(reason: string): Promise<boolean> {
+    if (!this.ownedLive || !this.threadId || this.durableThreadId !== this.threadId || this.starting || this.parking) return false;
+    this.parked = true;
+    const parking: Promise<void> = this.stop({ resetThread: false, reason })
+      .finally(() => { if (this.parking === parking) this.parking = null; });
+    this.parking = parking;
+    await parking;
+    return true;
+  }
+
   async steerTurn(prompt: string, expectedTurnId: string): Promise<void> {
     await this.ensureStarted();
     if (!this.threadId) {
@@ -1117,6 +1156,11 @@ export class CodexAppServerTransport {
   }
 
   async shutdown(options: CodexAppServerShutdownOptions = {}): Promise<void> {
+    this.parked = false;
+    await this.stop(options);
+  }
+
+  private async stop(options: CodexAppServerShutdownOptions): Promise<void> {
     await this.leaveAttachedThread();
     this.proactiveShutdown = {
       reason: options.reason
@@ -1220,12 +1264,15 @@ export class CodexAppServerTransport {
 
   private async ensureStarted(): Promise<void> {
     this.options.signal?.throwIfAborted();
-    if (this.isAlive() && this.threadId) {
-      return;
-    }
-
+    // Never launch beside a process that is still being parked.
+    if (this.parking) await this.parking.catch(() => undefined);
+    // An open connection is not a ready thread: wait for a launch in progress.
     if (this.starting) {
       return this.starting;
+    }
+
+    if (this.isAlive() && this.threadId) {
+      return;
     }
 
     const controller = new AbortController();
@@ -1313,20 +1360,33 @@ export class CodexAppServerTransport {
       }
     } else {
       const launchArgs = normalizeCodexAppServerLaunchArgs(this.options.launchArgs);
+      const codexExecutable = resolveCodexExecutable(env);
+      const scoutMcp = await resolveScoutMcpCodexLaunch({
+        currentDirectory: this.options.cwd,
+        env,
+        codexExecutable,
+      });
+      signal.throwIfAborted();
+      if (scoutMcp.unknownReason) {
+        this.writeLog(this.stderrLogPath, `[openscout] ${scoutMcp.unknownReason}\n`);
+      }
       connection = spawnCodexAppServerStdioConnection({
-        executable: resolveCodexExecutable(env),
+        executable: codexExecutable,
         args: [
           "app-server",
-          ...buildScoutMcpCodexLaunchArgs({
-            currentDirectory: this.options.cwd,
-            env,
-          }),
+          ...scoutMcp.args,
           ...launchArgs,
         ],
         cwd: this.options.cwd,
         env,
         handlers,
       });
+      if (scoutMcp.usesUrl) {
+        const failure = registerSharedScoutMcpClient(env, connection.pid);
+        if (failure) {
+          this.writeLog(this.stderrLogPath, `[openscout] could not register this app-server with the shared Scout MCP server: ${failure}\n`);
+        }
+      }
     }
 
     this.connectionGeneration++;
@@ -1354,14 +1414,17 @@ export class CodexAppServerTransport {
     });
 
     signal.throwIfAborted();
-    await this.resumeOrStartThread(signal);
+    // A wake resumes the parked thread or fails; it never falls back to a new
+    // thread. A failed wake stays parked, so a later message tries again.
+    await this.resumeOrStartThread(signal, this.parked ? this.durableThreadId : null);
+    this.parked = false;
     signal.throwIfAborted();
     await this.persistState();
     signal.throwIfAborted();
   }
 
-  private async resumeOrStartThread(signal: AbortSignal): Promise<void> {
-    const requestedThreadId = this.options.threadId?.trim() || null;
+  private async resumeOrStartThread(signal: AbortSignal, parkedThreadId: string | null = null): Promise<void> {
+    const requestedThreadId = this.options.threadId?.trim() || parkedThreadId || null;
     const storedThreadId = requestedThreadId ?? await readOptionalFile(this.threadIdPath);
     signal.throwIfAborted();
     if (storedThreadId) {
@@ -1871,10 +1934,18 @@ export class CodexAppServerClient {
   private activeTurn: ActiveTurn | null = null;
   private removeNotificationListener: (() => void) | null = null;
   private removeErrorListener: (() => void) | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** turn/started seen without its turn/completed, tracked or not. */
+  private serverTurnOpen = false;
+  private closed = false;
 
   constructor(private options: CodexAppServerSessionOptions) {
     this.transport = new CodexAppServerTransport(options);
     this.bindTransport();
+  }
+
+  get isParked(): boolean {
+    return this.transport.isParked;
   }
 
   get threadId(): string | null {
@@ -1915,7 +1986,13 @@ export class CodexAppServerClient {
   }
 
   observeExisting() {
-    const state = !this.isAlive() ? "gone" : !this.transport.ownedLive || !this.threadId || this.attentionUnsafe || this.transport.nativeControlBlocked ? "unknown"
+    // Parked is idle, not gone: "gone" ends room bindings. A revive wakes it.
+    if (this.transport.isParked && this.threadId && !this.transport.isTransitioning) {
+      return { state: "idle", sessionId: this.threadId, turnId: undefined,
+        token: `${this.liveIncarnation}:parked:${this.liveRevision}`, steer: true } as const;
+    }
+    const state = this.transport.isTransitioning && (this.isAlive() || this.transport.isParked) ? "unknown"
+      : !this.isAlive() ? "gone" : !this.transport.ownedLive || !this.threadId || this.attentionUnsafe || this.transport.nativeControlBlocked ? "unknown"
       : this.activeTurn ? (this.activeTurn.turnId ? "active" : "unknown") : this.queuedOperations ? "unknown" : "idle";
     return { state, sessionId: this.threadId ?? undefined, turnId: this.activeTurn?.turnId || undefined,
       token: `${this.liveIncarnation}:${this.transport.connectionGeneration}:${this.liveRevision}`, steer: true } as const;
@@ -1925,6 +2002,29 @@ export class CodexAppServerClient {
     const observed = this.observeExisting();
     if (observed.sessionId !== expected.sessionId || observed.token !== expected.token
       || observed.state !== (action === "steer" ? "active" : "idle")) return { accepted: false, evidence: "native_state_changed" };
+    this.touchIdle();
+    try {
+      return await this.submitObserved(expected, action, prompt, observed);
+    } finally {
+      this.settleIdle();
+    }
+  }
+
+  private async submitObserved(
+    expected: { sessionId: string; token: string },
+    action: "revive" | "steer",
+    prompt: string,
+    observed: ReturnType<CodexAppServerClient["observeExisting"]>,
+  ) {
+    if (action === "revive" && this.transport.isParked) {
+      // Claim the wake before the first await: a revive holding the old token is now stale.
+      const revision = ++this.liveRevision;
+      await this.transport.ensureOnline();
+      await this.serialized; // let the park itself, or any send, leave the queue
+      if (this.liveRevision !== revision || this.activeTurn || this.queuedOperations || this.threadId !== expected.sessionId) {
+        return { accepted: false, evidence: "native_state_changed" };
+      }
+    }
     if (action === "steer") {
       // No await between expected-state validation and the native expectedTurnId write.
       await this.transport.submitExisting(prompt, observed.turnId);
@@ -1946,7 +2046,8 @@ export class CodexAppServerClient {
   }
 
   ensureOnline(): Promise<CodexAppServerThreadResult> {
-    return this.transport.ensureOnline();
+    this.touchIdle();
+    return this.transport.ensureOnline().finally(() => this.settleIdle());
   }
 
   async invoke(prompt: string, timeoutMs?: number): Promise<CodexAppServerTurnResult> {
@@ -2055,8 +2156,11 @@ export class CodexAppServerClient {
   }
 
   async steer(prompt: string): Promise<void> {
-    await this.transport.ensureOnline();
+    this.touchIdle();
+    // A parked session has no turn; do not start the server only to refuse.
+    if (!this.transport.isParked) await this.transport.ensureOnline();
     if (!this.transport.currentThreadId || !this.activeTurn?.turnId) {
+      this.settleIdle();
       throw new Error(`Codex app-server session for ${this.options.agentName} has no active turn to steer.`);
     }
 
@@ -2064,6 +2168,7 @@ export class CodexAppServerClient {
   }
 
   async interrupt(): Promise<void> {
+    if (this.transport.isParked) return;
     await this.transport.ensureOnline();
     if (!this.transport.currentThreadId || !this.activeTurn?.turnId) {
       return;
@@ -2082,6 +2187,8 @@ export class CodexAppServerClient {
         ?? (options.resetThread ? "OpenScout reset the app-server session" : "OpenScout stopped the app-server session"),
     });
 
+    this.closed = true;
+    this.touchIdle();
     const activeTurn = this.activeTurn;
     this.activeTurn = null;
     if (activeTurn) {
@@ -2099,15 +2206,75 @@ export class CodexAppServerClient {
   }
 
   private bindTransport(): void {
-    this.removeNotificationListener = this.transport.onNotification((message) => this.handleNotification(message));
-    this.removeErrorListener = this.transport.onError((error) => this.failActiveTurn(error));
+    this.removeNotificationListener = this.transport.onNotification((message) => {
+      this.handleNotification(message);
+      if (message.method === "turn/started") this.serverTurnOpen = true;
+      if (message.method === "turn/completed") this.serverTurnOpen = false;
+      this.settleIdle();
+    });
+    this.removeErrorListener = this.transport.onError((error) => {
+      this.serverTurnOpen = false;
+      this.failActiveTurn(error);
+      this.settleIdle();
+    });
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    this.touchIdle();
     this.queuedOperations++;
-    const next = this.serialized.then(task, task).finally(() => { this.queuedOperations--; });
+    const next = this.serialized.then(task, task).finally(() => { this.queuedOperations--; this.settleIdle(); });
     this.serialized = next.then(() => undefined, () => undefined);
     return next;
+  }
+
+  /** Any interaction stops the idle clock. */
+  private touchIdle(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  /** Restart the idle clock from now when the session has nothing to do. */
+  private settleIdle(): void {
+    this.touchIdle();
+    const idleParkMs = resolveCodexIdleParkMs(this.options.idleParkMs, { ...process.env, ...this.options.env });
+    if (idleParkMs <= 0 || !this.isIdle()) return;
+    this.idleTimer = setTimeout(() => this.parkIfIdle(idleParkMs), idleParkMs);
+    (this.idleTimer as { unref?: () => void }).unref?.();
+  }
+
+  private isIdle(): boolean {
+    return this.queuedOperations === 0 && this.isIdleIgnoringQueue();
+  }
+
+  private parkIfIdle(idleParkMs: number): void {
+    this.idleTimer = null;
+    if (!this.isIdle()) return;
+    if (!this.threadIsDurable()) {
+      this.settleIdle(); // look again after another window
+      return;
+    }
+    // Retire idle tokens handed out before parking: a revive must re-observe.
+    this.liveRevision++;
+    const minutes = Math.round(idleParkMs / 60_000);
+    void this.enqueue(async () => {
+      // Serialized behind any send that arrived meanwhile; that send wins.
+      if (this.queuedOperations > 1 || !this.isIdleIgnoringQueue()) return;
+      await this.transport.park(
+        `OpenScout parked the app-server after ${minutes} idle minute${minutes === 1 ? "" : "s"}; the next message resumes thread ${this.threadId}`,
+      );
+    }).catch(() => undefined);
+  }
+
+  private isIdleIgnoringQueue(): boolean {
+    return !this.closed && !this.activeTurn && !this.serverTurnOpen
+      && !this.transport.nativeControlBlocked && this.transport.ownedLive && Boolean(this.threadId);
+  }
+
+  /** Only a thread Codex has written can be resumed; parking any other would lose it. */
+  private threadIsDurable(): boolean {
+    return Boolean(this.threadId) && this.transport.currentDurableThreadId === this.threadId;
   }
 
   private createActiveTurn(
@@ -2419,7 +2586,8 @@ export async function interruptCodexAppServerLocalAgent(options: CodexAppServerI
 
 export function isCodexAppServerLocalAgentAlive(options: CodexAppServerSessionOptions): boolean {
   const session = codexAppServerClients.get(codexAppServerSessionKey(options));
-  return Boolean(session?.isAlive());
+  // Parked counts: routing must still deliver to it, and delivery wakes it.
+  return Boolean(session && (session.isAlive() || session.isParked));
 }
 
 export async function shutdownCodexAppServerLocalAgent(

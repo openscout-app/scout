@@ -6,11 +6,10 @@ import {
   type ScoutOperatorSignal,
 } from "@openscout/protocol";
 
-import { basename } from "node:path";
-
 import {
   agentNotificationForOperatorSignal,
   agentNotificationForPermissionRequest,
+  notificationProjectName,
   pushDeliveryForLevel,
 } from "./agent-notification-builders.js";
 import type {
@@ -84,6 +83,10 @@ export type BrokerOperatorAttentionServiceOptions = {
   ) => Promise<MobilePushBroadcastResult>;
   /** The name the operator knows an agent by. A push never names an agent by its raw id. */
   agentDisplayName?: (actorId: string) => string | undefined;
+  /** The agent's roster number text ("012"), when it holds one. */
+  agentRosterCode?: (actorId: string) => string | null | undefined;
+  /** The agent's harness ("codex"), so a generated handle reads as it. */
+  agentHarness?: (actorId: string) => string | null | undefined;
   warn?: (message: string) => void;
   now?: () => number;
 };
@@ -134,7 +137,8 @@ export class BrokerOperatorAttentionService {
       ...(input.view ? { view: input.view } : {}),
       agentName: this.agentName(input.agentId),
       agentId: input.agentId,
-      project: input.projectRoot ? basename(input.projectRoot) : null,
+      ...this.agentShorthand(input.agentId),
+      project: notificationProjectName(input.projectRoot),
       createdAt: input.createdAt ?? this.now(),
       conversationId: input.conversationId,
       messageId: input.messageId,
@@ -179,8 +183,9 @@ export class BrokerOperatorAttentionService {
         signal,
         agentName: input.requesterName?.trim() || this.agentName(input.requesterId),
         agentId: input.requesterId,
+        ...this.agentShorthand(input.requesterId),
         body: input.body,
-        project: input.projectRoot ? basename(input.projectRoot) : null,
+        project: notificationProjectName(input.projectRoot),
         createdAt: input.createdAt ?? this.options.now?.() ?? Date.now(),
       })
       : undefined;
@@ -329,6 +334,13 @@ export class BrokerOperatorAttentionService {
         `[openscout-runtime] failed to send operator delivery issue push to ${failure.deviceId} (${failure.tokenSuffix}): ${failure.reason ?? failure.status ?? "unknown"}`,
       );
     }
+  }
+
+  /** The roster number and harness that make the lock-screen name short. */
+  private agentShorthand(actorId: string): { agentCode?: string; agentHarness?: string } {
+    const code = this.options.agentRosterCode?.(actorId)?.trim();
+    const harness = this.options.agentHarness?.(actorId)?.trim();
+    return { ...(code ? { agentCode: code } : {}), ...(harness ? { agentHarness: harness } : {}) };
   }
 
   private agentName(actorId: string): string {

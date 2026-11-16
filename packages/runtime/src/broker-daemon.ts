@@ -22,7 +22,7 @@ import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
-import { deliverInPlace, isScoutBackgroundCopy } from "./in-place/deliver.js";
+import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
 import { permissionWaitPatch } from "./broker-blocked-reply.js";
@@ -89,6 +89,7 @@ import {
   mintChannelId,
   OPENSCOUT_COORDINATOR_AGENT_ID,
   SCOUT_DISPATCHER_AGENT_ID,
+  rosterNumberText,
 } from "@openscout/protocol";
 
 import { createInMemoryControlRuntime } from "./broker.js";
@@ -237,6 +238,7 @@ import {
   getTailDiscovery,
   readRecentLiveEvents,
   readRecentTranscriptEvents,
+  readTailSessionUsage,
 } from "./tail/index.js";
 import {
   getRepoWatchSnapshot,
@@ -1066,6 +1068,7 @@ const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalS
     actorFor: (actorId) => runtime.peek().actors[actorId],
     harnessSupportsResume: (harness) => Boolean(findHarnessEntry(harness)?.resume),
     observeEndpointSession: observeLocalAgentEndpointSession,
+    probeInPlace: (probe) => probeInPlaceConfirmed(probe),
     log: (message) => console.log(message),
   }, input);
 
@@ -2138,6 +2141,8 @@ const localEndpointResolver = new BrokerLocalEndpointResolver({
   isLocalAgentEndpointAliveAsync,
   ensureLocalSessionEndpointOnline,
   observeLocalEndpointSession: observeLocalAgentEndpointSession,
+  // The resolver restarts a session on one answer, so the answer is confirmed.
+  probeInPlace: (probe) => probeInPlaceConfirmed(probe),
   ensureLocalAgentBindingOnline,
   createIsolatedAgentEndpoint: createIsolatedAgentEndpointForInvocation,
   upsertActor: upsertActorDurably,
@@ -3125,6 +3130,14 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
     const name = brokerActorDisplayName(snapshot, actorId);
     return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
   },
+  agentRosterCode: (actorId) => {
+    const entry = agentRosterService?.entry(actorId);
+    return entry ? rosterNumberText(entry.number) : null;
+  },
+  agentHarness: (actorId) => {
+    const endpoints = Object.values(runtime.snapshot().endpoints).filter((endpoint) => endpoint.agentId === actorId);
+    return (endpoints.find((endpoint) => endpoint.preferred) ?? endpoints[0])?.harness ?? null;
+  },
   warn: (message) => console.warn(message),
 });
 
@@ -3153,7 +3166,7 @@ const permissionService = new BrokerPermissionService({
     const context = shapeAttentionContext(invocation.task, "task");
     const view = permissionDialogView(prompt.text);
     if (context) {
-      if (view.view === "turn.approve.command" || view.view === "turn.approve.tool") view.why = context.text;
+      if (view.view === "turn.approve.command" && !view.why) view.why = context.text;
       if (view.view === "turn.approve.edit") view.summary = context.text;
     }
     operatorAttentionService.queuePermissionRequest({
@@ -3554,6 +3567,7 @@ const routeRequest = createBrokerHttpRouter({
   brokerRepoTailService,
   getHarnessTopologySnapshot,
   getTailDiscovery,
+  readTailSessionUsage,
   nudgeHarnessTopologyScan,
   deliveryHttpService,
   durableActionHttpService,

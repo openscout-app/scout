@@ -7,7 +7,7 @@ import {
 import { SCOUT_RUNTIME_CATALOG } from "./runtime-execution.js";
 
 describe("runtime catalog", () => {
-  test("accepts the bundled catalog and exposes Astra, Fable 5, and Grok 4.6", () => {
+  test("accepts the bundled catalog and exposes Astra, Fable 5, and Grok 4.7", () => {
     const parsed = parseScoutRuntimeCatalog(SCOUT_RUNTIME_CATALOG);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -29,9 +29,9 @@ describe("runtime catalog", () => {
     expect(claude?.models.find((model) => model.id === "claude-opus-5")?.presentation)
       .toEqual({ detail: "Deepest" });
     expect(parsed.catalog.harnesses.find((entry) => entry.id === "grok")?.models[0]?.id)
-      .toBe("grok-4.6");
+      .toBe("grok-4.7");
     expect(parsed.catalog.harnesses.find((entry) => entry.id === "grok")?.models[0]?.contextWindowTokens)
-      .toBe(500_000);
+      .toBeUndefined(); // New model context is unverified; never inherit an older model's limit.
     expect(parsed.catalog.harnesses.find((entry) => entry.id === "grok")?.listed).toBe(false);
     expect(parsed.catalog.harnesses.find((entry) => entry.id === "devin")?.models.map((model) => model.id))
       .toEqual(["swe-2-high", "swe-2-medium", "swe-2-max"]);
@@ -48,7 +48,7 @@ describe("runtime catalog", () => {
     expect(parseScoutRuntimeCatalog(invalid).ok).toBe(false);
   });
 
-  test("offers only the Grok models the CLI actually serves, with effort on both entries", () => {
+  test("offers only the Grok models the CLI actually serves, with effort on the harness", () => {
     const parsed = parseScoutRuntimeCatalog(SCOUT_RUNTIME_CATALOG);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -56,8 +56,8 @@ describe("runtime catalog", () => {
     // -32602 "unknown model id", which fails the whole session start.
     for (const id of ["grok", "grok-acp"]) {
       const harness = parsed.catalog.harnesses.find((entry) => entry.id === id);
-      expect(harness?.models.map((model) => model.id)).toEqual(["grok-4.6", "grok-4.5"]);
-      expect(harness?.models.every((model) => model.contextWindowTokens === 500_000)).toBe(true);
+      expect(harness?.models.map((model) => model.id)).toEqual(["grok-4.7", "grok-4.6", "grok-4.5"]);
+      expect(harness?.models.filter((model) => model.id !== "grok-4.7").every((model) => model.contextWindowTokens === 500_000)).toBe(true);
       expect(harness?.reasoningEfforts).toEqual(["low", "medium", "high", "xhigh"]);
       expect(harness?.defaultReasoningEffort).toBe("high");
     }

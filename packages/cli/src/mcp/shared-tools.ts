@@ -26,6 +26,17 @@ export type ScoutSessionContext = {
 
 type RequestHandler = (request: unknown, extra: unknown) => Promise<unknown>;
 
+/** A request as the SDK hands it to a handler. */
+export type SharedToolRequest = { method: string; params?: { _meta?: unknown; [key: string]: unknown } };
+
+/**
+ * The session a request runs as: one context for the whole connection, or
+ * one chosen per request (a Codex call names its thread and turn).
+ */
+export type ScoutSessionResolver =
+  | ScoutSessionContext
+  | ((request: SharedToolRequest) => ScoutSessionContext | Promise<ScoutSessionContext>);
+
 /** SDK internals this module relies on. Checked once at build time so a change fails loudly. */
 type ProtocolInternals = {
   _requestHandlers: Map<string, RequestHandler>;
@@ -39,7 +50,7 @@ const PER_CONNECTION_METHODS = new Set(["initialize", "ping"]);
 
 export type SharedScoutTools = {
   /** A protocol endpoint for one connection, answered by the shared tools. */
-  connect: (context: ScoutSessionContext) => Server;
+  connect: (session: ScoutSessionResolver) => Server;
   /** Env keys read while the tools were built: one value for every connection. */
   buildTimeReads: ReadonlySet<string>;
   methods: string[];
@@ -104,11 +115,17 @@ export function createSharedScoutTools(baseEnv: NodeJS.ProcessEnv = process.env)
   return {
     buildTimeReads,
     methods: shared.map(([method]) => method),
-    connect(context) {
+    connect(session) {
       const server = new Server(serverInfo, { capabilities, instructions });
       const handlers = (server as unknown as ProtocolInternals)._requestHandlers;
+      const resolve = typeof session === "function" ? session : () => session;
       for (const [method, handler] of shared) {
-        handlers.set(method, (request, extra) => sessions.run(context, () => handler(request, extra)));
+        // A resolver that throws refuses the request; the SDK turns it into
+        // a JSON-RPC error for the client.
+        handlers.set(method, async (request, extra) => {
+          const context = await resolve(request as SharedToolRequest);
+          return sessions.run(context, () => handler(request, extra));
+        });
       }
       return server;
     },

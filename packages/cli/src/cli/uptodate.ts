@@ -14,6 +14,8 @@ export function shouldEnsureBrokerUptodateForCommand(command: string | null, arg
   // download commands only restart the web server, never the broker. Signing
   // in only talks to the download host.
   if (command === "web" || command === "auth") return false;
+  // Settings are local files the CLI reads and writes; the broker is not involved.
+  if (command === "settings") return false;
   return command !== "chat" && command !== "status" && command !== "report" && command !== "feedback" && command !== "mcp" && command !== "statusline" && command !== "permission-hook" && command !== "search";
 }
 

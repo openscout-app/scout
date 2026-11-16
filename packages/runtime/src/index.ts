@@ -47,6 +47,8 @@ export * from "./support-paths.js";
 export * from "./scout-agent-cards.js";
 export * from "./user-config.js";
 export * from "./user-config-fields.js";
+export * from "./settings-catalog.js";
+export * from "./settings-service.js";
 export * from "./harness-model-preferences.js";
 export * from "./runtime-list-preferences.js";
 export * from "./local-config.js";

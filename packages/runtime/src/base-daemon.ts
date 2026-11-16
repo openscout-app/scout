@@ -81,6 +81,7 @@ import {
 } from "./menu-helper-supervisor.js";
 import { readAllProcessCommandRows } from "./system-probes/ps.js";
 import { selectInstanceAwareEntrypoint } from "./instance.js";
+import { createSharedMcpSupervisor, readSharedMcpOptIn, resolveSharedMcpCommand, settleSharedMcpOptIn, sharedMcpClientsDirectory, sharedMcpPort } from "./shared-mcp.js";
 
 import { loadOpenScoutRuntimeBuildIdentity } from "./build-info.js";
 import { resolveMeshBridgeExtension, meshBridgeLaunchKey, meshBridgeExtensionCommand, writeMeshBridgeLaunchConfig, readMeshBridgeDestinationKeyId, type MeshBridgeExtension } from "./mesh-bridge-extension.js";
@@ -97,6 +98,7 @@ const WEB_START_RETRY_MS = 5_000;
 const PAIRING_RECONCILE_INTERVAL_MS = 500;
 const PAIRING_STOP_TIMEOUT_MS = 5_000;
 const MESH_BRIDGE_RECONCILE_INTERVAL_MS = 5_000;
+const SHARED_MCP_RECONCILE_INTERVAL_MS = 5_000;
 const MESH_BRIDGE_STOP_TIMEOUT_MS = 6_000;
 // An unconfigured bridge (no relay token) is not a crash; retry rarely.
 const MESH_BRIDGE_UNCONFIGURED_RETRY_MS = 5 * 60_000;
@@ -135,6 +137,7 @@ let parentWatcher: ReturnType<typeof setInterval> | null = null;
 let pairingProcess: ChildProcess | null = null;
 let pairingReconcileTimer: NodeJS.Timeout | null = null;
 let menuHelperReconcileTimer: NodeJS.Timeout | null = null;
+let sharedMcpReconcileTimer: NodeJS.Timeout | null = null;
 let pairingReconcileInFlight = false;
 let pairingRestartGeneration: number | null = null;
 let pairingRestartDelayMs = RESTART_MIN_DELAY_MS;
@@ -329,6 +332,57 @@ const roomListeningSupervisor = createRoomListeningSupervisor({
   terminate: child => terminateChildProcess(child, "room listening"),
   warn: message => warn(message),
 });
+
+// The opt-in shared Scout MCP server: one `scout mcp serve` for every local
+// session, run while `scout mcp install --shared` has left its opt-in file.
+const sharedMcpSupervisor = createSharedMcpSupervisor({
+  desired: () => readSharedMcpOptIn(config.supportDirectory) !== null,
+  spawn: () => {
+    const port = readSharedMcpOptIn(config.supportDirectory)?.port ?? sharedMcpPort();
+    const repoRoot = resolveOpenScoutRepoRoot({
+      startDirectories: [process.env.OPENSCOUT_SETUP_CWD, process.cwd(), dirname(fileURLToPath(import.meta.url))],
+    });
+    const launch = resolveSharedMcpCommand({
+      port,
+      bunExecutable: resolveBunExecutable()?.path ?? null,
+      repoRoot,
+      runtimePackageDir: config.runtimePackageDir,
+    });
+    if (!launch) throw new Error("no Scout CLI entrypoint (or no Bun) to run `scout mcp serve`");
+    const stdout = logFile("shared-mcp.stdout.log"), stderr = logFile("shared-mcp.stderr.log");
+    try {
+      return spawn(launch.command, launch.args, {
+        argv0: "scout-mcp", cwd: launch.cwd,
+        env: { ...process.env, OPENSCOUT_PARENT_PID: String(process.pid),
+          OPENSCOUT_CONTROL_HOME: config.controlHome, OPENSCOUT_BROKER_URL: brokerControlUrl,
+          OPENSCOUT_MCP_SHARED_CLIENTS_DIR: sharedMcpClientsDirectory(config.supportDirectory) },
+        stdio: ["ignore", stdout, stderr],
+      });
+    } finally { closeSync(stdout); closeSync(stderr); }
+  },
+  terminate: child => terminateChildProcess(child, "shared MCP server"),
+  log,
+  warn,
+});
+
+function startSharedMcpSupervision(): void {
+  let ticking = false;
+  const tick = () => {
+    if (shuttingDown || ticking) return;
+    ticking = true;
+    // A drain with no registered client left removes the opt-in first, and
+    // reconcile then stops the server.
+    void Promise.resolve()
+      .then(() => settleSharedMcpOptIn(config.supportDirectory, { log }))
+      .catch((error) => warn("shared MCP opt-in update failed", error instanceof Error ? error.message : String(error)))
+      .then(() => sharedMcpSupervisor.reconcile())
+      .catch((error) => warn("shared MCP reconcile failed", error instanceof Error ? error.message : String(error)))
+      .finally(() => { ticking = false; });
+  };
+  tick();
+  sharedMcpReconcileTimer = setInterval(tick, SHARED_MCP_RECONCILE_INTERVAL_MS);
+  sharedMcpReconcileTimer.unref();
+}
 
 function scheduleBrokerRestart(): void {
   const delay = brokerRestartDelayMs;
@@ -1229,6 +1283,10 @@ async function shutdown(exitCode = 0): Promise<void> {
     clearInterval(meshBridgeReconcileTimer);
     meshBridgeReconcileTimer = null;
   }
+  if (sharedMcpReconcileTimer) {
+    clearInterval(sharedMcpReconcileTimer);
+    sharedMcpReconcileTimer = null;
+  }
   // The helper keeps running: it is the host's menu, not part of this process.
   if (menuHelperReconcileTimer) {
     clearInterval(menuHelperReconcileTimer);
@@ -1240,6 +1298,7 @@ async function shutdown(exitCode = 0): Promise<void> {
   stopEdgeProcesses();
   await Promise.all([
     roomListeningSupervisor.stop(),
+    sharedMcpSupervisor.stop(),
     stopPairingController(),
     terminateChildProcess(meshBridgeProcess, "mesh bridge", MESH_BRIDGE_STOP_TIMEOUT_MS),
     terminateChildProcess(brokerProcess, "broker"),
@@ -1328,5 +1387,6 @@ roomListeningSupervisor.start();
 await startLocalEdge();
 startPairingSupervision();
 startMeshBridgeSupervision();
+startSharedMcpSupervision();
 startMenuHelperSupervision();
 void startWebWhenBrokerIsReady();

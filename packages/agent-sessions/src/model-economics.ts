@@ -65,7 +65,14 @@ export type FamilyTierPicks = {
 };
 
 /**
- * Verified against native-provider pricing pages and models.dev, 2026-11-10.
+ * When FAMILY_TIER_PICKS was last verified against native-provider pricing
+ * pages and models.dev. Change it whenever the picks are re-verified; the
+ * public model worldview publishes it as `economicsReviewedAt`.
+ */
+export const FAMILY_TIER_PICKS_REVIEWED_AT = "2026-11-10";
+
+/**
+ * Verified on FAMILY_TIER_PICKS_REVIEWED_AT.
  * `apple` has no catalog row: on-device Foundation Models are free and
  * private, which is why it exists here at all — it is the zero-cost tier.
  */

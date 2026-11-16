@@ -66,8 +66,9 @@ person whose machine it is.
   agent-sessions, session-trace, and mesh-extension have one.
 - Run the narrowest affected tests while you work.
 - New or changed process spawning or shell execution: `bun run sync-exec:fence`.
-- Before you hand off a cross-package change: `bun run check` and
-  `bun run test:unit`.
+- Before you hand off a change: `bun run check` and `bun run test:changed`.
+- Before merge: run `bun run test:unit` once per pull request on the exact head.
+  The change-based handoff gate does not replace this full-suite merge gate.
 - CI also runs `bun run check:core` (no app imports) and
   `bun run check:presentation` (public repository presentation).
 - Rust: `bun run scoutd:check`, `bun run scoutd:test`,
