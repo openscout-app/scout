@@ -1311,7 +1311,6 @@ export class CodexAppServerTransport {
     this.promptDirty = true;
     await this.persistPrompt();
     this.proactiveShutdown = null;
-    this.parked = false;
     try {
       await assertCodexWorkingDirectory(this.options.cwd, this.options.agentName);
     } catch (error) {
@@ -1411,14 +1410,17 @@ export class CodexAppServerTransport {
     });
 
     signal.throwIfAborted();
-    await this.resumeOrStartThread(signal);
+    // A wake resumes the parked thread or fails; it never falls back to a new
+    // thread. A failed wake stays parked, so a later message tries again.
+    await this.resumeOrStartThread(signal, this.parked ? this.durableThreadId : null);
+    this.parked = false;
     signal.throwIfAborted();
     await this.persistState();
     signal.throwIfAborted();
   }
 
-  private async resumeOrStartThread(signal: AbortSignal): Promise<void> {
-    const requestedThreadId = this.options.threadId?.trim() || null;
+  private async resumeOrStartThread(signal: AbortSignal, parkedThreadId: string | null = null): Promise<void> {
+    const requestedThreadId = this.options.threadId?.trim() || parkedThreadId || null;
     const storedThreadId = requestedThreadId ?? await readOptionalFile(this.threadIdPath);
     signal.throwIfAborted();
     if (storedThreadId) {
@@ -2230,7 +2232,7 @@ export class CodexAppServerClient {
   /** Restart the idle clock from now when the session has nothing to do. */
   private settleIdle(): void {
     this.touchIdle();
-    const idleParkMs = resolveCodexIdleParkMs(this.options.idleParkMs);
+    const idleParkMs = resolveCodexIdleParkMs(this.options.idleParkMs, { ...process.env, ...this.options.env });
     if (idleParkMs <= 0 || !this.isIdle()) return;
     this.idleTimer = setTimeout(() => this.parkIfIdle(idleParkMs), idleParkMs);
     (this.idleTimer as { unref?: () => void }).unref?.();

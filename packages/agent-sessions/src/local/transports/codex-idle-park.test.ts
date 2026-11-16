@@ -174,6 +174,49 @@ test("a thread Codex never wrote is not parked, since a wake could not resume it
   expect(client.isAlive()).toBe(true);
 });
 
+for (const resumeError of ["thread already has an active writer", "no rollout found for thread id thread-park"]) {
+  test(`a wake never forks the thread when resume fails (${resumeError})`, async () => {
+    const { options } = session(100);
+    const client = getOrCreateCodexAppServerClient(options);
+    await client.send("hello");
+    const original = client.threadId;
+    await eventually(() => client.isParked && !client.isAlive());
+
+    const executable = options.env!.OPENSCOUT_CODEX_BIN!;
+    const working = readFileSync(executable, "utf8");
+    writeFileSync(executable, working.replace(
+      'const thread = { id: params.threadId ?? "thread-park", path: rollout };',
+      `if (method === "thread/resume") { say({ id, error: { message: ${JSON.stringify(resumeError)} } }); continue; }
+const thread = { id: params.threadId ?? "forked-thread", path: rollout };`,
+    ));
+    await expect(client.send("again")).rejects.toThrow();
+    expect(client.threadId).toBe(original);
+    expect(client.isParked).toBe(true);
+    expect(isCodexAppServerLocalAgentAlive(options)).toBe(true);
+
+    // Once the thread can be resumed again, the next message lands on it.
+    writeFileSync(executable, working);
+    expect((await client.send("later")).threadId).toBe(original);
+  });
+}
+
+test("a session's own env can set the window", async () => {
+  const saved = process.env.OPENSCOUT_CODEX_IDLE_PARK_MS;
+  process.env.OPENSCOUT_CODEX_IDLE_PARK_MS = "100";
+  try {
+    const { options } = session(0);
+    delete options.idleParkMs;
+    options.env!.OPENSCOUT_CODEX_IDLE_PARK_MS = "0";
+    const client = getOrCreateCodexAppServerClient(options);
+    await client.send("hello");
+    await sleep(350);
+    expect(client.isParked).toBe(false);
+  } finally {
+    if (saved === undefined) delete process.env.OPENSCOUT_CODEX_IDLE_PARK_MS;
+    else process.env.OPENSCOUT_CODEX_IDLE_PARK_MS = saved;
+  }
+});
+
 test("a window of 0 keeps the session running", async () => {
   const { options } = session(0);
   const client = getOrCreateCodexAppServerClient(options);
