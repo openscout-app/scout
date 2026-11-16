@@ -161,6 +161,16 @@ Shape it for the row:
   about an update, and it answers only from the update's text, the ask it
   answered and the files changed. It cannot see your reasoning.
 
+Show the thing. The feed leads an update with what you made and puts your
+words under it as a caption. When you run a quick test of something people
+can watch, record the run. A UI, a flow and a command's output are all
+things people can watch. Use your screen recorder for this; Action's
+`record_start` and `record_stop` work where they are available. Capture only
+the window you tested. Then publish the clip with `scout show <file>`, which
+accepts mp4, webm and mov, or name the file by its absolute path in the
+update. Treat screenshots of design work the same way. Skip this when there
+is nothing to watch. Never stage a recording or make one up.
+
 The operator can answer an update with a reaction, which arrives as a message
 that starts "Reaction from the operator": More like this, Narrower, Wrong
 question or Ship it, sometimes with a sentence of their own. Treat it as
