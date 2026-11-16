@@ -488,3 +488,31 @@ describe("broker daemon collaboration routes", () => {
     expect(response.flight.state).toBe("waking");
   }, 15_000);
 });
+
+// Real acceptance and journal writers, with only a fixture HTTP receiver. No
+// native harness, installed runtime or hosted service participates.
+test("failed work retry traverses HTTP acceptance once and keeps one work item", async () => {
+  const h = await broker.startBroker();
+  await broker.seedBasicConversation(h); await broker.seedHangingReceiver(h, "fabric");
+  const first = await broker.postJson<{ flight: import("@openscout/protocol").FlightRecord }>(h.baseUrl, "/v1/deliver", {
+    requestId: "original-failed-work", requesterId: "operator", target: { kind: "agent_id", agentId: "fabric" },
+    body: "Review the retry fixture", intent: "consult", workItem: { id: "retry-work", title: "Retry fixture" },
+  });
+  await broker.postJson(h.baseUrl, "/v1/flights", { ...first.flight, state: "failed", completedAt: Date.now(),
+    error: "Fixture startup failure", metadata: { ...first.flight.metadata, failureCause: "harness_start" } });
+  const input = { workId: "retry-work", attempt: 1 };
+  const retry = await broker.postJson<import("@openscout/protocol").WorkRetryResponse>(h.baseUrl, "/v1/work/retry", input);
+  expect(retry.invocationId).not.toBe(first.flight.invocationId);
+  expect(await broker.postJson(h.baseUrl, "/v1/work/retry", input)).toEqual(retry);
+  const snapshot = await broker.getJson<import("./registry.js").RuntimeRegistrySnapshot>(h.baseUrl, "/v1/snapshot");
+  const invocation = snapshot.invocations[retry.invocationId]!;
+  expect(invocation).toMatchObject({ task: "Review the retry fixture", targetAgentId: "fabric", collaborationRecordId: "retry-work", execution: { session: "new" } });
+  expect(Object.values(snapshot.invocations).filter(item => item.requestId === retry.requestId)).toHaveLength(1);
+  expect(Object.values(snapshot.collaborationRecords).filter(item => item.kind === "work_item")).toHaveLength(1);
+  expect(snapshot.collaborationRecords["retry-work"]).toMatchObject({ state: "working" });
+  await broker.postJson(h.baseUrl, "/v1/flights", { ...snapshot.flights[retry.flightId], state: "failed", completedAt: Date.now(),
+    error: "Fixture disk failure", metadata: { failureCause: "disk_full" } });
+  const refused = await broker.postJsonStatus(h.baseUrl, "/v1/work/retry", { workId: "retry-work", attempt: 2 });
+  expect(refused.status).toBe(409);
+  expect(refused.body).toMatchObject({ error: expect.stringContaining("Free disk space first") });
+}, 15_000);

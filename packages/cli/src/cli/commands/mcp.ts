@@ -72,6 +72,7 @@ export function renderMcpCommandHelp(): string {
     "  invocations_get  fetch current state for an existing ask flight",
     "  invocations_wait bounded wait for an existing ask flight",
     "  work_update      progress / waiting / review / done for existing work",
+    "  work_retry       retry a failed run in a fresh session; reuse the attempt for receipts",
     "  work_move        move work to a lifecycle station; the runtime checks it",
     "  work_review      confirm, reopen, or consult on a move pending review",
     "  work_lifecycle   stations, where an item sits, and its recent moves",

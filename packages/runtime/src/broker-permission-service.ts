@@ -1,7 +1,7 @@
 import type { FlightRecord, InvocationRequest, QuestionRecord } from "@openscout/protocol";
 import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-permission.js";
 
-export class PermissionDeliveryUnconfirmedError extends Error {}
+export class PermissionDeliveryUnconfirmedError extends Error { readonly failureCause = "harness_error" as const; }
 /** Nothing can answer this request any more. Its record is settled. */
 export class PermissionRequestEndedError extends Error {
   constructor(message: string, readonly sessionOpen: boolean) { super(message); }

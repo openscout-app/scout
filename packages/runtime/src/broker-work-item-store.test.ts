@@ -1,3 +1,4 @@
+import { FAILED_RUN_CAUSES, failedRunRetryable } from "@openscout/protocol";
 import { describe, expect, test } from "bun:test";
 
 import type {
@@ -342,9 +343,9 @@ describe("BrokerWorkItemStore", () => {
       completedAt: undefined,
       nextMoveOwnerId: "operator",
       waitingOn: expect.objectContaining({
-        kind: "actor",
-        targetId: "operator",
-        label: "Decide whether to retry the failed execution",
+        kind: "failed_run",
+        cause: "unknown",
+        retryable: false,
       }),
     }));
   });
@@ -372,4 +373,15 @@ describe("BrokerWorkItemStore", () => {
       waitingOn: undefined,
     }));
   });
+});
+
+
+test.each(FAILED_RUN_CAUSES)("failed work projects cause %s, the flight and the recovery policy", async cause => {
+  const { runtime, store, promote } = createStore();
+  await store.recordDeliveryWorkItemIfNeeded({ payload: testPayload(), requestId: "deliver-1", requesterId: "operator",
+    targetAgentId: "agent-1", conversationId: "conversation-1", createdAt: 100 });
+  await promote(testInvocation(), testFlight({ state: "failed", output: undefined, metadata: { failureCause: cause } }), undefined);
+  expect(runtime.collaborationRecord("work-1")).toMatchObject({ state: "waiting", waitingOn: {
+    kind: "failed_run", cause, flightId: "flight-1", retryable: failedRunRetryable(cause), label: expect.stringContaining(cause),
+  } });
 });

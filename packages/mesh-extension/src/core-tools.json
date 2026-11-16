@@ -1232,6 +1232,62 @@
     }
   },
   {
+    "name": "work_retry",
+    "title": "Retry Failed Scout Work",
+    "description": "Send the original ask again to the same target in a fresh session. Only endpoint_lost and harness_start failures can retry. Start attempt at 1 and reuse it after an uncertain receipt; increment after that retry fails or admission refuses to start a run. Never retries automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "workId",
+        "attempt"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "invocationId": {
+          "type": "string"
+        },
+        "flightId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workId",
+        "attempt",
+        "requestId",
+        "invocationId",
+        "flightId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "work_move",
     "title": "Move Scout Work",
     "description": "Move a work item to another station of its lifecycle. The runtime runs the lifecycle's checks: allow applies the move, hold and consult record it without moving, deny explains why. Moves into stations with review criteria are applied and marked for review. Use work_lifecycle first to see the stations open to the item. Use dryRun to check without recording.",

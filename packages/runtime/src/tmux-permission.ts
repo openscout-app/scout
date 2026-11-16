@@ -1,3 +1,4 @@
+import { FailedRunError } from "./failed-run-error.js";
 import { createHash } from "node:crypto";
 import { parseContinuationDialog, stripTerminalControls } from "./continuation/dialog.js";
 import { requestManagedPermission, type ManagedPermissionPrompt, type PermissionDecision } from "./managed-permission.js";
@@ -77,15 +78,15 @@ export function tmuxPermissionPrompt(input: TmuxPermissionPane): ManagedPermissi
     text: prompt.text, version: prompt.version, decisions: Object.keys(prompt.keys) as PermissionDecision[],
     isCurrent: current,
     answer: async decision => {
-      if (!await current()) throw new Error("Permission prompt changed before key delivery.");
+      if (!await current()) throw new FailedRunError("harness_error", "Permission prompt changed before key delivery.");
       const keys = prompt.keys[decision];
-      if (!keys?.length) throw new Error("Permission scope is not offered by the harness.");
+      if (!keys?.length) throw new FailedRunError("harness_error", "Permission scope is not offered by the harness.");
       await input.send(keys);
       // Key submission is not acknowledgement. Wait for this prompt to leave.
       for (let attempt = 0; attempt < 20; attempt++) {
         if (!await input.alive()) {
           if (decision === "deny") return;
-          throw new Error("Live permission process exited before acknowledging the grant.");
+          throw new FailedRunError("harness_error", "Live permission process exited before acknowledging the grant.");
         }
         const tail = await input.capture();
         if (tail.trim()) {
@@ -94,7 +95,7 @@ export function tmuxPermissionPrompt(input: TmuxPermissionPane): ManagedPermissi
         }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      throw new Error("Permission keys sent but the harness did not acknowledge them.");
+      throw new FailedRunError("harness_error", "Permission keys sent but the harness did not acknowledge them.");
     },
   };
 }

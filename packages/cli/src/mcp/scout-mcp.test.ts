@@ -2817,3 +2817,19 @@ test("show MCP is discoverable and sends local path, caption and resolved caller
     expect(requests).toEqual([{ path: "/v1/shows", body: { path: "preview.mp4", caption: "The working flow", caller: { actorId: "agent-test", currentDirectory: "/tmp/openscout-test", metadata: { sessionId: "019ddb1b-test-thread", harness: "codex" } } } }]);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+
+test("work_retry forwards only the explicit idempotent work attempt and returns runtime diagnostics", async () => {
+  const calls: unknown[] = [];
+  const { client } = await connectTestServer({ retryWorkItem: async input => {
+    calls.push(input);
+    if (input.attempt === 2) throw new Error("Work cannot retry cause disk_full. Free disk space first.");
+    return { ...input, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" };
+  } });
+  const result = await client.callTool({ name: "work_retry", arguments: { workId: "work-1", attempt: 1 } });
+  expect(calls).toEqual([{ workId: "work-1", attempt: 1 }]);
+  expect(result.structuredContent).toEqual({ workId: "work-1", attempt: 1, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" });
+  const refused = await client.callTool({ name: "work_retry", arguments: { workId: "work-1", attempt: 2 } });
+  expect(refused.isError).toBe(true);
+  expect(JSON.stringify(refused.content)).toContain("Free disk space first");
+});

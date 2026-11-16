@@ -2041,3 +2041,18 @@ test("harness hooks are read, applied and removed only from this machine", async
   }
   expect(calls).toHaveLength(3);
 });
+
+
+test("work retry HTTP delegates to the runtime and retains actionable conflict diagnostics", async () => {
+  const calls: unknown[] = [];
+  const h = createHarness({ workRetry: { retry: async input => {
+    calls.push(input);
+    if (input.attempt !== 1) throw new (await import("./broker-work-lifecycles.js")).WorkLifecycleError(409, "Cannot retry cause disk_full. Free disk space first.");
+    return { ...input, requestId: "stable", invocationId: "ask", flightId: "flight" };
+  } } as BrokerHttpRouterDeps["workRetry"] });
+  const a = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1", attempt: 1 } });
+  expect(a.response.status).toBe(200); expect(a.body).toMatchObject({ requestId: "stable", flightId: "flight" });
+  expect(calls).toEqual([{ workId: "work-1", attempt: 1 }]);
+  const b = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1", attempt: 2 } });
+  expect(b.response.status).toBe(409); expect(b.body).toMatchObject({ error: expect.stringContaining("Free disk space first") });
+});

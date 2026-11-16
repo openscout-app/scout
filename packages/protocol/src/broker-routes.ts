@@ -57,6 +57,7 @@ export const scoutBrokerPaths = {
     workMoves: "/v1/work/moves",
     workMove: "/v1/work/move",
     workReview: "/v1/work/review",
+    workRetry: "/v1/work/retry",
     workClaim: "/v1/work/claim",
     pairingAttach: "/v1/pairing/attach",
     pairingDetach: "/v1/pairing/detach",

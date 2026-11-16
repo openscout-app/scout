@@ -208,6 +208,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/work/lifecycles": "local",
   "POST /v1/work/move": "local",
   "POST /v1/work/review": "local",
+  "POST /v1/work/retry": "local",
   "POST /v1/commands": "local",
   "POST /v1/conversations": "local",
   "POST /v1/conversations/:id/read-cursors": "local",
