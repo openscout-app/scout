@@ -141,8 +141,42 @@ bun run --cwd packages/pairing check
 bun run --cwd packages/cli check
 ```
 
-Run the narrowest relevant tests while iterating. Use `bun run check` and
-`bun run test:unit` before handing off a broad cross-package change.
+Run the narrowest relevant tests while iterating. Before handing off a change,
+run `bun run check` and `bun run test:changed`. Before merge, run the full
+`bun run test:unit` once per pull request on the exact head. Repeat that merge
+gate if the head changes. Hosted CI requires explicit authorization.
+
+### Run test groups by name
+
+```bash
+bun run test:groups
+bun run test:group protocol release-scripts
+bun run test:group protocol --with-dependents --plan
+bun run test:changed --base origin/main --plan
+```
+
+`test:groups` lists the registry. `test:group` runs named groups once, in suite
+order; `all` runs the full unit suite. `--with-dependents` adds tests for
+packages that depend on the named packages.
+
+`test:changed` uses the merge base of `origin/main` (or `--base <ref>`) and
+`HEAD`. It includes branch, staged, unstaged, deleted and untracked changes.
+It adds each changed package and its transitive dependents. The always set is
+CLI launcher tests, the remote target registry check, runner tests, protocol
+tests, release-script tests, and the two repository-wide pairing checks.
+Docs-only changes run just this set.
+
+The capsule runs when its import closure or explicit build/process inputs
+change. It includes both repository-wide pairing checks, so their separate
+group is omitted. Root manifests, lockfiles, CI configuration, runner changes
+and unknown inputs select the full suite. Rust changes print a note for the
+matching Rust checks; the runner does not run them.
+
+`--plan` prints without running tests. `--bail` stops after the first failing
+group; the default runs all selected groups and reports failures. Put Node 24
+on `PATH` for the capsule. Static imports do not cover every dynamic file read;
+the full unit suite remains the merge gate. Keep `test:unit` and
+`test:unit:source` as explicit `&&` chains for CI and runtime opt-in checks.
 
 ## Architecture guardrails
 
