@@ -85,6 +85,9 @@ function session(idleParkMs: number, writesRollout = true): { options: CodexAppS
 const launches = (log: string) => readFileSync(log, "utf8").split("\n").filter((line) => line.startsWith("launch ") && line.endsWith(" app-server"));
 const resumes = (log: string) => readFileSync(log, "utf8").split("\n").filter((line) => line.startsWith("resume "));
 const processExists = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** Parked and finished stopping: while the stop runs, the session observes as unknown. */
+const settledParked = (client: ReturnType<typeof getOrCreateCodexAppServerClient>) =>
+  client.isParked && !client.isAlive() && client.observeExisting().state === "idle";
 
 async function eventually(check: () => boolean, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -109,7 +112,7 @@ test("an idle session parks, stays routable, and the next send resumes the same 
   const firstPid = client.identity?.pid ?? 0;
   expect(firstPid).toBeGreaterThan(0);
 
-  await eventually(() => client.isParked);
+  await eventually(() => settledParked(client));
   await eventually(() => !processExists(firstPid));
   expect(client.isAlive()).toBe(false);
   expect(isCodexAppServerLocalAgentAlive(options)).toBe(true);
@@ -135,7 +138,7 @@ test("each interaction restarts the window", async () => {
   await sleep(300); // 550 ms after the first send, 300 ms after the second
   expect(client.isParked).toBe(false);
   expect(client.isAlive()).toBe(true);
-  await eventually(() => client.isParked);
+  await eventually(() => settledParked(client));
 });
 
 test("a turn in progress is never parked", async () => {
@@ -147,14 +150,14 @@ test("a turn in progress is never parked", async () => {
   expect(client.isParked).toBe(false);
   expect(client.isAlive()).toBe(true);
   expect((await reply).output).toBe("reply to slow");
-  await eventually(() => client.isParked);
+  await eventually(() => settledParked(client));
 });
 
 test("a room revive wakes a parked session and starts its turn", async () => {
   const { options, log } = session(100);
   const client = getOrCreateCodexAppServerClient(options);
   await client.send("hello");
-  await eventually(() => client.isParked);
+  await eventually(() => settledParked(client));
 
   const observed = client.observeExisting();
   expect(observed.state).toBe("idle");
@@ -180,7 +183,7 @@ for (const resumeError of ["thread already has an active writer", "no rollout fo
     const client = getOrCreateCodexAppServerClient(options);
     await client.send("hello");
     const original = client.threadId;
-    await eventually(() => client.isParked && !client.isAlive());
+    await eventually(() => settledParked(client));
 
     const executable = options.env!.OPENSCOUT_CODEX_BIN!;
     const working = readFileSync(executable, "utf8");
@@ -197,6 +200,44 @@ const thread = { id: params.threadId ?? "forked-thread", path: rollout };`,
     // Once the thread can be resumed again, the next message lands on it.
     writeFileSync(executable, working);
     expect((await client.send("later")).threadId).toBe(original);
+  });
+}
+
+test("a second revive during a wake cannot write before the thread is resumed", async () => {
+  const { options, log } = session(100);
+  const client = getOrCreateCodexAppServerClient(options);
+  await client.send("hello");
+  await eventually(() => settledParked(client));
+
+  const executable = options.env!.OPENSCOUT_CODEX_BIN!;
+  let fake = readFileSync(executable, "utf8");
+  fake = fake.replace("const say =", "let resuming = false;\nconst say =");
+  fake = fake.replace("say({ id, result: { thread } });",
+    'if (method === "thread/resume") { resuming = true; setTimeout(() => { resuming = false; say({ id, result: { thread } }); }, 400); } else say({ id, result: { thread } });');
+  fake = fake.replace("const threadId = params.threadId;",
+    'if (resuming) appendFileSync(log, "premature turn/start\\n");\nconst threadId = params.threadId;');
+  writeFileSync(executable, fake);
+
+  const first = client.submitExisting(client.observeExisting(), "revive", "first");
+  await eventually(() => resumes(log).length === 1);
+  expect(client.observeExisting().state).toBe("unknown");
+  const second = await client.submitExisting(client.observeExisting(), "revive", "second");
+  expect(second.accepted).toBe(false);
+  expect((await first).accepted).toBe(true);
+  expect(readFileSync(log, "utf8")).not.toContain("premature turn/start");
+});
+
+for (const resetThread of [false, true]) {
+  test(`an explicit stop clears parked (resetThread ${resetThread})`, async () => {
+    const { options } = session(100);
+    const client = getOrCreateCodexAppServerClient(options);
+    await client.send("hello");
+    await eventually(() => settledParked(client));
+    await shutdownCodexAppServerLocalAgent(options, { resetThread });
+    expect(client.isParked).toBe(false);
+    expect(isCodexAppServerLocalAgentAlive(options)).toBe(false);
+    expect(client.observeExisting().state).toBe("gone");
+    if (resetThread) expect(client.threadId).toBe(null);
   });
 }
 

@@ -1113,6 +1113,9 @@ export class CodexAppServerTransport {
 
   get isParked(): boolean { return this.parked; }
 
+  /** A launch or a park is under way; the thread is not ready for writes. */
+  get isTransitioning(): boolean { return Boolean(this.starting || this.parking); }
+
   /**
    * Stop an idle spawned app-server and keep its thread. Attached servers are
    * not Scout's to stop, so they are left alone. Returns whether it parked.
@@ -1263,12 +1266,13 @@ export class CodexAppServerTransport {
     this.options.signal?.throwIfAborted();
     // Never launch beside a process that is still being parked.
     if (this.parking) await this.parking.catch(() => undefined);
-    if (this.isAlive() && this.threadId) {
-      return;
-    }
-
+    // An open connection is not a ready thread: wait for a launch in progress.
     if (this.starting) {
       return this.starting;
+    }
+
+    if (this.isAlive() && this.threadId) {
+      return;
     }
 
     const controller = new AbortController();
@@ -1983,11 +1987,12 @@ export class CodexAppServerClient {
 
   observeExisting() {
     // Parked is idle, not gone: "gone" ends room bindings. A revive wakes it.
-    if (this.transport.isParked && this.threadId) {
+    if (this.transport.isParked && this.threadId && !this.transport.isTransitioning) {
       return { state: "idle", sessionId: this.threadId, turnId: undefined,
         token: `${this.liveIncarnation}:parked:${this.liveRevision}`, steer: true } as const;
     }
-    const state = !this.isAlive() ? "gone" : !this.transport.ownedLive || !this.threadId || this.attentionUnsafe || this.transport.nativeControlBlocked ? "unknown"
+    const state = this.transport.isTransitioning && (this.isAlive() || this.transport.isParked) ? "unknown"
+      : !this.isAlive() ? "gone" : !this.transport.ownedLive || !this.threadId || this.attentionUnsafe || this.transport.nativeControlBlocked ? "unknown"
       : this.activeTurn ? (this.activeTurn.turnId ? "active" : "unknown") : this.queuedOperations ? "unknown" : "idle";
     return { state, sessionId: this.threadId ?? undefined, turnId: this.activeTurn?.turnId || undefined,
       token: `${this.liveIncarnation}:${this.transport.connectionGeneration}:${this.liveRevision}`, steer: true } as const;
@@ -2012,7 +2017,8 @@ export class CodexAppServerClient {
     observed: ReturnType<CodexAppServerClient["observeExisting"]>,
   ) {
     if (action === "revive" && this.transport.isParked) {
-      const revision = this.liveRevision;
+      // Claim the wake before the first await: a revive holding the old token is now stale.
+      const revision = ++this.liveRevision;
       await this.transport.ensureOnline();
       await this.serialized; // let the park itself, or any send, leave the queue
       if (this.liveRevision !== revision || this.activeTurn || this.queuedOperations || this.threadId !== expected.sessionId) {
