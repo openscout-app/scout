@@ -1,4 +1,6 @@
-import { scoutRuntimeHarness, scoutRuntimeLatestModelInFamily } from "./runtime-execution.js";
+import { SCOUT_MODEL_TASTE, resolveScoutModelTaste, type ScoutModelTaste } from "./model-taste.js";
+import { SCOUT_RUNTIME_CATALOG } from "./runtime-execution.js";
+import type { ScoutOwnedRuntimeCatalog } from "./runtime-catalog-contract.js";
 
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -154,187 +156,17 @@ type RolePolicy = {
   candidates: RuntimeCandidate[];
 };
 
-// Each slot follows the catalog: the newest enabled model in its family (or
-// Codex tier), so a catalog update moves routing without editing this file.
-// The fallback applies only when the catalog has no match.
-type CatalogPick = { id: string; label: string };
-
-function catalogModel(
-  harness: string,
-  matches: (model: { id: string; family?: string; label: string }) => boolean,
-  fallback: CatalogPick,
-  label: (model: { id: string; label: string; version?: string }) => string = (model) => model.label,
-): CatalogPick {
-  const models = (scoutRuntimeHarness(harness)?.models ?? []).filter((model) => model.enabled && matches(model));
-  const model = models.find((entry) => entry.default) ?? models[0];
-  return model ? { id: model.id, label: label(model) } : fallback;
+function rolePolicies(taste: ScoutModelTaste, catalog: ScoutOwnedRuntimeCatalog): Record<OrchestrationRoleId, RolePolicy> {
+  const runtimes = resolveScoutModelTaste(taste, catalog);
+  return Object.fromEntries(Object.entries(taste.roles).map(([id, role]) => [id, {
+    label: role.label, objective: role.objective, strategy: role.strategy,
+    // A candidate whose runtime the catalog cannot route is not offered.
+    candidates: role.candidates.flatMap(candidate => {
+      const runtime = runtimes[candidate.runtime];
+      return runtime ? [{ ...runtime, fit: candidate.fit, taskRationale: candidate.rationale }] : [];
+    }),
+  }])) as Record<OrchestrationRoleId, RolePolicy>;
 }
-
-function claudeFamily(family: string, fallback: CatalogPick): CatalogPick {
-  const id = scoutRuntimeLatestModelInFamily("claude", family);
-  const model = scoutRuntimeHarness("claude")?.models.find((entry) => entry.id === id);
-  return model ? { id: model.id, label: model.label } : fallback;
-}
-
-/** Codex tiers share the GPT family; the id suffix names the tier. Catalog order is newest first. */
-function codexTier(tier: string, fallback: CatalogPick): CatalogPick {
-  return catalogModel(
-    "codex",
-    (model) => model.id.endsWith(`-${tier}`),
-    fallback,
-    (model) => `GPT-${model.version ?? model.label}`,
-  );
-}
-
-function familyModel(harness: string, family: string, fallback: CatalogPick): CatalogPick {
-  return catalogModel(harness, (model) => model.family === family, fallback);
-}
-
-const FABLE = claudeFamily("Fable", { id: "claude-fable-5", label: "Fable 5" });
-const OPUS = claudeFamily("Opus", { id: "claude-opus-5-5", label: "Opus 5.5" });
-const SONNET = claudeFamily("Sonnet", { id: "claude-sonnet-4-6", label: "Sonnet 4.6" });
-const HAIKU = claudeFamily("Haiku", { id: "claude-haiku-4-5", label: "Haiku 4.5" });
-const ASTRA = codexTier("astra", { id: "gpt-6-astra", label: "GPT-6 Astra" });
-const SOL = codexTier("sol", { id: "gpt-6.1-sol", label: "GPT-6.1 Sol" });
-const LUNA = codexTier("luna", { id: "gpt-6-luna", label: "GPT-6 Luna" });
-const GROK = familyModel("grok", "Grok", { id: "grok-4.6", label: "Grok 4.6" });
-const GLM = familyModel("opencode", "GLM", { id: "opencode-go/glm-5.2", label: "GLM-5.2" });
-const MINIMAX = familyModel("opencode", "MiniMax", { id: "opencode-go/minimax-m3", label: "MiniMax M3" });
-const DEEPSEEK = familyModel("opencode", "DeepSeek", { id: "opencode-go/deepseek-v4-pro", label: "DeepSeek V4 Pro" });
-const DEVIN = familyModel("devin", "SWE", { id: "swe-2-high", label: "SWE-2 High" });
-
-const RUNTIMES = {
-  fable: runtimeDefinition(
-    FABLE.label, "claude", "claude", FABLE.id, "max", "Fable",
-    "Product taste, design iteration, and premise-level critique.",
-    "Spends the premium shared Claude allowance; keep it off routine mechanical work.",
-  ),
-  opus: runtimeDefinition(
-    OPUS.label, "claude", "claude", OPUS.id, "high", "Opus",
-    "Long-context synthesis, architecture, and coherent product reasoning.",
-    "Premium shared Claude quota; avoid routine scans and repeated verification.",
-  ),
-  sonnet: runtimeDefinition(
-    SONNET.label, "claude", "claude", SONNET.id, "high", null,
-    "Strong generalist implementation with fast turns.",
-    "Shares Claude's allowance; a poor pick while that pool is guarded.",
-  ),
-  haiku: runtimeDefinition(
-    HAIKU.label, "claude", "claude", HAIKU.id, "low", null,
-    "Fast narrow scans and classification inside the Claude harness.",
-    "Light reasoning; a poor fit for broad synthesis.",
-  ),
-  astra: runtimeDefinition(
-    ASTRA.label, "codex", "codex", ASTRA.id, "high", null,
-    "Codex's most capable tier: hard reasoning, review, and research.",
-    "The costliest Codex tier; use Sol for routine implementation.",
-  ),
-  sol: runtimeDefinition(
-    SOL.label, "codex", "codex", SOL.id, "xhigh", null,
-    "Load-bearing coding, multi-file refactors, debugging, and integration.",
-    "Deep turns spend Codex quota quickly; keep them for work where failure is expensive.",
-  ),
-  luna: runtimeDefinition(
-    LUNA.label, "codex", "codex", LUNA.id, "medium", null,
-    "Inexpensive source mapping, test enumeration, and repeatable audit work.",
-    "Keep it out of sole high-stakes judgment and final acceptance.",
-  ),
-  grok: runtimeDefinition(
-    GROK.label, "grok", "grok", GROK.id, null, "Grok",
-    "Independent assumption checking, deletion pressure, and adversarial critique.",
-    "Not the sole implementation authority; check conclusions against the repository.",
-  ),
-  kimi: runtimeDefinition(
-    "Kimi Code", "kimi", "kimi", null, null, "Kimi",
-    "Dense repository and study synthesis through the native Kimi harness.",
-    "The harness picks the model and quota telemetry can be stale; probe before a large fan-out.",
-  ),
-  glm: runtimeDefinition(
-    GLM.label, "opencode", "opencode", GLM.id, null, "OpenCode",
-    "Independent broad-context synthesis through OpenCode.",
-    "OpenCode quota is not visible in Scout; start with a bounded canary.",
-  ),
-  minimax: runtimeDefinition(
-    MINIMAX.label, "minimax", "opencode", MINIMAX.id, null, "OpenCode",
-    "Cost-effective structured evidence collection and comparison.",
-    "Verify load-bearing conclusions with a stronger reviewer.",
-  ),
-  deepseek: runtimeDefinition(
-    DEEPSEEK.label, "opencode", "opencode", DEEPSEEK.id, null, "OpenCode",
-    "Code-level review from an independent model lineage.",
-    "Quota is opaque; not the sole acceptance authority.",
-  ),
-  devin: runtimeDefinition(
-    `Devin ${DEVIN.label}`, "devin", "devin", DEVIN.id, null, null,
-    "Autonomous implementation in its own environment.",
-    "Devin quota is not visible in Scout; review its changes before they land.",
-  ),
-} as const;
-
-// Each role's candidates come from three different provider pools, so a
-// quota failover always lands on a fresh allowance and a different lineage.
-const ROLE_POLICIES: Record<OrchestrationRoleId, RolePolicy> = {
-  product_judgment: {
-    label: "Product judgment",
-    objective: "Strategic tradeoffs, UX prioritization, scope shaping, and high-level product decisions.",
-    strategy: "Prefer models with product taste and clear tradeoff reasoning.",
-    candidates: [
-      roleCandidate("fable", 100, "Product taste, fast design iteration, and clear UX direction."),
-      roleCandidate("astra", 92, "Technically grounded product decisions with execution realism."),
-      roleCandidate("grok", 82, "An unfiltered view of feature bloat and scope."),
-    ],
-  },
-  large_context_synthesis: {
-    label: "Large-context synthesis",
-    objective: "Repository-wide investigations, architectural archaeology, and multi-file synthesis.",
-    strategy: "Prefer large effective context windows, and keep premium pools for work that needs them.",
-    candidates: [
-      roleCandidate("kimi", 100, "Native long-context retrieval on its own allowance."),
-      roleCandidate("opus", 96, "Deep structural understanding across multi-package repositories."),
-      roleCandidate("astra", 90, "A very large window with strong reasoning over it."),
-    ],
-  },
-  adversarial_critique: {
-    label: "Adversarial critique",
-    objective: "Challenging design assumptions, finding UX and logic gaps, and applying deletion pressure.",
-    strategy: "Prefer a lineage other than the authors', so critique is independent rather than agreeable.",
-    candidates: [
-      roleCandidate("grok", 100, "A contrarian lineage, edge-case discovery, and premise challenge."),
-      roleCandidate("fable", 94, "Design critique and UX stress-testing."),
-      roleCandidate("deepseek", 84, "A third lineage for a second opinion."),
-    ],
-  },
-  evidence_inventory: {
-    label: "Evidence inventory",
-    objective: "Grep and AST inventory, reference tracing, log audit, and structured fact collection.",
-    strategy: "Prefer fast, inexpensive models with precise structured output.",
-    candidates: [
-      roleCandidate("luna", 100, "Low-cost source tracing, test inventory, and reference mapping."),
-      roleCandidate("haiku", 94, "Fast mechanical scans and categorization."),
-      roleCandidate("minimax", 90, "Cost-effective evidence indexing and pattern enumeration."),
-    ],
-  },
-  implementation: {
-    label: "Implementation",
-    objective: "Code creation, refactoring, type checking, unit tests, and bug fixing.",
-    strategy: "Prefer strong coding models with high instruction following.",
-    candidates: [
-      roleCandidate("sol", 100, "Accurate multi-file refactors and complex logic."),
-      roleCandidate("sonnet", 92, "Strong generalist coding with fast turns."),
-      roleCandidate("devin", 84, "Autonomous implementation in a separate environment."),
-    ],
-  },
-  code_review: {
-    label: "Code review",
-    objective: "Diff analysis, security audit, regression detection, and style conformity.",
-    strategy: "Prefer a reviewer from a different lineage than the implementer, sensitive to subtle bugs.",
-    candidates: [
-      roleCandidate("opus", 100, "Architectural consistency and subtle invariant violations, from outside the Codex lineage."),
-      roleCandidate("astra", 95, "Rigorous logic and boundary checking."),
-      roleCandidate("deepseek", 87, "An independent second opinion on code-level edge cases."),
-    ],
-  },
-};
 
 export function isOrchestrationRoleId(value: string): value is OrchestrationRoleId {
   return (ORCHESTRATION_ROLE_IDS as readonly string[]).includes(value);
@@ -409,24 +241,29 @@ export function buildOrchestrationProviderMap(
     now?: number;
     role?: OrchestrationRoleId | null;
     bias?: OrchestrationRoutingBias;
+    taste?: ScoutModelTaste;
+    catalog?: ScoutOwnedRuntimeCatalog;
   } = {},
 ): OrchestrationProviderMap {
   const now = finiteNumber(options.now) ?? Date.now();
   const bias = options.bias ?? "balanced";
   const quotaWeight = routingBiasWeight(bias);
+  const policies = rolePolicies(options.taste ?? SCOUT_MODEL_TASTE, options.catalog ?? SCOUT_RUNTIME_CATALOG);
   const summaries = new Map(
     report.providers.map((provider) => [provider.id, summarizeProviderPacing(provider, now)]),
   );
   const roles = options.role ? [options.role] : [...ORCHESTRATION_ROLE_IDS];
-  const assignments = roles.map((role) => {
-    const policy = ROLE_POLICIES[role];
+  // A role with no routable candidate gets no assignment rather than a guess.
+  const assignments = roles.flatMap((role) => {
+    const policy = policies[role];
     const ranked = policy.candidates
       .map((runtime) => {
         const quota = summaries.get(runtime.route.providerId) ?? unknownProviderSummary(runtime.route.providerId);
         return { runtime, quota, score: runtime.fit + quotaScoreAdjustment(quota, now) * quotaWeight };
       })
       .sort((left, right) => right.score - left.score || right.runtime.fit - left.runtime.fit);
-    const selected = ranked[0]!;
+    const selected = ranked[0];
+    if (!selected) return [];
     const quotaRisk = isQuotaRisk(selected.quota);
     const alternatives = ranked.slice(1);
     if (quotaRisk) {
@@ -436,7 +273,7 @@ export function buildOrchestrationProviderMap(
         return leftRank - rightRank || right.score - left.score || right.runtime.fit - left.runtime.fit;
       });
     }
-    return {
+    return [{
       role,
       roleLabel: policy.label,
       modelLabel: selected.runtime.label,
@@ -462,9 +299,9 @@ export function buildOrchestrationProviderMap(
         quotaRisk: isQuotaRisk(quota),
         quota,
       })),
-    };
+    }];
   });
-  const models = buildModelGuidance(roles, summaries, now);
+  const models = buildModelGuidance(roles, summaries, now, policies);
 
   return {
     generatedAt: report.generatedAt,
@@ -480,6 +317,7 @@ function buildModelGuidance(
   roles: OrchestrationRoleId[],
   summaries: Map<string, ProviderPacingSummary>,
   now: number,
+  policies: Record<OrchestrationRoleId, RolePolicy>,
 ): OrchestrationModelGuidance[] {
   const models = new Map<string, {
     runtime: RuntimeDefinition;
@@ -487,7 +325,7 @@ function buildModelGuidance(
   }>();
 
   for (const role of roles) {
-    const policy = ROLE_POLICIES[role];
+    const policy = policies[role];
     for (const candidate of policy.candidates) {
       const key = orchestrationRuntimeRouteKey(candidate.route);
       const existing = models.get(key);
@@ -606,32 +444,6 @@ function paceQuotaWindow(
     resetIn: window.resetIn,
     freshness: window.freshness.label,
     confidence,
-  };
-}
-
-function runtimeDefinition(
-  label: string,
-  providerId: string,
-  harness: string,
-  model: string | null,
-  effort: string | null,
-  profile: string | null,
-  capability: string,
-  caution: string,
-): RuntimeDefinition {
-  return {
-    label,
-    route: { providerId, harness, model, effort, profile },
-    capability,
-    caution,
-  };
-}
-
-function roleCandidate(runtimeId: keyof typeof RUNTIMES, fit: number, rationale?: string): RuntimeCandidate {
-  return {
-    ...RUNTIMES[runtimeId],
-    fit,
-    taskRationale: rationale ?? RUNTIMES[runtimeId].capability,
   };
 }
 

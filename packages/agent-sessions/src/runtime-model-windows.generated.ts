@@ -8,6 +8,7 @@ export const RUNTIME_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   "claude-haiku-5-5": 1000000,
   "gpt-6-astra": 1050000,
   "gpt-6-1-sol": 1050000,
+  "gpt-6-1-terra": 1050000,
   "gpt-6-sol": 272000,
   "gpt-6-luna": 272000,
   "grok-4-6": 500000,

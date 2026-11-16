@@ -31,8 +31,8 @@ describe("runtime execution contracts", () => {
     expect(scoutRuntimeDefaultHarness()).toBe("claude");
     expect(scoutRuntimeDefaultModel("claude")).toBe("claude-opus-5-5");
     expect(scoutRuntimeDefaultModel("codex")).toBe("gpt-6-astra");
-    expect(scoutRuntimeDefaultModel("grok")).toBe("grok-4.6");
-    expect(scoutRuntimeDefaultModel("grok-acp")).toBe("grok-4.6");
+    expect(scoutRuntimeDefaultModel("grok")).toBe("grok-4.7");
+    expect(scoutRuntimeDefaultModel("grok-acp")).toBe("grok-4.7");
     expect(isScoutRuntimeHarnessListed("grok")).toBe(false);
     expect(isScoutRuntimeHarnessListed("grok-acp")).toBe(true);
     expect(scoutRuntimeDefaultReasoningEffort("claude", "claude-opus-5")).toBe("medium");
@@ -65,7 +65,7 @@ describe("runtime execution contracts", () => {
     expect(SCOUT_RUNTIME_EFFORT_CATALOG.find((entry) => entry.id === "ultra")).toEqual(
       expect.objectContaining({
         harnesses: ["codex"],
-        models: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"],
+        models: ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"],
       }),
     );
   });
