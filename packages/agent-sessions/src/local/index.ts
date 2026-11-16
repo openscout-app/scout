@@ -125,6 +125,8 @@ export type CompleteLocalAgentTurnOptions = {
 };
 
 export type CreateLocalAgentClientOptions = {
+  /** Environment overrides inherited by harness subprocesses and their tools. */
+  env?: Record<string, string | undefined>;
   harness: LocalAgentHarness;
   transport?: LocalAgentTransport;
   cwd: string;
@@ -871,6 +873,7 @@ export async function createLocalAgentClient(
       sessionId,
       name: localSessionName(harness),
       cwd: options.cwd,
+      env: options.env ? Object.fromEntries(Object.entries(options.env).filter((entry): entry is [string, string] => entry[1] !== undefined)) : undefined,
       options: buildAdapterOptions({
         transport,
         systemPrompt: options.systemPrompt,
