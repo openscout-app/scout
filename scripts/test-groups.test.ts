@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { allGroups, changedFiles, dependentsOf, GROUPS, groupNamed, importClosure, ROOT, select } from "./test-groups.ts";
+import { allGroups, changedFiles, dependentsOf, GROUPS, groupNamed, importClosure, packages, ROOT, select } from "./test-groups.ts";
 
 const scripts = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).scripts as Record<string, string>;
 const names = (paths: string[]) => select(paths).groups.map(([name]) => name);
@@ -34,12 +34,17 @@ describe("suite parity", () => {
 });
 
 describe("change selection", () => {
-  test("protocol changes select its dependents, not independent harness packages", () => {
-    const selected = names(["packages/protocol/src/records.ts"]);
-    for (const group of ["protocol", "runtime", "pairing", "cli", "mesh-extension"]) expect(selected).toContain(group);
-    expect(selected).not.toContain("agent-sessions");
-    expect(selected).not.toContain("session-trace");
-    expect(dependentsOf("packages/protocol")).toEqual(["packages/cli", "packages/mesh-extension", "packages/pairing", "packages/runtime"]);
+  test("a package change selects the package and its dependents from package.json, and no other package", () => {
+    // Read the graph rather than pin it, so a new dependency elsewhere does not break this test.
+    for (const pkg of packages().filter((p) => GROUPS.some((g) => g.package === p.dir))) {
+      const dependents = new Set([pkg.dir, ...dependentsOf(pkg.dir)]);
+      const selected = names([`${pkg.dir}/src/index.ts`]);
+      for (const group of GROUPS.filter((g) => g.package)) {
+        if (dependents.has(group.package!)) expect(selected).toContain(group.name);
+        else if (!group.always) expect(selected).not.toContain(group.name);
+      }
+    }
+    for (const dir of ["packages/runtime", "packages/pairing", "packages/cli"]) expect(dependentsOf("packages/protocol")).toContain(dir);
   });
 
   test("agent-sessions changes select session-trace and the other dependents", () => {
@@ -192,7 +197,8 @@ describe("command line", () => {
   test("with-dependents adds the package graph without independent packages", () => {
     const result = cli(["run", "protocol", "--with-dependents", "--plan"]);
     expect(result.code).toBe(0);
-    expect(result.out.trim().split(/\s+/)).toEqual(["cli-happy", "protocol", "runtime", "pairing", "cli", "mesh-extension"]);
+    const dirs = new Set(["packages/protocol", ...dependentsOf("packages/protocol")]);
+    expect(result.out.trim().split(/\s+/)).toEqual(GROUPS.filter((g) => g.package && dirs.has(g.package)).map((g) => g.name));
     expect(cli(["run", "agent-sessions", "--with-dependents", "--plan"]).out).toContain("session-trace");
   });
 
