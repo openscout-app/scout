@@ -399,7 +399,7 @@ const submitAsk: ScoutAskHandler = async (command) => {
   if (command.task) validateTaskAsk(command.task, { to: command.to, channel: command.channel,
     capability: !command.task?.continue && Boolean(command.projectPath || command.runtimeProfile || command.existingHandle),
     execution: Boolean(command.harness || command.model || command.reasoningEffort || command.placement || command.host || command.projectPath || command.runtimeProfile),
-    relation: Boolean(command.relation) });
+    relation: Boolean(command.relation), decisionImages: command.decisionImages?.length ?? 0 });
   if (command.completion || command.relation) {
     const target = command.to?.trim();
     const exactTarget = target && /^(id|session):[^\s]+$/.test(target);
@@ -531,6 +531,7 @@ const submitAsk: ScoutAskHandler = async (command) => {
     task: command.task?.continue && (host || commandProjectPath)
       ? { ...command.task, successor: { host, projectPath: commandProjectPath } } : command.task,
     image: command.image,
+    decisionImages: command.decisionImages,
     attachments: command.attachments,
     requestId: command.requestId,
     completion: command.completion,

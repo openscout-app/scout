@@ -17,6 +17,19 @@ export function finishedTaskError(id: string): Error {
 type Task = { invocation: InvocationRequest; flight: FlightRecord };
 
 /** Inbox notification is not input to an already-dispatched harness turn. */
+/**
+ * Keys only the runtime may write on a reply message. A client's reply
+ * metadata never carries them, so a client cannot plant a decision answer.
+ */
+const RUNTIME_REPLY_METADATA_KEYS = ["decisionAnswer"] as const;
+
+export function clientReplyMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!metadata) return {};
+  const clean = { ...metadata };
+  for (const key of RUNTIME_REPLY_METADATA_KEYS) delete clean[key];
+  return clean;
+}
+
 export function followupAudience(invocation: InvocationRequest, flight: FlightRecord): MessageRecord["audience"] {
   if (invocation.metadata?.humanOwned === true) return { notify: [invocation.targetAgentId], reason: "thread_reply" };
   if (flight.state === "queued" || flight.state === "waking") return { delivery: "none" };
@@ -224,7 +237,11 @@ export class BrokerTaskService {
     return message && ref ? this.followupReceipt(message, await this.resolve(ref)) : null;
   }
 
-  async reply(input: ScoutTaskReply): Promise<unknown> {
+  /**
+   * `extra.metadata` is for runtime callers only (a decision answer rides on
+   * its reply this way); it never comes from a client and is not forwarded.
+   */
+  async reply(input: ScoutTaskReply, extra: { metadata?: Record<string, unknown> } = {}): Promise<unknown> {
     validateTaskReply(input);
     if (!input.requestId?.trim() || !input.body?.trim() || !input.senderId?.trim()) throw new Error("reply requires requestId, senderId and non-empty body");
     if (input.ref) {
@@ -240,7 +257,7 @@ export class BrokerTaskService {
         actorId: input.senderId, originNodeId: this.options.nodeId, class: "agent", body: input.body, attachments: input.attachments,
         audience: { notify: [invocation.requesterId], reason: "thread_reply" },
         visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-        metadata: { ...(input.metadata ?? {}), clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
+        metadata: { ...clientReplyMetadata(input.metadata), ...extra.metadata, clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
           completionReply: { invocationId: invocation.id, flightId: flight.id, revision: flightCompletion(flight)?.revision ?? 0,
             kind: input.waitingOn ? "blocked" : input.progress ? "progress" : "final",
             ...(input.waitingOn ? { waitingOn: parseReplyWaitingOn(input.waitingOn) } : {}), ...(input.failed ? { outcome: "failed" } : {}) } } }, input.image);
@@ -253,7 +270,7 @@ export class BrokerTaskService {
       conversationId: message.conversationId, replyToMessageId: message.id, actorId: input.senderId, originNodeId: this.options.nodeId,
       class: "status", body: input.body, attachments: input.attachments, audience: { notify: [message.actorId], reason: "thread_reply" },
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-      metadata: { ...(input.metadata ?? {}), source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
+      metadata: { ...clientReplyMetadata(input.metadata), source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
   }
   private postMessage(message: MessageRecord, image?: ScoutTaskReply["image"]): Promise<unknown> {
     if (!image) return this.options.postMessage(message);

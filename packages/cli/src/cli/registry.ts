@@ -26,6 +26,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "status", summary: "Inspect work by handle or filter all blocked/failed work" },
   { name: "operator", hidden: true, summary: "Removed; use ask or reply" },
   { name: "notify", hidden: true, summary: "Removed; use ask or reply" },
+  { name: "decision", summary: "Read and answer operator asks as decision cards" },
   { name: "diff", summary: "Inspect worktree or session-scoped diffs" },
   { name: "runtimes", summary: "Show harness catalog and readiness" },
   { name: "providers", summary: "Show provider usage quota windows" },

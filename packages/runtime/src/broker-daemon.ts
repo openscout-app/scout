@@ -13,7 +13,10 @@ import { BrokerAttachmentService } from "./broker-attachment-service.js";
 import { createOperatorAttachmentNotifier } from "./broker-operator-attachment-notifier.js";
 import { AttachmentError } from "./attachment-contract.js";
 import { markAttachmentReferences } from "./attachment-retention.js";
-import { iterateMessageRecordsAsync } from "./broker-message-records.js";
+import { iterateMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
+import { BrokerDecisionCardService } from "./broker-decision-cards.js";
+import { sessionActorAlias } from "./session-alias.js";
+import { createDecisionModel } from "./decision-synthesis-model.js";
 import { createTailscaleListenerGuard, isRuntimeLoopbackTcpSocket, type LocalListenerKind } from "./mesh-tailscale-listener-guard.js";
 import { MeshFeedback } from "./mesh-feedback.js";
 import { MeshBridgeManagement } from "./mesh-bridge-management.js";
@@ -2966,25 +2969,38 @@ async function postConversationMessage(
 // Each host that holds a question to the operator keeps its own record of it,
 // so a question asked on another host can be dismissed here, and an answer
 // given on another host settles it here.
+// Built once the task and permission services exist; asks before then get their card on the startup pass.
+let decisionCardService: BrokerDecisionCardService | undefined;
+
 async function recordOperatorQuestion(message: MessageRecord, signal: ScoutOperatorSignal): Promise<void> {
-  if (signal.kind !== "need" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  // A need and a consult (an ask with a default) both wait on the operator, so
+  // both get a record, which is where their decision card lives. FYIs do not.
+  if (signal.kind === "notify" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  const question = signal.kind === "need" ? signal.question : message.body;
+  const requestKind = signal.kind === "need" ? signal.requestKind ?? "question" : "question";
   await recordCollaborationDurably({
     id: `operator-question:${message.id}`, kind: "question", state: "open", acceptanceState: "none",
-    title: signal.requestKind === "permission" ? "Permission request" : signal.question,
-    summary: signal.question, createdById: message.actorId, askedById: message.actorId,
+    title: requestKind === "permission" ? "Permission request" : question,
+    summary: question, createdById: message.actorId, askedById: message.actorId,
     ownerId: operatorActorId, nextMoveOwnerId: operatorActorId, conversationId: message.conversationId,
     createdAt: message.createdAt, updatedAt: message.createdAt,
-    metadata: { operatorNeedMessageId: message.id, requestKind: signal.requestKind ?? "question" },
+    metadata: { operatorNeedMessageId: message.id, requestKind },
   });
+  await decisionCardService?.register(message, signal);
 }
 
 async function settleOperatorQuestion(message: MessageRecord): Promise<void> {
   if (message.actorId !== operatorActorId || !message.replyToMessageId) return;
+  // A progress or blocked reply keeps the ask open: "show me more" is not an answer.
+  const completion = message.metadata?.completionReply as { kind?: string } | undefined;
+  if (completion?.kind === "progress" || completion?.kind === "blocked") return;
   const record = runtime.collaborationRecord(`operator-question:${message.replyToMessageId}`);
   if (record?.kind === "question" && record.state === "open" && record.conversationId === message.conversationId) {
+    const decisionAnswer = message.metadata?.decisionAnswer;
     await recordCollaborationDurably({ ...record, state: "closed", answer: message.body,
       answeredById: operatorActorId, answeredAt: message.createdAt, closedAt: message.createdAt,
-      nextMoveOwnerId: undefined, updatedAt: message.createdAt });
+      nextMoveOwnerId: undefined, updatedAt: message.createdAt,
+      ...(decisionAnswer ? { metadata: { ...record.metadata, decisionAnswer } } : {}) });
   }
 }
 
@@ -3361,7 +3377,43 @@ const taskService = new BrokerTaskService({
     return response.json();
   },
 });
-const operatorTaskExpiryTimer = setInterval(() => { void taskService.expireOperatorTasks().catch(error => console.warn("operator task expiry failed", error)); }, 1_000);
+decisionCardService = new BrokerDecisionCardService({
+  operatorActorId,
+  record: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
+  questionRecords: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is QuestionRecord => record.kind === "question"),
+  writeRecord: recordCollaborationDurably,
+  message: id => readMessageRecord(runtime.peek().messages, id),
+  invocation: id => knownInvocations.get(id) ?? journal.getInvocation(id),
+  currentFlight: id => journal.getCurrentFlightForInvocation(id),
+  where: ({ actorId, sessionId }) => decisionCardWhere(actorId, sessionId),
+  reply: (input, extra) => taskService.reply(input, extra),
+  decidePermission: (id, version, decision) => permissionService.decide(id, version, decision),
+  model: createDecisionModel(),
+  log: (message, detail) => console.warn(message, detail),
+});
+
+/** Where a session runs, as a card names it: alias or name, harness, project. Never a raw id. */
+function decisionCardWhere(actorId: string | undefined, sessionId: string | undefined): { session?: string; harness?: string; project?: string } {
+  const snapshot = runtime.peek();
+  const endpoint = Object.values(snapshot.endpoints).find(item => (sessionId && item.sessionId === sessionId) || (actorId && item.agentId === actorId));
+  const agentId = endpoint?.agentId ?? actorId;
+  const alias = agentId ? sessionActorAlias(snapshot, agentId) : null;
+  const name = agentId && !alias ? brokerActorDisplayName(snapshot, agentId) : null;
+  const looksRaw = (value: string | null) => !value || value === agentId || value === sessionId || /[:/]|[0-9a-f]{12,}/iu.test(value);
+  const session = alias ?? (looksRaw(name) ? undefined : name!);
+  const root = endpoint?.projectRoot ?? endpoint?.cwd;
+  return {
+    ...(session ? { session } : {}),
+    ...(endpoint?.harness ? { harness: endpoint.harness } : {}),
+    ...(root ? { project: basename(root) } : {}),
+  };
+}
+
+const operatorTaskExpiryTimer = setInterval(() => {
+  void taskService.expireOperatorTasks()
+    .then(() => decisionCardService?.settleDefaulted())
+    .catch(error => console.warn("operator task expiry failed", error));
+}, 1_000);
 operatorTaskExpiryTimer.unref();
 
 const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
@@ -3371,6 +3423,10 @@ const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDel
   withTaskImage: (message, image, commit) => {
     if (!attachmentService) throw new Error("task images unavailable");
     return attachmentService.withTaskImage(message, image, commit);
+  },
+  withTaskImages: (message, uploads, commit) => {
+    if (!attachmentService) throw new Error("task images unavailable");
+    return attachmentService.withTaskImages(message, uploads, commit);
   },
   checkTaskPeer: payload => {
     if (!payload.task) return;
@@ -3629,6 +3685,7 @@ const routeRequest = createBrokerHttpRouter({
     },
   }),
   permissionService,
+  decisionCards: decisionCardService,
   nativePermissions,
   harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
@@ -4261,6 +4318,9 @@ function recoverStartupWork(): void {
     console.error("[openscout-runtime] initial cardless session sweep failed:", error);
   });
   reconcilePermissionRequests("startup");
+  void decisionCardService?.resume().catch((error) => {
+    console.error("[openscout-runtime] decision card startup pass failed:", error);
+  });
   sweepRegistryRetention()
     .catch((error) => {
       console.error("[openscout-runtime] initial registry retention sweep failed:", error);

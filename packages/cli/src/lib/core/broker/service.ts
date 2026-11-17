@@ -4430,6 +4430,7 @@ function defaultAskExecutionSession(
 export async function deliverScoutAsk(input: {
   task?: import("@openscout/protocol").ScoutTaskAsk;
   image?: AttachmentUpload;
+  decisionImages?: AttachmentUpload[];
   attachments?: OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;
@@ -4548,6 +4549,7 @@ export async function deliverScoutAsk(input: {
     intent: input.task ? "task_ask" : input.completion || input.relation ? "explicit_consult" : "consult",
     ...(input.task ? { task: input.task } : {}),
     ...(input.image ? { image: input.image } : {}),
+    ...(input.decisionImages?.length ? { decisionImages: input.decisionImages } : {}),
     ...(input.attachments?.length ? { attachments: normalizeOutgoingAttachments(input.attachments, input.requestId) } : {}),
     ...(input.completion ? { completion: input.completion } : {}),
     ...(input.relation ? { relation: input.relation } : {}),

@@ -1,6 +1,7 @@
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
-import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
+import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY, applyDecisionToTask } from "@openscout/protocol";
+import { bindDecisionCard, decisionPictureAttachmentId } from "./decision-card-binding.js";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { acceptSessionInput, recoverSessionInputDelivery, validateSessionInputRequest, type SessionInputDeliveryOptions } from "./broker-session-input-delivery.js";
 import { BrokerCommandAdmission } from "./broker-storage-pressure.js";
@@ -99,6 +100,8 @@ type ChannelAttentionPointerInput = {
 
 export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions & {
   withTaskImage?: <T>(message: MessageRecord, image: NonNullable<ScoutDeliverRequest["image"]>, commit: () => Promise<T>) => Promise<T>;
+  /** Binds the task image and a decision card's pictures in one transaction. */
+  withTaskImages?: <T>(message: MessageRecord, uploads: Array<{ id: string; upload: NonNullable<ScoutDeliverRequest["image"]> }>, commit: () => Promise<T>) => Promise<T>;
   recoverTaskFollowup?: (actor: string, requestId: string) => Promise<ScoutDeliverResponse | null>;
   taskAsk?: (payload: ScoutDeliverRequest) => Promise<ScoutDeliverResponse | null>;
   checkTaskPeer?: (payload: ScoutDeliverRequest) => void;
@@ -450,7 +453,10 @@ export class BrokerDeliveryAcceptanceService {
     if (payload.task) {
       const special = await this.options.taskAsk?.(payload);
       if (special) return special;
-      const task = payload.task;
+      // A card's labels are the task's options and its default is the task's
+      // default action, so every older reader of those fields agrees with it.
+      if (payload.task.decision) payload = { ...payload, task: applyDecisionToTask(payload.task, payload.task.decision) };
+      const task = payload.task!;
       const policy = task.operator ? taskNotificationPolicy(task) : undefined;
       payload = { ...payload, intent: task.fyi ? "tell" : "consult", ensureAwake: task.fyi ? false : payload.ensureAwake,
         ...(task.fyi ? { workItem: undefined, collaborationRecordId: undefined, execution: undefined, invocationMetadata: undefined } :
@@ -763,6 +769,9 @@ export class BrokerDeliveryAcceptanceService {
           ...(operatorSignal
             ? { operatorSignal, operatorSignalId: messageId }
             : {}),
+          ...(payload.task?.decision && !payload.task.fyi
+            ? { decisionCard: bindDecisionCard(payload.task.decision, messageId, payload.decisionImages ?? []) }
+            : {}),
           relayChannel: deliveryChannel || (conversation.kind === "direct" ? "dm" : "shared"),
           relayTarget: this.options.operatorActorId,
           relayTargetIds: notifyTargets,
@@ -801,7 +810,9 @@ export class BrokerDeliveryAcceptanceService {
         flight = await this.acceptInvocation(invocation, message, payload, work.pendingCreation);
       } else await this.postMessage(message, payload);
       if (operatorSignal) {
-        if (operatorSignal.kind === "need") await this.options.recordOperatorNeed?.(message, operatorSignal);
+        // A need and a consult (an ask with a default) get a question record,
+        // which holds their decision card. An FYI waits on nobody.
+        if (operatorSignal.kind !== "notify") await this.options.recordOperatorNeed?.(message, operatorSignal);
         const requesterAgent = snapshot.agents[requesterId];
         const requesterActor = snapshot.actors[requesterId];
         const requesterEndpoint = Object.values(snapshot.endpoints)
@@ -1430,19 +1441,26 @@ export class BrokerDeliveryAcceptanceService {
         message.metadata = { ...message.metadata, taskFyiReceipt: { kind: "delivery", accepted: true, routeKind, conversationId: conversation.id, receipt } };
       }
     }
-    if (payload.image) {
-      if (!this.options.withTaskImage) throw new Error("task image uploads are unavailable");
-      return this.options.withTaskImage(message, payload.image, () => this.options.postConversationMessage(message));
-    }
-    return this.options.postConversationMessage(message);
+    return this.withImages(message, payload, () => this.options.postConversationMessage(message));
   }
   private async acceptInvocation(invocation: InvocationRequest, message: MessageRecord, payload: ScoutDeliverRequest,
     work: DeliveryWorkItemResolution["pendingCreation"]): Promise<FlightRecord> {
+    return this.withImages(message, payload, () => this.options.acceptInvocation(invocation, message, work));
+  }
+  private withImages<T>(message: MessageRecord, payload: ScoutDeliverRequest, commit: () => Promise<T>): Promise<T> {
+    const pictures = message.metadata?.decisionCard ? payload.decisionImages ?? [] : [];
+    if (pictures.length) {
+      if (!this.options.withTaskImages) throw new Error("decision picture uploads are unavailable");
+      return this.options.withTaskImages(message, [
+        ...(payload.image ? [{ id: `${message.id}.image`, upload: payload.image }] : []),
+        ...pictures.map((upload, index) => ({ id: decisionPictureAttachmentId(message.id, index), upload })),
+      ], commit);
+    }
     if (payload.image) {
       if (!this.options.withTaskImage) throw new Error("task image uploads are unavailable");
-      return this.options.withTaskImage(message, payload.image, () => this.options.acceptInvocation(invocation, message, work));
+      return this.options.withTaskImage(message, payload.image, commit);
     }
-    return this.options.acceptInvocation(invocation, message, work);
+    return commit();
   }
 
   private now(): number {
@@ -1463,6 +1481,15 @@ export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActor
     const upload = postWithAttachmentsSchema.shape.attachments.element.parse(payload.image);
     if (!imageMimes.has(upload.mediaType)) throw new Error("task evidence must be an image");
     validateAttachmentBytes(decodeAttachment(upload.data), upload.mediaType);
+  }
+  if (payload.decisionImages !== undefined) {
+    if (!task.decision) throw new Error("decision images need a --decision card");
+    if (!Array.isArray(payload.decisionImages) || payload.decisionImages.length > 3) throw new Error("a decision card carries at most 3 pictures");
+    for (const image of payload.decisionImages) {
+      const upload = postWithAttachmentsSchema.shape.attachments.element.parse(image);
+      if (!imageMimes.has(upload.mediaType)) throw new Error("a decision picture must be an image");
+      validateAttachmentBytes(decodeAttachment(upload.data), upload.mediaType);
+    }
   }
   // The ask client always sends the rendered label of this same ref (`ref:<id>`).
   // That label is the route itself. A different label, agent, session, channel,
@@ -1485,6 +1512,7 @@ export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActor
     execution: Boolean(payload.execution?.harness || payload.execution?.model || payload.execution?.reasoningEffort || payload.execution?.placement
       || payload.projectAgent || payload.execution?.targetSessionId || payload.execution?.session),
     relation: Boolean(payload.relation),
+    decisionImages: payload.decisionImages?.length ?? 0,
   });
 }
 

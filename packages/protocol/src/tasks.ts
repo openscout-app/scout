@@ -1,4 +1,5 @@
 import { FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH, parseReplyWaitingOn } from "./invocations.js";
+import { applyDecisionToTask, validateDecisionCard, type DecisionCardSubmission } from "./decision-cards.js";
 /** Versioned ask/reply semantics. Old peers must be refused before dispatch. */
 export const SCOUT_TASKS_CAPABILITY = "ask-reply/1";
 export type ScoutTaskAsk = {
@@ -26,6 +27,13 @@ export type ScoutTaskAsk = {
    * It is not part of the worker's prompt. See {@link ScoutTaskCallback}.
    */
   callback?: ScoutTaskCallback;
+  /**
+   * A decision card for an operator task. Its pictures index the request's
+   * `decisionImages`; the runtime stores them as attachments. The card's labels
+   * become `options` and its default (two-way doors only) becomes
+   * `defaultAction`. See docs/agent/decision-cards.agent.md.
+   */
+  decision?: DecisionCardSubmission;
 };
 /**
  * `ask --callback <file>`: the source of the asker's callback file, read on
@@ -57,7 +65,7 @@ export type ScoutNotificationPolicy = { requested: boolean; priority: "normal" |
 
 /** Shared pre-effect validation for CLI, MCP and the runtime. */
 export function validateTaskAsk(task: ScoutTaskAsk, route: {
-  to?: string; channel?: string; capability?: boolean; execution?: boolean; relation?: boolean;
+  to?: string; channel?: string; capability?: boolean; execution?: boolean; relation?: boolean; decisionImages?: number;
 }): void {
   const modes = [route.to, task.operator, route.channel, route.capability, task.ref, task.continue].filter(Boolean);
   if (modes.length !== 1) throw new Error("ask requires exactly one routing mode: --to, --operator, --channel, --project, --ref, or --continue");
@@ -82,6 +90,18 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   if (task.window !== undefined && (!task.defaultAction || !task.operator || task.fyi || !Number.isFinite(task.window) || task.window <= 0)) throw new Error("--window requires --default-action and a positive number of seconds");
   if (task.callback !== undefined && (typeof task.callback?.code !== "string" || !task.callback.code.trim() || task.callback.code.length > SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH)) throw new Error(`--callback takes a JavaScript module file of up to ${SCOUT_TASK_CALLBACK_MAX_CODE_LENGTH} characters`);
   if (task.callback !== undefined && (task.fyi || task.ref || task.cancel || task.operator || route.channel)) throw new Error("--callback belongs to a new task an agent carries out; it cannot be combined with --fyi, --ref, --cancel, --operator or --channel");
+  if (task.decision !== undefined) validateTaskDecision(task, route.decisionImages);
+}
+/**
+ * The rules for `--decision`: an operator task that expects an answer, a valid
+ * agent card, and task fields that agree with the card. `decisionImages` is the
+ * number of images the request carries, when known.
+ */
+export function validateTaskDecision(task: ScoutTaskAsk, decisionImages?: number): void {
+  if (!task.operator || task.fyi) throw new Error("--decision requires an operator task expecting an answer");
+  const problems = validateDecisionCard(task.decision, { origin: "agent", pictures: "image", imageCount: decisionImages });
+  if (problems.length) throw new Error(`--decision is not valid:\n- ${problems.join("\n- ")}`);
+  applyDecisionToTask(task, task.decision!);
 }
 export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed" | "waitingOn">): void {
   if (Number(Boolean(reply.ref)) + Number(Boolean(reply.to)) !== 1) throw new Error("reply requires exactly one of --ref <task> or --to <message>");

@@ -18,6 +18,7 @@ import type { MeshDiagnostics } from "./mesh-diagnostics.js";
 import { TaskClosedError, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
 import { SessionNameTargetError, type SessionNameService } from "./session-names.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
+import { DecisionAnswerError, type BrokerDecisionCardService } from "./broker-decision-cards.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
 import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
@@ -257,6 +258,8 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Decision cards on operator asks: reads and answers. */
+  decisionCards?: BrokerDecisionCardService;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
   /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
@@ -680,6 +683,43 @@ export function createBrokerHttpRouter(
   }
   if (method === "POST" && url.pathname === "/v1/mcp-events") {
     await handleBrokerMcpEvents(request, response, deps.mcpEvents); return;
+  }
+  const decisionMatch = method === "GET" ? url.pathname.match(/^\/v1\/decisions\/([^/]+)$/) : null;
+  if (url.pathname === "/v1/decisions" || url.pathname.startsWith("/v1/decisions/")) {
+    // Operator asks are this machine's: the same fence as permission decisions.
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    const cards = deps.decisionCards;
+    if (!cards) { json(response, 404, { error: "decision_cards_unavailable" }); return; }
+    try {
+      if (method === "GET" && url.pathname === "/v1/decisions") {
+        const state = url.searchParams.get("state") === "all" ? "all" : "open";
+        const limit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+        json(response, 200, { decisions: await cards.list({ state, ...(Number.isFinite(limit) ? { limit } : {}) }) });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/decisions/answer") {
+        const body = await readRequestBody<{ id?: unknown; answer?: unknown; requestId?: unknown }>(request, { maxBytes: 16 * 1024 });
+        if (typeof body.id !== "string" || typeof body.requestId !== "string" || !body.answer || typeof body.answer !== "object") {
+          throw new DecisionAnswerError("id, requestId and answer are required");
+        }
+        json(response, 200, { ok: true, decision: await cards.answer({ id: body.id, requestId: body.requestId, answer: body.answer as never }) });
+        return;
+      }
+      if (decisionMatch) {
+        const id = decodeURIComponent(decisionMatch[1]!);
+        const view = await cards.view(id);
+        if (!view) { json(response, 404, { error: "not_found", detail: `no operator ask ${id}` }); return; }
+        json(response, 200, { decision: view });
+        return;
+      }
+      json(response, 405, { error: "method_not_allowed" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof DecisionAnswerError) json(response, error.status, { error: message });
+      else if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended", sessionOpen: error.sessionOpen });
+      else json(response, error instanceof PermissionDeliveryUnconfirmedError ? 502 : 409, { error: message });
+    }
+    return;
   }
   if (method === "POST" && url.pathname === "/v1/permissions/decide") {
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
