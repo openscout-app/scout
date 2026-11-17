@@ -234,6 +234,7 @@ import {
   nudgeHarnessTopologyScan,
 } from "./harness-topology/index.js";
 import {
+  getCachedTailDiscovery,
   getTailDiscovery,
   readRecentLiveEvents,
   readRecentTranscriptEvents,
@@ -349,6 +350,7 @@ import { BrokerHomeService } from "./broker-home-service.js";
 import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 import { BrokerUnavailableTargetService, localEndpointCanReceive, localEndpointSupportsQueue } from "./broker-unavailable-target-service.js";
 import { BrokerRouteAliasStore } from "./broker-route-alias-store.js";
+import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { BrokerRouteAliasError, BrokerRouteAliasService } from "./broker-route-alias-service.js";
 import { AgentRosterService } from "./agent-roster-service.js";
 import { AgentRosterStore } from "./agent-roster-store.js";
@@ -644,6 +646,16 @@ const routeAliasService = routeAliasDatabase
       operatorActorId: "operator",
       runtimeSnapshot: () => runtime.routingSnapshot(),
       createId: createRuntimeId,
+    })
+  : undefined;
+// Operator session names: local overlays on harness titles (docs/session-names.md).
+const sessionNameService = routeAliasDatabase
+  ? new SessionNameService({
+      store: new SessionNameStore(routeAliasDatabase),
+      nodeId,
+      operatorActorId: "operator",
+      registry: () => runtime.peek(),
+      transcripts: () => getCachedTailDiscovery().transcripts,
     })
   : undefined;
 // The agent roster (docs/agent-roster.md): roster numbers and project codes.
@@ -3359,6 +3371,7 @@ const brokerService = createBrokerCoreService({
     nodeId,
     meshId,
     actorDisplayName: brokerActorDisplayName,
+    sessionNamer: sessionNameService ? () => sessionNameService.endpointNamer() : undefined,
   }, query),
   readCapabilities: readBrokerCapabilityMatrixSnapshot,
   readRuntimeCatalog: readBrokerRuntimeCatalogSnapshot,
@@ -3589,6 +3602,7 @@ const routeRequest = createBrokerHttpRouter({
   t3Service,
   routeAliasService,
   agentRosterService,
+  sessionNameService,
   integrationSetupService,
   integrationSlackDelivery,
   integrationSlackEvents,

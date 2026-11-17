@@ -90,6 +90,7 @@ export * from "./attachments.js";
 export type { ObservedSessionIdentity, ObservedSessionLink, SessionReadAvailability, HostReadAvailability, ObservedSessionSource, ObservedSessionRead, ObservedSessionInventory } from "./observed-sessions.js";
 
 export type { ObservedSessionMaterialFile, ObservedSessionMaterials } from "./session-materials.js";
+export * from "./session-names.js";
 
 export * from "./host-attention.js";
 export * from "./tasks.js";

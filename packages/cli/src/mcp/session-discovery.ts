@@ -14,7 +14,10 @@ import {
 
 type ObservedSession = {
   id: string;
+  /** Resolved name: operator name, then current work title, then harness title. */
   title: string | null;
+  titleSource?: ObservedSessionRead["titleSource"];
+  harnessTitle?: string | null;
   harness: string | null;
   sessionId: string | null;
   harnessSessionId: string | null;
@@ -65,7 +68,8 @@ export function sessionDiscoveryDependencies(
         nativeApp: nativeApp.status === "fulfilled" ? nativeApp.value : { threads: [], available: false, truncated: false },
         sessions: runtime?.sessions.map((row) => ({
           id: JSON.stringify([row.identity.nodeId, row.identity.harness, row.identity.nativeSessionId]),
-          title: row.title, harness: row.identity.harness, sessionId: row.identity.nativeSessionId,
+          title: row.title, titleSource: row.titleSource ?? (row.title ? "harness" : null), harnessTitle: row.harnessTitle ?? row.title,
+          harness: row.identity.harness, sessionId: row.identity.nativeSessionId,
           harnessSessionId: row.identity.nativeSessionId, workspaceRoot: row.cwd,
           identity: row.identity, observedAt: row.observedAt, availability: row.availability,
           identityConflict: row.identityConflict, links: row.links,
@@ -104,7 +108,8 @@ function sessionFacts(session?: ObservedSession) {
   return { identity, nodeId: identity?.nodeId ?? null, nativeSessionId: identity?.nativeSessionId ?? null,
     identityStatus: session?.identityConflict ? "conflict" : identity ? "observed" : "unavailable",
     observedAt: session?.observedAt ?? null, availability: session?.availability ?? "unknown",
-    identityConflict: session?.identityConflict ?? false, links: session?.links ?? [] };
+    identityConflict: session?.identityConflict ?? false, links: session?.links ?? [],
+    titleSource: session?.titleSource ?? null, harnessTitle: session?.harnessTitle ?? null };
 }
 
 function runtimeFacts(inventory: Awaited<ReturnType<SessionDiscoveryDependencies["readInventory"]>> | null) {
@@ -196,7 +201,7 @@ export function registerSessionDiscoveryTools(server: McpServer, deps: SessionDi
     const terminalSourceIds = new Set(inventory.terminals.map((record) => `${record.harness}:${record.sourceSessionId}`));
     for (const session of inventory.sessions) {
       if ([session.harnessSessionId, session.sessionId].some(id => id && terminalSourceIds.has(`${session.harness}:${id}`))) continue;
-      results.push({ queryAliases: [session.id, session.sessionId, session.harnessSessionId], sessionId: session.harnessSessionId ?? session.sessionId, terminalId: session.identity ? null : session.id, ...sessionFacts(session), harness: session.harness, cwd: session.identity ? session.workspaceRoot : session.workspaceRoot ?? "", title: session.title, state: "unknown", actions: actionsFor(undefined, session, deps.webOrigin), panels: linkedPanels(session.harness, session.harnessSessionId ?? session.sessionId) });
+      results.push({ queryAliases: [session.id, session.sessionId, session.harnessSessionId, session.harnessTitle ?? null], sessionId: session.harnessSessionId ?? session.sessionId, terminalId: session.identity ? null : session.id, ...sessionFacts(session), harness: session.harness, cwd: session.identity ? session.workspaceRoot : session.workspaceRoot ?? "", title: session.title, state: "unknown", actions: actionsFor(undefined, session, deps.webOrigin), panels: linkedPanels(session.harness, session.harnessSessionId ?? session.sessionId) });
     }
     // App-held locks are live reachability evidence even with no indexed transcript.
     for (const native of inventory.nativeApp?.threads ?? []) {
@@ -270,7 +275,7 @@ export function registerSessionDiscoveryTools(server: McpServer, deps: SessionDi
         const candidates = inventory?.sessions.filter(record => record.harness === harnessId && (record.harnessSessionId === sessionId || record.sessionId === sessionId)) ?? [];
         const session = candidates.length === 1 ? candidates[0] : undefined;
         const actions = actionsFor(terminal, session, deps.webOrigin);
-        return { ...sessionFacts(session), ...(session ? {} : { identityStatus: candidates.length > 1 ? "ambiguous" : "unavailable" }), sessionId, harness: harnessId, project: facet(hit, "project"), title: hit.title.slice(0, 240), snippet: hit.snippet.slice(0, 1200), source: source ?? null, freshness: hit.freshness, state: observedState(terminal), actions };
+        return { ...sessionFacts(session), ...(session ? {} : { identityStatus: candidates.length > 1 ? "ambiguous" : "unavailable" }), sessionId, harness: harnessId, project: facet(hit, "project"), title: (session?.titleSource === "operator" || session?.titleSource === "work" ? session.title ?? hit.title : hit.title).slice(0, 240), snippet: hit.snippet.slice(0, 1200), source: source ?? null, freshness: hit.freshness, state: observedState(terminal), actions };
       });
       const sources = inventory ? inventorySources(inventory) : null;
       const status = !hits.length ? "not_requested" : inventoryStatus(inventory);
