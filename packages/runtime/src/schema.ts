@@ -161,6 +161,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_agents_number
   ON roster_agents (number);
 CREATE INDEX IF NOT EXISTS idx_roster_agents_project_key
   ON roster_agents (project_key);
+
+CREATE TABLE IF NOT EXISTS session_names (
+  harness TEXT NOT NULL,
+  native_session_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  set_by_actor_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (harness, native_session_id)
+);
 `;
 
 // Scout-owned registry of harness sessions and the disposable terminal surfaces

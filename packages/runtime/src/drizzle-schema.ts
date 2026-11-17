@@ -329,6 +329,21 @@ export const rosterAgentsTable = sqliteTable("roster_agents", {
   index("idx_roster_agents_project_key").on(table.projectKey),
 ]);
 
+// -- session_names ------------------------------------------------------------
+// Operator-set names for harness sessions on this node, keyed by the observed
+// identity (harness, native session id). Local metadata only: the harness's
+// own session files are never written. Clearing a name deletes its row.
+export const sessionNamesTable = sqliteTable("session_names", {
+  harness: text("harness").notNull(),
+  nativeSessionId: text("native_session_id").notNull(),
+  name: text("name").notNull(),
+  setByActorId: text("set_by_actor_id").notNull(),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.harness, table.nativeSessionId] }),
+]);
+
 // -- conversations -----------------------------------------------------------
 export const conversationsTable = sqliteTable("conversations", {
   id: text("id").primaryKey(),
@@ -1236,6 +1251,7 @@ export const controlPlaneDrizzleSchema = {
   routeAliasRevisions: routeAliasRevisionsTable,
   rosterProjects: rosterProjectsTable,
   rosterAgents: rosterAgentsTable,
+  sessionNames: sessionNamesTable,
   conversations: conversationsTable,
   conversationMembers: conversationMembersTable,
   messages: messagesTable,

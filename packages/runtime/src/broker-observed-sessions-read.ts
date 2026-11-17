@@ -10,7 +10,11 @@ const valid = (value: unknown): value is string => typeof value === "string" && 
 export class ObservedSessionReadError extends Error {
   constructor(public status: number, public code: string, public candidates: unknown[] = [], public candidatesTruncated = false) { super(code); }
 }
-export type ObservedSessionReadDeps = { nodeId: string; readCache?: () => DiscoverySnapshot; readEndpoints?: () => Record<string, AgentEndpoint> };
+export type ObservedSessionReadDeps = {
+  nodeId: string; readCache?: () => DiscoverySnapshot; readEndpoints?: () => Record<string, AgentEndpoint>;
+  /** Applies session names (operator, then work, then harness) to the rows. */
+  nameSessions?: (inventory: ObservedSessionInventory) => ObservedSessionInventory;
+};
 
 export function buildObservedSessionInventory(deps: ObservedSessionReadDeps, limit = 100): ObservedSessionInventory {
   const cached = (deps.readCache ?? getCachedTailDiscovery)();
@@ -27,7 +31,8 @@ export function buildObservedSessionInventory(deps: ObservedSessionReadDeps, lim
     if (prior) { if (paths.get(key) !== transcript.transcriptPath) prior.identityConflict = true; continue; }
     const conflict = cached.issues?.some(issue => issue.kind === "transcript_path_collision" && issue.sessionKey === `${transcript.source}:${transcript.sessionId}`) ?? false;
     sessions.set(key, { identity, links: [], cwd: transcript.cwd && transcript.cwd.length <= 4096 ? transcript.cwd : null,
-      title: transcript.title?.slice(0, 512) ?? null, observedAt: cached.generatedAt,
+      title: transcript.title?.slice(0, 512) ?? null, titleSource: transcript.title ? "harness" : null,
+      harnessTitle: transcript.title?.slice(0, 512) ?? null, observedAt: cached.generatedAt,
       availability: initialized ? states.get(identity.harness)?.availability ?? "unknown" : "not_scanned", identityConflict: conflict });
     paths.set(key, transcript.transcriptPath);
   }
@@ -96,7 +101,8 @@ export function readObservedSessions(deps: ObservedSessionReadDeps, url: URL, re
     for (const key of url.searchParams.keys()) if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw new ObservedSessionReadError(400, "invalid_session_query");
     const limit = Number(url.searchParams.get("limit") ?? 100);
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new ObservedSessionReadError(400, "invalid_session_limit");
-    const inventory = buildObservedSessionInventory(deps, resolve ? 2_000 : limit);
+    const built = buildObservedSessionInventory(deps, resolve ? 2_000 : limit);
+    const inventory = deps.nameSessions ? deps.nameSessions(built) : built;
     return { status: 200, body: resolve ? { schema: "scout.observed-session/v1", session: selectObservedSession(inventory, url) } : inventory };
   } catch (error) {
     return error instanceof ObservedSessionReadError ? { status: error.status, body: { error: error.code, ...(error.candidates.length ? { candidates: error.candidates, candidatesTruncated: error.candidatesTruncated } : {}) } }
