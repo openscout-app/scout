@@ -225,6 +225,13 @@
       "when": 1794174623365,
       "tag": "0032_fleet_recovery_index",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1794892744353,
+      "tag": "0033_session_names",
+      "breakpoints": true
     }
   ]
 }

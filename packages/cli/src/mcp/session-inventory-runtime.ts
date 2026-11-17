@@ -12,6 +12,9 @@ const schema = z.object({
     identity: z.object({ nodeId: id, harness: id, nativeSessionId: id }).strict(),
     links: z.array(z.object({ kind: z.enum(["agent", "conversation", "terminal"]), id }).strict()).max(8),
     cwd: z.string().max(4096).nullable(), title: z.string().max(512).nullable(),
+    // Older runtimes send neither field; a renamed session carries both.
+    titleSource: z.enum(["operator", "work", "harness"]).nullable().optional(),
+    harnessTitle: z.string().max(512).nullable().optional(),
     observedAt: z.number().finite(), availability: status, identityConflict: z.boolean(),
   }).strict()).max(200),
   coverage: z.object({ kind: z.literal("cached_window"), scope: z.string().nullable(), truncated: z.boolean(),

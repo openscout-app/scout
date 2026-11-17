@@ -24,6 +24,7 @@ import {
   type BrokerHttpRouterDeps,
 } from "./broker-http-router.js";
 import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
+import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
 import { createRuntimeRegistrySnapshot, queryRuntimeNotificationRouting } from "./registry.js";
 import {
@@ -614,6 +615,46 @@ describe("createBrokerHttpRouter", () => {
     expect((one.body as any).processes.map((p: any) => [p.pid, p.parentChain.length])).toEqual([[22, 2]]);
     expect((one.body as any).transcripts.map((t: any) => t.sessionId)).toEqual(["b"]);
     expect((one.body as any).totals.total).toBe(2);
+  });
+
+  test("session names: set over HTTP, applied to tail discovery and observed sessions, machine-local", async () => {
+    const database = new Database(":memory:");
+    migrateControlPlaneDatabaseSchema(database as never);
+    const transcripts = [
+      { source: "claude", transcriptPath: "/t/a.jsonl", sessionId: "a", title: "kernel-panic-last-boot", cwd: "/w/a", project: "a", harness: "unattributed", mtimeMs: 2, size: 1 },
+    ];
+    const snapshot = { generatedAt: 1, processes: [], transcripts, totals: { total: 0, scoutManaged: 0, hudsonManaged: 0, unattributed: 0, transcripts: 1 } };
+    const sessionNameService = new SessionNameService({
+      store: new SessionNameStore(database as never),
+      nodeId: "node-1",
+      operatorActorId: "operator",
+      registry: () => ({ nodes: {}, endpoints: {}, collaborationRecords: {} }),
+      transcripts: () => transcripts as never,
+    });
+    const harness = createHarness({
+      sessionNameService,
+      getTailDiscovery: async () => snapshot as never,
+      readObservedSessionCache: () => ({ ...snapshot, readStatus: { initialized: true, sources: [{ harness: "claude", availability: "available", processes: "available" }] } }) as never,
+    });
+
+    const set = await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a", name: "Session names" } });
+    expect(set.response.status).toBe(200);
+    expect(set.body).toMatchObject({ action: "set", resolution: { name: "Session names", source: "operator", harnessTitle: "kernel-panic-last-boot" } });
+
+    const tail = await requestRouter(harness, "GET", "/v1/tail/discover");
+    expect((tail.body as any).transcripts[0]).toMatchObject({ title: "Session names", harnessTitle: "kernel-panic-last-boot", sessionNameSource: "operator" });
+    const observed = await requestRouter(harness, "GET", "/v1/observed-sessions");
+    expect((observed.body as any).sessions[0]).toMatchObject({ title: "Session names", titleSource: "operator", harnessTitle: "kernel-panic-last-boot" });
+    expect((await requestRouter(harness, "GET", "/v1/session-names")).body).toMatchObject({ names: [{ nativeSessionId: "a", name: "Session names" }] });
+
+    expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "nope", name: "x" } })).response.status).toBe(404);
+    expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a" } })).response.status).toBe(400);
+    const remote = await requestRouter(harness, "POST", "/v1/session-names", {
+      body: { selector: "a", name: "x" }, transportContext: { transport: "remote", remoteAddress: "192.168.1.50" } as never,
+    });
+    expect(remote.response.status).toBe(403);
+    expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a", name: null } })).body).toMatchObject({ action: "cleared" });
+    expect((await requestRouter(createHarness(), "GET", "/v1/session-names")).response.status).toBe(503);
   });
 
   test("tail usage reads requested sessions and refuses a request without one", async () => {

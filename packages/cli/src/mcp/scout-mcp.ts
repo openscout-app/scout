@@ -129,6 +129,7 @@ import { registerRouteContext } from "./route-context.ts";
 import { routeContextDependencies } from "../lib/core/mesh/route-context.ts";
 import { registerSessionSendTool, sessionSendDependencies } from "./session-send.ts";
 import { registerSessionDiscoveryTools, sessionDiscoveryDependencies } from "./session-discovery.ts";
+import { registerSessionRenameTools } from "./session-rename.ts";
 import { waitForStdioServerClosure } from "./stdio-server-lifecycle.ts";
 
 const AGENT_STATE_VALUES = [
@@ -3440,6 +3441,7 @@ export function createScoutMcpServer(options: {
 
   registerIntegrationTools(server, aliasBrokerRequest);
   registerDiffTools(server, aliasBrokerRequest);
+  registerSessionRenameTools(server, aliasBrokerRequest, env);
 
   registerChatListeningTools(server, (operation, body) => chatListeningRequest(
     { env },

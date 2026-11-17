@@ -58,6 +58,20 @@ function herdrInventory(options: { live?: boolean; harness?: string; kind?: stri
 }
 
 describe("Scoutbot read-only session tools", () => {
+  test("a renamed session shows its name, keeps the harness title, and still matches the old title", async () => {
+    const runtime = runtimeFixture({ sessions: [{ ...runtimeFixture().sessions[0]!, title: "Session names", titleSource: "operator", harnessTitle: "kernel-panic-last-boot" }] });
+    // The fixture index, never this machine's.
+    const client = await clientFor({ ...runtimeDeps(runtime), openStore: dependencies().openStore });
+    for (const query of ["Session names", "kernel-panic"]) {
+      const result = await client.callTool({ name: "sessions_inventory", arguments: { query } });
+      expect((result.structuredContent as any).results).toEqual([
+        expect.objectContaining({ title: "Session names", titleSource: "operator", harnessTitle: "kernel-panic-last-boot", nativeSessionId: "native-1" }),
+      ]);
+    }
+    const search = await client.callTool({ name: "sessions_search", arguments: { query: "build" } });
+    expect((search.structuredContent as any).results[0]).toMatchObject({ title: "Session names", harnessTitle: "kernel-panic-last-boot" });
+  });
+
   test("a panel-name lookup joins exact harness identity and keeps observed status separate", async () => {
     const client = await clientFor(dependencies({ readInventory: async () => ({
       sessions: [{ id: "session-record", title: "Router report", harness: "codex", sessionId: null, harnessSessionId: "native-2", workspaceRoot: "/work" }],

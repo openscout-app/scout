@@ -44,6 +44,7 @@ export const scoutBrokerPaths = {
     rosterProjectCode: "/v1/roster/projects/code",
     rosterImport: "/v1/roster/import",
     rosterResolve: "/v1/roster/resolve",
+    sessionNames: "/v1/session-names",
     permissionsNative: "/v1/permissions/native",
     permissionsNativeWait: "/v1/permissions/native/wait",
     hooks: "/v1/hooks",

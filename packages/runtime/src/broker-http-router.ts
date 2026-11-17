@@ -11,7 +11,8 @@ import { MeshFeedback, MeshFeedbackError } from "./mesh-feedback.js";
 import { MeshBridgeManagement, MeshBridgeManagementError } from "./mesh-bridge-management.js";
 import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
-import { TaskClosedError, completionReply } from "@openscout/protocol";
+import { TaskClosedError, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
+import { SessionNameTargetError, type SessionNameService } from "./session-names.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
 import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
@@ -328,6 +329,8 @@ export type BrokerHttpRouterDeps = {
   t3Service?: BrokerT3Service;
   routeAliasService?: BrokerRouteAliasService;
   agentRosterService?: AgentRosterService;
+  /** Operator session names; absent without broker SQLite persistence. */
+  sessionNameService?: SessionNameService;
   integrationSetupService?: BrokerIntegrationSetupService;
   integrationSlackDelivery?: IntegrationSlackDeliveryService;
   integrationSlackEvents?: IntegrationSlackEvents;
@@ -562,6 +565,7 @@ export function createBrokerHttpRouter(
     rendezvousService,
     routeAliasService,
     agentRosterService,
+    sessionNameService,
     integrationSetupService,
     integrationSlackDelivery,
     integrationSlackEvents,
@@ -1659,6 +1663,46 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  if (url.pathname === "/v1/session-names") {
+    // Session names are machine-local metadata, like the roster.
+    const context = request.transportContext;
+    if (context && (context.transport === "remote" || context.guest || context.scoped)) {
+      json(response, 403, { error: "local_only", detail: "session names are machine-local" });
+      return;
+    }
+    if (!sessionNameService) {
+      json(response, 503, { error: "session_names_unavailable", detail: "session names require broker SQLite persistence" });
+      return;
+    }
+    if (method === "GET" && url.pathname === "/v1/session-names") {
+      json(response, 200, { names: sessionNameService.list() } satisfies SessionNameListResult);
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/session-names") {
+      try {
+        const body = await readRequestBody<SessionNameSetRequest>(request);
+        if (!body || typeof body !== "object" || !("name" in body)) {
+          json(response, 400, { error: "invalid_session_name", detail: "the body needs a name (null or empty clears it)" });
+          return;
+        }
+        json(response, 200, sessionNameService.set(body));
+      } catch (error) {
+        if (error instanceof SessionNameTargetError) {
+          json(response, error.code === "session_not_found" ? 404 : error.code === "ambiguous_session" ? 409 : 400, {
+            error: error.code,
+            detail: error.message,
+            ...(error.candidates.length ? { candidates: error.candidates } : {}),
+          });
+          return;
+        }
+        badRequest(response, error);
+      }
+      return;
+    }
+    json(response, 405, { error: "method_not_allowed" });
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/v1/topology/snapshot") {
     json(response, 200, await getHarnessTopologySnapshot(url.searchParams.get("force") === "1"));
     return;
@@ -1676,13 +1720,16 @@ export function createBrokerHttpRouter(
     };
     const timingDesc = [scope, limit ? `limit-${limit}` : null].filter(Boolean).join("-");
     const parentChainParam = url.searchParams.get("parentChain")?.trim().toLowerCase();
-    const payload = trimTailDiscoverySnapshot(
+    const shaped = trimTailDiscoverySnapshot(
       shapeTailDiscoverySnapshot(await getTailDiscovery(discoveryOptions), {
         includeParentChain: !(parentChainParam === "0" || parentChainParam === "false"),
         pid: parseTailDiscoveryPid(url.searchParams.get("pid")),
       }),
       limit,
     );
+    const payload = sessionNameService
+      ? { ...shaped, transcripts: sessionNameService.applyToTranscripts(shaped.transcripts) }
+      : shaped;
     jsonWithHeaders(response, 200, payload, {
       "Server-Timing": serverTimingHeader([{
         name: force ? "tail-discover-force" : "tail-discover",
@@ -2400,7 +2447,9 @@ export function createBrokerHttpRouter(
   if (method === "GET" && (url.pathname === "/v1/observed-sessions" || url.pathname === "/v1/observed-sessions/resolve")) {
     if (request.transportContext?.transport === "remote" || request.transportContext?.guest) { json(response, 403, { error: "forbidden" }); return; }
     const result = readObservedSessions({ nodeId, readCache: deps.readObservedSessionCache,
-      readEndpoints: runtime.peek ? () => runtime.peek!().endpoints : undefined }, url, url.pathname.endsWith("/resolve"));
+      readEndpoints: runtime.peek ? () => runtime.peek!().endpoints : undefined,
+      nameSessions: sessionNameService ? (inventory) => sessionNameService.applyToObservedInventory(inventory) : undefined },
+      url, url.pathname.endsWith("/resolve"));
     json(response, result.status, result.body); return;
   }
 
