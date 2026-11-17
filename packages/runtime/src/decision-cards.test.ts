@@ -12,9 +12,10 @@ import type {
 
 import { BrokerDecisionCardService, DecisionAnswerError } from "./broker-decision-cards.js";
 import { bindDecisionCard, decisionPictureAttachmentId, imagePixelSize } from "./decision-card-binding.js";
-import { decisionSynthesisConfigured, createDecisionModel } from "./decision-synthesis-model.js";
+import { DECISION_SYNTHESIS_MODEL, createDecisionModel, decisionSynthesisConfigured, parseHarnessJson } from "./decision-synthesis-model.js";
 import {
   cardFromModelOutput,
+  decisionModelOutputProblems,
   decisionSourceHash,
   synthesizeDecisionCard,
   type DecisionModel,
@@ -42,11 +43,12 @@ const STATUS_ASK: DecisionSynthesisSource = {
   options: [],
 };
 
-const fakeModel = (output: unknown, usage = { inputTokens: 1000, outputTokens: 250 }): DecisionModel & { calls: number } => {
+const fakeModel = (output: unknown): DecisionModel & { calls: number } => {
   const model = {
-    model: "claude-haiku-5-5",
+    model: "haiku",
+    via: "claude-cli",
     calls: 0,
-    async extract() { model.calls += 1; return { output, usage }; },
+    async extract() { model.calls += 1; return { output }; },
   };
   return model;
 };
@@ -134,17 +136,88 @@ describe("synthesis plumbing", () => {
   });
 
   test("a failed or empty model call is reported, never a card", async () => {
-    const failing: DecisionModel = { model: "claude-haiku-5-5", async extract() { throw new Error("timeout"); } };
-    expect(await synthesizeDecisionCard(MERGE_ASK, failing)).toEqual({ outcome: "failed", error: "timeout" });
+    const failing: DecisionModel = { model: "haiku", via: "claude-cli", async extract() { throw new Error("timeout"); } };
+    expect(await synthesizeDecisionCard(MERGE_ASK, failing, () => 0)).toEqual({ outcome: "failed", error: "timeout", durationMs: 0 });
     expect((await synthesizeDecisionCard(MERGE_ASK, fakeModel(null))).outcome).toBe("failed");
   });
 
-  test("no credential, no model", () => {
-    const empty = { ANTHROPIC_CONFIG_DIR: "/nonexistent-scout-test" } as NodeJS.ProcessEnv;
-    expect(decisionSynthesisConfigured(empty)).toBe(false);
-    expect(createDecisionModel(empty)).toBeUndefined();
-    expect(decisionSynthesisConfigured({ ...empty, ANTHROPIC_API_KEY: "x" })).toBe(true);
-    expect(decisionSynthesisConfigured({ ...empty, ANTHROPIC_API_KEY: "x", SCOUT_DECISION_SYNTHESIS: "0" })).toBe(false);
+  test("harness JSON that breaks the schema is a plain ask, even when a card could be read from it", async () => {
+    const cases: unknown[] = [
+      "Merge now",
+      [MERGE_OUTPUT],
+      { ...MERGE_OUTPUT, door: "sideways" },
+      { ...MERGE_OUTPUT, extra: true },
+      { ...MERGE_OUTPUT, isChoice: "yes" },
+      { ...MERGE_OUTPUT, pick: "Merge now" },
+      { ...MERGE_OUTPUT, options: [{ ...MERGE_OUTPUT.options[0], undo: "maybe" }, MERGE_OUTPUT.options[1]] },
+      { ...MERGE_OUTPUT, options: [{ label: "Merge now", quote: "Merge it now", result: "Lands." }, MERGE_OUTPUT.options[1]] },
+      (({ door: _door, ...rest }) => rest)(MERGE_OUTPUT),
+    ];
+    for (const output of cases) {
+      const result = await synthesizeDecisionCard(MERGE_ASK, fakeModel(output));
+      expect(result.outcome).toBe("failed");
+      expect(decisionModelOutputProblems(output).length).toBeGreaterThan(0);
+    }
+    expect(decisionModelOutputProblems(MERGE_OUTPUT)).toEqual([]);
+    expect(decisionModelOutputProblems({ ...MERGE_OUTPUT, pick: null })).toEqual([]);
+  });
+
+  test("SCOUT_DECISION_SYNTHESIS=0 or off turns synthesis off", () => {
+    const invoke = async () => ({ output: "{}", sessionId: null });
+    expect(createDecisionModel({ SCOUT_DECISION_SYNTHESIS: "0" }, { invoke })).toBeUndefined();
+    expect(createDecisionModel({ SCOUT_DECISION_SYNTHESIS: "off" }, { invoke })).toBeUndefined();
+    expect(createDecisionModel({}, { invoke })).toBeDefined();
+    expect(decisionSynthesisConfigured({ SCOUT_DECISION_SYNTHESIS: "0" })).toBe(false);
+    expect(decisionSynthesisConfigured({ SCOUT_DECISION_SYNTHESIS: "off" })).toBe(false);
+  });
+
+  test("one harness turn per card, through the Claude CLI path, then the session is reset", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const shutdowns: Array<{ resetSession?: boolean }> = [];
+    const model = createDecisionModel({ SCOUT_DECISION_SYNTHESIS_MODEL: "claude-haiku-5-5" }, {
+      runtimeDirectory: "/tmp/scout-decision-synthesis-test",
+      logsDirectory: "/tmp/scout-decision-synthesis-test/logs",
+      invoke: async (options) => { calls.push(options as unknown as Record<string, unknown>); return { output: "```json\n" + JSON.stringify(MERGE_OUTPUT) + "\n```", sessionId: "s1" }; },
+      shutdown: async (_options, extra) => { shutdowns.push(extra ?? {}); },
+    })!;
+    expect(model.model).toBe("claude-haiku-5-5");
+    expect(model.via).toBe("claude-cli");
+    const result = await synthesizeDecisionCard(MERGE_ASK, model);
+    expect(result.outcome).toBe("card");
+    expect(calls).toHaveLength(1);
+    const launchArgs = calls[0]!.launchArgs as string[];
+    expect(launchArgs.slice(0, 2)).toEqual(["--model", "claude-haiku-5-5"]);
+    expect(launchArgs).toContain("--strict-mcp-config");
+    expect(launchArgs[launchArgs.indexOf("--tools") + 1]).toBe("");
+    expect(calls[0]!.cwd).toBe("/tmp/scout-decision-synthesis-test/workspace");
+    // The model sees the shape and the field rules, not a raw schema it could echo back.
+    const systemPrompt = String(calls[0]!.systemPrompt);
+    expect(systemPrompt).toContain("\"isChoice\": true | false");
+    expect(systemPrompt).toContain("\"pick\": null or {");
+    expect(systemPrompt).toContain("- options[].quote: The exact words");
+    expect(systemPrompt).not.toContain("additionalProperties");
+    expect(shutdowns).toEqual([{ resetSession: true }]);
+    expect(createDecisionModel({}, { invoke: async () => ({ output: "", sessionId: null }) })!.model).toBe(DECISION_SYNTHESIS_MODEL);
+  });
+
+  test("a failed harness turn still resets the session and leaves the plain ask", async () => {
+    let reset = 0;
+    const model = createDecisionModel({}, {
+      runtimeDirectory: "/tmp/scout-decision-synthesis-test",
+      invoke: async () => { throw new Error("Claude stream-json result reported an error"); },
+      shutdown: async () => { reset += 1; },
+    })!;
+    const result = await synthesizeDecisionCard(MERGE_ASK, model);
+    expect(result).toMatchObject({ outcome: "failed", error: "Claude stream-json result reported an error" });
+    expect(reset).toBe(1);
+  });
+
+  test("reads the one JSON object out of the harness's reply", () => {
+    expect(parseHarnessJson("{\"a\":1}")).toEqual({ a: 1 });
+    expect(parseHarnessJson("```json\n{\"a\":1}\n```")).toEqual({ a: 1 });
+    expect(parseHarnessJson("Here it is: {\"a\":1}")).toEqual({ a: 1 });
+    expect(parseHarnessJson("no json")).toBeNull();
+    expect(parseHarnessJson("{broken")).toBeNull();
   });
 });
 
@@ -274,7 +347,7 @@ const MERGE_OUTPUT = {
 };
 
 describe("decision card service", () => {
-  test("synthesizes once, records the cost, and reuses the cache for the same ask", async () => {
+  test("synthesizes once, records the path and time, and reuses the cache for the same ask", async () => {
     const model = fakeModel(MERGE_OUTPUT);
     const h = harness({ model });
     await h.service.register(h.message, h.signal);
@@ -282,7 +355,9 @@ describe("decision card service", () => {
     const view = (await h.service.view("inv-request-abc"))!;
     expect(view.origin).toBe("synthesized");
     expect(view.card?.kind).toBe("decision");
-    expect(view.synthesis).toMatchObject({ outcome: "card", model: "claude-haiku-5-5", inputTokens: 1000, outputTokens: 250, costUsd: 0.000225 });
+    expect(view.synthesis).toMatchObject({ outcome: "card", model: "haiku", via: "claude-cli" });
+    expect(typeof view.synthesis?.durationMs).toBe("number");
+    expect(view.synthesis).not.toHaveProperty("costUsd");
     // Registering again does nothing: the card is made once.
     await h.service.register(h.message, h.signal);
     await h.service.idle();
@@ -300,13 +375,13 @@ describe("decision card service", () => {
   });
 
   test("a failed model call leaves the plain ask and says why", async () => {
-    const failing: DecisionModel = { model: "claude-haiku-5-5", async extract() { throw new Error("401 unauthorized"); } };
+    const failing: DecisionModel = { model: "haiku", via: "claude-cli", async extract() { throw new Error("Claude is not signed in"); } };
     const h = harness({ model: failing });
     await h.service.register(h.message, h.signal);
     await h.service.idle();
     const view = (await h.service.view(h.questionId))!;
     expect(view.card).toBeUndefined();
-    expect(view.synthesis).toMatchObject({ outcome: "failed", error: "401 unauthorized" });
+    expect(view.synthesis).toMatchObject({ outcome: "failed", error: "Claude is not signed in" });
   });
 
   test("the history check shows an earlier answer and never answers", async () => {

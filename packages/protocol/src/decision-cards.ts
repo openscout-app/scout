@@ -637,10 +637,14 @@ export type DecisionSynthesisInfo = {
   /** `card`: a card was made. `question`: the text holds no real choice. `failed`: the model call failed; the plain ask stands. */
   outcome: "card" | "question" | "failed";
   sourceHash: string;
+  /** The model as the harness names it, e.g. `haiku`. */
   model?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-  costUsd?: number;
+  /** The path the turn took, e.g. `claude-cli`: the operator's signed-in harness, no API key. */
+  via?: string;
+  /** Wall time of the harness turn. Absent when the result came from the cache. */
+  durationMs?: number;
+  /** The result was reused from an earlier ask with the same source hash. */
+  cached?: boolean;
   error?: string;
   at: number;
 };

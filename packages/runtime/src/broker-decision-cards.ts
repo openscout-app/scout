@@ -22,7 +22,6 @@ import {
 
 import {
   decisionSourceHash,
-  decisionSynthesisCostUsd,
   synthesizeDecisionCard,
   type DecisionModel,
   type DecisionSynthesisResult,
@@ -196,15 +195,16 @@ export class BrokerDecisionCardService {
     this.loadCache();
     const sourceHash = decisionSourceHash(source, model.model);
     const cached = this.cache.get(sourceHash);
-    const result = cached ?? { ...await synthesizeDecisionCard(source, model), model: model.model };
+    const result = cached ?? { ...await synthesizeDecisionCard(source, model, () => this.now()), model: model.model };
     if (!cached && result.outcome !== "failed") this.cache.set(sourceHash, result);
-    const usage = cached ? undefined : result.usage;
+    const durationMs = cached ? undefined : result.durationMs;
     const info: DecisionSynthesisInfo = {
       outcome: result.outcome,
       sourceHash,
       model: model.model,
-      ...(usage ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } : {}),
-      ...(usage && decisionSynthesisCostUsd(model.model, usage) !== undefined ? { costUsd: decisionSynthesisCostUsd(model.model, usage) } : {}),
+      via: model.via,
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(cached ? { cached: true } : {}),
       ...(result.outcome === "failed" ? { error: result.error.slice(0, 300) } : result.outcome === "question" && !cached ? { error: result.reason.slice(0, 300) } : {}),
       at: this.now(),
     };

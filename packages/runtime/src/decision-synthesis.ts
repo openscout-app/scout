@@ -21,7 +21,7 @@ import {
  * choice, the ask stays a question.
  */
 
-export const DECISION_SYNTHESIS_PROMPT_VERSION = 1;
+export const DECISION_SYNTHESIS_PROMPT_VERSION = 2;
 /** Labels from `--option` are kept verbatim, so they may run past the 18 characters an agent's card allows. */
 const SYNTHESIZED_LABEL_MAX = DECISION_CARD_LIMITS.synthesizedLabel;
 
@@ -231,32 +231,90 @@ export function cardFromModelOutput(source: DecisionSynthesisSource, raw: unknow
 /* the model                                                           */
 /* ------------------------------------------------------------------ */
 
-export type DecisionModelUsage = { inputTokens: number; outputTokens: number };
-
-/** One structured call to a small model. A thrown error or `null` output means: keep the plain ask. */
+/** One turn through a harness. A thrown error or `null` output means: keep the plain ask. */
 export interface DecisionModel {
+  /** The model as the harness names it (`haiku`, or an override). */
   readonly model: string;
-  extract(input: { system: string; prompt: string; schema: Record<string, unknown> }): Promise<{ output: unknown; usage: DecisionModelUsage }>;
+  /** The path the turn takes, e.g. `claude-cli`. */
+  readonly via: string;
+  extract(input: { system: string; prompt: string; schema: Record<string, unknown> }): Promise<{ output: unknown }>;
 }
 
-/** US dollars per million tokens. */
-const PRICES: Record<string, { input: number; output: number }> = {
-  "claude-haiku-5-5": { input: 0.10, output: 0.50 },
-};
-
-export function decisionSynthesisCostUsd(model: string, usage: DecisionModelUsage): number | undefined {
-  const price = PRICES[model];
-  return price ? (usage.inputTokens * price.input + usage.outputTokens * price.output) / 1_000_000 : undefined;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export type DecisionSynthesisResult = DecisionSynthesisOutcome & { usage?: DecisionModelUsage } | { outcome: "failed"; error: string; usage?: DecisionModelUsage };
+/**
+ * Check the harness's JSON against `DECISION_MODEL_OUTPUT_SCHEMA`, strictly:
+ * every required key, no extra keys, the right types and enum values. Any
+ * problem means the plain ask stands. A card built from valid output is then
+ * checked again by `validateDecisionCard`.
+ */
+export function decisionModelOutputProblems(raw: unknown): string[] {
+  if (!isPlainObject(raw)) return ["the output is not a JSON object"];
+  const problems: string[] = [];
+  const exactKeys = (value: Record<string, unknown>, keys: readonly string[], where: string) => {
+    for (const key of keys) if (!(key in value)) problems.push(`${where} is missing ${key}`);
+    for (const key of Object.keys(value)) if (!keys.includes(key)) problems.push(`${where} has an extra key ${key}`);
+  };
+  const needString = (value: unknown, where: string) => {
+    if (typeof value !== "string") problems.push(`${where} is not a string`);
+  };
+  const needEnum = (value: unknown, allowed: readonly string[], where: string) => {
+    if (typeof value !== "string" || !allowed.includes(value)) problems.push(`${where} is not one of ${allowed.join(", ")}`);
+  };
 
-export async function synthesizeDecisionCard(source: DecisionSynthesisSource, model: DecisionModel): Promise<DecisionSynthesisResult> {
+  exactKeys(raw, ["isChoice", "question", "options", "pick", "door"], "the card");
+  if (typeof raw.isChoice !== "boolean") problems.push("isChoice is not a boolean");
+  needString(raw.question, "question");
+  needEnum(raw.door, ["one_way", "two_way", "unknown"], "door");
+  if (!Array.isArray(raw.options)) {
+    problems.push("options is not an array");
+  } else {
+    raw.options.forEach((option, index) => {
+      const where = `options[${index}]`;
+      if (!isPlainObject(option)) {
+        problems.push(`${where} is not an object`);
+        return;
+      }
+      exactKeys(option, ["label", "quote", "result", "undo"], where);
+      needString(option.label, `${where}.label`);
+      needString(option.quote, `${where}.quote`);
+      needString(option.result, `${where}.result`);
+      needEnum(option.undo, ["easy", "hard", "unknown"], `${where}.undo`);
+    });
+  }
+  if (raw.pick !== null && "pick" in raw) {
+    if (!isPlainObject(raw.pick)) {
+      problems.push("pick is not null or an object");
+    } else {
+      exactKeys(raw.pick, ["label", "quote", "why"], "pick");
+      needString(raw.pick.label, "pick.label");
+      needString(raw.pick.quote, "pick.quote");
+      needString(raw.pick.why, "pick.why");
+    }
+  }
+  return problems;
+}
+
+export type DecisionSynthesisResult =
+  | (DecisionSynthesisOutcome & { durationMs?: number })
+  | { outcome: "failed"; error: string; durationMs?: number };
+
+export async function synthesizeDecisionCard(
+  source: DecisionSynthesisSource,
+  model: DecisionModel,
+  now: () => number = Date.now,
+): Promise<DecisionSynthesisResult> {
+  const started = now();
   try {
-    const { output, usage } = await model.extract({ system: DECISION_SYSTEM_PROMPT, prompt: decisionModelPrompt(source), schema: DECISION_MODEL_OUTPUT_SCHEMA as unknown as Record<string, unknown> });
-    if (output === null || output === undefined) return { outcome: "failed", error: "model returned no output", usage };
-    return { ...cardFromModelOutput(source, output), usage };
+    const { output } = await model.extract({ system: DECISION_SYSTEM_PROMPT, prompt: decisionModelPrompt(source), schema: DECISION_MODEL_OUTPUT_SCHEMA as unknown as Record<string, unknown> });
+    const durationMs = now() - started;
+    if (output === null || output === undefined) return { outcome: "failed", error: "the harness returned no JSON", durationMs };
+    const problems = decisionModelOutputProblems(output);
+    if (problems.length) return { outcome: "failed", error: `the harness's JSON does not match the card schema: ${problems.slice(0, 4).join("; ")}`, durationMs };
+    return { ...cardFromModelOutput(source, output), durationMs };
   } catch (error) {
-    return { outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+    return { outcome: "failed", error: error instanceof Error ? error.message : String(error), durationMs: now() - started };
   }
 }

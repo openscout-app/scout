@@ -69,17 +69,39 @@ door with `gate: none`.
   ask verbatim. A pick must also quote a stated preference ("I'd go with ...",
   "recommend", "prefer"). Fewer than 2 grounded options, more than 3, or
   `isChoice: false` leaves a `question`. With no pick, the card has none.
-- **Model:** `claude-haiku-5-5`, one structured-output call, effort low, no
-  thinking, no retries, a 20 s timeout. Override the model with
-  `SCOUT_DECISION_SYNTHESIS_MODEL`. Turn synthesis off with
-  `SCOUT_DECISION_SYNTHESIS=0`. It runs only when the runtime's environment
-  has `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`, or an
-  Anthropic config directory. Otherwise asks stay plain.
-- **Cost:** about 1,000 input and 250 output tokens, about $0.0002 per card.
-  Calls run one at a time. `decisionSynthesis` records the tokens and
-  `costUsd` that were actually used.
-- **Failure:** the record keeps `outcome: "failed"` and the error. The ask stays
-  plain.
+- **Path:** one turn through Scout's Claude CLI path,
+  `invokeClaudeStreamJsonAgent` (`claude --print`, stream-json), on the
+  operator's signed-in harness. There is no API key and no SDK. Each card gets
+  a fresh session named `scout-decision-synthesis`: the turn runs, then
+  `shutdownClaudeStreamJsonAgent(..., { resetSession: true })` ends it, so no
+  card sees another's text. The turn runs in an empty folder under the
+  session's runtime directory with `--model haiku --effort low --tools ""
+  --strict-mcp-config --disable-slash-commands --no-session-persistence` and a
+  short `--system-prompt`. It has no tools, no MCP servers and no project
+  instructions, and it writes no transcript.
+- **Model:** the harness's own `haiku` alias, which Claude Code resolves to its
+  current small model (`claude-haiku-5-5` today). Override it with
+  `SCOUT_DECISION_SYNTHESIS_MODEL`, which takes any value `claude --model`
+  accepts. Turn synthesis off with `SCOUT_DECISION_SYNTHESIS=0` (or `off`).
+  Synthesis runs only when the Claude CLI resolves (`resolveClaudeExecutable`).
+  Otherwise asks stay plain.
+- **Output check:** the model gets the reply's shape and one rule per field,
+  not a raw JSON Schema; given the raw schema, Haiku echoed it back. The
+  runtime then checks the reply strictly against `DECISION_MODEL_OUTPUT_SCHEMA`
+  (`decisionModelOutputProblems`): every required key, no extra keys, and the
+  right types and enum values. Any problem is `outcome: "failed"`, so the ask
+  stays plain. A card built from valid output is checked again by
+  `validateDecisionCard`.
+- **Cost:** time and plan quota, not dollars. One Haiku turn takes about 3 to
+  6 s of wall time. Of that, Claude Code start-up takes under 1 s, and the
+  model takes 2.7 to 5.3 s. The turn uses about 2.4k input tokens (the
+  system prompt and the ask) and 230 to 830 output tokens, including any
+  thinking. Calls run one at a time and never retry. `decisionSynthesis`
+  records `model`, `via: "claude-cli"` and `durationMs`.
+- **Failure:** the record keeps `outcome: "failed"` and the error, which
+  covers a failed turn, a timeout (90 s), no JSON, or JSON that breaks the
+  schema. The ask stays plain. A failed result is not cached, but the same
+  record is not tried again.
 
 ### History check
 
@@ -155,7 +177,7 @@ type OperatorCardView = {
   card?: DecisionCard | PermissionCard;
   origin?: "agent"|"synthesized"|"permission";
   synthesis?: { outcome: "card"|"question"|"failed"; sourceHash: string; model?: string;
-                inputTokens?: number; outputTokens?: number; costUsd?: number; error?: string; at: number };
+                via?: string; durationMs?: number; cached?: boolean; error?: string; at: number };
   answer?: { answer: DecisionAnswer | PermissionAnswer; text: string; at: number; by: "operator"|"default" };
   requests?: Array<{ note?: string; at: number }>;   // show_more history
 };
@@ -228,8 +250,10 @@ The routes are machine-local. A remote transport gets 403.
 - Reading decision-pack packs from the plugin's data home is not built. Today
   agents pass the file.
 - An ask copied over the mesh can be answered by card only on its home host.
-- A runtime started by launchd may not have `ANTHROPIC_API_KEY`. It then does
-  not synthesize, and asks stay plain.
+- Synthesis needs the Claude CLI to be installed and signed in. When it is
+  missing or signed out, the turn fails and asks stay plain.
+- Synthesis runs only through Claude. Other harnesses (Codex, ACP) are not
+  wired as a synthesis path.
 - More than 3 `--option` values stay a question.
 
 ## Code map
