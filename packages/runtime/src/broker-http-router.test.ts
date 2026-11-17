@@ -649,10 +649,18 @@ describe("createBrokerHttpRouter", () => {
 
     expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "nope", name: "x" } })).response.status).toBe(404);
     expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a" } })).response.status).toBe(400);
-    const remote = await requestRouter(harness, "POST", "/v1/session-names", {
-      body: { selector: "a", name: "x" }, transportContext: { transport: "remote", remoteAddress: "192.168.1.50" } as never,
-    });
-    expect(remote.response.status).toBe(403);
+    const refused: Array<[unknown, string]> = [
+      [{ transport: "remote", remoteAddress: "192.168.1.50" }, "local_only"],
+      [{ transport: "loopback", guest: {} }, "local_only"],
+      [{ transport: "loopback", scoped: {} }, "access_denied"],
+    ];
+    for (const [transportContext, error] of refused) {
+      const denied = await requestRouter(harness, "POST", "/v1/session-names", {
+        body: { selector: "a", name: "x" }, transportContext: transportContext as never,
+      });
+      expect(denied.response.status).toBe(403);
+      expect(denied.body).toMatchObject({ error });
+    }
     expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a", name: null } })).body).toMatchObject({ action: "cleared" });
     expect((await requestRouter(createHarness(), "GET", "/v1/session-names")).response.status).toBe(503);
   });

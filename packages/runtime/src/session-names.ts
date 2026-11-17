@@ -225,18 +225,17 @@ export class SessionNameService {
   }
 
   /**
-   * Names for broker endpoints: the operator's name or the current work title
-   * of the session the endpoint answers to, or null to keep its own label.
+   * Names for broker endpoints: an operator name on any alias wins before a
+   * work title on another alias, or null to keep the endpoint's own label.
    */
   endpointNamer(): (endpoint: AgentEndpoint) => string | null {
     const resolve = this.resolver();
     return (endpoint) => {
       if (!validId(endpoint.harness)) return null;
-      for (const nativeId of endpointNativeIds(endpoint)) {
-        const resolution = resolve(endpoint.harness, nativeId, null);
-        if (resolution.source === "operator" || resolution.source === "work") return resolution.name;
-      }
-      return null;
+      const resolutions = endpointNativeIds(endpoint).map((nativeId) => resolve(endpoint.harness, nativeId, null));
+      const operator = resolutions.find((resolution) => resolution.source === "operator");
+      if (operator) return operator.name;
+      return resolutions.find((resolution) => resolution.source === "work")?.name ?? null;
     };
   }
 

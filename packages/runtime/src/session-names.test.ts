@@ -196,6 +196,36 @@ describe("SessionNameService", () => {
     });
   });
 
+  test("an operator name on an observed alias wins over a work title on another alias", () => {
+    const managed = endpoint("ep-1", "session-abc", "claude", "scout-session-1", {
+      nativeSessionId: "claude-native",
+      externalSessionId: "claude-1",
+    });
+    const { service, registry } = harness({
+      transcripts,
+      endpoints: [managed],
+      records: [work("w-current", "session-abc", "Current work", "working", 9)],
+    });
+    expect(service.resolver()("claude", "claude-native", null).source).toBe("work");
+    expect(service.set({ selector: "session-abc", name: "Operator alias" }).session).toEqual({
+      harness: "claude", nativeSessionId: "claude-1",
+    });
+    expect(service.endpointNamer()(managed)).toBe("Operator alias");
+    expect(service.applyToTranscripts(transcripts)[0]).toMatchObject({
+      title: "Operator alias", sessionNameSource: "operator",
+    });
+    const report = readMeshNodeState({
+      snapshot: () => ({ ...registry, actors: {}, agents: {}, flights: {} }) as never,
+      nodeId: NODE,
+      meshId: "mesh",
+      actorDisplayName: (_snapshot, id) => id,
+      sessionNamer: () => service.endpointNamer(),
+    });
+    expect(report.sessions.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "ep-1", title: "Operator alias" }),
+    ]));
+  });
+
   test("observed-session rows carry the resolved title and the harness title", () => {
     const { service } = harness({ transcripts });
     service.set({ selector: "codex-1", name: "Build fix" });
