@@ -35,7 +35,7 @@ import { join } from "node:path";
 
 import {
   clampAgentNotification,
-  collapseAgentNotification,
+  agentNotificationPreview,
   sealedAgentNotification,
   type AgentNotification,
 } from "@openscout/protocol";
@@ -202,18 +202,17 @@ export function sealAgentNotificationForDevice(
     keys,
     phonePublicKey,
   });
-  const collapsed = collapseAgentNotification(notification);
+  const preview = agentNotificationPreview(notification);
   const { v, itemId, sender, project, host, level, createdAt, route } = notification;
   const asText = (body?: string): AgentNotification => ({
     v, itemId, sender, project, host, level, createdAt, route,
     view: "text",
-    title: collapsed.headline,
+    title: preview.title,
     ...(body ? { body } : {}),
   });
-  const detail = collapsed.body.replace(/\n/g, " ").slice(0, 200);
 
   // Richest first; each rung drops detail until the envelope fits one push.
-  for (const record of [notification, asText(detail), asText()]) {
+  for (const record of [notification, asText(preview.body), asText()]) {
     const sealed = seal(clampAgentNotification(record));
     if (sealed.length <= MAX_SEALED_PUSH_CHARS) return sealed;
   }

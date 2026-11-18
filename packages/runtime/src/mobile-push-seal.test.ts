@@ -80,7 +80,7 @@ describe("sealed push content", () => {
       view: "ask",
       note: "I need you",
       urgent: true,
-      lockScreen: { title: "fab is waiting on your answer", body: "I need you", category: "scout.question", threadId: "scout.agent.fab", level: "time-sensitive" },
+      lockScreen: { title: "Scout", subtitle: "", body: "fab\nReply needed\nI need you", category: "scout.question", threadId: "scout.agent.fab", level: "time-sensitive" },
     });
 
     const big = sealAgentNotificationForDevice({
@@ -91,7 +91,9 @@ describe("sealed push content", () => {
       summary: "要約".repeat(150),
     }, phoneHex.slice(0, 16), { keys, pairingDir: dir });
     expect(big!.length).toBeLessThanOrEqual(2800);
-    expect(open(big!)).toMatchObject({ view: "text", title: "Wants to edit 8 files" });
+    const fallback = open(big!);
+    expect(fallback).toMatchObject({ view: "text", title: "Edit 8 files?" });
+    expect(fallback.lockScreen.body).toBe(`fab\nEdit 8 files?\n${fallback.body}`);
 
     expect(sealAgentNotificationForDevice({ ...base, view: "ask", note: "x" }, "0000000000000000", { keys, pairingDir: dir })).toBeNull();
     expect(sealAgentNotificationForDevice({ ...base, view: "ask", note: "x" }, phoneHex.slice(0, 16), { keys: null, pairingDir: dir })).toBeNull();
