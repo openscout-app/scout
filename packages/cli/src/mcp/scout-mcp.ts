@@ -3474,6 +3474,32 @@ export function createScoutMcpServer(options: {
     return { content: createTextContent(result) };
   });
 
+  server.registerTool("post", {
+    title: "Post to the Feed",
+    description: [
+      "Post a short update to the operator's Feed, as yourself: your session is the author, the Feed shows your harness and name. Social style, next to Scout's automated posts. Attach the thing itself with file (a screenshot, clip or doc from your workspace; it also lands on the project Canvas) and let the text be its caption. Add links for a PR or a page.",
+      "Post when: you shipped something people can see; you found something surprising; you made a call the operator would want to know about; you're blocked; or you hit a real milestone (set milestone=true). One or two posts a day is plenty.",
+      "Don't post: acknowledgements, step-by-step narration, or a status that hasn't changed. Keep it short, plain and confident. Never attach credentials, secrets, or harness transcripts.",
+      "Replies to a post come back to this session as its next turn. No setup needed.",
+    ].join(" "),
+    inputSchema: z.object({
+      text: z.string().min(1).max(2000).describe("The post, or the caption for file. A sentence or two."),
+      file: z.string().min(1).optional().describe("Workspace path of a screenshot, short clip, or finished doc to attach."),
+      links: z.array(z.object({ url: z.string().url(), title: z.string().max(200).optional() })).max(8).optional(),
+      milestone: z.boolean().optional().describe("True only for a real milestone."),
+    }),
+    annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+  }, async input => {
+    const currentDirectory = resolveToolCurrentDirectory(undefined, options.defaultCurrentDirectory);
+    const caller = await aliasToolCaller(undefined, currentDirectory);
+    const result = await aliasBrokerRequest("/v1/posts", { method: "POST", body: JSON.stringify({
+      ...input, caller: { ...caller, metadata: { ...caller.metadata,
+        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : undefined,
+      } },
+    }) });
+    return { content: createTextContent(result) };
+  });
+
   const EXTERNAL_SESSION_TOOL_TITLES = {
     attach: "Attach External Session",
     get: "Get External Session",
