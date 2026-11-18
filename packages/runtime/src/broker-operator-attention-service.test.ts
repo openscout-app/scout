@@ -312,8 +312,9 @@ describe("BrokerOperatorAttentionService", () => {
     const notification = harness.alerts[0]!.notification!;
     expect(notification.sender).toMatchObject({ code: "012", harness: "codex" });
     expect(collapseAgentNotification(notification)).toMatchObject({
-      title: "Codex 012 is waiting on your answer",
-      subtitle: expect.stringMatching(/^webshop on /u),
+      title: expect.stringMatching(/^Scout on .+/u),
+      subtitle: "",
+      body: "Codex 012 · webshop\nReply needed\nDeploy?",
     });
   });
 
