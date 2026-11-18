@@ -1,3 +1,4 @@
+import { isRexSurface, rexHarnessPresent, type RexSurface } from "./rex-terminal.js";
 import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 
@@ -20,23 +21,23 @@ import { execSystemFile } from "./system-probes/exec.js";
 export const LIVE_TERMINAL_HARNESSES = ["claude", "grok", "codex", "pi", "kimi", "opencode"] as const;
 export type LiveTerminalHarness = (typeof LIVE_TERMINAL_HARNESSES)[number];
 
-export type LiveTerminalSurface =
+type DetectedTerminalSurface =
   | { backend: "tmux"; pane: string; session: string }
   | { backend: "ghostty"; terminalId: string };
+export type LiveTerminalSurface = DetectedTerminalSurface | RexSurface;
 
-export type LiveTerminalSession = {
+type HarnessProcess = {
   harness: LiveTerminalHarness;
-  /** pid of the harness process itself. */
   pid: number;
-  /** tty the harness runs on, e.g. `ttys013` or `pts/3`. */
-  tty: string;
-  surface: LiveTerminalSurface;
-  /** The harness's own session id when it exposes one (Claude does). */
   nativeSessionId?: string;
 };
 
+type DetectedTerminalSession = HarnessProcess & { surface: DetectedTerminalSurface; tty: string };
+/** Rex identifies a launched harness by the process in its block. */
+export type LiveTerminalSession = DetectedTerminalSession | (HarnessProcess & { surface: RexSurface; tty?: never });
+
 export type LiveTerminalDetection =
-  | { ok: true; session: LiveTerminalSession }
+  | { ok: true; session: DetectedTerminalSession }
   | { ok: false; reason: "no_harness" | "no_surface" | "surface_unreadable"; detail: string };
 
 type ProcessRow = { pid: number; ppid: number; tty: string; command: string };
@@ -207,6 +208,7 @@ export async function detectCurrentLiveTerminalSession(input: {
 
 export function isAttachedLiveTerminalEndpoint(endpoint: AgentEndpoint): boolean {
   if (endpoint.metadata?.attachedLive !== true) return false;
+  if (endpoint.transport === "rex") return isRexSurface(endpoint.metadata.terminalSurface);
   if (endpoint.transport === "tmux") return typeof endpoint.pane === "string" && endpoint.pane.trim().length > 0;
   if (endpoint.transport === "ghostty") return typeof endpoint.metadata?.ghosttyTerminalId === "string";
   return false;
@@ -214,6 +216,7 @@ export function isAttachedLiveTerminalEndpoint(endpoint: AgentEndpoint): boolean
 
 /** Where an attached endpoint delivers, for messages: "tmux pane %3" / "Ghostty terminal 76495F47". */
 export function describeAttachedLiveTerminal(endpoint: AgentEndpoint): string {
+  if (endpoint.transport === "rex") return `Rex block ${endpoint.sessionId}`;
   return endpoint.transport === "ghostty"
     ? `Ghostty terminal ${String(endpoint.metadata?.ghosttyTerminalId ?? "").slice(0, 8)}`
     : `tmux pane ${endpoint.pane}`;
@@ -246,6 +249,10 @@ export function isAttachedLiveTerminalEndpointAliveSnapshot(endpoint: AgentEndpo
 export async function isAttachedLiveTerminalEndpointAlive(endpoint: AgentEndpoint): Promise<boolean> {
   const pid = livePid(endpoint);
   if (!pid || !processAlive(pid)) return false;
+  if (endpoint.transport === "rex") {
+    const surface = endpoint.metadata?.terminalSurface;
+    return isRexSurface(surface) && rexHarnessPresent(surface, pid, String(endpoint.harness));
+  }
   if (endpoint.transport === "ghostty") {
     const terminalId = endpoint.metadata?.ghosttyTerminalId;
     return typeof terminalId === "string" && await ghosttyTerminalExists(terminalId);

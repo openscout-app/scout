@@ -60,6 +60,8 @@ export function renderMcpCommandHelp(): string {
     "  session_attach_current",
     "                   pro integration: attach the current live Codex session",
     "  card_create      pro integration: fresh reply-ready return address",
+    "  rex_start_agent  open a Scout-addressable Claude or Codex window in the caller's local Rex session",
+    "  rex_status       read Rex windows, child addresses, or a block's native program reports",
     "  agents_start     pro integration: start/create a concrete local agent session",
     "  where            shortlist local projects, agents or sessions by topic",
     "  check            read live work, optionally resolving a topic first",

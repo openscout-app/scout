@@ -233,6 +233,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/inbox/ack": "local",
   "POST /v1/inbox/claim": "local",
   "POST /v1/inbox/nack": "local",
+  "POST /v1/integrations/rex/start": "local",
+  "POST /v1/integrations/rex/status": "local",
   "POST /v1/integrations/setup": "local",
   "POST /v1/integrations/t3/:id": "local",
   "POST /v1/invocations": "local",

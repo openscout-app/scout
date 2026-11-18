@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 import type { SessionState } from "@openscout/agent-sessions";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
+import { isRexSurface, sendRexPrompt } from "./rex-terminal.js";
 import { resolveCodexExecutableInventory } from "@openscout/agent-sessions/codex-executable";
 import type {
   AgentCapability,
@@ -6934,7 +6935,11 @@ async function invokeAttachedLiveTerminalEndpoint(
   const flightId = createLocalAgentFlightId();
   const askedAt = nowSeconds();
   const nudge = buildLocalAgentNudge(agentRuntimeId, invocation, flightId);
-  if (endpoint.transport === "ghostty") {
+  if (endpoint.transport === "rex") {
+    const surface = endpoint.metadata?.terminalSurface;
+    if (!isRexSurface(surface)) throw new Error("Missing Rex block address");
+    await sendRexPrompt(surface, Number(endpoint.metadata?.livePid), harness, nudge);
+  } else if (endpoint.transport === "ghostty") {
     await sendGhosttyPrompt(String(endpoint.metadata?.ghosttyTerminalId), nudge);
   } else {
     // Only Claude exposes stable composer markers; every other TUI is judged by
@@ -6952,7 +6957,7 @@ async function invokeAttachedLiveTerminalEndpoint(
     askedAt,
     timeoutSeconds: invocation.timeoutMs ? Math.max(30, Math.floor(invocation.timeoutMs / 1000)) : 300,
     exitedError: async () => await isAttachedLiveTerminalEndpointAlive(endpoint) ? null : goneError,
-    blockedError: harness === "claude" && endpoint.transport !== "ghostty"
+    blockedError: harness === "claude" && endpoint.transport === "tmux"
       ? async () => claudeLoginBlockedError(await captureTmuxPaneTail(endpoint.pane!, 40).catch(() => ""))
       : undefined,
   });

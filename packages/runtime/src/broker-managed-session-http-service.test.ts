@@ -52,6 +52,7 @@ function createHarness(input: {
   const ensuredEndpoints: AgentEndpoint[] = [];
 
   const service = new BrokerManagedSessionHttpService({
+    async startRexSession() { throw new Error("unexpected Rex launch"); },
     nodeId: "node-local",
     runtimeSnapshot: () => snapshot,
     processCwd: () => input.processCwd ?? "/default-cwd",

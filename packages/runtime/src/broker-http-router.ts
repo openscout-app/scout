@@ -1,3 +1,4 @@
+import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
@@ -862,6 +863,26 @@ export function createBrokerHttpRouter(
       }
       return badRequest(response, "Invalid Deck action or text");
     } catch (error) { return badRequest(response, error instanceof Error ? error.message : String(error)); }
+  }
+
+  if (method === "POST" && url.pathname === "/v1/integrations/rex/start") {
+    if (denyRemoteMutation()) return;
+    try {
+      const input = await readRequestBody<RexStartInput>(request);
+      json(response, 200, await managedSessionHttpService.startRexSession(input));
+    } catch (error) { badRequest(response, error); }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/integrations/rex/status") {
+    if (denyRemoteMutation()) return;
+    try {
+      const input = await readRequestBody<RexStatusInput>(request);
+      const observation = await readRexStatus(input);
+      const endpoints = runtime.peek?.().endpoints;
+      json(response, 200, { ...observation, agents: endpoints ? rexBindings(Object.values(endpoints), nodeId, input) : null });
+    } catch (error) { badRequest(response, error); }
+    return;
   }
 
   if (method === "POST" && url.pathname.startsWith("/v1/integrations/t3/")) {

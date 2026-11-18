@@ -2118,6 +2118,7 @@ const managedSessionService = new BrokerManagedSessionService({
 });
 
 const managedSessionHttpService = new BrokerManagedSessionHttpService({
+  startRexSession: (input) => managedSessionService.startRexSession(input),
   nodeId,
   runtimeSnapshot: () => runtime.snapshot(),
   processCwd: () => process.cwd(),
