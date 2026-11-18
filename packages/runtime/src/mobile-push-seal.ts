@@ -204,15 +204,21 @@ export function sealAgentNotificationForDevice(
   });
   const preview = agentNotificationPreview(notification);
   const { v, itemId, sender, project, host, level, createdAt, route } = notification;
-  const asText = (body?: string): AgentNotification => ({
+  const asText = (title: string, body?: string): AgentNotification => ({
     v, itemId, sender, project, host, level, createdAt, route,
     view: "text",
-    title: preview.title,
+    title,
     ...(body ? { body } : {}),
   });
 
   // Richest first; each rung drops detail until the envelope fits one push.
-  for (const record of [notification, asText(preview.body), asText()]) {
+  const candidates = [
+    notification,
+    ...(preview.body ? [asText(preview.title, preview.body)] : []),
+    asText(preview.title),
+    asText("Open in Scout"),
+  ];
+  for (const record of candidates) {
     const sealed = seal(clampAgentNotification(record));
     if (sealed.length <= MAX_SEALED_PUSH_CHARS) return sealed;
   }
