@@ -845,6 +845,25 @@ describe("scoutAskHandler", () => {
     });
   });
 
+  test("a copied task ref gets one route prefix and a running-turn refusal stays actionable", async () => {
+    useIsolatedOpenScoutHome();
+    const detail = "Follow-up not sent. Send a separate ask with --to session:claude:test.";
+    globalThis.fetch = (async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/v1/node") return jsonResponse({ id: "node-1", capabilities: ["ask-reply/1"] });
+      expect(new URL(request.url).pathname).toBe("/v1/deliver");
+      const payload = await request.json();
+      expect(payload).toMatchObject({ targetLabel: "ref:1-abcdef", target: { kind: "binding_ref", ref: "1-abcdef" } });
+      if (payload.task.ref) return jsonResponse({ error: "task_followup_not_sent", detail, evidence: "flt-parent" }, 409);
+      return jsonResponse({ kind: "delivery", accepted: true, conversation: { id: "dm.test" }, message: { id: "msg-next" } });
+    }) as typeof fetch;
+    const ask = { senderId: "operator", body: "Review scope", senderContext: { agentId: "operator" } };
+    expect(await scoutAskHandler({ ...ask, requestId: "context", task: { version: 1, ref: "ref:1-abcdef" } }))
+      .toMatchObject({ ok: false, state: "failed", ids: { flightId: "flt-parent" }, error: { code: "task_followup_not_sent", message: detail } });
+    expect(await scoutAskHandler({ ...ask, requestId: "successor", task: { version: 1, continue: "ref:1-abcdef" } }))
+      .toMatchObject({ ok: true, ids: { messageId: "msg-next" } });
+  });
+
   test("posts one broker ask with sender context and returns a compact receipt", async () => {
     const home = useIsolatedOpenScoutHome();
     const workspaceRoot = join(home, "dev");

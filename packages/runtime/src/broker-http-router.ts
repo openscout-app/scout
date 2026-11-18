@@ -20,7 +20,7 @@ import { BrokerBusyError } from "./broker-storage-pressure.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
 import { handleBrokerQuarantineRoute, type BrokerQuarantineQueries } from "./broker-quarantine-http-service.js";
 import { createHash } from "node:crypto";
-import { BrokerRequestReceipts } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, ProvenRequestFailure } from "./broker-request-receipts.js";
 import { hasRetiredEndpointRegistration } from "./broker-endpoint-selection.js";
 import { handleBrokerAccessRoute, type BrokerAccessHttpDeps } from "./broker-access-http-routes.js";
 import { handleBrokerMcpEvents } from "./broker-mcp-event-routes.js";
@@ -174,6 +174,7 @@ import { normalizeConversationTitle } from "./conversation-title.js";
 
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
+  else if (error instanceof ProvenRequestFailure) json(response, 409, { error: error.code, detail: error.message, evidence: error.evidence });
   else if (error instanceof BrokerBusyError) json(response, 503, { error: error.code, retryable: true, detail: error.message });
   else writeBadRequest(response, error);
 }

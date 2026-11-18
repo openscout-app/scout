@@ -107,7 +107,7 @@ async function taskFixture(state: FlightRecord["state"] = "running", extra: Reco
   return { h, tasks, ask, answer, successors, get interrupts() { return interrupts; }, setNow(value: number) { now = value; } };
 }
 
-test.each(["queued", "waking", "running", "waiting"] as const)("follow-up on %s creates no invocation and returns its own receipt", async state => {
+test.each(["queued", "waking"] as const)("follow-up on %s creates no invocation and returns its own receipt", async state => {
   const { h, ask } = await taskFixture(state);
   const before = Object.keys(h.runtime.snapshot().invocations);
   const first = await ask(); expect(first).toMatchObject({ accepted: true, message: { body: "scope change" } });
@@ -196,12 +196,11 @@ test("a committed harness result outbox can deliver after completion, but an exp
   expect(Object.values(h.runtime.peek().messages).filter(m => m.replyToMessageId === "ask-parent")).toHaveLength(1);
 });
 
-test("canonical writer upgrades a stale queued follow-up to live-session delivery", async () => {
-  const { h } = await taskFixture("running");
-  const followup: MessageRecord = { ...reply(), id: "stale-followup", actorId: "operator", class: "status",
-    audience: { delivery: "none" }, body: "new context", metadata: { taskFollowup: { invocationId: "parent" } } };
-  await h.records.recordMessage(followup);
-  expect(h.runtime.peek().messages[followup.id]?.audience).toMatchObject({ notify: ["worker"] });
+test.each(["running", "waiting"] as const)("only human-owned %s tasks accept inbox follow-ups", async state => {
+  const worker = await taskFixture(state);
+  await expect(worker.ask()).rejects.toThrow("Follow-up not sent");
+  const human = await taskFixture(state, { humanOwned: true });
+  expect(await human.ask()).toMatchObject({ accepted: true, message: { audience: { notify: ["worker"] } } });
 });
 
 test("old remote task homes fail locally with a capability diagnostic before forwarding", async () => {
@@ -222,7 +221,7 @@ test("a successor to an ask sent to a harness session continues in that session"
   const { ask, successors } = await taskFixture("completed", {}, undefined,
     { targetAgentId: session, execution: { harness: "claude", session: "existing", targetSessionId: session } });
   await ask({ task: { version: 1, continue: "parent" } });
-  expect(successors[0]).toMatchObject({ target: { kind: "agent_id", agentId: session }, targetAgentId: session,
+  expect(successors[0]).toMatchObject({ target: { kind: "session_id", sessionId: session, harness: "claude" },
     execution: { harness: "claude", session: "existing", targetSessionId: session } });
 });
 
@@ -235,7 +234,7 @@ test("a successor to an ask sent to an agent still starts a new session", async 
 });
 
 test("a follow-up's reason reaches the worker in its text, and retries stay idempotent", async () => {
-  const { h, ask } = await taskFixture("running");
+  const { h, ask } = await taskFixture("queued");
   const task = { version: 1, ref: "parent", because: "the operator narrowed the scope" };
   const first = await ask({ task });
   expect(first).toMatchObject({ accepted: true, message: { body: "scope change\n\nBecause: the operator narrowed the scope" } });
@@ -319,7 +318,7 @@ test("cross-host successor never borrows a local endpoint project", async () => 
 });
 
 
-test("queued follow-up commits after dispatch's prompt read and is delivered to the running session", async () => {
+test("the writer refuses a queued follow-up when dispatch wins the race", async () => {
   let release!: () => void, entered!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const atPost = new Promise<void>(resolve => { entered = resolve; });
@@ -330,11 +329,8 @@ test("queued follow-up commits after dispatch's prompt read and is delivered to 
   // Dispatch has already read the prompt, before this message reaches the writer.
   expect(Object.values(h.runtime.peek().messages).filter(m => m.metadata?.taskFollowup)).toHaveLength(0);
   release();
-  await pending;
-  const followup = Object.values(h.runtime.peek().messages).find(m => m.metadata?.taskFollowup)!;
-  expect(followup.audience).toMatchObject({ notify: ["worker"] });
-  expect(h.frames.flat().filter(entry => entry.kind === "message.record" && entry.message.id === followup.id))
-    .toMatchObject([{ message: { audience: { notify: ["worker"] } } }]);
+  await expect(pending).rejects.toThrow("Follow-up not sent");
+  expect(h.frames.flat().filter(entry => entry.kind === "message.record" && entry.message.metadata?.taskFollowup)).toHaveLength(0);
 });
 
 test("operator expiry reads only the open-task index, never a registry snapshot", async () => {
