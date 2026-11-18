@@ -1,5 +1,5 @@
 import { completionReply, flightCompletion, flightSessionTrace } from "@openscout/protocol";
-import { taskTerminal, finishedTaskError, taskCompletionMessage } from "./broker-tasks.js";
+import { taskTerminal, finishedTaskError, followupAudience, taskCompletionMessage } from "./broker-tasks.js";
 import { assertExplicitReplyAdmission, prepareCompletionAdmission } from "./broker-explicit-completion.js";
 import { blockedFlight, holdFinalReplyWhilePermissionOpen, openPermissionRequestId, resumedFlight } from "./broker-blocked-reply.js";
 import { messageWithAcceptedFlight } from "./broker-delivery-receipt-recovery.js";
@@ -743,8 +743,7 @@ export class BrokerDurableRecordStore {
         // Choose delivery under the writer, not from the sender's possibly queued
         // observation: startup may already have passed the prompt snapshot.
         if (!followup.cancel) message = { ...message,
-          audience: ["queued", "waking"].includes(flight.state) ? { delivery: "none" }
-            : { notify: [task.targetAgentId], reason: "thread_reply" },
+          audience: followupAudience(task, flight),
           metadata: { ...message.metadata,
             targetSessionId: flightSessionTrace(flight).at(-1)?.sessionId ?? task.execution?.targetSessionId } };
 
