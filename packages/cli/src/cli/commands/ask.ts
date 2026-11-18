@@ -34,7 +34,7 @@ export function renderAskCommandHelp(): string {
     "", "Ask creates a task and returns on acceptance, not completion. Use scout wait <handle> to wait.",
     "  --to <agent>          recipient; repeat for one independent task/receipt per target",
     "  --project <path>      capability route; add --harness, --model, --effort, or --on <host>",
-    "  --ref <task>          follow up on unfinished work without creating another task",
+    "  --ref <task>          add context before agent dispatch; an active turn refuses --ref",
     "  --ref <task> --cancel explicitly cancel; receipt reports worker interruption",
     "  --continue <task>     successor to a completed, failed, or cancelled task",
     "  --fyi                 deliberate no-answer message; no task/work record",
@@ -424,6 +424,7 @@ export async function runAskWithOptions(
       receipt,
       options.targetLabel
         ?? options.existingTargetHandle
+        ?? renderBindingRef(options.task?.continue ?? options.task?.ref)
         ?? (options.runtimeProfile ? `profile:${options.runtimeProfile}` : undefined),
     ));
   }

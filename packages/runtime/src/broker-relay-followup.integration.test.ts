@@ -52,8 +52,11 @@ test("a tmux turn can finish without reading its inbox; the sender gets a refusa
   // The relay answers only the original prompt; it never polls Scout's inbox.
   await relay.endTurn();
   expect(relay.pasteCount()).toBe(1);
-  expect(response.status).toBeGreaterThanOrEqual(400);
-  expect(JSON.stringify(response.body)).toContain(`--to session:claude:${relay.session}`);
+  expect(response).toMatchObject({ status: 409, body: {
+    error: "task_followup_not_sent", detail: expect.stringContaining(`--to session:claude:${relay.session}`),
+  } });
+  const receipt = await broker.getJson(relay.baseUrl, "/v1/request-receipts/followup?requesterId=operator");
+  expect(receipt).toMatchObject({ receipt: { state: "failed", failure: { code: "task_followup_not_sent", evidence: relay.ask.flight!.id } } });
   expect(await send()).toEqual(response);
   const messages = await broker.getJson<MessageRecord[]>(relay.baseUrl, `/v1/messages?conversationId=${relay.ask.conversation.id}`);
   expect(messages.some(m => m.body === request.body)).toBe(false);

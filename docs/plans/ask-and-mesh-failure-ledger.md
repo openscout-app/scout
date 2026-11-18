@@ -59,41 +59,19 @@ source, not only the old CLI.
   starts a new session.
 - **Needs a live check** after the runtime restarts.
 
+### 5. Follow-ups to a running task were accepted without reaching the turn
+
+Queued and waking agent tasks read follow-ups from the prompt index at
+dispatch. Running tasks used an inbox notification instead. Neither the
+terminal adapter nor turn completion drained that notification.
+
+The task home now refuses a running or waiting agent follow-up with
+`task_followup_not_sent`. The writer also checks the flight state so a
+follow-up racing dispatch cannot miss the prompt. Use a separate ask to the
+session, or `--continue` after completion. The relay integration test covers
+the refused follow-up and the successor on a named dev instance.
+
 ## Open
-
-### 5. Follow-ups to a running task are accepted, then dropped
-
-This is the most damaging entry. It happened at least nine times in one
-session.
-
-- **Symptom:** `ask --ref <running task>` returns "Follow-up accepted" with
-  `state: queued`. The worker's final turn ignores it. A later follow-up gets
-  "task is finished".
-- **Cause, verified in code:**
-  - A follow-up sent while the flight is queued or waking is folded into the
-    prompt at dispatch.
-  - Once the flight is running, the follow-up becomes a `notify` delivery to
-    the worker. No harness adapter pushes that delivery into a running turn:
-    - Claude stream-json has no steer primitive.
-    - Codex `turn/steer` is wired only for deck lanes.
-    - In-place terminal input serves only `session_send`.
-  - The worker sees the follow-up only if the model polls `scout inbox`.
-  - At completion nothing checks for follow-ups left over. Their deliveries
-    stay pending until stale reconciliation fails them.
-- **Plan:**
-  1. Index `notify` follow-ups in the journal as well, with `createdAt`.
-  2. In the local invocation service, after the turn returns and before the
-     flight is marked completed, collect every non-cancel follow-up created
-     after the prompt was read.
-  3. Run those follow-ups as another turn on the same endpoint, and repeat
-     until none are left.
-  4. Check again under the writer before completing. The writer fence closes
-     only once the flight is terminal or its final reply is claimed.
-  5. Later, steer mid-turn where a harness supports it. Re-dispatch at
-     completion stays the guarantee.
-- **Tests:** none cover a follow-up consumed by a running turn today. The test
-  named "queued follow-up ... is delivered to the running session" checks only
-  the audience.
 
 ### 6. MCP `ask` and `scout wait` report "The operation timed out"
 
