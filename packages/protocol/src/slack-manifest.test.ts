@@ -1,5 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { slackClientAppManifest } from "./slack-manifest.ts";
+import { slackAppManifest, slackClientAppManifest } from "./slack-manifest.ts";
+
+describe("Slack app manifest", () => {
+  test("keeps bot presence enabled for generic and project apps", () => {
+    for (const mode of ["generic", "project"] as const) {
+      const manifest = slackAppManifest("Scout", mode) as {
+        features: { bot_user: { always_online: boolean } };
+      };
+      expect(manifest.features.bot_user.always_online).toBe(true);
+    }
+  });
+});
 
 describe("Slack operator client manifest", () => {
   test("keeps the operator connection user-scoped and includes file access", () => {
