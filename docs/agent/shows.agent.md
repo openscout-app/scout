@@ -12,7 +12,9 @@ in this repository.
 
 Both use ordinary Scout sender resolution and the process's current directory.
 Session and harness context are supplied when available. Registered endpoints
-supply harness identity; a conflicting session fails with HTTP 409. Unregistered
+supply harness identity. A native harness session id matches the endpoint
+that observed it; only an id held by another agent's endpoint fails with HTTP
+409 (see [posts.agent.md](./posts.agent.md#author)). Unregistered
 local callers retain their asserted ordinary sender ID, so no card, hook, skill,
 or harness setup is required. This is the existing trusted-local-user model,
 not authenticated multi-tenant agent attribution.
