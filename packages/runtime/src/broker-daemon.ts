@@ -281,7 +281,7 @@ import { findHarnessEntry } from "./harness-catalog.js";
 import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
-import { BrokerRequestReceipts, RetryablePreEffectFailure } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, ProvenRequestFailure, RetryablePreEffectFailure } from "./broker-request-receipts.js";
 import { resolveSessionWorkspace } from "./agent-workspace.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
@@ -3255,7 +3255,16 @@ const taskService = new BrokerTaskService({
     const wirePayload = kind === "ask" ? { ...(payload as ScoutDeliverRequest), intent: "task_ask" } : payload;
     const response = await daemonMeshPeerFetch(node.brokerUrl, `/v1/mesh/tasks/${kind}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(wirePayload), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error(`task home rejected request (${response.status}): ${await response.text()}`);
+    if (!response.ok) {
+      // Only a proven refusal from the task home settles the sender's receipt.
+      if (kind === "ask" && response.status === 409) {
+        const refusal = await response.clone().json().catch(() => null);
+        if (refusal?.error === "task_followup_not_sent" && typeof refusal.detail === "string" && typeof refusal.evidence === "string") {
+          throw new ProvenRequestFailure(refusal.detail, refusal.error, refusal.evidence);
+        }
+      }
+      throw new Error(`task home rejected request (${response.status}): ${await response.text()}`);
+    }
     return response.json();
   },
 });

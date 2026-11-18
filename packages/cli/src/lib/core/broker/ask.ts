@@ -6,6 +6,7 @@ import {
   flightCompletion,
   type ScoutRouteTarget,
 } from "@openscout/protocol";
+import { ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
 
 import {
@@ -381,6 +382,17 @@ export function buildScoutAskRoute(input: {
 }
 
 export const scoutAskHandler: ScoutAskHandler = async (command) => {
+  try {
+    return await submitAsk(command);
+  } catch (error) {
+    if (!(error instanceof ScoutBrokerHttpError) || error.status !== 409 || error.code !== "task_followup_not_sent") throw error;
+    const { detail, evidence } = JSON.parse(error.body);
+    return { ok: false, state: "failed", ids: typeof evidence === "string" ? { flightId: evidence } : {},
+      error: { code: error.code, message: detail || error.message } };
+  }
+};
+
+const submitAsk: ScoutAskHandler = async (command) => {
   const currentDirectory = command.currentDirectory ?? process.cwd();
   if (command.task) validateTaskAsk(command.task, { to: command.to, channel: command.channel,
     capability: !command.task?.continue && Boolean(command.projectPath || command.runtimeProfile || command.existingHandle),
@@ -479,7 +491,7 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
     };
   }
   const taskTarget = command.task?.operator ? { kind: "agent_label" as const, label: "operator" }
-    : command.task?.ref || command.task?.continue ? { kind: "binding_ref" as const, ref: command.task.ref ?? command.task.continue! }
+    : command.task?.ref || command.task?.continue ? { kind: "binding_ref" as const, ref: (command.task.ref ?? command.task.continue!).replace(/^ref:/, "") }
     : command.channel ? { kind: "channel" as const, channel: command.channel } : undefined;
   const target = taskTarget ?? buildScoutAskRoute({
     to: requestedTo,
