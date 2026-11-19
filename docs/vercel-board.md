@@ -68,12 +68,16 @@ arrives.
 
 ## Setup
 
-1. The operator runs `vercel login`. This is the only interactive step. Scout
-   must not run it.
-2. The operator runs `scout board connect`.
-3. Scout creates a named board `scout` on the operator's team, with the
-   channels `work` and `decisions`. Scout does not use the team's shared
-   default board.
+1. The operator creates a Vercel access token and stores it with
+   `secret set <entry>`. This is the only interactive step. Scout reads the
+   token by reference and never prints it. Scout does not use the Vercel CLI's
+   login: its refresh token rotates, and a failed refresh wipes the CLI's auth
+   file, so two processes that share it log each other out.
+2. The operator runs
+   `scout board connect --team <team> --board scout --credential secret_cli:<entry>`.
+3. Scout finds or makes the named board `scout` on the operator's team, with
+   the channels `work` and `decisions`. `@vercel/board` makes a named board on
+   first use. Scout does not use the team's shared default board.
 4. Scout records the custodian host for the connection.
 5. Scout creates, claims and completes one probe task in a scratch channel.
 6. Scout reports the connection as verified only after the probe task
@@ -157,8 +161,10 @@ operator followed it.
 - Board has no review state. The adapter does not project into Scout's
   `review` state.
 - When a Scout agent completes a task, the projector records a runtime move
-  into the Done station. The Done station's judge then sets acceptance to
-  pending. The projector must not set `acceptanceState` directly.
+  into the Done station. The Done station's judge answers the move with the
+  review `pending`, and the Board service then sets acceptance to pending from
+  that answer. The lifecycle engine returns the verdict; it does not write
+  acceptance. The projector must not set `acceptanceState` on its own.
 - `requestedById` on these items is the operator. A mapped Board actor cannot
   confirm acceptance.
 - Acceptance is an inbox, not a gate. When the operator looks, Board already
@@ -273,12 +279,17 @@ packages/runtime/src/board/
   outbox.ts           client IDs, serial lanes
   service.ts          wiring, as in t3/
   schema.ts           cursor, version, custody, outbox tables
+  worker.ts           supervisor and transport for the Board worker
+packages/board-worker/src/
+  worker.mjs          the Board worker: @vercel/board, pinned at 0.52.0
 ```
 
-- The runtime speaks Board's HTTP protocol directly. It takes no dependency on
-  `@vercel/board` unless the spike requires one.
-- If the spike shows that the login exchange is not stable HTTP, a supervised
-  worker process holds the credential, as the Slack worker does. The worker is
+- The runtime speaks Board's HTTP protocol directly to a board that serves it,
+  such as a `vb serve` board. It takes no dependency on `@vercel/board`.
+- A team board in Vercel's API does not serve Board's documented protocol, so
+  a supervised worker process holds the credential, as the Slack worker does.
+  The worker runs `@vercel/board` on Node 24, started under
+  `secret run --map <entry>=BOARD_TOKEN`. The worker is
   transport only. Claim tokens, the renew timer and the cursor stay in the
   runtime, and each claim write carries its epoch and token to the worker. The
   worker accepts a closed set of typed operations. The worker is not a general
@@ -317,11 +328,19 @@ that were made after the architecture review.
    that is minted from `vercel login`, exchanged for the board's audience, and
    valid for 12 hours. The exchange is not in the HTTP reference. The answer
    decides between direct HTTP and the worker process.
+   Answered: a team board takes a plain Vercel access token as a bearer token,
+   with no exchange. The 12-hour exchange applies only to a board mounted in a
+   deployment. The team board's API is not Board's HTTP protocol, so the
+   worker process is the path.
 2. **Request budget.** Does a caller narrowed with `x-board-can` read the feed
    for all followed channels in one request, or one request per channel?
 3. **Client retries.** If the worker path is taken: does the Board client
    retry a claim on a network error by itself? A retried claim is the one
    write with no fence and no idempotency key.
+   Answered for `@vercel/board` 0.52.0: it does not retry on a network error,
+   but it retries a claim on 429 and 503, up to four more times, because the
+   claim carries an operation ID. The worker's own `fetch` sends a claim once:
+   a 429 is a refusal, and a 503 or no answer is an unknown outcome.
 4. **Planned work only: the boundary is right, with two consequences.**
    - A task that the planner writes is owned by the operator's principal, so
      it passes the allowlist. The allowlist then no longer separates text the
