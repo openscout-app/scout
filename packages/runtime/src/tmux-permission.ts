@@ -73,9 +73,12 @@ type TmuxPermissionPane = {
 export function tmuxPermissionPrompt(input: TmuxPermissionPane): ManagedPermissionPrompt | null {
   const prompt = parseTmuxPermission(input.text, input.projectRoot);
   if (!prompt) return null;
-  const current = async () => await input.alive()
-    && (!input.currentCwd || await input.currentCwd() === input.cwd)
-    && parseTmuxPermission(await input.capture(), input.projectRoot)?.version === prompt.version;
+  const current = async () => {
+    if (!await input.alive()) return false;
+    if (input.currentCwd && await input.currentCwd() !== input.cwd) return false;
+    if (parseTmuxPermission(await input.capture(), input.projectRoot)?.version !== prompt.version) return false;
+    return !input.currentCwd || await input.currentCwd() === input.cwd;
+  };
   return { sessionId: input.sessionId, projectRoot: input.projectRoot,
     ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     text: prompt.text, version: prompt.version, decisions: Object.keys(prompt.keys) as PermissionDecision[],

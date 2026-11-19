@@ -450,6 +450,26 @@ describe("permission supervisor lifecycle", () => {
     expect(sent).toEqual([["Enter"]]);
   });
 
+  test("a typographic apostrophe does not turn a persistent Edit choice into once", async () => {
+    const h = harness({ supervisor: () => approve });
+    const edit = "Edit file\n src/app.ts\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don’t ask again in this project\n   3. No\nEsc to cancel";
+    let pane = edit;
+    const sent: string[][] = [];
+    const prompt = tmuxPermissionPrompt({
+      sessionId: "pane", projectRoot: "/work/app", text: edit,
+      capture: async () => pane, alive: async () => true,
+      send: async keys => { sent.push(keys); pane = "ready"; },
+    })!;
+    expect(prompt.decisions).toEqual(["once", "project", "deny"]);
+    await h.service.wait(invocation, prompt);
+    expect(sent).toEqual([["Enter"]]);
+  });
+
+  test("an unrecognized Yes option is not a one-time choice", () => {
+    const ambiguous = "Edit file\n src/app.ts\nDo you want to proceed?\n ❯ 1. Yes, whenever you feel like it\n   2. No\nEsc to cancel";
+    expect(parseTmuxPermission(ambiguous, "/work/app")).toBeNull();
+  });
+
   test("a tmux prompt becomes stale when its working directory changes", async () => {
     let cwd = "/work/app";
     const prompt = tmuxPermissionPrompt({
@@ -459,6 +479,22 @@ describe("permission supervisor lifecycle", () => {
     expect(await prompt.isCurrent()).toBe(true);
     cwd = "/work/outside";
     expect(await prompt.isCurrent()).toBe(false);
+  });
+
+  test("a cwd change during the final capture blocks key delivery", async () => {
+    const h = harness({ supervisor: () => approve });
+    let cwd = "/work/app";
+    let captures = 0;
+    let sent = 0;
+    const prompt = tmuxPermissionPrompt({
+      sessionId: "pane", projectRoot: "/work/app", cwd, currentCwd: async () => cwd, text: tool,
+      capture: async () => { captures++; if (captures === 2) cwd = "/work/outside"; return tool; },
+      alive: async () => true, send: async () => { sent++; },
+    })!;
+    const waiting = h.service.wait(invocation, prompt);
+    await expect(waiting).rejects.toThrow("Permission prompt changed before key delivery");
+    expect(sent).toBe(0);
+    expect(h.notifications).toHaveLength(1);
   });
 
   test("an ambiguous automatic delivery notifies the operator and cannot be replayed", async () => {

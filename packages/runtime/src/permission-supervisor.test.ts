@@ -132,4 +132,20 @@ describe("permission supervisor", () => {
       act: "notify", reason: "command has no working directory",
     });
   });
+
+  test("network and publish grants do not permit outside filesystem effects", () => {
+    for (const text of [claude("curl -o/tmp/outside https://example.com"), codex("curl -o/tmp/outside https://example.com", project)]) {
+      expect(decidePermissionSupervisor(prompt(text), grants("unattended")).act).toBe("notify");
+    }
+    for (const text of [claude("git push /tmp/outside HEAD"), codex("git push /tmp/outside HEAD", project)]) {
+      expect(decidePermissionSupervisor(prompt(text), grants("silent")).act).toBe("notify");
+    }
+  });
+
+  test("higher grants retain their in-project network and publish meaning", () => {
+    expect(decidePermissionSupervisor(prompt(claude("curl -o dist/result https://example.com")), grants("unattended")).act).toBe("continue");
+    expect(decidePermissionSupervisor(prompt(codex("curl -o dist/result https://example.com", project)), grants("unattended")).act).toBe("continue");
+    expect(decidePermissionSupervisor(prompt(claude("git push origin HEAD")), grants("silent")).act).toBe("continue");
+    expect(decidePermissionSupervisor(prompt(codex("git push origin HEAD", project)), grants("silent")).act).toBe("continue");
+  });
 });

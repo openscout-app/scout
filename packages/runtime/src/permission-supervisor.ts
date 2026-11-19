@@ -64,13 +64,16 @@ export function decidePermissionSupervisor(
 }
 
 const LOCAL_SCRIPT = /^(?:test|lint|typecheck|check|build)(?::[\w.-]+)*$/;
+const OUTSIDE_PROJECT_PATH = /(?:^|\s|=|@)(?:~|\/)|\.\./;
 const ATTACHED_ABSOLUTE_PATH = /^--?[A-Za-z][A-Za-z0-9-]*=?(?:\/|~)/;
 
 function classifyPermissionCommandRisk(command: string | null): ContinuationRisk {
   const risk = classifyContinuationRisk(command);
-  if (risk !== "workspace" || !command) return risk;
+  if (!command) return risk;
   const words = command.trim().split(/\s+/);
-  if (words.some(word => ATTACHED_ABSOLUTE_PATH.test(word))) return "unknown";
+  if (OUTSIDE_PROJECT_PATH.test(command.replace(/\bhttps?:\/\/\S+/giu, ""))
+    || words.some(word => ATTACHED_ABSOLUTE_PATH.test(word))) return "unknown";
+  if (risk !== "workspace") return risk;
   if (/^(?:bun|npm|pnpm|yarn)$/.test(words[0] ?? "") && words[1] === "run" && !LOCAL_SCRIPT.test(words[2] ?? "")) {
     return "unknown";
   }
