@@ -418,7 +418,7 @@ test("experimental board marker: a second node refuses without takeover, and a r
 
 // ---- service ------------------------------------------------------------------
 
-function serviceHarness() {
+function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void) {
   const cancelled: { id: string; reason: string }[] = [];
   const time = clock();
   const board = new FakeVercelBoard({ now: time.now });
@@ -432,7 +432,10 @@ function serviceHarness() {
   const rooms = new Map<string, ConversationDefinition>();
   const live: VercelBoardHandoffEvent[] = [];
   const service = new BrokerVercelBoardService({
-    nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now, fetch: board.fetch,
+    nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now, fetch: (url, init) => {
+      beforeFetch?.(String(url), board);
+      return board.fetch(url, init);
+    },
     vercelBoardWorker: { node: "/nonexistent/node" },
     credentialOptions: { env: { VERCEL_BOARD_TEST_TOKEN: board.token } },
     recordWork: async (record, options) => { records.set(record.id, options?.reconcile ? options.reconcile(records.get(record.id), record) : record); },
@@ -539,16 +542,29 @@ test("claim loss cancels the dispatched Scout flight without settling Board agai
   expect(h.board.count("POST", `/tasks/${taskId}/fail`)).toBe(0);
 });
 
-test("fan-in gets the full Scout dependency result, attributed and quoted", async () => {
-  const h = serviceHarness();
+test("fan-in reads the full dependency result, attributed and quoted, before taking its lease", async () => {
+  let duringFanIn: (() => void) | undefined;
+  let upstreamId: string | undefined;
+  const h = serviceHarness(url => {
+    if (upstreamId && new URL(url).pathname.endsWith(`/messages/${upstreamId}`)) duringFanIn?.();
+  });
   await h.connect();
   const upstream = h.board.createTask({ channel: "work", text: "Gather sources" });
+  upstreamId = upstream;
   const downstream = h.board.createTask({ channel: "work", text: "Summarize the sources", needs: [upstream] });
   await h.service.claim({ connectionId: "c1", taskId: upstream, agentId: "agent-1", actorId: "operator" });
   const output = "x".repeat(1200) + "\rFinal source: https://example.com/source";
   h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
   await h.service.pump("c1");
-  await h.service.claim({ connectionId: "c1", taskId: downstream, agentId: "agent-2", actorId: "operator" });
+  let reads = 0;
+  duringFanIn = () => {
+    reads++;
+    expect(h.board.task(downstream)!.state).toBe("ready");
+    h.time.advance(61_000); // longer than the first lease
+  };
+  const claim = await h.service.claim({ connectionId: "c1", taskId: downstream, agentId: "agent-2", actorId: "operator" });
+  expect(reads).toBe(1);
+  expect(claim.until).toBeGreaterThan(h.time.now());
   const prompt = h.deliveries.at(-1)!.body;
   expect(prompt).toContain(`Dependency ${upstream} (completed; channel work):`);
   expect(prompt).toContain("\n> Final source: https://example.com/source");

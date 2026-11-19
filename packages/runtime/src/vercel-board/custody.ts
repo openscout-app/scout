@@ -27,12 +27,17 @@ export type VercelBoardCustodyNotice =
   /** The agent finished, but the claim was gone and the task moved on. The result stays in Scout. */
   | { kind: "finished_claim_lost"; row: VercelBoardCustodyRow; result: string };
 
+type ClaimInput = {
+  taskId: string; workId: string; agentId: string; startedBy: string;
+  dependencyContext?: { channel: string; owner: string; needs: string[]; lines: string[] };
+};
+
 export interface VercelBoardCustodyDeps {
   connection: Pick<VercelBoardConnectionConfig, "id" | "principal">;
   transport: VercelBoardTransport;
   store: VercelBoardStore;
   /** Grant the Scout side: deliver the task to the agent, attached to the projected work item. */
-  dispatch(input: { taskId: string; workId: string; agentId: string; task: VercelBoardWireMessage; attemptId: string }): Promise<{ flightId: string }>;
+  dispatch(input: ClaimInput & { task: VercelBoardWireMessage; attemptId: string }): Promise<{ flightId: string }>;
   flight(flightId: string): Pick<FlightRecord, "state" | "output" | "error" | "summary"> | undefined;
   cancelFlight?(flightId: string, reason: string): Promise<void>;
   notify?(notice: VercelBoardCustodyNotice): Promise<void> | void;
@@ -61,7 +66,7 @@ export class VercelBoardCustody {
     this.firstLease = Math.min(deps.firstLeaseSeconds ?? VERCEL_BOARD_FIRST_LEASE_SECONDS, this.lease);
   }
 
-  async claim(input: { taskId: string; workId: string; agentId: string; startedBy: string }): Promise<VercelBoardCustodyRow> {
+  async claim(input: ClaimInput): Promise<VercelBoardCustodyRow> {
     const { connection, store, transport } = this.deps;
     const active = store.activeCustody(connection.id).find(row => row.taskId === input.taskId);
     if (active) {
@@ -81,7 +86,7 @@ export class VercelBoardCustody {
     }
   }
 
-  private async claimAttempt(input: { taskId: string; workId: string; agentId: string; startedBy: string }, attemptId: string): Promise<VercelBoardCustodyRow> {
+  private async claimAttempt(input: ClaimInput, attemptId: string): Promise<VercelBoardCustodyRow> {
     const { connection, store, transport } = this.deps;
     let grant;
     try {
