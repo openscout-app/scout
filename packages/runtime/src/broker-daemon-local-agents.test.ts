@@ -99,6 +99,68 @@ describe("broker daemon local agent routing", () => {
     ]));
   }, 15_000);
 
+  test("resolves a fresh session's card and preserves its observed runtime in channel history", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "scout-joiner-project-"));
+    broker.temporaryDirectories.add(projectRoot);
+    const harness = await broker.startBroker({ devInstance: true, env: { OPENSCOUT_CORE_AGENTS: "" } });
+    const ask = await broker.postJson<{
+      targetAgentId: string;
+      flight: { id: string; invocationId: string };
+    }>(harness.baseUrl, "/v1/deliver", {
+      requestId: "launch-joiner",
+      target: { kind: "project_path", projectPath: projectRoot },
+      execution: { harness: "claude", session: "new", model: "opus" },
+      intent: "consult", ensureAwake: false, body: "Read the project.",
+    });
+    const actorId = ask.targetAgentId;
+    const snapshot = await broker.getJson<{
+      agents: Record<string, unknown>;
+      endpoints: Record<string, { id: string; agentId: string }>;
+    }>(harness.baseUrl, "/v1/snapshot");
+    expect(snapshot.agents[actorId]).toBeUndefined();
+    const endpoint = Object.values(snapshot.endpoints).find(endpoint => endpoint.agentId === actorId)!;
+    const cardPath = `/v1/agent-cards?agentId=${encodeURIComponent(actorId)}`;
+    type Card = { agentId: string; displayName: string; harness: string; metadata: { model?: string } };
+    const initial = await broker.getJson<{ cards: Card[] }>(harness.baseUrl, cardPath);
+    expect(initial.cards).toEqual([expect.objectContaining({ agentId: actorId, harness: "claude" })]);
+    expect(initial.cards[0]?.metadata.model).toBeUndefined();
+
+    await broker.waitFor(
+      () => broker.getJson<{ flights: Record<string, { metadata?: { dispatchOutcome?: { status?: string } } }> }>(
+        harness.baseUrl, "/v1/snapshot",
+      ),
+      snapshot => snapshot.flights[ask.flight.id]?.metadata?.dispatchOutcome?.status === "queued_until_online",
+    );
+    await broker.postJson(harness.baseUrl, "/v1/flights", {
+      ...ask.flight, targetAgentId: actorId, requesterId: "operator", state: "running",
+      metadata: { dispatchAck: { endpointId: endpoint.id, acknowledgedAt: Date.now(), executionResolution: {
+        harness: { observed: "claude" }, model: { observed: "claude-fable-5.2" },
+      } } },
+    });
+    const { cards } = await broker.getJson<{ cards: Card[] }>(harness.baseUrl, cardPath);
+    expect(cards[0]?.metadata.model).toBe("claude-fable-5.2");
+    const unfiltered = await broker.getJson<{ cards: Card[] }>(harness.baseUrl, "/v1/agent-cards");
+    expect(unfiltered.cards.some(card => card.agentId === actorId)).toBe(false);
+
+    const request = {
+      requestId: "post-as-joiner", caller: { actorId, nodeId: harness.nodeId },
+      target: { kind: "channel", channel: "questions" },
+      intent: "task_ask", task: { version: 1, fyi: true }, body: "Here is what I found.",
+      messageMetadata: { senderContext: { agentId: actorId, cwd: projectRoot, worktree: "unknown", model: "client-model" } },
+    };
+    const posted = await broker.postJson<{ conversation: { id: string }; message: { id: string } }>(
+      harness.baseUrl, "/v1/deliver", request,
+    );
+    expect(await broker.postJson(harness.baseUrl, "/v1/deliver", request)).toEqual(posted);
+    const messages = await broker.getJson<Array<{ id: string; metadata: Record<string, unknown> }>>(
+      harness.baseUrl, `/v1/messages?conversationId=${posted.conversation.id}`,
+    );
+    expect(messages.find(message => message.id === posted.message.id)?.metadata.senderContext).toEqual({
+      agentId: actorId, displayName: cards[0]?.displayName, cwd: projectRoot, worktree: "unknown",
+      harness: "claude", model: "claude-fable-5.2",
+    });
+  }, 15_000);
+
   test("applies a broker runtime profile to a fresh current-project session", async () => {
     const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
     const supportDirectory = join(controlHome, "support");

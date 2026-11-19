@@ -1,3 +1,4 @@
+import { sessionSenderMetadata } from "./broker-session-sender-profile.js";
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
 import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
@@ -984,7 +985,7 @@ export class BrokerDeliveryAcceptanceService {
         policy: "durable",
         createdAt,
         metadata: {
-          ...(payload.messageMetadata ?? {}),
+          ...sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata),
           ...(payload.task && payload.requestId ? { requestId: payload.requestId, requestIntent: payload.task.fyi ? "tell" : "consult" } : {}),
           ...(labels.length ? { labels } : {}),
           relayChannel: deliveryChannel,
