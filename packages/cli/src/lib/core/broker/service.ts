@@ -479,6 +479,7 @@ export type ScoutAskResult = {
   sessionAlias?: string;
   executionResolution?: import("@openscout/protocol").ScoutExecutionResolution;
   workItem?: ScoutTrackedWorkItem;
+  workPageUnavailable?: true;
   unresolvedTarget?: string;
   targetDiagnostic?: ScoutAskTargetDiagnostic;
   preflightFailure?: {
@@ -4606,6 +4607,7 @@ export async function deliverScoutAsk(input: {
     sessionAlias: delivery.receipt?.sessionAlias ?? delivery.sessionAlias,
     executionResolution: delivery.receipt?.executionResolution,
     workItem,
+    ...(delivery.workPageUnavailable ? { workPageUnavailable: true } : {}),
   };
 }
 

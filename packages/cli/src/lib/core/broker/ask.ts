@@ -81,6 +81,7 @@ type ScoutAskDeliveryResult = {
   sessionAlias?: string;
   executionResolution?: ScoutAskReceipt["executionResolution"];
   workItem?: ScoutAskResult["workItem"];
+  workPageUnavailable?: true;
   targetDiagnostic?: ScoutAskResult["targetDiagnostic"];
   preflightFailure?: ScoutAskResult["preflightFailure"];
 };
@@ -223,6 +224,7 @@ export function buildScoutAskReceipt(input: {
     ok,
     state,
     ...(input.result.accepted ? { recording: "recorded" as const } : {}),
+    ...(input.result.workPageUnavailable ? { workPageUnavailable: true } : {}),
     ...(typeof input.result.deliveryMessage?.metadata?.workerInterrupted === "boolean" ? { workerInterrupted: input.result.deliveryMessage.metadata.workerInterrupted } : {}),
     ...(input.result.deliveryMessage?.metadata?.notificationPolicy ? { notificationStatus:
       (input.result.deliveryMessage.metadata.notificationPolicy as { requested?: boolean }).requested ? "requested_unconfirmed" as const : "not_requested" as const } : {}),
