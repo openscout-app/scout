@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import {
-  BOARD_ADAPTER_ID, BOARD_LABELS, isBoardChannelPath, isBoardPrincipal, validateBoardCredentialReference,
+  BOARD_ADAPTER_ID, BOARD_DEFAULT_VERCEL_BOARD, BOARD_LABELS, boardCanHeader, isBoardChannelPath, isBoardPrincipal, validateBoardCredentialReference,
+  validateBoardVercelTarget, vercelTargetOfUrl, vercelTeamBoardUrl, type BoardVercelTarget,
   type ActorIdentity, type BoardClaimRequest, type BoardClaimResponse, type BoardConnectRequest, type BoardConnectResponse,
   type BoardConnectionConfig, type BoardConnectionState, type BoardConnectionStatus, type BoardPlanRequest, type BoardPlanResponse,
   type CollaborationEvent, type CollaborationRecord, type FlightRecord, type ScoutDeliverRequest, type ScoutDeliverResponse, type WorkItemRecord,
 } from "@openscout/protocol";
 import type { ControlPlaneSqliteTransactionalDatabase } from "../sqlite-adapter.js";
 import { agentLabel, BoardHttpError, BoardHttpTransport, BoardUnknownOutcomeError, type BoardFetch, type BoardTransport } from "./client.js";
-import { BOARD_DEFAULT_CHANNELS, BOARD_DEFAULT_PROBE_CHANNEL, BOARD_PROFILE, BoardConnectionError, BoardConnectionFile, boardTransportFor, VERCEL_TRANSPORT_DIAGNOSTIC } from "./connection.js";
+import { BOARD_DEFAULT_CHANNELS, BOARD_DEFAULT_PROBE_CHANNEL, BOARD_PROFILE, BoardConnectionError, BoardConnectionFile, boardTransportFor } from "./connection.js";
 import { BoardCredential, BoardCredentialError } from "./credential.js";
 import { BoardClaimError, BoardCustody, type BoardCustodyNotice } from "./custody.js";
 import { BoardFollower } from "./follower.js";
@@ -16,6 +17,7 @@ import { BoardOutbox } from "./outbox.js";
 import { boardActorId, boardPrincipalOf, boardScopedId, boardTaskWorkItem, boardWorkId, mergeBoardProjection } from "./projection.js";
 import { BoardCursorConflictError, BoardStore } from "./store.js";
 import type { BoardWireMessage } from "./wire.js";
+import { BoardWorkerError, BoardWorkerSupervisor, BoardWorkerTransport, type BoardWorkerOptions } from "./worker.js";
 
 export class BoardServiceError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly fix?: string) {
@@ -42,6 +44,8 @@ export interface BrokerBoardServiceOptions {
   flight(id: string): FlightRecord | undefined;
   fetch?: BoardFetch;
   credentialOptions?: ConstructorParameters<typeof BoardCredential>[1];
+  /** The Vercel transport's worker. `memory` points it at an in-memory board, for tests. */
+  boardWorker?: BoardWorkerOptions & { memory?: boolean };
   /** Tests drive the loops by hand. */
   autoStart?: boolean;
   now?: () => number;
@@ -52,6 +56,8 @@ interface LiveConnection {
   config: BoardConnectionConfig;
   credential: BoardCredential;
   transport: BoardTransport;
+  /** The Vercel transport's worker, for a `vercel_api` connection. */
+  worker?: BoardWorkerSupervisor;
   store: BoardStore;
   follower: BoardFollower;
   custody: BoardCustody;
@@ -112,13 +118,25 @@ export class BrokerBoardService {
     this.live.clear();
   }
 
-  private build(config: BoardConnectionConfig): LiveConnection {
-    if (config.transport !== "protocol") throw new BoardServiceError(501, "transport_unavailable", VERCEL_TRANSPORT_DIAGNOSTIC);
-    const credential = new BoardCredential(config.credential, this.options.credentialOptions);
-    const transport = new BoardHttpTransport(config, () => credential.token(), this.options.fetch);
+  /** The worker for a team board. Its profile and `x-board-can` are fixed here, from the connection. */
+  private worker(config: BoardConnectionConfig, credential: BoardCredential): BoardWorkerSupervisor {
+    const { memory, ...options } = this.options.boardWorker ?? {};
+    if (!config.vercel) throw new BoardServiceError(400, "invalid_connection", "A team board connection must name its team and board.");
+    return new BoardWorkerSupervisor({
+      target: memory ? { kind: "memory" } : { kind: "vercel", team: config.vercel.team, board: config.vercel.board },
+      profile: config.profile, can: boardCanHeader(config),
+      credential: memory ? null : config.credential,
+      readToken: () => credential.token(),
+    }, options);
+  }
+
+  private build(config: BoardConnectionConfig, prepared?: { credential: BoardCredential; worker: BoardWorkerSupervisor }): LiveConnection {
+    const credential = prepared?.credential ?? new BoardCredential(config.credential, this.options.credentialOptions);
+    const worker = config.transport === "vercel_api" ? prepared?.worker ?? this.worker(config, credential) : undefined;
+    const transport: BoardTransport = worker ? new BoardWorkerTransport(worker) : new BoardHttpTransport(config, () => credential.token(), this.options.fetch);
     const store = new BoardStore(this.options.database, this.now);
     const live: LiveConnection = {
-      config, credential, transport, store, state: "connecting", readsBlockedUntil: 0, abort: new AbortController(), timers: [],
+      config, credential, transport, worker, store, state: "connecting", readsBlockedUntil: 0, abort: new AbortController(), timers: [],
       follower: undefined as never, custody: undefined as never, outbox: new BoardOutbox({ connection: config, transport, store }),
     };
     live.follower = new BoardFollower({
@@ -136,10 +154,10 @@ export class BrokerBoardService {
     return live;
   }
 
-  private async open(config: BoardConnectionConfig): Promise<LiveConnection> {
+  private async open(config: BoardConnectionConfig, prepared?: { credential: BoardCredential; worker: BoardWorkerSupervisor }): Promise<LiveConnection> {
     const existing = this.live.get(config.id);
     if (existing) this.close(existing, "stopped");
-    const live = this.build(config);
+    const live = this.build(config, prepared);
     try {
       live.grant = this.lease.claim(config.id, config.principal);
     } catch (error) {
@@ -153,6 +171,7 @@ export class BrokerBoardService {
 
   private close(live: LiveConnection, state: BoardConnectionState): void {
     live.abort.abort();
+    live.worker?.stop();
     for (const timer of live.timers) clearTimeout(timer);
     live.timers = [];
     if (live.grant) this.lease.release(live.config.id, live.config.principal, live.grant);
@@ -244,6 +263,12 @@ export class BrokerBoardService {
       live.state = "unreachable";
       live.detail = `${error.code}: ${error.message}`;
       return;
+    }
+    if (error instanceof BoardWorkerError) {
+      live.state = "transport_unavailable";
+      live.detail = error.message;
+      live.fix = error.fix;
+      return 60_000;
     }
     if (error instanceof BoardCredentialError) {
       live.state = "auth_expired";
@@ -497,26 +522,58 @@ export class BrokerBoardService {
 
   // ---- connect and status ------------------------------------------------
 
+  /** The board a connect request names: a URL, or a team and a board name. */
+  private targetOf(request: BoardConnectRequest): { url: string; transport: "protocol" } | { url: string; transport: "vercel_api"; vercel: BoardVercelTarget } {
+    const named = request.team !== undefined || request.board !== undefined;
+    if (named && request.url !== undefined) throw new BoardServiceError(400, "invalid_request", "Name the board by url, or by team and board, not both.");
+    if (named || (typeof request.url === "string" && boardTransportFor(request.url) === "vercel_api")) {
+      const vercel = named
+        ? { team: String(request.team ?? "").trim(), board: String(request.board ?? BOARD_DEFAULT_VERCEL_BOARD).trim() }
+        : vercelTargetOfUrl(request.url!);
+      const errors = vercel ? validateBoardVercelTarget(vercel) : ["the URL names no team (teamId) and board"];
+      if (errors.length) throw new BoardServiceError(400, "invalid_request", errors.join("; "), "Run: scout board connect --team <team ID or slug> --board scout --credential secret_cli:<entry>");
+      return { url: vercelTeamBoardUrl(vercel!), transport: "vercel_api", vercel: vercel! };
+    }
+    if (typeof request.url !== "string") throw new BoardServiceError(400, "invalid_request", "Name the board: url, or team and board.");
+    return { url: request.url.replace(/\/+$/, ""), transport: "protocol" };
+  }
+
   async connect(request: BoardConnectRequest & { experimentalMarker?: boolean; takeover?: boolean }): Promise<BoardConnectResponse> {
-    if (!request || typeof request.url !== "string") throw new BoardServiceError(400, "invalid_request", "url is required.");
-    const transportKind = boardTransportFor(request.url);
-    if (transportKind === "vercel_api") throw new BoardServiceError(501, "transport_unavailable", VERCEL_TRANSPORT_DIAGNOSTIC);
+    if (!request || typeof request !== "object") throw new BoardServiceError(400, "invalid_request", "A connect request is required.");
+    const target = this.targetOf(request);
     const credentialErrors = validateBoardCredentialReference(request.credential);
     if (credentialErrors.length) throw new BoardServiceError(400, "invalid_credential_reference", credentialErrors.join("; "));
     const channels = request.channels ?? BOARD_DEFAULT_CHANNELS;
     const probeChannel = request.probeChannel ?? BOARD_DEFAULT_PROBE_CHANNEL;
     if (!channels.every(isBoardChannelPath) || !isBoardChannelPath(probeChannel)) throw new BoardServiceError(400, "invalid_request", "Channels must be Board channel paths.");
-    const id = request.id ?? `board-${createHash("sha256").update(request.url).digest("hex").slice(0, 12)}`;
+    const id = request.id ?? `board-${createHash("sha256").update(target.url).digest("hex").slice(0, 12)}`;
     const draft: BoardConnectionConfig = {
-      id, url: request.url.replace(/\/+$/, ""), transport: transportKind, principal: "pending:pending", profile: request.profile ?? BOARD_PROFILE,
+      id, url: target.url, transport: target.transport, ...(target.transport === "vercel_api" ? { vercel: target.vercel } : {}),
+      principal: "pending:pending", profile: request.profile ?? BOARD_PROFILE,
       channels, probeChannel, ownerAllowlist: [], custodianNodeId: this.options.nodeId, credential: request.credential, connectedAt: this.now(),
     };
     const credential = new BoardCredential(draft.credential, this.options.credentialOptions);
-    const transport = new BoardHttpTransport(draft, () => credential.token(), this.options.fetch);
+    // A team board's worker serves connect and then the connection: one process, one in-memory test board.
+    const worker = draft.transport === "vercel_api" ? this.worker(draft, credential) : undefined;
+    try {
+      const response = await this.connectWith(request, draft, credential, worker);
+      return response;
+    } catch (error) {
+      worker?.stop();
+      throw error;
+    }
+  }
+
+  private async connectWith(
+    request: BoardConnectRequest & { experimentalMarker?: boolean; takeover?: boolean },
+    draft: BoardConnectionConfig, credential: BoardCredential, worker: BoardWorkerSupervisor | undefined,
+  ): Promise<BoardConnectResponse> {
+    const transport: BoardTransport = worker ? new BoardWorkerTransport(worker) : new BoardHttpTransport(draft, () => credential.token(), this.options.fetch);
     let me;
     try {
       me = await transport.me();
     } catch (error) {
+      if (error instanceof BoardWorkerError) throw new BoardServiceError(503, error.code, error.message, error.fix);
       if (error instanceof BoardCredentialError) throw new BoardServiceError(400, error.code, error.message, authFix(draft));
       if (error instanceof BoardHttpError && error.status === 401) throw new BoardServiceError(401, "auth_failed", "The board refused the credential.", authFix(draft));
       if (error instanceof BoardHttpError) throw new BoardServiceError(502, error.code, `The board did not answer GET /me: ${error.message}`, error.hint);
@@ -527,11 +584,15 @@ export class BrokerBoardService {
     const ownerAllowlist = request.ownerAllowlist ?? [principal];
     if (!ownerAllowlist.every(isBoardPrincipal)) throw new BoardServiceError(400, "invalid_request", "ownerAllowlist holds principal IDs, never handles.");
     const config: BoardConnectionConfig = { ...draft, principal, ownerAllowlist };
-    const ready = new BoardHttpTransport(config, () => credential.token(), this.options.fetch);
+    // The worker's narrowing depends only on the channels, which have not changed.
+    const ready: BoardTransport = worker ? transport : new BoardHttpTransport(config, () => credential.token(), this.options.fetch);
+    // On a team board, the first of these makes or finds the board by name.
+    const { channels, probeChannel } = config;
     for (const channel of [...channels, probeChannel]) {
       await ready.ensureChannel(channel).catch(error => {
         if (error instanceof BoardHttpError && (error.status === 409 || error.code === "channel_exists")) return;
-        throw new BoardServiceError(502, error instanceof BoardHttpError ? error.code : "channel_failed", `Could not make channel ${channel}.`);
+        const code = error instanceof BoardHttpError ? error.code : "channel_failed";
+        throw new BoardServiceError(error instanceof BoardHttpError && error.status === 404 ? 404 : 502, code, `Could not make channel ${channel}: ${error instanceof Error ? error.message : code}`, error instanceof BoardHttpError ? error.hint : undefined);
       });
     }
     let markerId: string | undefined;
@@ -549,7 +610,7 @@ export class BrokerBoardService {
       if (probe.state === "completed") config.verifiedAt = this.now();
     }
     await this.file.put(config);
-    const live = await this.open(config);
+    const live = await this.open(config, worker ? { credential, worker } : undefined);
     if (markerId) live.markerId = markerId;
     if (live.state === "connecting" && this.options.autoStart === false) live.state = "following";
     return { connection: config, status: this.statusOf(live), ...(probe ? { probe } : {}) };
@@ -601,14 +662,14 @@ export class BrokerBoardService {
       out.push({
         id: config.id, url: config.url, transport: config.transport, principal: config.principal, profile: config.profile, channels: config.channels,
         custodianNodeId: config.custodianNodeId, nodeId: this.options.nodeId,
-        state: config.transport !== "protocol" ? "transport_unavailable" : config.custodianNodeId === this.options.nodeId ? "stopped" : "not_custodian",
+        state: config.custodianNodeId === this.options.nodeId ? "stopped" : "not_custodian",
         ...(config.custodianNodeId !== this.options.nodeId ? { detail: `Node ${config.custodianNodeId} is the custodian.` } : {}),
         verified: config.verifiedAt !== undefined,
         cursors: config.channels.map(channel => ({ channel, stored: Boolean(store.cursor(config.id, channel)) })),
         custody: store.custodyCounts(config.id), outbox: store.outboxCounts(config.id),
       });
     }
-    if (connectionId && !out.length) throw new BoardServiceError(404, "not_found", `No board connection ${connectionId}.`, "Run: scout board connect --url <board url> --credential secret_cli:<entry>");
+    if (connectionId && !out.length) throw new BoardServiceError(404, "not_found", `No board connection ${connectionId}.`, "Run: scout board connect --team <team> --board scout --credential secret_cli:<entry>");
     return out;
   }
 }

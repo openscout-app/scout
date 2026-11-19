@@ -373,6 +373,7 @@ function serviceHarness() {
   const flights = new Map<string, FlightRecord>();
   const service = new BrokerBoardService({
     nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now, fetch: board.fetch,
+    boardWorker: { node: "/nonexistent/node" },
     credentialOptions: { env: { BOARD_TEST_TOKEN: board.token } },
     recordWork: async (record, options) => { records.set(record.id, options?.reconcile ? options.reconcile(records.get(record.id), record) : record); },
     appendWorkEvent: async event => { events.push(event); },
@@ -404,10 +405,10 @@ test("connect reads the principal, makes the channels, and is verified only afte
   expect(h.board.count("POST", "/channels")).toBe(2);
 });
 
-test("a team board URL fails with an actionable diagnostic, before any request", async () => {
+test("a team board URL goes to the Board worker, never to the HTTP transport", async () => {
   const h = serviceHarness();
   await expect(h.service.connect({ url: "https://api.vercel.com/v1/messageboard/boards/scout?teamId=team_1", credential: { backend: "env", key: "BOARD_TEST_TOKEN" } }))
-    .rejects.toMatchObject({ code: "transport_unavailable", status: 501 });
+    .rejects.toMatchObject({ status: 503 });
   expect(h.board.requests.length).toBe(0);
 });
 

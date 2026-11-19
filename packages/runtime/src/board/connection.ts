@@ -16,17 +16,12 @@ export class BoardConnectionError extends Error {
 /**
  * A team board in Vercel's API does not speak Board's documented HTTP
  * protocol: its routes and wire shapes are Vercel's own, and only the
- * `@vercel/board` client translates them. This build speaks the documented
- * protocol only, so such a URL fails here, with the reason, instead of at
- * the first read.
+ * `@vercel/board` client translates them. Such a board goes through the
+ * Board worker; any other URL is spoken to directly.
  */
 export function boardTransportFor(url: string): BoardTransportKind {
   return isVercelTeamBoardUrl(url) ? "vercel_api" : "protocol";
 }
-
-export const VERCEL_TRANSPORT_DIAGNOSTIC =
-  "This is a team board in Vercel's API. Its wire format is not Board's documented HTTP protocol, and this Scout build does not ship the Vercel transport yet. "
-  + "Point Scout at a board that serves the documented protocol (a `vb serve` board, or a board mounted in a deployment), or wait for the Vercel transport.";
 
 /** The connection file: operator configuration, mode 0600, in the control home. It holds a credential reference, never a value. */
 export class BoardConnectionFile {
