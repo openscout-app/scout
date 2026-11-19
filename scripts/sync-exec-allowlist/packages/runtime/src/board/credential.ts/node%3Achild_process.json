@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/board/credential.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "bounded asynchronous credential read through the local secret helper, with an explicit timeout and process-group cleanup",
+  "owner": "runtime"
+}

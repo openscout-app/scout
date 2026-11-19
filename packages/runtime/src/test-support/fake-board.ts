@@ -1,0 +1,288 @@
+/**
+ * An in-memory Board that answers the documented HTTP routes Scout uses
+ * (Board 0.52 reference). No network: tests pass `fetch` to the transport.
+ * Faults are injected per route: drop the answer after applying the write,
+ * fail before applying, or answer a status.
+ */
+type Task = {
+  state: "waiting" | "ready" | "claimed" | "blocked" | "completed" | "failed" | "canceled";
+  owner: string; by: string; for: string | null; needs: string[]; epoch: number;
+  claim: { actor: string; until: number; token: string } | null;
+  blocked: { kind: string | null; reason: string } | null; result: string | null; reason: string | null;
+};
+type Message = {
+  id: string; channel: string; text: string; re: string | null; labels: Record<string, string>; deleted: boolean;
+  createdAt: string; version: number; revision: number; by: { actor: string; principal: string; profile: string | null }; task?: Task;
+};
+type Event = { seq: number; type: string; channel: string; payload: Record<string, unknown>; messageId?: string; snapshot?: unknown };
+export type FakeBoardFault = { route: string; mode: "drop_answer" | "fail_before"; status?: number; times?: number } | { route: string; mode: "status"; status: number; code: string; times?: number; retryAfter?: string };
+
+export class FakeBoard {
+  readonly principal: string;
+  readonly token: string;
+  readonly requests: { method: string; path: string; headers: Record<string, string>; body?: unknown }[] = [];
+  private seq = 0;
+  private floor = 0;
+  private readonly messages = new Map<string, Message>();
+  private readonly events: Event[] = [];
+  private readonly posts = new Map<string, string>();
+  private readonly batches = new Map<string, string[]>();
+  private readonly channels = new Set<string>();
+  private faults: FakeBoardFault[] = [];
+  now: () => number;
+
+  constructor(options: { principal?: string; token?: string; now?: () => number } = {}) {
+    this.principal = options.principal ?? "local:user:operator";
+    this.token = options.token ?? "test-token-123456";
+    this.now = options.now ?? Date.now;
+  }
+
+  fault(fault: FakeBoardFault): void { this.faults.push(fault); }
+
+  /** Write as someone else, outside Scout. */
+  createTask(input: { channel: string; text: string; owner?: string; needs?: string[] }): string {
+    return this.makeTask(input.channel, input.text, {}, input.needs ?? [], input.owner ?? this.principal, null).id;
+  }
+  /** Another worker claims a task. */
+  claimAs(id: string, actor: string, leaseSeconds = 300): { epoch: number; token: string } {
+    const message = this.messages.get(id)!;
+    this.expire(message);
+    const task = message.task!;
+    if (task.state !== "ready") throw new Error(`fake: ${id} is ${task.state}`);
+    task.epoch += 1;
+    const token = `tok-${id}-${task.epoch}-${Math.random().toString(36).slice(2)}`;
+    task.claim = { actor, until: this.now() + leaseSeconds * 1000, token };
+    task.state = "claimed";
+    this.bump(message, "task.claimed", { id, epoch: task.epoch });
+    return { epoch: task.epoch, token };
+  }
+  /** Edit a root as someone other than its owner: Board blocks the task, kind `edited`, and the claim ends. */
+  editAsOther(id: string, text: string): void {
+    const message = this.messages.get(id)!;
+    message.text = text;
+    message.task!.state = "blocked";
+    message.task!.blocked = { kind: "edited", reason: "edited by someone else" };
+    message.task!.claim = null;
+    this.bump(message, "message.edited", { id, text });
+    this.bump(message, "task.blocked", { id, kind: "edited" });
+  }
+  deleteRoot(id: string): void {
+    const message = this.messages.get(id)!;
+    message.deleted = true;
+    message.text = "";
+    message.task!.state = "canceled";
+    message.task!.reason = "deleted";
+    message.task!.claim = null;
+    this.bump(message, "message.deleted", { id });
+    this.bump(message, "task.canceled", { id, reason: "deleted" });
+  }
+  /** Drop the oldest events: a cursor before the floor is rejected. */
+  truncateFeed(): void { this.floor = this.seq; }
+  task(id: string): (Task & { id: string; text: string }) | undefined {
+    const message = this.messages.get(id);
+    if (!message?.task) return undefined;
+    this.expire(message);
+    return { ...message.task, id, text: message.text };
+  }
+  message(id: string): Message | undefined { return this.messages.get(id); }
+  taskIds(): string[] { return [...this.messages.values()].filter(message => message.task).map(message => message.id); }
+  count(method: string, pathPrefix: string): number { return this.requests.filter(request => request.method === method && request.path.startsWith(pathPrefix)).length; }
+
+  private nextId(): string { return String(++this.seq); }
+  private actor(): { actor: string; principal: string; profile: string | null } { return { actor: `${this.principal}+scout`, principal: this.principal, profile: "scout" }; }
+
+  private bump(message: Message, type: string, payload: Record<string, unknown>): void {
+    message.version = ++this.seq;
+    message.revision += 1;
+    this.events.push({ seq: message.version, type, channel: message.channel, payload, messageId: message.id, snapshot: this.view(message) });
+  }
+
+  private makeTask(channel: string, text: string, labels: Record<string, string>, needs: string[], owner: string, clientId: string | null): Message {
+    this.channels.add(channel);
+    const id = this.nextId();
+    const open = needs.filter(need => this.messages.get(need)?.task?.state !== "completed");
+    const message: Message = {
+      id, channel, text, re: null, labels, deleted: false, createdAt: new Date(this.now()).toISOString(), version: Number(id), revision: 1,
+      by: owner === this.principal ? this.actor() : { actor: owner, principal: owner, profile: null },
+      task: { state: open.length ? "waiting" : "ready", owner, by: owner, for: null, needs, epoch: 0, claim: null, blocked: null, result: null, reason: null },
+    };
+    this.messages.set(id, message);
+    this.events.push({ seq: Number(id), type: "task.created", channel, payload: { id, needs }, messageId: id, snapshot: this.view(message) });
+    if (clientId) this.posts.set(clientId, id);
+    return message;
+  }
+
+  private expire(message: Message): void {
+    const task = message.task;
+    if (task?.state === "claimed" && task.claim && task.claim.until <= this.now()) {
+      const epoch = task.epoch;
+      task.state = "ready";
+      task.claim = null;
+      this.bump(message, "task.expired", { id: message.id, epoch });
+    }
+  }
+
+  private readyDependents(id: string): void {
+    for (const message of this.messages.values()) {
+      const task = message.task;
+      if (task?.state === "waiting" && task.needs.includes(id) && task.needs.every(need => this.messages.get(need)?.task?.state === "completed")) {
+        task.state = "ready";
+        this.bump(message, "task.ready", { id: message.id });
+      }
+    }
+  }
+
+  private view(message: Message): unknown {
+    const { task, ...rest } = message;
+    if (!task) return { ...rest };
+    const { claim, ...taskRest } = task;
+    // A view never carries a token.
+    return { ...rest, task: { ...taskRest, claim: claim ? { actor: claim.actor, until: new Date(claim.until).toISOString() } : null } };
+  }
+
+  private takeFault(route: string): FakeBoardFault | undefined {
+    const index = this.faults.findIndex(fault => fault.route === route);
+    if (index < 0) return undefined;
+    const fault = this.faults[index]!;
+    if ((fault.times ?? 1) <= 1) this.faults.splice(index, 1);
+    else fault.times = (fault.times ?? 1) - 1;
+    return fault;
+  }
+
+  readonly fetch = async (input: string, init: RequestInit): Promise<Response> => {
+    const url = new URL(input);
+    const method = init.method ?? "GET";
+    const headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v]));
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+    const path = url.pathname.replace(/^\/board/, "");
+    this.requests.push({ method, path, headers, ...(body !== undefined ? { body } : {}) });
+    const json = (status: number, value: unknown, extra: Record<string, string> = {}) =>
+      new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...extra } });
+    const error = (status: number, code: string, message = code, extra: Record<string, string> = {}) => json(status, { error: { code, message } }, extra);
+    if (headers.authorization !== `Bearer ${this.token}`) return error(401, "unauthorized");
+    if (headers["x-board-profile"] !== "scout") return error(400, "invalid_profile");
+    if (!headers["x-board-can"]) return error(400, "invalid_scope", "Scout always narrows");
+    const route = `${method} ${path.replace(/\/[^/]+\/(claim|renew|complete|fail|release|labels)$/, "/:id/$1").replace(/^\/(messages|posts|tasks\/batch)\/[^/]+$/, "/$1/:id")}`;
+    const fault = this.takeFault(route);
+    if (fault?.mode === "status") return error(fault.status, fault.code, fault.code, fault.retryAfter ? { "retry-after": fault.retryAfter } : {});
+    if (fault?.mode === "fail_before") throw new TypeError("fetch failed");
+    const answer = this.route(method, path, url.searchParams, body, json, error);
+    if (fault?.mode === "drop_answer") throw new TypeError("fetch failed");
+    return answer;
+  };
+
+  private route(method: string, path: string, query: URLSearchParams, body: any, json: (s: number, v: unknown) => Response, error: (s: number, c: string, m?: string) => Response): Response {
+    for (const message of this.messages.values()) this.expire(message);
+    if (method === "GET" && path === "/me") return json(200, { ...this.actor(), expiresAt: null });
+    if (method === "POST" && path === "/channels") { this.channels.add(body.path); return json(201, { channel: body.path }); }
+    if (method === "GET" && path === "/events") {
+      const channel = query.get("channel");
+      const afterRaw = query.get("after");
+      if (afterRaw !== null && (!/^\d+$/.test(afterRaw) || Number(afterRaw) < this.floor)) return error(400, "invalid_cursor");
+      if (afterRaw === null) return json(200, { events: [], cursor: String(this.seq) });
+      const after = Number(afterRaw);
+      const matched = this.events.filter(event => event.seq > after && (!channel || event.channel === channel)).slice(0, 200);
+      return json(200, {
+        events: matched.map(event => ({ cursor: String(event.seq), type: event.type, createdAt: new Date(this.now()).toISOString(), payload: event.payload, ...(event.snapshot ? { message: event.snapshot } : {}) })),
+        cursor: String(matched.length === 200 ? matched[matched.length - 1]!.seq : this.seq),
+      });
+    }
+    if (method === "GET" && path === "/tasks") {
+      const channel = query.get("channel");
+      const after = Number(query.get("after") ?? 0);
+      const list = [...this.messages.values()].filter(message => message.task && (!channel || message.channel === channel) && Number(message.id) > after).sort((a, b) => Number(a.id) - Number(b.id));
+      const page = list.slice(0, 2);
+      return json(200, { tasks: page.map(message => ({ message: this.view(message), replies: 0, last: null })), cursor: page.length ? page[page.length - 1]!.id : null });
+    }
+    let match = path.match(/^\/messages\/([^/]+)$/);
+    if (method === "GET" && match) {
+      const message = this.messages.get(decodeURIComponent(match[1]!));
+      return message ? json(200, { message: this.view(message), replies: [] }) : error(404, "message_not_found");
+    }
+    match = path.match(/^\/posts\/([^/]+)$/);
+    if (method === "GET" && match) {
+      const id = this.posts.get(decodeURIComponent(match[1]!));
+      return id ? json(200, { message: this.view(this.messages.get(id)!) }) : error(404, "post_not_found");
+    }
+    if (method === "POST" && path === "/messages") {
+      const existing = body.id ? this.posts.get(body.id) : undefined;
+      if (existing) return json(200, { message: this.view(this.messages.get(existing)!) });
+      const parent = body.re ? this.messages.get(body.re) : undefined;
+      const channel = parent?.channel ?? body.channel;
+      this.channels.add(channel);
+      const id = this.nextId();
+      const message: Message = { id, channel, text: body.text, re: parent?.id ?? null, labels: body.labels ?? {}, deleted: false, createdAt: new Date(this.now()).toISOString(), version: Number(id), revision: 1, by: this.actor() };
+      this.messages.set(id, message);
+      this.events.push({ seq: Number(id), type: "message.posted", channel, payload: { id, channel }, messageId: id, snapshot: this.view(message) });
+      if (body.id) this.posts.set(body.id, id);
+      return json(201, { message: this.view(message) });
+    }
+    match = path.match(/^\/messages\/([^/]+)\/labels$/);
+    if (method === "POST" && match) {
+      const message = this.messages.get(decodeURIComponent(match[1]!));
+      if (!message) return error(404, "message_not_found");
+      for (const [key, expected] of Object.entries((body.if ?? {}) as Record<string, string | null>)) {
+        if ((message.labels[key] ?? null) !== expected) return error(409, "label_conflict");
+      }
+      Object.assign(message.labels, body.set ?? {});
+      for (const key of body.unset ?? []) delete message.labels[key];
+      this.bump(message, "labels.changed", { id: message.id, set: body.set ?? {}, unset: body.unset ?? [] });
+      return json(200, { message: this.view(message) });
+    }
+    if (method === "POST" && path === "/tasks") {
+      const existing = body.id ? this.posts.get(body.id) : undefined;
+      if (existing) return json(200, { task: this.view(this.messages.get(existing)!) });
+      const message = this.makeTask(body.channel, body.text, body.labels ?? {}, body.needs ?? [], this.principal, body.id ?? null);
+      return json(201, { task: this.view(message) });
+    }
+    if (method === "POST" && path === "/tasks/batch") {
+      const existing = this.batches.get(body.id);
+      if (existing) return json(200, { tasks: existing.map(id => this.view(this.messages.get(id)!)) });
+      const byKey = new Map<string, string>();
+      const ids: string[] = [];
+      for (const task of body.tasks as { key?: string; text: string; labels?: Record<string, string>; needs?: (string | { key: string })[] }[]) {
+        const needs = (task.needs ?? []).map(need => typeof need === "string" ? need : byKey.get(need.key)!);
+        const message = this.makeTask(body.channel, task.text, task.labels ?? {}, needs, this.principal, null);
+        if (task.key) byKey.set(task.key, message.id);
+        ids.push(message.id);
+      }
+      this.batches.set(body.id, ids);
+      return json(201, { tasks: ids.map(id => this.view(this.messages.get(id)!)) });
+    }
+    match = path.match(/^\/tasks\/batch\/([^/]+)$/);
+    if (method === "GET" && match) {
+      const ids = this.batches.get(decodeURIComponent(match[1]!));
+      return ids ? json(200, { tasks: ids.map(id => this.view(this.messages.get(id)!)) }) : error(404, "batch_not_found");
+    }
+    match = path.match(/^\/tasks\/([^/]+)\/(claim|renew|complete|fail|release)$/);
+    if (method === "POST" && match) {
+      const message = this.messages.get(decodeURIComponent(match[1]!));
+      const task = message?.task;
+      if (!message || !task) return error(404, "not_a_task");
+      const verb = match[2]!;
+      if (verb === "claim") {
+        if (task.state === "claimed") return error(409, "task_claimed");
+        if (task.state !== "ready") return error(409, task.state === "completed" || task.state === "failed" || task.state === "canceled" ? "task_finished" : "task_not_ready");
+        const lease = Math.min(Number(body?.lease ?? 900), 3600);
+        task.epoch += 1;
+        const token = `tok-${message.id}-${task.epoch}-${Math.random().toString(36).slice(2)}`;
+        task.claim = { actor: `${this.principal}+scout`, until: this.now() + lease * 1000, token };
+        task.state = "claimed";
+        this.bump(message, "task.claimed", { id: message.id, epoch: task.epoch });
+        return json(200, { task: this.view(message), claim: { epoch: task.epoch, token, until: new Date(task.claim.until).toISOString() } });
+      }
+      if (task.state !== "claimed" || !task.claim || task.epoch !== body.epoch || task.claim.token !== body.token) return error(409, "claim_lost");
+      if (verb === "renew") {
+        task.claim.until = this.now() + Math.min(Number(body.lease ?? 900), 3600) * 1000;
+        this.bump(message, "task.renewed", { id: message.id, epoch: task.epoch });
+        return json(200, { task: this.view(message), until: new Date(task.claim.until).toISOString() });
+      }
+      task.claim = null;
+      if (verb === "complete") { task.state = "completed"; task.result = body.result ?? null; this.bump(message, "task.completed", { id: message.id, epoch: task.epoch, result: task.result }); this.readyDependents(message.id); }
+      else if (verb === "fail") { task.state = "failed"; task.reason = body.reason; this.bump(message, "task.failed", { id: message.id, epoch: task.epoch, reason: body.reason }); }
+      else { task.state = "ready"; this.bump(message, "task.released", { id: message.id, epoch: task.epoch }); }
+      return json(200, { task: this.view(message) });
+    }
+    return error(404, "not_found", `${method} ${path}`);
+  }
+}
