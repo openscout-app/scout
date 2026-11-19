@@ -3,15 +3,15 @@ import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsCon
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { NativePermissionAskError } from "./native-permission.js";
 import { HarnessHooksError } from "./harness-hooks.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrokerRequestReceipts } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, canonicalRequest } from "./broker-request-receipts.js";
 import { BrokerIntegrationSetupService } from "./broker-integration-setup.js";
 import { ChatQuestionError } from "./chat-question-transition.js";
 import { clearOperatorTitle, markOperatorTitled } from "./conversation-title.js";
 import { EventEmitter } from "node:events";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, test } from "bun:test";
@@ -844,10 +844,14 @@ describe("createBrokerHttpRouter", () => {
     expect(question.response.status).toBe(409);
     expect(unavailable.response.status).toBe(422);
     expect(harness.deliverCalls).toHaveLength(3);
-    expect(harness.deliverCalls[0]?.payload).toEqual({
+    expect(harness.deliverCalls[0]?.payload).toMatchObject({
       target: "agent-1",
       body: "hello",
       intent: "tell",
+      caller: { actorId: "operator" },
+      requesterId: "operator",
+      messageMetadata: { attribution: { actorId: "operator", rootActorId: "operator", source: "system" } },
+      invocationMetadata: { attribution: { actorId: "operator", rootActorId: "operator", source: "system" } },
     });
     expect(harness.deliverCalls[0]?.signal).toBeInstanceOf(AbortSignal);
 
@@ -1739,7 +1743,9 @@ test("permission decision route is machine-local and forwards the exact decision
   const harness = createHarness({ permissionService: { decide: async (...args: unknown[]) => { decisions.push(args); } } as unknown as NonNullable<BrokerHttpRouterDeps["permissionService"]> });
   const body = { requestId: "permission-1", version: "v", decision: "project" };
   const result = await requestRouter(harness, "POST", "/v1/permissions/decide", { body });
-  expect(result.response.status).toBe(200); expect(decisions).toEqual([["permission-1", "v", "project"]]);
+  expect(result.response.status).toBe(200); expect(decisions).toEqual([["permission-1", "v", "project", undefined, {
+    actorId: "operator", rootActorId: "operator", source: "system",
+  }]]);
   const remote = await requestRouter(harness, "POST", "/v1/permissions/decide", { body, transportContext: { transport: "remote" } });
   expect(remote.response.status).toBe(403); expect(decisions).toHaveLength(1);
   const invalid = await requestRouter(harness, "POST", "/v1/permissions/decide", { body: { ...body, decision: "allow-all" } });
@@ -2009,6 +2015,27 @@ test("exact message reads do not snapshot and preserve durable bytes, absence an
   expect((await requestRouter(h, "GET", "/v1/messages/absent")).response.status).toBe(404);
   h.deps.readMessage = async () => { throw Error("storage unavailable"); };
   expect((await requestRouter(h, "GET", "/v1/messages/unavailable")).response.status).toBe(503);
+});
+
+test("legacy requester-only delivery receipts keep their original fingerprint", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "broker-legacy-attribution-receipt-"));
+  try {
+    const body = { requestId: "legacy-requester-only", requesterId: "operator", target: "agent-1", body: "same work", intent: "tell" };
+    const original = { kind: "delivery", deliveryId: "legacy-delivery" };
+    // Pre-V1 router-owned receipts included request metadata, with no caller or attribution added.
+    const fingerprintPayload = { ...body, messageMetadata: { requestId: body.requestId, requestIntent: body.intent },
+      invocationMetadata: { requestId: body.requestId } };
+    const fingerprint = createHash("sha256").update(canonicalRequest(fingerprintPayload)).digest("hex");
+    const path = createHash("sha256").update(canonicalRequest(["operator", body.requestId, "deliver"])).digest("hex");
+    writeFileSync(join(directory, `${path}.json`), JSON.stringify({
+      requesterId: "operator", requestId: body.requestId, operation: "deliver", fingerprint, state: "done", result: original,
+    }));
+    const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory) });
+    const result = await requestRouter(harness, "POST", "/v1/deliver", { body });
+    expect(result.response.status).toBe(202);
+    expect(result.body).toEqual(original);
+    expect(harness.deliverCalls).toHaveLength(0);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("pre-origin invocation receipts replay unchanged after upgrade and changing HTTP trace headers", async () => {
