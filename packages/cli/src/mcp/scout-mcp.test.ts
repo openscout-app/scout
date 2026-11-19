@@ -714,6 +714,26 @@ describe("createScoutMcpServer", () => {
     expect(received?.reporter?.agentId).toBeUndefined();
   });
 
+  for (const code of ["task_followup_not_sent", "task_followup_unauthorized"] as const) {
+    test(`ask returns ${code} through MCP without waiting on the original flight`, async () => {
+      const message = "Follow-up refused. Retry from the original requester.";
+      let waits = 0;
+      const { client } = await connectTestServer({
+        resolveSenderId: async () => "project-agent",
+        scoutAskHandler: async () => ({
+          ok: false, state: "failed", ids: { flightId: "flt-parent" }, error: { code, message },
+        }),
+        waitForFlight: async () => { waits++; throw new Error("must not wait"); },
+      });
+      const result = await client.callTool({ name: "ask", arguments: {
+        ref: "inv-parent", body: "More context", replyMode: "inline",
+      } });
+      expect(result.structuredContent).toMatchObject({ ok: false, error: { code, message } });
+      expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(message) })]));
+      expect(waits).toBe(0);
+    });
+  }
+
   test("ask wraps the ScoutAskHandler primitive", async () => {
     let receivedAsk: ScoutAskCommand | undefined;
     const { client } = await connectTestServer({

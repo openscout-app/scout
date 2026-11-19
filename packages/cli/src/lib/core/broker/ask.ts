@@ -385,10 +385,14 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
   try {
     return await submitAsk(command);
   } catch (error) {
-    if (!(error instanceof ScoutBrokerHttpError) || error.status !== 409 || error.code !== "task_followup_not_sent") throw error;
-    const { detail, evidence } = JSON.parse(error.body);
-    return { ok: false, state: "failed", ids: typeof evidence === "string" ? { flightId: evidence } : {},
-      error: { code: error.code, message: detail || error.message } };
+    if (!(error instanceof ScoutBrokerHttpError) || (!command.task?.ref && !command.task?.continue)) throw error;
+    const code = error.status === 409 && (error.code === "task_followup_not_sent" || error.code === "task_followup_unauthorized")
+      ? error.code : error.status === 400 ? "invalid_request" : null;
+    if (!code) throw error;
+    let refusal: { detail?: unknown; evidence?: unknown } | null = null;
+    try { refusal = JSON.parse(error.body); } catch { /* Keep the HTTP diagnostic. */ }
+    return { ok: false, state: "failed", ids: typeof refusal?.evidence === "string" ? { flightId: refusal.evidence } : {},
+      error: { code, message: typeof refusal?.detail === "string" ? refusal.detail : error.message } };
   }
 };
 
