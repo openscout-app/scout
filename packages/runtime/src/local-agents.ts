@@ -3819,11 +3819,16 @@ export async function sendTmuxPrompt(
   sessionName: string,
   prompt: string,
   strategy?: TmuxDispatchStrategy,
+  socketPath?: string,
 ): Promise<TmuxPromptDispatchResult> {
-  if (hasManagedPermissionContext()) {
+  // A socket-bound direct send must not use the broker's managed permission
+  // responder, which addresses panes on the broker's default socket.
+  const run = (args: string[], options: Parameters<typeof execSystemFile>[2]) =>
+    execSystemFile("tmux", socketPath ? ["-S", socketPath, ...args] : args, options);
+  if (!socketPath && hasManagedPermissionContext()) {
     const before = await captureTmuxPaneTail(sessionName, 80);
     if (parseTmuxPermission(before)) {
-      const cwd = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
+      const cwd = (await run(["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
       await handleManagedTmuxPermission(sessionName, cwd, before);
     }
   }
@@ -3832,38 +3837,38 @@ export async function sendTmuxPrompt(
   let bufferOwned = true;
   try {
     if (effectiveStrategy.pre && effectiveStrategy.pre.length > 0) {
-      await execSystemFile("tmux", ["send-keys", "-t", sessionName, ...effectiveStrategy.pre], { timeoutMs: 2_000 });
+      await run(["send-keys", "-t", sessionName, ...effectiveStrategy.pre], { timeoutMs: 2_000 });
     }
-    await execSystemFile("tmux", ["load-buffer", "-b", bufferName, "-"], {
+    await run(["load-buffer", "-b", bufferName, "-"], {
       input: prompt,
       timeoutMs: 5_000,
       maxStdoutBytes: 64 * 1024,
       maxStderrBytes: 64 * 1024,
     });
-    await execSystemFile("tmux", buildTmuxPasteBufferArgs(bufferName, sessionName), { timeoutMs: 2_000 });
+    await run(buildTmuxPasteBufferArgs(bufferName, sessionName), { timeoutMs: 2_000 });
     // paste-buffer -d deletes the buffer after consumption; no manual cleanup needed.
     bufferOwned = false;
 
     // Let the target PTY drain the bracketed paste before the submit chord lands —
     // without this gap, the submit keys can race the paste tail and get swallowed.
     await tmuxDispatchSleep(TMUX_PASTE_DRAIN_MS);
-    await execSystemFile("tmux", ["send-keys", "-t", sessionName, ...effectiveStrategy.submit], { timeoutMs: 2_000 });
+    await run(["send-keys", "-t", sessionName, ...effectiveStrategy.submit], { timeoutMs: 2_000 });
 
     // Sample twice: a fast probe at ~250ms catches the common-case clear; a
     // slower probe at ~1s catches harnesses that take a beat to flush the
     // composer after submit (e.g. while showing a "thinking…" placeholder).
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_FIRST_SAMPLE_MS)) {
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_FIRST_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 0 };
     }
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_SECOND_SAMPLE_MS)) {
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_SECOND_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 0 };
     }
 
     // Still stuck — retry with a bare Enter. Covers the case where the submit chord
     // landed while the harness was in a transient state (popup, suggestion menu)
     // that absorbed it.
-    await execSystemFile("tmux", ["send-keys", "-t", sessionName, "Enter"], { timeoutMs: 2_000 });
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_RETRY_SAMPLE_MS)) {
+    await run(["send-keys", "-t", sessionName, "Enter"], { timeoutMs: 2_000 });
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_RETRY_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 1 };
     }
 
@@ -3871,22 +3876,22 @@ export async function sendTmuxPrompt(
     // deadline sized by what the pane is actually doing: a visibly busy harness
     // gets the long grace period, an idle one stays close to the old budget.
     const deadlineAt = Date.now()
-      + tmuxVerifyDeadlineMs(await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES));
+      + tmuxVerifyDeadlineMs(await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath));
     while (Date.now() < deadlineAt) {
-      if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_POLL_MS)) {
+      if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_POLL_MS, socketPath)) {
         return { submitted: true, retries: 1 };
       }
     }
 
     throw new DispatchStalledError({
       sessionName,
-      paneTail: (await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES)).slice(0, 2_000),
+      paneTail: (await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath)).slice(0, 2_000),
       retries: 1,
     });
   } catch (error) {
     if (bufferOwned) {
       try {
-        await execSystemFile("tmux", ["delete-buffer", "-b", bufferName], { timeoutMs: 2_000 });
+        await run(["delete-buffer", "-b", bufferName], { timeoutMs: 2_000 });
       } catch {
         // Ignore cleanup failures after a tmux delivery error.
       }
@@ -3907,16 +3912,17 @@ async function dispatchVerifiedAfter(
   sessionName: string,
   strategy: TmuxDispatchStrategy,
   delayMs: number,
+  socketPath?: string,
 ): Promise<boolean> {
   await tmuxDispatchSleep(delayMs);
-  const paneTail = await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES);
+  const paneTail = await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath);
   if (!paneTail) {
     // Capture failed (session gone, tmux unavailable). Treat as verified to avoid
     // throwing a spurious stall — the broker's normal error paths will surface any
     // real session loss.
     return true;
   }
-  if (hasManagedPermissionContext()) {
+  if (!socketPath && hasManagedPermissionContext()) {
     const fullTail = await captureTmuxPaneTail(sessionName, 80);
     if (parseTmuxPermission(fullTail)) {
       const cwd = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
@@ -3926,12 +3932,13 @@ async function dispatchVerifiedAfter(
   return strategy.verify(paneTail);
 }
 
-async function captureTmuxPaneTail(sessionName: string, lines: number): Promise<string> {
+async function captureTmuxPaneTail(sessionName: string, lines: number, socketPath?: string): Promise<string> {
   return await captureTmuxPane(sessionName, {
     start: `-${lines}`,
     end: "-",
     joinWrapped: false,
     maxAgeMs: 0,
+    socketPath,
   }) ?? "";
 }
 

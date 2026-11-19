@@ -26,10 +26,13 @@ test("direct input finds a managed tmux endpoint by native and Scout session id"
     codexHeldByApp: async () => false,
     scoutLaunchedTmuxSessions: async () => new Set([session]),
     self: [],
-    readTmuxTail: async () => "❯ \n",
+    readTmuxTail: async (target: string, socketPath: string) => {
+      expect([target, socketPath]).toEqual(["%17", "/tmp/fixture-tmux.sock"]);
+      return "❯ \n";
+    },
     promptTmux: async (target: string) => { prompts.push(target); },
     managedTmuxContext: async () => ({ nodeId, snapshot }),
-    managedTmuxPane: async (name: string, pane: string | undefined) => name === session && pane === "%17" ? pane : null,
+    managedTmuxPane: async (name: string, pane: string | undefined) => name === session && pane === "%17" ? { target: pane, socketPath: "/tmp/fixture-tmux.sock" } : null,
   } satisfies DeliverInPlaceDeps;
   for (const sessionId of [native, session]) {
     expect(await deliverInPlace({ sessionId, harness: "claude", body: "Follow up" }, deps))
