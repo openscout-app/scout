@@ -431,6 +431,8 @@ export type MeshIngressGateDeps = {
   guardedLocalListener?: (socket: { localPort?: number; localAddress?: string }) => boolean;
   /** Protected mode removes ambient loopback/Unix trust; never sent to remote peers. */
   localAdminKey?: string;
+  /** Verifies operator attribution without enabling protected-ingress mode. */
+  attributionKey?: string;
   keyConflict?: (keyId: string) => boolean;
   scopedAccess?: ScopedIngressAccess;
   mode: MeshGateMode;
@@ -617,14 +619,15 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
         forwarded.url = requestTarget;
         await next(forwarded); return;
       }
+      const localAttributionKey = deps.localAdminKey ?? deps.attributionKey;
       let adminBody: Buffer | undefined;
-      if (deps.localAdminKey && classifyMeshTransport(remoteAddress) !== "remote" && request.headers[LOCAL_ADMIN_HEADER]) {
+      if (localAttributionKey && classifyMeshTransport(remoteAddress) !== "remote" && request.headers[LOCAL_ADMIN_HEADER]) {
         if (typeof request.headers[LOCAL_ADMIN_HEADER] !== "string" || !/^[a-f0-9]{64}$/.test(request.headers[LOCAL_ADMIN_HEADER] as string)) {
           request.resume(); json(response, 401, { error: "invalid_local_admin_proof" }); return;
         }
         try { adminBody = await bufferRequestBody(request, 1024 * 1024); }
         catch { json(response, 413, { error: "payload_too_large" }); return; }
-        const verified = verifyLocalAdminRequest(deps.localAdminKey, { method, path: request.url ?? url.pathname,
+        const verified = verifyLocalAdminRequest(localAttributionKey, { method, path: request.url ?? url.pathname,
           body: adminBody, headers: request.headers, destinationKeyId: deps.destinationKeyId, bootedAt: deps.bootedAt, nonceClaim: deps.nonceClaim });
         if (!verified.ok) { json(response, 401, { error: "invalid_local_admin_proof" }); return; }
         transport = classifyMeshTransport(remoteAddress);
@@ -697,6 +700,7 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
         await next(replayBufferedRequest(request, body, {
           transport,
           ...(remoteAddress ? { remoteAddress } : {}),
+          ...(adminBody !== undefined ? { operator: true as const } : {}),
           ...(decision.guest ? { guest: decision.guest } : {}),
         }));
         return;
@@ -715,6 +719,7 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
         const context: RuntimeRequestTransportContext = {
           transport,
           ...(remoteAddress ? { remoteAddress } : {}),
+          ...(adminBody !== undefined ? { operator: true as const } : {}),
         };
         (request as RuntimeHttpRequestLike).transportContext = context;
         await next(adminBody ? replayBufferedRequest(request, adminBody, context) : request as RuntimeHttpRequestLike);
@@ -732,6 +737,7 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
         (request as RuntimeHttpRequestLike).transportContext = {
           transport,
           ...(remoteAddress ? { remoteAddress } : {}),
+          ...(adminBody !== undefined ? { operator: true as const } : {}),
         };
         await next(request as RuntimeHttpRequestLike);
         return;
@@ -754,6 +760,7 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
         (request as RuntimeHttpRequestLike).transportContext = {
           transport,
           ...(remoteAddress ? { remoteAddress } : {}),
+          ...(adminBody !== undefined ? { operator: true as const } : {}),
         };
         await next(request as RuntimeHttpRequestLike);
         return;
@@ -777,6 +784,7 @@ export function createMeshIngressGate(deps: MeshIngressGateDeps): MeshIngressGat
       const context: RuntimeRequestTransportContext = {
         transport,
         ...(remoteAddress ? { remoteAddress } : {}),
+        ...(adminBody !== undefined ? { operator: true as const } : {}),
         ...(decision.principal ? { peer: decision.principal } : {}),
       };
       await next(replayBufferedRequest(request, body, context));
