@@ -258,6 +258,18 @@ export class WorkerSQLiteProjection {
     if (worker) this.terminateWorker(worker);
     this.cachedHealth = { ...this.cachedHealth, unavailable: "sqlite projection closed" };
   }
+  /** The broker owns the next startup attempt. Drop pending derived work;
+   * a fresh worker will replay the durable journal through a new barrier. */
+  retireStartupWorker(cause: unknown): void {
+    if (this.scheduled) clearImmediate(this.scheduled);
+    if (this.retry) clearTimeout(this.retry);
+    this.scheduled = null;
+    this.retry = null;
+    // During startup, the durable store defers new notifications until it
+    // captures the next barrier. Do not let a failed pump start its own retry.
+    this.projectedRevision = this.requestedRevision;
+    if (this.worker) this.failed(this.worker, cause);
+  }
   private failRequests(error: Error): void {
     for (const request of this.requests.values()) request.reject(error);
     this.requests.clear(); this.warmPromise = null;
