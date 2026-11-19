@@ -198,7 +198,8 @@ export class BrokerTaskService {
       class: "status", body, attachments: payload.attachments,
       audience: request.cancel ? { delivery: "none" } : followupAudience(invocation, flight),
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-      metadata: { source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: Boolean(request.cancel) },
+      metadata: { ...(payload.invocationMetadata?.attribution ? { attribution: payload.invocationMetadata.attribution } : {}),
+        source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: Boolean(request.cancel) },
         targetSessionId: flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId,
         workerInterrupted: interrupted, clientMessageId: taskMessageId(actor, payload.requestId!) },
     };
@@ -234,7 +235,7 @@ export class BrokerTaskService {
         actorId: input.senderId, originNodeId: this.options.nodeId, class: "agent", body: input.body, attachments: input.attachments,
         audience: { notify: [invocation.requesterId], reason: "thread_reply" },
         visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-        metadata: { clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
+        metadata: { ...(input.metadata ?? {}), clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
           completionReply: { invocationId: invocation.id, flightId: flight.id, revision: flightCompletion(flight)?.revision ?? 0,
             kind: input.waitingOn ? "blocked" : input.progress ? "progress" : "final",
             ...(input.waitingOn ? { waitingOn: parseReplyWaitingOn(input.waitingOn) } : {}), ...(input.failed ? { outcome: "failed" } : {}) } } }, input.image);
@@ -247,7 +248,7 @@ export class BrokerTaskService {
       conversationId: message.conversationId, replyToMessageId: message.id, actorId: input.senderId, originNodeId: this.options.nodeId,
       class: "status", body: input.body, attachments: input.attachments, audience: { notify: [message.actorId], reason: "thread_reply" },
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-      metadata: { source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
+      metadata: { ...(input.metadata ?? {}), source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
   }
   private postMessage(message: MessageRecord, image?: ScoutTaskReply["image"]): Promise<unknown> {
     if (!image) return this.options.postMessage(message);

@@ -110,6 +110,8 @@ export type RuntimeRequestTransportContext = {
   remoteAddress?: string;
   /** present only after the ingress gate verified the peer signature */
   peer?: RuntimePeerAuthPrincipal;
+  /** present only after a local operator proof is verified */
+  operator?: true;
   /** present only after the ingress gate verified a guest grant signature */
   guest?: RuntimeGuestAuthPrincipal;
   /** Verified principal proof; never accepted from forwarded body identity fields. */

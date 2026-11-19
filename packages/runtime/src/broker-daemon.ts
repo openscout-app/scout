@@ -547,6 +547,8 @@ if (meshInstanceRefusal) {
   console.log(`[openscout-runtime] mesh off: ${meshInstanceRefusal}`);
 }
 const localAdminKey = readLocalAdminKey(process.env.OPENSCOUT_LOCAL_ADMIN_KEY_FILE);
+const attributionKey = localAdminKey ?? readLocalAdminKey(process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE);
+delete process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
 removeLocalAdminEnvironment(process.env);
 requireProtectedAccessState(dbPath, Boolean(localAdminKey));
 if (localAdminKey) { process.umask(0o077); protectAccessDirectories(controlHome, supportDirectory, dbPath); }
@@ -704,6 +706,7 @@ const meshIngressGate = createMeshIngressGate({
   },
   irohEndpointId: () => localIrohEntrypoint?.endpointId,
   localAdminKey,
+  attributionKey,
   keyConflict: (id) => [Boolean(trustedPeerStore?.knownTrustedPeerKey(id)), Boolean(guestGrantStore?.knownKey(id)), Boolean(meshAccessStore?.knownDevice(id)), Boolean(meshAccessStore?.knownPrincipal(id))].filter(Boolean).length > 1,
   scopedAccess: meshAccessStore ? {
     knownDevice: (keyId) => meshAccessStore.knownDevice(keyId),
@@ -2218,7 +2221,10 @@ if (process.env.OPENSCOUT_ATTACHMENTS_DISABLED !== "1" && !sqliteDisabled) {
       conversation: id => runtime.conversation(id),
       authorizeActor: principal => {
         // Mesh host reads never inherit this broker's local operator privileges.
-        if (principal.actorId === operatorActorId) return principal.nodeId === nodeId;
+        if (principal.actorId === operatorActorId) {
+          return principal.nodeId === nodeId
+            && (principal.attribution === undefined || principal.attribution.source === "local-admin" || principal.attribution.source === "system");
+        }
         const agent = runtime.agent(principal.actorId);
         if (agent) return agent.authorityNodeId === principal.nodeId;
         const endpoints = Object.values(runtime.peek().endpoints).filter(e => e.agentId === principal.actorId);
@@ -3491,6 +3497,7 @@ const routeRequest = createBrokerHttpRouter({
   shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
     service: attachmentService, nodeId,
+    snapshot: () => runtime.snapshot(),
     notifyOperator: createOperatorAttachmentNotifier({
       service: () => attachmentService, operatorActorId,
       ensureOperator: () => ensureBrokerActorForDelivery(operatorActorId),
@@ -3565,6 +3572,7 @@ const routeRequest = createBrokerHttpRouter({
   meshId,
   operatorActorId,
   runtime,
+  attributionSnapshot: () => runtime.snapshot(),
   journal,
   knownInvocations,
   brokerService,
