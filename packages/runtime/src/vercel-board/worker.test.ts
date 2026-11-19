@@ -34,13 +34,15 @@ function nodesOnPath(): string[] {
   }
   return found;
 }
-const fitForMemoryBoard = (node: string) => Bun.spawnSync([node, "--no-warnings", "-e", FIT_FOR_MEMORY_BOARD], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+const fitForMemoryBoard = (node: string) => Bun.spawnSync([node, "--no-warnings", "-e", FIT_FOR_MEMORY_BOARD], { stdout: "ignore", stderr: "ignore", timeout: 10_000 }).exitCode === 0;
 const PATH_NODES = nodesOnPath();
 const NODE = process.env.SCOUT_VERCEL_BOARD_TEST_NODE ?? PATH_NODES.find(fitForMemoryBoard) ?? Bun.which("node");
-const run = NODE ? test : test.skip;
+// Each test starts a real Node worker. A loaded full suite can take longer than Bun's 5s default.
+const WORKER_TEST_TIMEOUT_MS = 60_000;
+const run = (name: string, body: () => Promise<void>) => (NODE ? test : test.skip)(name, body, WORKER_TEST_TIMEOUT_MS);
 /** A Node on PATH that cannot run the in-memory board, to check how the worker refuses it. */
 const UNFIT_NODE = PATH_NODES.find(node => {
-  const real = Bun.spawnSync([node, "-p", "process.versions.bun ? '' : process.versions.node"]).stdout.toString().trim();
+  const real = Bun.spawnSync([node, "-p", "process.versions.bun ? '' : process.versions.node"], { timeout: 10_000 }).stdout.toString().trim();
   const [major, minor] = real.split(".").map(Number);
   return Boolean(real) && (major! > 22 || (major === 22 && minor! >= 18)) && !fitForMemoryBoard(node);
 });
@@ -106,7 +108,7 @@ test.skipIf(!UNFIT_NODE)("on a Node whose SQLite cannot bind numbered parameters
   const error = await worker.start().then(() => undefined, error => error);
   expect(error).toMatchObject({ status: 503, code: "worker_unavailable" });
   expect(String(error.message)).toContain("cannot bind numbered SQLite parameters");
-});
+}, WORKER_TEST_TIMEOUT_MS);
 
 run("x-board-can narrows every call: a channel outside it is refused", async () => {
   const { transport } = memoryWorker();
