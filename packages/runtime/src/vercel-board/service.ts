@@ -411,6 +411,9 @@ export class BrokerVercelBoardService {
   private handoff(live: LiveConnection, row: VercelBoardTaskEventRow, includeScoutResult = false): VercelBoardHandoff {
     const mine = row.epoch ? live.store.custodyForEpoch(live.config.id, row.taskId, row.epoch) : null;
     const record = vercelBoardHandoffRecord(row, mine ? { agentId: mine.agentId, flightId: mine.flightId, attemptId: mine.attemptId } : undefined);
+    if (row.kind === "claimed" && record.scout && mine && mine.startedBy !== this.options.operatorId) {
+      record.scout.reportedCallerId = mine.startedBy;
+    }
     if (includeScoutResult && mine?.state === "settled" && mine.result !== null
       && ((row.kind === "completed" && mine.outcome === "completed") || (row.kind === "failed" && mine.outcome === "failed"))) {
       record.scoutResult = mine.result;
@@ -524,6 +527,11 @@ export class BrokerVercelBoardService {
     if (request.actorId !== this.options.operatorId) {
       throw new VercelBoardServiceError(403, "operator_required", "In v1 only the operator starts a Board claim.");
     }
+    const reportedCallerId = request.reportedCallerId;
+    if (reportedCallerId !== undefined && (typeof reportedCallerId !== "string" || !reportedCallerId.trim()
+      || reportedCallerId.length > 256 || /[\u0000-\u001f\u007f]/.test(reportedCallerId))) {
+      throw new VercelBoardServiceError(400, "invalid_request", "reportedCallerId must be a single nonempty identity (up to 256 characters).");
+    }
     const live = this.requireLive(request.connectionId);
     if (typeof request.taskId !== "string" || !request.taskId || typeof request.agentId !== "string" || !request.agentId) {
       throw new VercelBoardServiceError(400, "invalid_request", "taskId and agentId are required.");
@@ -542,7 +550,7 @@ export class BrokerVercelBoardService {
     const workId = live.mirror.promotion(live.config.id, root.id) ?? "";
     let row;
     try {
-      row = await live.custody.claim({ taskId: root.id, workId, agentId: request.agentId, startedBy: request.actorId });
+      row = await live.custody.claim({ taskId: root.id, workId, agentId: request.agentId, startedBy: reportedCallerId ?? this.options.operatorId });
     } catch (error) {
       if (error instanceof VercelBoardClaimError) throw new VercelBoardServiceError(error.status, error.code, error.message);
       throw error;

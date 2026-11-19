@@ -27,3 +27,9 @@ test("messages and handoffs are reads with their filters in the query", () => {
   expect(parseVercelBoardCommand(["handoffs", "--connection", "c1", "--task", "42"]).path).toBe("/v1/integrations/vercel-board/handoffs?connection=c1&task=42");
   expect(() => parseVercelBoardCommand(["handoffs", "--connection", "c1", "--limit", "many"])).toThrow(/whole number/);
 });
+
+test("claim reports the calling session separately from the assigned agent", () => {
+  const command = parseVercelBoardCommand(["claim", "--connection", "c1", "--task", "42", "--agent", "worker"],
+    { CODEX_THREAD_ID: "calling-session", OPENSCOUT_AGENT: "planner" });
+  expect(command.body).toMatchObject({ agentId: "worker", reportedCallerId: "session:calling-session" });
+});

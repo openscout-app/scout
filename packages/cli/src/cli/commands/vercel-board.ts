@@ -1,6 +1,7 @@
 import { scoutBrokerPaths, type VercelBoardClaimResponse, type VercelBoardConnectResponse, type VercelBoardConnectionStatus, type VercelBoardCredentialReference, type VercelBoardHandoff, type VercelBoardHandoffsResponse, type VercelBoardMessagesResponse, type VercelBoardPromoteResponse } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
+import { claimedSessionId } from "../../lib/core/broker/sender.ts";
 import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
 
 export const VERCEL_BOARD_HELP = [
@@ -65,7 +66,7 @@ export function parseCredentialReference(value: string): VercelBoardCredentialRe
   return { backend: backend as VercelBoardCredentialReference["backend"], key };
 }
 
-export function parseVercelBoardCommand(args: string[]): Parsed {
+export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv = process.env): Parsed {
   const [command, ...rest] = args;
   if (!command || !(command in VALUE_FLAGS)) throw new ScoutCliError("Use scout integration connect, status, claim, promote, messages or handoffs vercel-board. See scout integration vercel-board --help.");
   const flags: Record<string, string> = {};
@@ -84,8 +85,11 @@ export function parseVercelBoardCommand(args: string[]): Parsed {
   }
   if (command === "claim") {
     for (const flag of ["--connection", "--task", "--agent"]) if (!flags[flag]) throw new ScoutCliError(`scout integration claim vercel-board requires ${flag}.`);
+    const session = claimedSessionId(env);
+    const reportedCallerId = session ? (session.startsWith("session:") ? session : `session:${session}`) : env.OPENSCOUT_AGENT?.trim();
     return { kind: "claim", method: "POST", path: scoutBrokerPaths.v1.vercelBoardClaim, body: {
       connectionId: flags["--connection"], taskId: flags["--task"], agentId: flags["--agent"], actorId: "operator",
+      ...(reportedCallerId ? { reportedCallerId } : {}),
       ...(switches.has("--confirm-owner") ? { confirmOwner: true } : {}),
     } };
   }
@@ -150,7 +154,7 @@ function formatStatus(status: VercelBoardConnectionStatus): string {
 
 export async function runVercelBoardCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
   if (!args.length || args.some(arg => ["--help", "-h", "help"].includes(arg))) { context.output.writeText(VERCEL_BOARD_HELP); return; }
-  const request = parseVercelBoardCommand(args);
+  const request = parseVercelBoardCommand(args, context.env);
   const response = await fetch(new URL(request.path, resolveScoutBrokerUrl()), {
     method: request.method, headers: { "content-type": "application/json" },
     ...(request.body ? { body: JSON.stringify(request.body) } : {}),
@@ -204,5 +208,7 @@ function formatHandoff(handoff: VercelBoardHandoff): string {
   const who = handoff.actor ? `${handoff.actor.principal}${handoff.actor.profile ? `+${handoff.actor.profile}` : ""}` : "board";
   const to = handoff.to ? ` -> ${handoff.to}` : "";
   const extra = handoff.scoutResult !== undefined ? ` ${handoff.kind === "failed" ? "reason" : "result"}: ${handoff.scoutResult}` : handoff.result ? ` result: ${handoff.result}` : handoff.reason ? ` reason: ${handoff.reason}` : "";
-  return `${new Date(handoff.at).toISOString()} ${handoff.taskId} ${handoff.kind}${handoff.derived ? " (derived)" : ""} by ${who}${to}${handoff.scout ? ` [${handoff.scout.agentId}]` : ""}${extra}`;
+  const caller = handoff.scout?.reportedCallerId;
+  const attribution = caller ? ` (reported: ${caller} for operator)` : "";
+  return `${new Date(handoff.at).toISOString()} ${handoff.taskId} ${handoff.kind}${handoff.derived ? " (derived)" : ""} by ${who}${to}${handoff.scout ? ` [${handoff.scout.agentId}]` : ""}${attribution}${extra}`;
 }
