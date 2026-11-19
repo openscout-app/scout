@@ -64,6 +64,7 @@ function lastRuleLine(text: string): number {
 
 type TmuxPermissionPane = {
   sessionId: string; projectRoot: string; text: string;
+  cwd?: string; currentCwd?: () => Promise<string>;
   capture: () => Promise<string>; alive: () => Promise<boolean>;
   send: (keys: string[]) => Promise<void>;
 };
@@ -72,8 +73,11 @@ type TmuxPermissionPane = {
 export function tmuxPermissionPrompt(input: TmuxPermissionPane): ManagedPermissionPrompt | null {
   const prompt = parseTmuxPermission(input.text, input.projectRoot);
   if (!prompt) return null;
-  const current = async () => await input.alive() && parseTmuxPermission(await input.capture(), input.projectRoot)?.version === prompt.version;
+  const current = async () => await input.alive()
+    && (!input.currentCwd || await input.currentCwd() === input.cwd)
+    && parseTmuxPermission(await input.capture(), input.projectRoot)?.version === prompt.version;
   return { sessionId: input.sessionId, projectRoot: input.projectRoot,
+    ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
     text: prompt.text, version: prompt.version, decisions: Object.keys(prompt.keys) as PermissionDecision[],
     isCurrent: current,
     answer: async decision => {

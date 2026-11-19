@@ -6,6 +6,7 @@ import {
   decideContinuation,
   type ContinuationRisk,
 } from "./continuation/decide.js";
+import { parseContinuationDialog } from "./continuation/dialog.js";
 import {
   loadContinuationPolicy,
   resolveContinuationGrant,
@@ -22,40 +23,64 @@ export type PermissionSupervisorVerdict = {
 };
 
 export function decidePermissionSupervisor(
-  prompt: Pick<ManagedPermissionPrompt, "projectRoot" | "text" | "decisions">,
+  prompt: Pick<ManagedPermissionPrompt, "projectRoot" | "cwd" | "text" | "decisions">,
   policy: ContinuationPolicyFile = loadContinuationPolicy(),
 ): PermissionSupervisorVerdict {
+  const codex = codexCommand(prompt.text);
+  const commandCwd = codex && !("invalid" in codex) ? codex.cwd : prompt.cwd;
   const grant = resolveContinuationGrant(policy, {
     herdrSession: "",
     paneId: "",
     cwd: prompt.projectRoot,
+    foregroundCwd: commandCwd,
   });
   const notify = (reason: string, risk: ContinuationRisk = "unknown"): PermissionSupervisorVerdict => ({
     act: "notify", reason, risk, grant: grant.source,
   });
+  if (codex && "invalid" in codex) return notify("unparsed Codex command");
+  if (codex && !codex.cwd) return notify("command has no working directory");
+  if (commandCwd !== undefined && !withinProject(prompt.projectRoot, commandCwd)) {
+    return notify("command leaves the granted project");
+  }
   if (grant.level === "ask") return notify("no project continuation grant");
   if (!prompt.decisions.includes("once")) return notify("one-time approval is not offered");
 
-  const codex = codexCommand(prompt.text);
   if (codex) {
-    if ("invalid" in codex) return notify("unparsed Codex command");
-    if (!withinProject(prompt.projectRoot, codex.cwd)) return notify("command leaves the granted project");
-    const risk = classifyContinuationRisk(codex.command);
+    const risk = classifyPermissionCommandRisk(codex.command);
     if (!continuationAllowsRisk(grant.level, risk)) {
       return notify(`${grant.level} does not auto-continue ${risk}`, risk);
     }
     return { act: "continue", reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
   }
 
+  const dialog = parseContinuationDialog(prompt.text);
   const verdict = decideContinuation({ paneBody: prompt.text, policy: grant.level });
   if (verdict.act !== "continue") return notify(verdict.reason, verdict.risk);
-  return { act: "continue", reason: verdict.reason, risk: verdict.risk, grant: grant.source };
+  const risk = dialog.commandExact && dialog.action !== "edit" && dialog.action !== "write"
+    ? classifyPermissionCommandRisk(dialog.command)
+    : verdict.risk;
+  if (!continuationAllowsRisk(grant.level, risk)) return notify(`${grant.level} does not auto-continue ${risk}`, risk);
+  return { act: "continue", reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
 }
 
-function withinProject(projectRoot: string, cwd: string | undefined): boolean {
-  if (cwd !== undefined && (!cwd || !isAbsolute(cwd))) return false;
+const LOCAL_SCRIPT = /^(?:test|lint|typecheck|check|build)(?::[\w.-]+)*$/;
+const ATTACHED_ABSOLUTE_PATH = /^--?[A-Za-z][A-Za-z0-9-]*=?(?:\/|~)/;
+
+function classifyPermissionCommandRisk(command: string | null): ContinuationRisk {
+  const risk = classifyContinuationRisk(command);
+  if (risk !== "workspace" || !command) return risk;
+  const words = command.trim().split(/\s+/);
+  if (words.some(word => ATTACHED_ABSOLUTE_PATH.test(word))) return "unknown";
+  if (/^(?:bun|npm|pnpm|yarn)$/.test(words[0] ?? "") && words[1] === "run" && !LOCAL_SCRIPT.test(words[2] ?? "")) {
+    return "unknown";
+  }
+  return risk;
+}
+
+function withinProject(projectRoot: string, cwd: string): boolean {
+  if (!cwd || !isAbsolute(cwd) || !isAbsolute(projectRoot)) return false;
   const root = resolve(projectRoot);
-  const target = resolve(cwd ?? root);
+  const target = resolve(cwd);
   const rel = relative(root, target);
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }

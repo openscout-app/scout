@@ -56,7 +56,16 @@ export class BrokerPermissionService {
     try {
       await this.deps.record(record);
       const automatic = this.deps.supervisor?.(prompt);
-      if (automatic?.act === "continue") await this.decide(id, prompt.version, "once", automatic);
+      while (pending.busy && !pending.done) await this.sleep(500);
+      if (pending.error) throw pending.error;
+      if (!pending.done && automatic?.act === "continue") {
+        try {
+          await this.decide(id, prompt.version, "once", automatic);
+        } catch (error) {
+          this.deps.notify(invocation, this.deps.read(id) ?? record, prompt);
+          throw error;
+        }
+      }
       if (!pending.done) {
         await this.deps.transition(invocation.id, "waiting", id);
         this.deps.notify(invocation, record, prompt);

@@ -86,4 +86,50 @@ describe("permission supervisor", () => {
     expect(nested.act).toBe("continue");
     expect(outside).toMatchObject({ act: "notify", reason: "no project continuation grant" });
   });
+
+  test("a Codex command cannot bypass a narrower working-directory grant", () => {
+    const policy: ContinuationPolicyFile = {
+      allowModel: false,
+      grants: [...grants().grants, { scope: "project", path: `${project}/restricted`, level: "ask" }],
+    };
+    expect(decidePermissionSupervisor(prompt(codex("bun test", `${project}/restricted`)), policy)).toMatchObject({
+      act: "notify", grant: "conflict",
+    });
+  });
+
+  test.each([
+    "make -C/tmp/outside check",
+    "grep -f/etc/passwd README.md",
+    "bun run ship",
+  ])("escalates delegated command %s for Claude and Codex", command => {
+    expect(decidePermissionSupervisor(prompt(claude(command)), grants()).act).toBe("notify");
+    expect(decidePermissionSupervisor(prompt(codex(command, project)), grants()).act).toBe("notify");
+  });
+
+  test("continues named local package scripts", () => {
+    expect(decidePermissionSupervisor(prompt(claude("bun run test:unit")), grants()).act).toBe("continue");
+    expect(decidePermissionSupervisor(prompt(codex("bun run check:core", project)), grants()).act).toBe("continue");
+  });
+
+  test("a Claude command cannot inherit a grant after leaving the project", () => {
+    expect(decidePermissionSupervisor({ ...prompt(claude("bun test")), cwd: "/work/outside" }, grants())).toMatchObject({
+      act: "notify", reason: "command leaves the granted project",
+    });
+  });
+
+  test("a Claude command cannot bypass a narrower live-directory grant", () => {
+    const policy: ContinuationPolicyFile = {
+      allowModel: false,
+      grants: [...grants().grants, { scope: "project", path: `${project}/restricted`, level: "ask" }],
+    };
+    expect(decidePermissionSupervisor({ ...prompt(claude("bun test")), cwd: `${project}/restricted` }, policy)).toMatchObject({
+      act: "notify", grant: "conflict",
+    });
+  });
+
+  test("a Codex command without a working directory stays with the operator", () => {
+    expect(decidePermissionSupervisor(prompt(codex("bun test")), grants())).toMatchObject({
+      act: "notify", reason: "command has no working directory",
+    });
+  });
 });

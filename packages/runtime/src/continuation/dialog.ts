@@ -263,7 +263,7 @@ function parseOptions(
 }
 
 function optionKind(label: string): ContinuationOptionKind {
-  if (/\bdon'?t ask again\b|\balways allow\b|\bswitch to auto mode\b/i.test(label)) {
+  if (/\bdon'?t ask again\b|\balways allow\b|\ballow all\b|\bduring this session\b|\bfor this session\b|\bswitch to auto mode\b/i.test(label)) {
     return "allow_always";
   }
   if (/^yes\b/i.test(label)) return "allow";
