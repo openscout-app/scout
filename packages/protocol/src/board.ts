@@ -41,18 +41,30 @@ export interface BoardCredentialReference {
  * How the runtime reaches the board.
  * - `protocol`: Board's documented HTTP protocol (a `vb serve` board, or a
  *   board mounted in a deployment).
- * - `vercel_api`: a team board in Vercel's API. Its wire format is not Board's
- *   documented protocol; it needs the transport worker, which this build does
- *   not ship yet.
+ * - `vercel_api`: a team board in Vercel's API, named by team and board name.
+ *   Its wire format is not Board's documented protocol, so the runtime reaches
+ *   it through the Board worker, which runs `@vercel/board`.
  */
 export type BoardTransportKind = "protocol" | "vercel_api";
+
+/** A team board in Vercel's API: the team (its ID or slug) and the board's name. */
+export interface BoardVercelTarget {
+  team: string;
+  board: string;
+}
+
+/** The board Scout makes or finds on a team when the operator names none. */
+export const BOARD_DEFAULT_VERCEL_BOARD = "scout";
 
 /** One board connection, operator-configured. One custodian per (board, principal). */
 export interface BoardConnectionConfig {
   /** Operator-owned and stable across credential rotation. */
   id: string;
+  /** The board's URL. For a team board, the canonical name from `vercelTeamBoardUrl`. */
   url: string;
   transport: BoardTransportKind;
+  /** Set exactly when `transport` is `vercel_api`. */
+  vercel?: BoardVercelTarget;
   /** The operator's principal, from `GET /me` at connect. Scout writes as it. */
   principal: string;
   /** The Board profile Scout writes as: `scout`. */
@@ -99,6 +111,38 @@ export function isVercelTeamBoardUrl(value: string): boolean {
   }
 }
 
+const VERCEL_TEAM = /^[^\s/?#]{1,128}$/;
+const VERCEL_BOARD = /^[^/]{1,64}$/;
+
+export function validateBoardVercelTarget(value: unknown): string[] {
+  if (!value || typeof value !== "object") return ["vercel must name a team and a board"];
+  const v = value as Record<string, unknown>;
+  const errors: string[] = [];
+  if (typeof v.team !== "string" || !VERCEL_TEAM.test(v.team)) errors.push("vercel.team must be a team ID (team_...) or slug");
+  if (typeof v.board !== "string" || !v.board.trim() || v.board !== v.board.trim() || !VERCEL_BOARD.test(v.board)) {
+    errors.push("vercel.board must be a board name: 1 to 64 characters, no /");
+  }
+  return errors;
+}
+
+/**
+ * The canonical URL for a team board, by team and name. It names the board in
+ * Scout's records; the worker finds or makes the board by its name.
+ */
+export function vercelTeamBoardUrl(target: BoardVercelTarget): string {
+  return `https://api.vercel.com/v1/messageboard/boards/${encodeURIComponent(target.board)}?teamId=${encodeURIComponent(target.team)}`;
+}
+
+/** The team and board a team-board URL names, or undefined. */
+export function vercelTargetOfUrl(value: string): BoardVercelTarget | undefined {
+  if (!isVercelTeamBoardUrl(value)) return undefined;
+  const url = new URL(value);
+  const team = url.searchParams.get("teamId") ?? url.searchParams.get("slug");
+  const board = decodeURIComponent(url.pathname.replace(/\/+$/, "").split("/").pop() ?? "");
+  const target = team ? { team, board } : undefined;
+  return target && !validateBoardVercelTarget(target).length ? target : undefined;
+}
+
 /** Validate a board URL without connecting. Plain HTTP only on loopback. */
 export function validateBoardUrl(value: unknown): string[] {
   if (typeof value !== "string") return ["url must be a string"];
@@ -132,6 +176,13 @@ export function validateBoardConnectionConfig(value: unknown): string[] {
   if (typeof c.id !== "string" || !CONNECTION_ID.test(c.id)) errors.push("id must be 1-64 letters, digits, - or _");
   errors.push(...validateBoardUrl(c.url));
   if (!["protocol", "vercel_api"].includes(c.transport as string)) errors.push("transport must be protocol or vercel_api");
+  if (c.transport === "vercel_api") {
+    const targetErrors = validateBoardVercelTarget(c.vercel);
+    errors.push(...targetErrors);
+    if (!targetErrors.length && c.url !== vercelTeamBoardUrl(c.vercel as BoardVercelTarget)) errors.push("url must be the team board's canonical URL");
+  } else if (c.vercel !== undefined) {
+    errors.push("vercel is set only for a vercel_api connection");
+  }
   if (!isBoardPrincipal(c.principal)) errors.push("principal must be a Board principal ID");
   if (!isBoardProfileName(c.profile)) errors.push("profile must be a Board profile name");
   if (!Array.isArray(c.channels) || c.channels.length < 1 || c.channels.length > 16 || !c.channels.every(isBoardChannelPath)
@@ -191,8 +242,11 @@ export interface BoardConnectionStatus {
   localLease?: { generation: number; expiresAt: number; heldHere: boolean };
 }
 
+/** Name a board by `url`, or a team board by `team` and `board` (default `scout`). Not both. */
 export interface BoardConnectRequest {
-  url: string;
+  url?: string;
+  team?: string;
+  board?: string;
   credential: BoardCredentialReference;
   id?: string;
   channels?: string[];
