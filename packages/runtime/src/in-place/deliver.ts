@@ -37,7 +37,12 @@ import { join } from "node:path";
 import { readHerdrSessions, readHerdrTopology } from "../system-probes/herdr.js";
 import { execSystemFile } from "../system-probes/exec.js";
 import { findLiveClaudeSession, type ClaudeSessionRecord } from "../claude-session-records.js";
-import { listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailComposerState } from "../local-agents.js";
+import { flightSessionTrace } from "@openscout/protocol";
+import { localEndpointProviderSessionId } from "../broker-local-endpoint-resolver.js";
+import { endpointStronglyMatchesSession } from "../broker-endpoint-selection.js";
+import type { RuntimeRegistrySnapshot } from "../registry.js";
+import { parseTmuxPermission } from "../tmux-permission.js";
+import { SCOUT_LAUNCHED_TMUX_OPTION, buildTmuxDispatchStrategy, listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailBlockingHarnessDialog, tmuxPaneTailComposerState } from "../local-agents.js";
 
 import { openLineTail, type LineTail } from "./line-tail.js";
 import { readOrcaAgents, sendOrcaPrompt, type OrcaAgent } from "./orca.js";
@@ -78,6 +83,12 @@ export type InPlaceDelivery =
 export type HerdrPaneMatch = { session: string; paneId: string; status: string | null; harness?: string; sessionKind?: string };
 
 export type DeliverInPlaceDeps = {
+  /** Opt-in for direct sends, not for reply routing or resume probes. */
+  managedTmuxContext?: () => Promise<{ nodeId: string; snapshot: Pick<RuntimeRegistrySnapshot, "endpoints" | "flights"> } | null>;
+  ownSessionIds?: readonly string[];
+  managedTmuxPane?: (session: string, pane?: string) => Promise<string | null>;
+  readTmuxTail?: (target: string) => Promise<string>;
+
   findHerdrPane?: (sessionId: string, harness?: string | null) => Promise<HerdrPaneMatch | null>;
   /** Surface-bound composer read, immediately before input. Missing/failed reads refuse. */
   composerEmpty?: (place: { via: InPlaceVia; location: string }) => Promise<boolean>;
@@ -453,6 +464,80 @@ async function typeWithEmptyComposer(
   return typeAt(place, before, type);
 }
 
+async function findMarkedTmuxPane(session: string, pane?: string): Promise<string | null> {
+  const { stdout } = await execSystemFile("tmux", [
+    "list-panes", "-s", "-t", session, "-F",
+    `#{session_name}|#{${SCOUT_LAUNCHED_TMUX_OPTION}}|#{pane_id}|#{pane_dead}`,
+  ], { timeoutMs: 2_000, maxStdoutBytes: 64 * 1024 });
+  const matches = stdout.trim().split("\n").map(line => line.split("|"))
+    .filter(([name, marked, id, dead]) => name === session && marked === "1"
+      && dead === "0" && /^%\d+$/.test(id ?? "") && (!pane || pane === id));
+  return matches.length === 1 ? matches[0]![2]! : null;
+}
+
+async function deliverToManagedTmux(
+  input: { sessionId: string; harness: string | null; body: string },
+  deps: DeliverInPlaceDeps,
+  before?: BeforeKeystroke,
+): Promise<InPlaceDelivery | null> {
+  const context = await deps.managedTmuxContext?.().catch(() => null);
+  if (!context) return null;
+  const { sessionId, harness, body } = input;
+  const { snapshot, nodeId } = context;
+  const matches = Object.values(snapshot.endpoints).filter(endpoint => {
+    if (endpoint.nodeId !== nodeId || endpoint.transport !== "tmux"
+      || (endpoint.harness !== "claude" && endpoint.harness !== "codex")
+      || (harness && harness !== endpoint.harness)
+      || !["idle", "active", "working", "waiting"].includes(endpoint.state)) return false;
+    // Do not accept a card ID as a session unless it is the endpoint's own session ID.
+    if ((endpoint.agentId !== sessionId || endpoint.sessionId === sessionId || endpoint.metadata?.cardless === true)
+      && endpointStronglyMatchesSession(endpoint, sessionId)) return true;
+    // An active dispatch can observe the native ID before its endpoint alias
+    // is refreshed. Tie that observation to both the endpoint and its session.
+    if (localEndpointProviderSessionId(endpoint)) return false;
+    return Object.values(snapshot.flights).some(flight => {
+      if (flight.state !== "running" && flight.state !== "waiting") return false;
+      const trace = flightSessionTrace(flight).at(-1);
+      const ack = flight.metadata?.dispatchAck as { executionResolution?: { sessionId?: string } } | undefined;
+      return trace?.endpointId === endpoint.id && trace.nodeId === nodeId
+        && trace.harness === endpoint.harness && trace.sessionId === endpoint.sessionId
+        && ack?.executionResolution?.sessionId === sessionId;
+    });
+  });
+  if (matches.some(endpoint => deps.ownSessionIds?.some(id => endpointStronglyMatchesSession(endpoint, id)))) {
+    return { ok: false, code: "not_live" };
+  }
+  const panes = new Map<string, { target: string; location: string; harness: "claude" | "codex"; waiting: boolean }>();
+  for (const endpoint of matches) {
+    const session = typeof endpoint.metadata?.tmuxSession === "string" ? endpoint.metadata.tmuxSession : endpoint.sessionId;
+    if (!session || session.startsWith("flat-")) continue;
+    const target = await (deps.managedTmuxPane ?? findMarkedTmuxPane)(session, endpoint.pane).catch(() => null);
+    if (!target) continue;
+    const previous = panes.get(target);
+    if (previous && previous.harness !== endpoint.harness) return { ok: false, code: "session_ambiguous" };
+    panes.set(target, { target, location: `tmux ${session} · ${target}`,
+      harness: endpoint.harness as "claude" | "codex", waiting: endpoint.state === "waiting" || Boolean(previous?.waiting) });
+  }
+  if (panes.size > 1) return { ok: false, code: "session_ambiguous" };
+  const pane = [...panes.values()][0];
+  if (!pane || pane.target === process.env.TMUX_PANE) return null;
+  const place = { via: "tmux" as const, location: pane.location };
+  if (pane.waiting) return { ok: false, code: "session_blocked", ...place };
+  const tail = await (deps.readTmuxTail ?? captureTmuxComposerTail)(pane.target).catch(() => null);
+  if (tail && (parseTmuxPermission(tail) || tmuxPaneTailBlockingHarnessDialog(tail))) {
+    return { ok: false, code: "session_blocked", ...place };
+  }
+  const draft = tail === null ? undefined : tmuxPaneTailComposerState(tail);
+  if (draft === undefined) return { ok: false, code: "in_place_failed", ...place, nothingSent: true,
+    detail: "Cannot observe the tmux composer; unsent text could be overwritten. Nothing was typed." };
+  if (draft) return { ok: false, code: "busy", ...place, detail: "The composer holds unsent text. Nothing was typed." };
+  return typeAt(place, before, async () => {
+    if (deps.promptTmux) return deps.promptTmux(pane.target, body);
+    const result = await sendTmuxPrompt(pane.target, body, buildTmuxDispatchStrategy(pane.harness, body));
+    if (!result.submitted) throw new Error("the pane did not accept the prompt");
+  });
+}
+
 export async function deliverInPlace(
   input: {
     sessionId: string;
@@ -504,6 +589,9 @@ export async function deliverInPlace(
       return typeAt({ via: "tmux", location }, before, () => (deps.promptTmux ?? promptTmuxPane)(target, body));
     }
   }
+
+  const managed = await deliverToManagedTmux({ sessionId, harness, body }, deps, before);
+  if (managed) return managed;
 
   // A Codex thread open in the ChatGPT app: nothing above can reach it.
   if (harness === "codex") {
@@ -629,11 +717,15 @@ async function tmuxDraft(target: string, deps: DeliverInPlaceDeps): Promise<stri
 }
 
 async function readTmuxComposerDraft(target: string): Promise<string | null | undefined> {
+  return tmuxPaneTailComposerState(await captureTmuxComposerTail(target));
+}
+
+async function captureTmuxComposerTail(target: string): Promise<string> {
   // `-e` keeps the escape sequences, which tell typed text from a suggestion.
   const { stdout } = await execSystemFile("tmux", [
     "capture-pane", "-p", "-e", "-t", target, "-S", `-${TMUX_COMPOSER_TAIL_LINES}`,
   ], { timeoutMs: 2_000, maxStdoutBytes: 256 * 1024 });
-  return tmuxPaneTailComposerState(stdout);
+  return stdout;
 }
 
 /**
