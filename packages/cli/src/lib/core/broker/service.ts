@@ -74,6 +74,8 @@ import type {
   WorkMoveRequest,
   WorkMoveResponse,
   WorkReviewRequest,
+  BoardPlanRequest,
+  BoardPlanResponse,
   WorkReviewResponse,
 } from "@openscout/protocol";
 import {
@@ -5904,6 +5906,11 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   } catch (error) {
     throw workClaimConflictFrom(error) ?? error;
   }
+}
+
+/** The Board planning path: creates Board tasks only. Work items appear when the custodian projects them. */
+export async function planScoutBoardTasks(input: BoardPlanRequest): Promise<BoardPlanResponse> {
+  return brokerPostJson<BoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.boardPlan, input);
 }
 
 export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {

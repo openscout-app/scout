@@ -6,6 +6,7 @@ const node = (flags = "", subcommands?: Record<string, ScoutCommandGrammar>): Sc
 export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "help": node("--detail"),
   "version": node(""),
+  "board": node("--agent= --allow= --channels= --confirm-owner --connection= --credential= --experimental-marker --id= --no-probe --probe-channel= --takeover --task= --url=", { "connect": node(), "status": node(), "claim": node() }),
   "integration": node("--agent= --allowed-channels= --allowed-users= --app-token-key= --app= --bot-token-key= --card= --confirm-workspace-authority --connection= --credential-backend= --idempotency-key= --if-revision= --name= --project= --request-id= --thread= --workspace=", { "setup": node("", { "slack": node() }), "status": node(), "manifest": node(), "rebind": node(), "verify": node(), "start": node(), "pause": node(), "resume": node(), "disconnect": node(), "credentials": node(), "rotate-credentials": node(), "t3": node("", { "inspect": node(), "attach": node(), "board": node(), "refresh": node(), "run": node() }) }),
   "setup": node("--context-root= --default-harness= --source-root="),
   "report": node("--diagnostics --file= --local-only --message-file="),
