@@ -192,8 +192,12 @@ export async function runVercelBoardCommand(context: ScoutCommandContext, args: 
     return;
   }
   if (request.kind === "handoffs") {
-    const list = (payload as VercelBoardHandoffsResponse).handoffs;
-    context.output.writeValue(payload, () => list.length ? list.map(formatHandoff).join("\n") : "No hand-offs yet.");
+    const { handoffs, scoutSettlement } = payload as VercelBoardHandoffsResponse;
+    context.output.writeValue(payload, () => {
+      const lines = handoffs.map(formatHandoff);
+      if (scoutSettlement) lines.push(`${scoutSettlement.taskId} ${scoutSettlement.outcome} (Scout custody, epoch ${scoutSettlement.epoch}): ${scoutSettlement.result}`);
+      return lines.join("\n") || "No hand-offs yet.";
+    });
     return;
   }
   const connected = payload as VercelBoardConnectResponse;

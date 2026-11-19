@@ -454,4 +454,6 @@ export interface VercelBoardHandoff {
 export interface VercelBoardHandoffsResponse {
   connectionId: string;
   handoffs: VercelBoardHandoff[];
+  /** Latest local settlement when the task has no corresponding mirrored hand-off yet. */
+  scoutSettlement?: { taskId: string; epoch: number; outcome: "completed" | "failed"; result: string };
 }

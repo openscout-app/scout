@@ -612,10 +612,18 @@ export class BrokerVercelBoardService {
   }
 
   /** Hand-offs: one task's chain when `taskId` is given, else the newest. Each joined to Scout's claim. */
-  async handoffs(request: { connectionId: string; taskId?: string; since?: number; limit?: number }): Promise<VercelBoardHandoffsResponse> {
+  async handoffs(request: { connectionId: string; taskId?: string; since?: number; limit?: number; includeScoutResult?: boolean }): Promise<VercelBoardHandoffsResponse> {
     const live = this.requireLive(request.connectionId);
     const rows = request.taskId ? live.mirror.chain(live.config.id, request.taskId) : live.mirror.recent(live.config.id, { since: request.since, limit: request.limit ?? 200 });
-    return { connectionId: live.config.id, handoffs: rows.map(row => this.handoff(live, row, Boolean(request.taskId))) };
+    const includeScoutResult = Boolean(request.taskId) && request.includeScoutResult !== false;
+    const handoffs = rows.map(row => this.handoff(live, row, includeScoutResult));
+    // Custody is persisted before the Board write; it also works without a mirror.
+    const latest = includeScoutResult && request.taskId ? live.store.latestCustody(live.config.id, request.taskId) : null;
+    const scoutSettlement = latest?.state === "settled" && latest.epoch !== null && latest.result !== null
+      && (latest.outcome === "completed" || latest.outcome === "failed")
+      && !handoffs.some(row => row.epoch === latest.epoch && row.scoutResult !== undefined)
+      ? { taskId: latest.taskId, epoch: latest.epoch, outcome: latest.outcome, result: latest.result } : undefined;
+    return { connectionId: live.config.id, handoffs, ...(scoutSettlement ? { scoutSettlement } : {}) };
   }
 
   private mirrorState(live: LiveConnection, channel: string): VercelBoardMirrorState {

@@ -544,10 +544,14 @@ test("Board shows an excerpt while Scout retains the full result for the task", 
   const output = "x".repeat(1200) + "final paragraph";
   h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
   await h.service.pump("c1");
-  await h.service.pump("c1");
   const excerpt = h.board.task(id)!.result!;
   expect(excerpt.length).toBeLessThanOrEqual(1000);
   expect(excerpt).toContain("[Truncated; full text in Scout handoffs]");
+  const beforeFeed = await h.service.handoffs({ connectionId: "c1", taskId: id });
+  expect(beforeFeed.scoutSettlement).toMatchObject({ taskId: id, outcome: "completed", result: output });
+  const boardOnly = await h.service.handoffs({ connectionId: "c1", taskId: id, includeScoutResult: false });
+  expect(boardOnly.scoutSettlement).toBeUndefined();
+  await h.service.pump("c1");
   const chain = await h.service.handoffs({ connectionId: "c1", taskId: id });
   expect(chain.handoffs.find(row => row.kind === "completed")).toMatchObject({ result: excerpt, scoutResult: output });
 });

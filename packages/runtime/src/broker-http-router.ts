@@ -913,7 +913,9 @@ export function createBrokerHttpRouter(
         return;
       }
       if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/handoffs") {
-        json(response, 200, await board.handoffs({ connectionId: url.searchParams.get("connection") ?? "", taskId: url.searchParams.get("task") ?? undefined, since: number("since"), limit: number("limit") }));
+        const context = request.transportContext;
+        const includeScoutResult = Boolean(context && context.transport !== "remote" && !context.peer && !context.guest && !forwardedNodeId);
+        json(response, 200, await board.handoffs({ connectionId: url.searchParams.get("connection") ?? "", taskId: url.searchParams.get("task") ?? undefined, since: number("since"), limit: number("limit"), includeScoutResult }));
         return;
       }
       if (method !== "POST") { notFound(response); return; }
