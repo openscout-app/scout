@@ -544,14 +544,23 @@ test("claim loss cancels the dispatched Scout flight without settling Board agai
 
 test("fan-in reads the full dependency result, attributed and quoted, before taking its lease", async () => {
   let duringFanIn: (() => void) | undefined;
-  let upstreamId: string | undefined;
+  const dependencyIds = new Set<string>();
   const h = serviceHarness(url => {
-    if (upstreamId && new URL(url).pathname.endsWith(`/messages/${upstreamId}`)) duringFanIn?.();
+    const id = new URL(url).pathname.match(/\/messages\/([^/]+)$/)?.[1];
+    if (id && dependencyIds.has(id)) duringFanIn?.();
   });
   await h.connect();
   const upstream = h.board.createTask({ channel: "work", text: "Gather sources" });
-  upstreamId = upstream;
-  const downstream = h.board.createTask({ channel: "work", text: "Summarize the sources", needs: [upstream] });
+  dependencyIds.add(upstream);
+  const outside = new VercelBoardHttpTransport(connection, async () => h.board.token, h.board.fetch);
+  const otherInputs = await Promise.all(Array.from({ length: 8 }, async (_, i) => {
+    const taskId = h.board.createTask({ channel: "work", text: `Outside input ${i}` });
+    const grant = await outside.claim(taskId, 60);
+    await outside.complete(taskId, grant.claim, `Outside result ${i}`);
+    dependencyIds.add(taskId);
+    return taskId;
+  }));
+  const downstream = h.board.createTask({ channel: "work", text: "Summarize the sources", needs: [upstream, ...otherInputs] });
   await h.service.claim({ connectionId: "c1", taskId: upstream, agentId: "agent-1", actorId: "operator" });
   const output = "x".repeat(1200) + "\rFinal source: https://example.com/source";
   h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
@@ -560,14 +569,15 @@ test("fan-in reads the full dependency result, attributed and quoted, before tak
   duringFanIn = () => {
     reads++;
     expect(h.board.task(downstream)!.state).toBe("ready");
-    h.time.advance(61_000); // longer than the first lease
+    h.time.advance(8_000); // the nine reads take longer than the first lease
   };
   const claim = await h.service.claim({ connectionId: "c1", taskId: downstream, agentId: "agent-2", actorId: "operator" });
-  expect(reads).toBe(1);
+  expect(reads).toBe(9);
   expect(claim.until).toBeGreaterThan(h.time.now());
   const prompt = h.deliveries.at(-1)!.body;
   expect(prompt).toContain(`Dependency ${upstream} (completed; channel work):`);
   expect(prompt).toContain("\n> Final source: https://example.com/source");
+  expect(prompt).toContain(`Dependency ${otherInputs[7]} (completed; channel work):\n> Outside result 7`);
 });
 
 test("Board shows an excerpt while Scout retains the full result for the task", async () => {
