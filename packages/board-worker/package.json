@@ -1,0 +1,17 @@
+{
+  "name": "@openscout/board-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The supervised Node worker that carries Scout's closed set of Board operations to a Vercel team board through @vercel/board.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "node --check src/worker.mjs",
+    "test": "node --test test/worker.test.mjs"
+  },
+  "dependencies": {
+    "@vercel/board": "0.52.0"
+  }
+}

@@ -62,6 +62,7 @@ export const GROUPS: TestGroup[] = [
   { name: "session-trace", summary: "@openscout/session-trace", steps: pkgTest("packages/session-trace"), package: "packages/session-trace" },
   { name: "release-scripts", summary: "Release, bump, workflow, bundle and boundary script tests (Node)", steps: [["node", "--test", ...RELEASE_SCRIPT_TESTS]], always: true, entries: () => RELEASE_SCRIPT_TESTS },
   { name: "mesh-extension", summary: "@openscout/mesh-extension", steps: pkgTest("packages/mesh-extension"), package: "packages/mesh-extension" },
+  { name: "board-worker", summary: "@openscout/board-worker: the Vercel Board worker (Node)", steps: pkgTest("packages/board-worker"), package: "packages/board-worker" },
   {
     name: "pairing-capsule",
     summary: "Pairing trust owner process, cutover and reclamation tests, controls and Node 24 compiled smokes",

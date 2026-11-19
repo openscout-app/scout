@@ -1,0 +1,103 @@
+// Worker tests against @vercel/board's own Vercel backend, with a stub in
+// place of Vercel's API. No network: the stub answers every request.
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { failureOf, openClient, parseBootstrap, runOperation, scoutFetch } from "../src/worker.mjs";
+
+const TASK = "msg_00000000-0000-4000-8000-000000000001_1";
+const bootstrap = { generation: 1, profile: "scout", can: "work=read,post,react,label;scout-probe=read,post,react,label", target: { kind: "vercel", team: "team_test", board: "scout" } };
+
+function stubApi(answerClaim) {
+  const calls = [];
+  const upstream = async (url, init = {}) => {
+    const headers = new Headers(init.headers);
+    calls.push({ method: init.method ?? "GET", url: String(url), authorization: headers.get("authorization"), profile: headers.get("x-board-profile"), can: headers.get("x-board-can"), redirect: init.redirect });
+    const path = new URL(url).pathname;
+    if (path.endsWith("/claim")) return answerClaim();
+    if (path.endsWith("/boards")) return Response.json({ boards: [{ id: "brd_test" }] });
+    return Response.json({ error: { code: "not_found", message: "Not here." } }, { status: 404 });
+  };
+  return { calls, upstream, claims: () => calls.filter(call => call.url.includes("/claim")).length };
+}
+
+test("a claim that answers 503 is sent once and reads as outcome unknown", async () => {
+  const api = stubApi(() => Response.json({ error: { code: "unavailable", message: "Busy." } }, { status: 503 }));
+  const client = await openClient(bootstrap, { token: "test-token", upstream: api.upstream });
+  const answer = await runOperation(client, "claim", { taskId: TASK, lease: 60 });
+  assert.deepEqual(answer, { ok: false, error: { kind: "unknown", code: "claim_unanswered" } });
+  assert.equal(api.claims(), 1);
+});
+
+test("a claim that answers 429 is sent once and reads as a refusal", async () => {
+  const api = stubApi(() => Response.json({ error: { code: "rate_limited", message: "Slow down." } }, { status: 429, headers: { "retry-after": "7" } }));
+  const client = await openClient(bootstrap, { token: "test-token", upstream: api.upstream });
+  const answer = await runOperation(client, "claim", { taskId: TASK, lease: 60 });
+  assert.equal(answer.ok, false);
+  assert.equal(answer.error.kind, "http");
+  assert.equal(answer.error.status, 429);
+  assert.equal(answer.error.retryAfterMs, 7000);
+  assert.equal(api.claims(), 1);
+});
+
+test("a claim with no answer is sent once and reads as outcome unknown", async () => {
+  const api = stubApi(() => { throw new TypeError("fetch failed"); });
+  const client = await openClient(bootstrap, { token: "test-token", upstream: api.upstream });
+  const answer = await runOperation(client, "claim", { taskId: TASK, lease: 60 });
+  assert.equal(answer.error.kind, "unknown");
+  assert.equal(api.claims(), 1);
+});
+
+test("every request carries the token, the scout profile and the fixed x-board-can, and refuses redirects", async () => {
+  const api = stubApi(() => Response.json({ error: { code: "unavailable" } }, { status: 503 }));
+  const client = await openClient(bootstrap, { token: "test-token", upstream: api.upstream });
+  await runOperation(client, "claim", { taskId: TASK });
+  assert.ok(api.calls.length >= 2);
+  for (const call of api.calls) {
+    assert.ok(call.url.startsWith("https://api.vercel.com/"));
+    assert.equal(call.authorization, "Bearer test-token");
+    assert.equal(call.profile, "scout");
+    assert.equal(call.can, bootstrap.can);
+    assert.equal(call.redirect, "error");
+  }
+});
+
+test("the token goes to api.vercel.com only", async () => {
+  let sent = 0;
+  const fetch = scoutFetch("test-token", { upstream: async () => { sent++; return new Response("{}"); } });
+  await assert.rejects(fetch("https://example.com/v1/messageboard/me", {}), /api\.vercel\.com only/);
+  await assert.rejects(fetch("http://api.vercel.com/v1/messageboard/me", {}), /api\.vercel\.com only/);
+  assert.equal(sent, 0);
+});
+
+test("a claim outside the claim operation is refused before it leaves", async () => {
+  let sent = 0;
+  const fetch = scoutFetch("test-token", { upstream: async () => { sent++; return new Response("{}"); } });
+  await assert.rejects(fetch(`https://api.vercel.com/v2/messageboard/boards/b/tasks/t/claim`, { method: "POST" }), /outside the claim operation/);
+  assert.equal(sent, 0);
+});
+
+test("operations outside the closed set are refused", async () => {
+  const answer = await runOperation({}, "request", { path: "/anything" });
+  assert.equal(answer.error.code, "unknown_operation");
+  const proxy = await runOperation({}, "__proto__", {});
+  assert.equal(proxy.error.code, "unknown_operation");
+});
+
+test("a write without an answer may have landed; a read without one did not", () => {
+  const unreachable = Object.assign(new Error("Vercel's API didn't answer"), { status: 502, code: "unreachable" });
+  assert.equal(failureOf("post", unreachable).kind, "unknown");
+  assert.equal(failureOf("complete", Object.assign(new Error("gateway"), { status: 504, code: "remote_error" })).kind, "unknown");
+  assert.equal(failureOf("events", unreachable).kind, "http");
+  assert.equal(failureOf("post", Object.assign(new Error("busy"), { status: 503, code: "unavailable" })).kind, "http");
+  assert.equal(failureOf("claim", Object.assign(new Error("busy"), { status: 503, code: "unavailable" })).kind, "unknown");
+  assert.equal(failureOf("renew", Object.assign(new Error("lost"), { status: 409, code: "claim_lost" })).code, "claim_lost");
+});
+
+test("the bootstrap names a board and a narrowing, never a credential", () => {
+  assert.throws(() => parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 2 })), /protocol 1/);
+  assert.throws(() => parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 1, target: { kind: "vercel", team: "team_test" } })), /team and a board/);
+  assert.throws(() => parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 1, target: { kind: "url", url: "https://example.com" } })), /vercel or memory/);
+  assert.throws(() => parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 1, profile: "not a profile" })), /profile/);
+  const parsed = parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 1, token: "ignored" }));
+  assert.equal("token" in parsed, false);
+});
