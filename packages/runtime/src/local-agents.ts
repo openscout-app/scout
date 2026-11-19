@@ -4011,7 +4011,9 @@ async function handleManagedTmuxPermission(sessionId: string, projectRoot: strin
   if (!parseTmuxPermission(observed, projectRoot)) return false;
   const target = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionId, "#{pane_id}"], { timeoutMs: 2_000 })).stdout.trim();
   if (!/^%\d+$/.test(target)) throw new Error("Could not bind permission to a live tmux pane");
-  return waitForTmuxPermission({ sessionId, projectRoot,
+  const currentCwd = async () => (await execSystemFile("tmux", ["display-message", "-p", "-t", target, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
+  const cwd = await currentCwd();
+  return waitForTmuxPermission({ sessionId, projectRoot, cwd, currentCwd,
     text: observed,
     capture: () => captureTmuxPaneTail(target, 80),
     alive: () => isLocalAgentSessionAliveAsync(sessionId),
