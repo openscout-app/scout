@@ -144,3 +144,11 @@ export function parseVercelBoardTaskSummary(value: unknown): VercelBoardWireMess
   const s = record(value, "task summary");
   return parseVercelBoardMessage(s.message ?? s);
 }
+
+/** Board accepts at most 1,000 characters. Scout custody retains the original. */
+export function boardResultExcerpt(text: string): string {
+  if (text.length <= 1000) return text;
+  const marker = "\n[Truncated; full text in Scout handoffs]";
+  const prefix = text.slice(0, 1000 - marker.length).replace(/[\uD800-\uDBFF]$/, "");
+  return prefix + marker;
+}

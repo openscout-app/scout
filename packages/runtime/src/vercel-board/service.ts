@@ -408,9 +408,13 @@ export class BrokerVercelBoardService {
   }
 
   /** A hand-off as the stream and the query give it: the event row, joined to Scout's claim when the claim is Scout's. */
-  private handoff(live: LiveConnection, row: VercelBoardTaskEventRow): VercelBoardHandoff {
+  private handoff(live: LiveConnection, row: VercelBoardTaskEventRow, includeScoutResult = false): VercelBoardHandoff {
     const mine = row.epoch ? live.store.custodyForEpoch(live.config.id, row.taskId, row.epoch) : null;
     const record = vercelBoardHandoffRecord(row, mine ? { agentId: mine.agentId, flightId: mine.flightId, attemptId: mine.attemptId } : undefined);
+    if (includeScoutResult && mine?.state === "settled" && mine.result !== null
+      && ((row.kind === "completed" && mine.outcome === "completed") || (row.kind === "failed" && mine.outcome === "failed"))) {
+      record.scoutResult = mine.result;
+    }
     const self = row.actor && row.actor.principal === live.config.principal && row.actor.profile === live.config.profile;
     return self && record.actor ? { ...record, actor: { ...record.actor, scoutActorId: mine?.agentId ?? this.options.operatorId } } : record;
   }
@@ -580,7 +584,7 @@ export class BrokerVercelBoardService {
   async handoffs(request: { connectionId: string; taskId?: string; since?: number; limit?: number }): Promise<VercelBoardHandoffsResponse> {
     const live = this.requireLive(request.connectionId);
     const rows = request.taskId ? live.mirror.chain(live.config.id, request.taskId) : live.mirror.recent(live.config.id, { since: request.since, limit: request.limit ?? 200 });
-    return { connectionId: live.config.id, handoffs: rows.map(row => this.handoff(live, row)) };
+    return { connectionId: live.config.id, handoffs: rows.map(row => this.handoff(live, row, Boolean(request.taskId))) };
   }
 
   private mirrorState(live: LiveConnection, channel: string): VercelBoardMirrorState {

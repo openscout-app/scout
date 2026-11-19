@@ -81,7 +81,9 @@ run("the worker carries the closed set: tasks, claims, posts, labels and the eve
   const renewed = await transport.renew(task.id, claimed.claim, 120);
   expect(renewed.until).toBeGreaterThan(claimed.claim.until);
   await expect(transport.renew(task.id, { epoch: 1, token: "not-the-token" }, 60)).rejects.toBeInstanceOf(VercelBoardHttpError);
-  expect((await transport.complete(task.id, claimed.claim, "Build fixed.")).task).toMatchObject({ state: "completed", result: "Build fixed." });
+  const result = (await transport.complete(task.id, claimed.claim, "x".repeat(1200))).task?.result;
+  expect(result?.length).toBeLessThanOrEqual(1000);
+  expect(result).toContain("[Truncated; full text in Scout handoffs]");
 
   const post = await transport.post({ channel: "work", text: "A note", id: "scout-post-1" });
   expect((await transport.postById("scout-post-1"))?.id).toBe(post.id);

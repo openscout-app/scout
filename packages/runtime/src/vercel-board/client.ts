@@ -1,5 +1,5 @@
 import { VERCEL_BOARD_LABELS, vercelBoardCanHeader, type VercelBoardConnectionConfig, type VercelBoardPlanTask } from "@openscout/protocol";
-import { parseVercelBoardEvent, parseVercelBoardMessage, parseVercelBoardMessagesPage, parseVercelBoardTaskSummary, type VercelBoardWireEvent, type VercelBoardWireMessage } from "./wire.js";
+import { boardResultExcerpt, parseVercelBoardEvent, parseVercelBoardMessage, parseVercelBoardMessagesPage, parseVercelBoardTaskSummary, type VercelBoardWireEvent, type VercelBoardWireMessage } from "./wire.js";
 
 /**
  * A refusal or failure from the board, by Board's status and code. The body's
@@ -224,10 +224,10 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     return parseVercelBoardMessage(answer.task);
   }
   complete(taskId: string, grant: { epoch: number; token: string }, result?: string) {
-    return this.settle(taskId, "complete", { epoch: grant.epoch, token: grant.token, ...(result !== undefined ? { result: result.slice(0, 1000) } : {}) });
+    return this.settle(taskId, "complete", { epoch: grant.epoch, token: grant.token, ...(result !== undefined ? { result: boardResultExcerpt(result) } : {}) });
   }
   fail(taskId: string, grant: { epoch: number; token: string }, reason: string) {
-    return this.settle(taskId, "fail", { epoch: grant.epoch, token: grant.token, reason: reason.slice(0, 1000) });
+    return this.settle(taskId, "fail", { epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason) });
   }
   release(taskId: string, grant: { epoch: number; token: string }) {
     return this.settle(taskId, "release", { epoch: grant.epoch, token: grant.token });

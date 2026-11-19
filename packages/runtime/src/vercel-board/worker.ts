@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { VercelBoardCredentialReference, VercelBoardPlanTask } from "@openscout/protocol";
 import { VercelBoardHttpError, VercelBoardUnknownOutcomeError, type VercelBoardClaimGrant, type VercelBoardMe, type VercelBoardTransport } from "./client.js";
-import { parseVercelBoardEvent, parseVercelBoardMessage, parseVercelBoardMessagesPage, parseVercelBoardTaskSummary, type VercelBoardWireMessage } from "./wire.js";
+import { boardResultExcerpt, parseVercelBoardEvent, parseVercelBoardMessage, parseVercelBoardMessagesPage, parseVercelBoardTaskSummary, type VercelBoardWireMessage } from "./wire.js";
 
 /**
  * The Vercel transport: a supervised Node worker that runs `@vercel/board`.
@@ -416,11 +416,11 @@ export class VercelBoardWorkerTransport implements VercelBoardTransport {
   }
 
   async complete(taskId: string, grant: { epoch: number; token: string }, result?: string) {
-    return parseVercelBoardMessage(record(await this.worker.call("complete", { taskId, epoch: grant.epoch, token: grant.token, ...(result !== undefined ? { result: result.slice(0, 1000) } : {}) }), "task").task);
+    return parseVercelBoardMessage(record(await this.worker.call("complete", { taskId, epoch: grant.epoch, token: grant.token, ...(result !== undefined ? { result: boardResultExcerpt(result) } : {}) }), "task").task);
   }
 
   async fail(taskId: string, grant: { epoch: number; token: string }, reason: string) {
-    return parseVercelBoardMessage(record(await this.worker.call("fail", { taskId, epoch: grant.epoch, token: grant.token, reason: reason.slice(0, 1000) }), "task").task);
+    return parseVercelBoardMessage(record(await this.worker.call("fail", { taskId, epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason) }), "task").task);
   }
 
   async release(taskId: string, grant: { epoch: number; token: string }) {

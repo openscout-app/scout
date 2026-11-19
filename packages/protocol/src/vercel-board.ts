@@ -441,6 +441,8 @@ export interface VercelBoardHandoff {
   title?: string;
   result?: string;
   reason?: string;
+  /** The unabridged settlement text, on a task-specific Scout handoffs query. */
+  scoutResult?: string;
   /** Set when the claim is Scout's: the agent it was dispatched to, and the flight. */
   scout?: { agentId: string; flightId: string | null; attemptId: string };
   /** True when the copy made it up from the task's state at backfill, because the event is older than the copy. */

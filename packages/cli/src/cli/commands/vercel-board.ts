@@ -203,6 +203,6 @@ export async function runVercelBoardCommand(context: ScoutCommandContext, args: 
 function formatHandoff(handoff: VercelBoardHandoff): string {
   const who = handoff.actor ? `${handoff.actor.principal}${handoff.actor.profile ? `+${handoff.actor.profile}` : ""}` : "board";
   const to = handoff.to ? ` -> ${handoff.to}` : "";
-  const extra = handoff.result ? ` result: ${handoff.result}` : handoff.reason ? ` reason: ${handoff.reason}` : "";
+  const extra = handoff.scoutResult !== undefined ? ` ${handoff.kind === "failed" ? "reason" : "result"}: ${handoff.scoutResult}` : handoff.result ? ` result: ${handoff.result}` : handoff.reason ? ` reason: ${handoff.reason}` : "";
   return `${new Date(handoff.at).toISOString()} ${handoff.taskId} ${handoff.kind}${handoff.derived ? " (derived)" : ""} by ${who}${to}${handoff.scout ? ` [${handoff.scout.agentId}]` : ""}${extra}`;
 }

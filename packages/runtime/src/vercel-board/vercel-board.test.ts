@@ -521,6 +521,22 @@ test("a claim is an ordinary ask in the channel's room: no work item, and the ag
   expect(chain.handoffs.map(handoff => handoff.id)).toEqual(handoffs.map(handoff => handoff.id));
 });
 
+test("Board shows an excerpt while Scout retains the full result for the task", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  const id = h.board.createTask({ channel: "work", text: "Write a long answer" });
+  await h.service.claim({ connectionId: "c1", taskId: id, agentId: "agent-1", actorId: "operator" });
+  const output = "x".repeat(1200) + "final paragraph";
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  const excerpt = h.board.task(id)!.result!;
+  expect(excerpt.length).toBeLessThanOrEqual(1000);
+  expect(excerpt).toContain("[Truncated; full text in Scout handoffs]");
+  const chain = await h.service.handoffs({ connectionId: "c1", taskId: id });
+  expect(chain.handoffs.find(row => row.kind === "completed")).toMatchObject({ result: excerpt, scoutResult: output });
+});
+
 test("promote makes the only work item, and a promoted task Scout completed lands in Done with acceptance pending", async () => {
   const h = serviceHarness();
   await h.connect();
