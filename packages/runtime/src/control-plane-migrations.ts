@@ -2,7 +2,7 @@ import { WEB_READ_INDEXES_SQL } from "./web-read-indexes.js";
 import { INTEGRATION_SLACK_EVENTS_SCHEMA } from "./integration-slack-events.js";
 import { INTEGRATION_SLACK_DELIVERY_SCHEMA } from "./integration-slack-delivery.js";
 import { INTEGRATION_WORKER_SQLITE_SCHEMA } from "./integration-worker-leases.js";
-import { BOARD_SQLITE_SCHEMA } from "./board/schema.js";
+import { VERCEL_BOARD_SQLITE_SCHEMA } from "./vercel-board/schema.js";
 import { INTEGRATION_SETUP_SQLITE_SCHEMA } from "./integration-setup-schema.js";
 import { GUEST_GRANTS_SQLITE_SCHEMA } from "./guest-access.js";
 import { existsSync } from "node:fs";
@@ -533,9 +533,9 @@ WHERE latest.invocation_id = inv.id
     apply(database) { database.exec(WEB_READ_INDEXES_SQL); },
   },
   {
-    id: "board-custodian-state",
+    id: "vercel-board-custodian-state",
     description: "Adds custodian-local Vercel Board cursors, versions, claim custody, outbox and lease.",
-    apply(database) { database.exec(BOARD_SQLITE_SCHEMA); },
+    apply(database) { database.exec(VERCEL_BOARD_SQLITE_SCHEMA); },
   },
 ];
 

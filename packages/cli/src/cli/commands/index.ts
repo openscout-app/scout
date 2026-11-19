@@ -34,7 +34,6 @@ export type ScoutCommandName =
   | "inbox"
   | "install"
   | "integration"
-  | "board"
   | "label"
   | "latest"
   | "recent"
@@ -82,8 +81,6 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
   switch (name) {
     case "integration":
       return (await import("./integration.ts")).runIntegrationCommand;
-    case "board":
-      return (await import("./board.ts")).runBoardCommand;
     case "app":
       return (await import("./app.ts")).runAppCommand;
     case "quarantine":

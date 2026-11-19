@@ -1,7 +1,0 @@
-{
-  "path": "packages/runtime/src/board/worker.ts",
-  "symbol": "node:child_process",
-  "category": "process-lifecycle",
-  "reason": "supervised Board worker: one detached asynchronous child per team board connection, started under the local secret helper, with restart backoff and process-group cleanup; plus a bounded node --version probe",
-  "owner": "runtime"
-}

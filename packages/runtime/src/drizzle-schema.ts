@@ -1213,25 +1213,73 @@ export const integrationWorkerLeasesTable = sqliteTable("integration_worker_leas
   check("integration_worker_state_check", sql`${table.state} IN ('starting', 'connected', 'stopped')`),
 ]);
 
-// -- board_* ------------------------------------------------------------------
-// Custodian-local Vercel Board state (src/board). Not replicated, not
-// journaled, and not read by any read model: board_custody holds raw claim
+// -- vercel_board_* -----------------------------------------------------------
+// Custodian-local Vercel Board state (src/vercel-board). Not replicated, not
+// journaled, and not read by any read model: vercel_board_custody holds raw claim
 // tokens that the runtime presents to Board.
-export const boardCursorsTable = sqliteTable("board_cursors", {
+export const vercelBoardCursorsTable = sqliteTable("vercel_board_cursors", {
   connectionId: text("connection_id").notNull(),
   channel: text("channel").notNull(),
   cursor: text("cursor").notNull(),
+  lastDeltaAt: integer("last_delta_at"),
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [primaryKey({ columns: [table.connectionId, table.channel] })]);
 
-export const boardVersionsTable = sqliteTable("board_versions", {
+export const vercelBoardMessagesTable = sqliteTable("vercel_board_messages", {
   connectionId: text("connection_id").notNull(),
-  rootId: text("root_id").notNull(),
+  messageId: text("message_id").notNull(),
+  channel: text("channel").notNull(),
+  rootId: text("root_id"),
+  replyTo: text("reply_to"),
   version: integer("version").notNull(),
+  text: text("text").notNull(),
+  labelsJson: text("labels_json").notNull(),
+  authorActor: text("author_actor"),
+  authorPrincipal: text("author_principal"),
+  authorProfile: text("author_profile"),
+  origin: text("origin").notNull(),
+  noSync: integer("no_sync").notNull().default(0),
+  deleted: integer("deleted").notNull().default(0),
+  taskState: text("task_state"),
+  taskJson: text("task_json"),
+  createdAt: integer("created_at"),
+  editedAt: integer("edited_at"),
   updatedAt: integer("updated_at").notNull(),
-}, (table) => [primaryKey({ columns: [table.connectionId, table.rootId] })]);
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.messageId] }),
+  index("idx_vercel_board_messages_channel").on(table.connectionId, table.channel, table.createdAt),
+  index("idx_vercel_board_messages_tasks").on(table.connectionId, table.taskState),
+]);
 
-export const boardCustodyTable = sqliteTable("board_custody", {
+export const vercelBoardTaskEventsTable = sqliteTable("vercel_board_task_events", {
+  connectionId: text("connection_id").notNull(),
+  cursor: text("cursor").notNull(),
+  channel: text("channel").notNull(),
+  taskId: text("task_id").notNull(),
+  kind: text("kind").notNull(),
+  at: integer("at").notNull(),
+  actor: text("actor"),
+  principal: text("principal"),
+  profile: text("profile"),
+  toActor: text("to_actor"),
+  epoch: integer("epoch"),
+  detailJson: text("detail_json"),
+  derived: integer("derived").notNull().default(0),
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.cursor] }),
+  index("idx_vercel_board_task_events_task").on(table.connectionId, table.taskId, table.at),
+  index("idx_vercel_board_task_events_at").on(table.connectionId, table.at),
+]);
+
+export const vercelBoardPromotionsTable = sqliteTable("vercel_board_promotions", {
+  connectionId: text("connection_id").notNull(),
+  taskId: text("task_id").notNull(),
+  workId: text("work_id").notNull(),
+  promotedBy: text("promoted_by").notNull(),
+  promotedAt: integer("promoted_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.connectionId, table.taskId] })]);
+
+export const vercelBoardCustodyTable = sqliteTable("vercel_board_custody", {
   connectionId: text("connection_id").notNull(),
   taskId: text("task_id").notNull(),
   attemptId: text("attempt_id").notNull(),
@@ -1251,12 +1299,12 @@ export const boardCustodyTable = sqliteTable("board_custody", {
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.connectionId, table.attemptId] }),
-  check("board_custody_state_check", sql`${table.state} IN ('claiming', 'claim_unknown', 'held', 'settling', 'settled', 'lost')`),
-  check("board_custody_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'failed', 'released')`),
-  index("idx_board_custody_task").on(table.connectionId, table.taskId, table.state),
+  check("vercel_board_custody_state_check", sql`${table.state} IN ('claiming', 'claim_unknown', 'held', 'settling', 'settled', 'lost')`),
+  check("vercel_board_custody_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'failed', 'released')`),
+  index("idx_vercel_board_custody_task").on(table.connectionId, table.taskId, table.state),
 ]);
 
-export const boardOutboxTable = sqliteTable("board_outbox", {
+export const vercelBoardOutboxTable = sqliteTable("vercel_board_outbox", {
   connectionId: text("connection_id").notNull(),
   clientId: text("client_id").notNull(),
   lane: text("lane").notNull(),
@@ -1270,12 +1318,12 @@ export const boardOutboxTable = sqliteTable("board_outbox", {
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.connectionId, table.clientId] }),
-  check("board_outbox_kind_check", sql`${table.kind} IN ('post', 'plan')`),
-  check("board_outbox_state_check", sql`${table.state} IN ('pending', 'unknown', 'done', 'failed')`),
-  index("idx_board_outbox_lane").on(table.connectionId, table.lane, table.state, table.createdAt),
+  check("vercel_board_outbox_kind_check", sql`${table.kind} IN ('post', 'plan')`),
+  check("vercel_board_outbox_state_check", sql`${table.state} IN ('pending', 'unknown', 'done', 'failed')`),
+  index("idx_vercel_board_outbox_lane").on(table.connectionId, table.lane, table.state, table.createdAt),
 ]);
 
-export const boardCustodianLeasesTable = sqliteTable("board_custodian_leases", {
+export const vercelBoardCustodianLeasesTable = sqliteTable("vercel_board_custodian_leases", {
   connectionId: text("connection_id").notNull(),
   principal: text("principal").notNull(),
   ownerId: text("owner_id").notNull(),
@@ -1285,7 +1333,7 @@ export const boardCustodianLeasesTable = sqliteTable("board_custodian_leases", {
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.connectionId, table.principal] }),
-  check("board_custodian_generation_check", sql`${table.generation} >= 1`),
+  check("vercel_board_custodian_generation_check", sql`${table.generation} >= 1`),
 ]);
 
 export const integrationSlackThreadsTable = sqliteTable("integration_slack_threads", {
@@ -1311,11 +1359,13 @@ export const controlPlaneDrizzleSchema = {
   integrationSlackThreadsTable,
   integrationSlackDeliveriesTable,
   integrationWorkerLeasesTable,
-  boardCursorsTable,
-  boardVersionsTable,
-  boardCustodyTable,
-  boardOutboxTable,
-  boardCustodianLeasesTable,
+  vercelBoardCursorsTable,
+  vercelBoardMessagesTable,
+  vercelBoardTaskEventsTable,
+  vercelBoardPromotionsTable,
+  vercelBoardCustodyTable,
+  vercelBoardOutboxTable,
+  vercelBoardCustodianLeasesTable,
   integrationSetupOperationsTable,
   integrationSetupRequestsTable,
   nodes: nodesTable,

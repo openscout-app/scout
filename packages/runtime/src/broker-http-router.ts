@@ -1,5 +1,5 @@
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
-import { BrokerBoardService, BoardServiceError, BoardConnectionError } from "./board/service.js";
+import { BrokerVercelBoardService, VercelBoardServiceError, VercelBoardConnectionError } from "./vercel-board/service.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
 import { readProviderQuotas } from "./broker-provider-quota-read.js";
@@ -330,7 +330,7 @@ export type BrokerHttpRouterDeps = {
   externalSessionService?: BrokerExternalSessionService;
   t3Service?: BrokerT3Service;
   /** The Vercel Board adapter; it answers on its custodian node. */
-  boardService?: BrokerBoardService;
+  vercelBoardService?: BrokerVercelBoardService;
   routeAliasService?: BrokerRouteAliasService;
   agentRosterService?: AgentRosterService;
   /** Operator session names; absent without broker SQLite persistence. */
@@ -899,28 +899,38 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  if (url.pathname.startsWith("/v1/board/")) {
-    if (!deps.boardService) { json(response, 503, { error: "board_unavailable" }); return; }
-    const board = deps.boardService;
+  if (url.pathname.startsWith("/v1/integrations/vercel-board/")) {
+    if (!deps.vercelBoardService) { json(response, 503, { error: "vercel_board_unavailable" }); return; }
+    const board = deps.vercelBoardService;
     try {
-      if (method === "GET" && url.pathname === "/v1/board/status") {
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/status") {
         json(response, 200, { connections: await board.status(url.searchParams.get("connection") ?? undefined) });
+        return;
+      }
+      const number = (name: string) => { const raw = url.searchParams.get(name); return raw === null || !/^\d+$/.test(raw) ? undefined : Number(raw); };
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/messages") {
+        json(response, 200, await board.messages({ connectionId: url.searchParams.get("connection") ?? "", channel: url.searchParams.get("channel") ?? "", limit: number("limit") }));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/handoffs") {
+        json(response, 200, await board.handoffs({ connectionId: url.searchParams.get("connection") ?? "", taskId: url.searchParams.get("task") ?? undefined, since: number("since"), limit: number("limit") }));
         return;
       }
       if (method !== "POST") { notFound(response); return; }
       // Board credentials and claim tokens stay on the custodian: no remote mutation, no forwarding.
       if (denyRemoteMutation()) return;
-      if (forwardedNodeId) { json(response, 403, { error: "board_local_only" }); return; }
+      if (forwardedNodeId) { json(response, 403, { error: "vercel_board_local_only" }); return; }
       const input = await readRequestBody<Record<string, any>>(request, { maxBytes: 256 * 1024 });
-      if (method === "POST" && url.pathname === "/v1/board/connect") { json(response, 200, await board.connect(input as any)); return; }
-      if (method === "POST" && url.pathname === "/v1/board/claim") { json(response, 200, await board.claim(input as any)); return; }
-      if (method === "POST" && url.pathname === "/v1/board/plan") { json(response, 200, await board.plan(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/connect") { json(response, 200, await board.connect(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/claim") { json(response, 200, await board.claim(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/plan") { json(response, 200, await board.plan(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/promote") { json(response, 200, await board.promote(input as any)); return; }
       notFound(response);
     } catch (error) {
       // Only service error codes and messages cross this boundary; credentials and tokens never do.
-      if (error instanceof BoardServiceError) { json(response, error.status, { error: error.code, message: error.message, ...(error.fix ? { fix: error.fix } : {}) }); return; }
-      if (error instanceof BoardConnectionError) { json(response, 400, { error: error.code, message: error.message, ...(error.fix ? { fix: error.fix } : {}) }); return; }
-      json(response, 500, { error: "board_request_failed", message: error instanceof Error ? error.message.slice(0, 300) : "failed" });
+      if (error instanceof VercelBoardServiceError) { json(response, error.status, { error: error.code, message: error.message, ...(error.fix ? { fix: error.fix } : {}) }); return; }
+      if (error instanceof VercelBoardConnectionError) { json(response, 400, { error: error.code, message: error.message, ...(error.fix ? { fix: error.fix } : {}) }); return; }
+      json(response, 500, { error: "vercel_board_request_failed", message: error instanceof Error ? error.message.slice(0, 300) : "failed" });
     }
     return;
   }

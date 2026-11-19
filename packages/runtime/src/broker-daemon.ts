@@ -1,6 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
-import { BrokerBoardService } from "./board/service.js";
+import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
@@ -2293,11 +2293,11 @@ const t3Service = new BrokerT3Service({
 
 // The Vercel Board adapter. It runs only where this node is the recorded
 // custodian; the credential and claim tokens never leave this node.
-const boardService = routeAliasDatabase ? new BrokerBoardService({
+const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
   database: routeAliasDatabase,
-  connectionsDirectory: join(controlHome, "board"),
+  connectionsDirectory: join(controlHome, "vercel-board"),
   recordWork: (record, options) => recordCollaborationDurably(record, options),
   appendWorkEvent: appendCollaborationEventDurably,
   work: id => runtime.collaborationRecord(id),
@@ -2306,6 +2306,21 @@ const boardService = routeAliasDatabase ? new BrokerBoardService({
   placeWorkChange: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context) as never,
   deliver: request => deliveryAcceptanceService.accept(request),
   flight: id => journal.getFlight(id),
+  // One room per followed channel: merge the roster, never drop anyone already in it.
+  ensureRoom: async (room) => {
+    await durableRecords.updateConversation(room.id, current => {
+      if (!current) return room;
+      const participantIds = [...new Set([...current.participantIds, ...room.participantIds])];
+      if (participantIds.length === current.participantIds.length) return undefined;
+      return { ...current, participantIds };
+    });
+  },
+  // Live only, beside asks and flights. The mirror's task events are the record.
+  publish: (event) => {
+    controlStreams.streamEphemeralEvent(event);
+    publishEphemeralControlEvent(event);
+  },
+  createId: () => createRuntimeId("evt"),
   warn: (message, error) => console.warn(`[openscout-runtime] ${message}`, error ?? ""),
 }) : undefined;
 
@@ -3628,7 +3643,7 @@ const routeRequest = createBrokerHttpRouter({
   rendezvousService,
   externalSessionService,
   t3Service,
-  boardService,
+  vercelBoardService,
   routeAliasService,
   agentRosterService,
   sessionNameService,
@@ -4283,7 +4298,7 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
   }, 60_000).unref();
 
   slackWorkerSupervisor?.start();
-  void boardService?.start().catch(error => console.error("[openscout-runtime] board adapter did not start:", error));
+  void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4309,7 +4324,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   meshApprovalShare.stop();
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
-  await boardService?.stop();
+  await vercelBoardService?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });

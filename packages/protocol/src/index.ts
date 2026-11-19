@@ -78,7 +78,7 @@ export * from "./session-task.js";
 export * from "./mcp-core-tools.js";
 
 export * from "./integrations.js";
-export * from "./board.js";
+export * from "./vercel-board.js";
 export * from "./slack-manifest.js";
 
 export * from "./room-listening.js";

@@ -5,7 +5,7 @@ import { readTaskImage } from "../cli/task-image.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
-import { registerBoardPlanTool } from "./board-plan.ts";
+import { registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
 import { registerDiffTools } from "./diff-tools.ts";
@@ -5773,7 +5773,7 @@ export function createScoutMcpServer(options: {
     },
   );
 
-  registerBoardPlanTool(server, {
+  registerVercelBoardPlanTool(server, {
     plan: deps.planBoardTasks ?? planScoutBoardTasks,
     resolveSender: async (senderId, currentDirectory) => resolveMcpSenderId(deps, senderId, resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory), env),
   });

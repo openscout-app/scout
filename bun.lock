@@ -28,13 +28,6 @@
         "typescript": "^5",
       },
     },
-    "packages/board-worker": {
-      "name": "@openscout/board-worker",
-      "version": "0.0.0",
-      "dependencies": {
-        "@vercel/board": "0.52.0",
-      },
-    },
     "packages/cli": {
       "name": "@openscout/scout",
       "version": "0.5.3",
@@ -153,6 +146,13 @@
       },
       "devDependencies": {
         "typescript": "^5",
+      },
+    },
+    "packages/vercel-board-worker": {
+      "name": "@openscout/vercel-board-worker",
+      "version": "0.0.0",
+      "dependencies": {
+        "@vercel/board": "0.52.0",
       },
     },
   },
@@ -388,8 +388,6 @@
 
     "@openscout/agent-sessions": ["@openscout/agent-sessions@workspace:packages/agent-sessions"],
 
-    "@openscout/board-worker": ["@openscout/board-worker@workspace:packages/board-worker"],
-
     "@openscout/mesh-extension": ["@openscout/mesh-extension@workspace:packages/mesh-extension"],
 
     "@openscout/pairing": ["@openscout/pairing@workspace:packages/pairing"],
@@ -401,6 +399,8 @@
     "@openscout/scout": ["@openscout/scout@workspace:packages/cli"],
 
     "@openscout/session-trace": ["@openscout/session-trace@workspace:packages/session-trace"],
+
+    "@openscout/vercel-board-worker": ["@openscout/vercel-board-worker@workspace:packages/vercel-board-worker"],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 

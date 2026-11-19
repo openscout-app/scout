@@ -17,7 +17,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "help", summary: "Show help text" },
   { name: "version", summary: "Print the Scout CLI version" },
   { name: "integration", summary: "Prepare and resume local project-agent integrations" },
-  { name: "board", summary: "Connect a Vercel Board and show its status" },
+  { name: "integrations", summary: "Alias for integration", canonicalName: "integration", hidden: true },
   { name: "setup", summary: "Set up local settings and the runtime" },
   { name: "report", summary: "Upload diagnostics with a private local fallback" },
   { name: "feedback", summary: "Send a note, optionally with diagnostics" },
