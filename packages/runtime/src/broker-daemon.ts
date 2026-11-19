@@ -25,6 +25,7 @@ import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
+import { decidePermissionSupervisor } from "./permission-supervisor.js";
 import { permissionWaitPatch } from "./broker-blocked-reply.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
@@ -3142,6 +3143,7 @@ const permissionService = new BrokerPermissionService({
   operatorId: operatorActorId,
   nodeId,
   createId: () => createRuntimeId("permission"),
+  supervisor: decidePermissionSupervisor,
   record: recordCollaborationDurably,
   read: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
   requests: () => Object.values(runtime.snapshot().collaborationRecords)

@@ -200,6 +200,22 @@ answers, and sends only to that process. The Requests page and Scoutbot share
 this API through `useRequestActions`. No background resume, fork, or project hook
 is installed.
 
+Managed requests first consult the permission supervisor, which uses the same
+`$OPENSCOUT_HOME/continuation-policy.json` project grants as Herdr continuation.
+With no grant, the default `ask` level changes nothing. A `workspace` grant lets
+the supervisor answer **Allow once** for exact local reads, tests, builds, checks, and
+plain relative in-project edits. Higher grant levels keep their existing risk
+meaning. Unknown prompts, sensitive or outside paths, and requests without a
+one-time allow choice stay with the operator. The supervisor never chooses a
+persistent project grant or a denial.
+
+A successful automatic decision skips the operator notification and settles the
+record with `answeredById: "permission-supervisor"`. Its actuation metadata records
+the grant, risk, and reason. Delivery still goes through the same live-prompt
+revalidation and no-replay protection as an operator decision. This slice covers
+Scout-managed requests through `wait`; native Claude requests through `raise`
+keep their existing human-only path.
+
 A runtime restart loses the live callback. Each record names the node that wrote
 it, and the runtime reconciles the open records of its own node that no process
 waits on: once at startup, then every minute. If the session's pane still shows

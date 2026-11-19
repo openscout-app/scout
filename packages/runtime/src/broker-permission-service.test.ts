@@ -4,11 +4,12 @@ import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, Permission
 import { configureManagedPermissionHandler, withManagedPermissionContext } from "./managed-permission.js";
 import { parseTmuxPermission, tmuxPermissionPrompt, waitForTmuxPermission } from "./tmux-permission.js";
 import { waitForReadyComposer } from "./local-agents.js";
+import type { PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
 const trust = `old scrollback\nAccessing workspace:\n /tmp/project\nQuick safety check: Is this a project you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel`;
 const tool = `Bash command\n rm -rf dist\nThis command requires approval\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again in this project\n   3. No\nEsc to cancel`;
 const invocation = { id: "inv", targetAgentId: "agent", conversationId: "chn-test" } as InvocationRequest;
-function harness(options: { reattach?: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>; localInvocation?: boolean } = {}) {
+function harness(options: { reattach?: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>; localInvocation?: boolean; supervisor?: () => PermissionSupervisorVerdict } = {}) {
   const records = new Map<string, QuestionRecord>();
   const states: string[] = [];
   const notifications: QuestionRecord[] = [];
@@ -18,6 +19,7 @@ function harness(options: { reattach?: (request: { sessionId: string; projectRoo
     operatorId: "operator", nodeId: "node", createId: () => "permission-1", record: async record => { assertValidCollaborationRecord(record); records.set(record.id, record); },
     read: id => records.get(id), requests: () => [...records.values()], flight: () => ({ id: "flt", state } as FlightRecord),
     localInvocation: () => options.localInvocation ?? true,
+    supervisor: options.supervisor,
     reattach: async request => { lookups.push(request.sessionId); return options.reattach ? options.reattach(request) : { sessionOpen: false }; },
     transition: async (_, value) => { states.push(value); state = value; },
     notify: (_, record) => { notifications.push(record); }, sleep: async () => { await new Promise(resolve => setTimeout(resolve, 1)); },
@@ -394,4 +396,59 @@ test("native raise stores the resolved conversation without replacing the harnes
   });
   expect(captured?.conversationId).toBe("chat-one");
   expect(captured?.metadata?.permissionRequest).toMatchObject({ sessionId: "native-session" });
+});
+
+describe("permission supervisor lifecycle", () => {
+  const approve: PermissionSupervisorVerdict = { act: "continue", reason: "workspace continues workspace", risk: "workspace", grant: "project:/work/app" };
+
+  test("approves once, skips operator notification, and records its authority", async () => {
+    const h = harness({ supervisor: () => approve });
+    const answers: string[] = [];
+    await h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async decision => { answers.push(decision); },
+    });
+    expect(answers).toEqual(["once"]);
+    expect(h.notifications).toHaveLength(0);
+    expect(h.states).toEqual(["running"]);
+    expect(h.records.get("permission-1")).toMatchObject({
+      state: "closed", answer: "once", answeredById: "permission-supervisor",
+      metadata: { permissionActuation: {
+        status: "attempt", initiatedBy: "permission-supervisor", reason: approve.reason, grant: approve.grant, risk: "workspace",
+      } },
+    });
+  });
+
+  test("a supervisor notify verdict follows the existing operator path", async () => {
+    const h = harness({ supervisor: () => ({ ...approve, act: "notify", reason: "workspace does not auto-continue network", risk: "network" }) });
+    const answers: string[] = [];
+    const waiting = h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "curl https://example.com", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async decision => { answers.push(decision); },
+    });
+    await until(() => h.notifications.length === 1);
+    expect(answers).toEqual([]);
+    expect(h.states).toEqual(["waiting"]);
+    await h.service.decide("permission-1", "v", "once");
+    await waiting;
+    expect(answers).toEqual(["once"]);
+    expect(h.records.get("permission-1")?.answeredById).toBe("operator");
+  });
+
+  test("an ambiguous automatic delivery cannot be replayed", async () => {
+    const h = harness({ supervisor: () => approve });
+    let answers = 0;
+    const waiting = h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async () => { answers++; throw new Error("send failed"); },
+    });
+    await expect(waiting).rejects.toBeInstanceOf(PermissionDeliveryUnconfirmedError);
+    expect(answers).toBe(1);
+    expect(h.notifications).toHaveLength(0);
+    expect(h.records.get("permission-1")).toMatchObject({
+      state: "declined", answeredById: "permission-supervisor",
+      metadata: { permissionActuation: { status: "attempt", initiatedBy: "permission-supervisor" } },
+    });
+    await expect(h.service.decide("permission-1", "v", "once")).rejects.toThrow("settled");
+  });
 });
