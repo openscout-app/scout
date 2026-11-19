@@ -9,13 +9,13 @@
     "subfolder": "packages/cli"
   },
   "websiteUrl": "https://openscout.app/docs/integrations",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@openscout/scout",
-      "version": "0.5.2",
+      "version": "0.5.3",
       "runtimeHint": "bunx",
       "packageArguments": [
         { "type": "positional", "value": "mcp" }

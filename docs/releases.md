@@ -144,11 +144,12 @@ node scripts/release-notes.mjs <version>
 `scripts/release-notes.test.mjs` fails when a section from 0.5.1 on has no
 headline bullet.
 
-## 0.5.2 shared MCP
+## 0.5.3 shared MCP
 
 Scout's MCP server can now run as one shared process for every local session,
 and delivery into a terminal refuses to type into a composer it cannot see
-empty. Install with `bun add -g @openscout/scout`.
+empty. Install with `bun add -g @openscout/scout`. 0.5.2 was never published
+as a complete set; this release ships as 0.5.3.
 
 ### What's changed
 
