@@ -1,5 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerBoardService } from "./board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
@@ -2290,6 +2291,24 @@ const t3Service = new BrokerT3Service({
   deliver: request => deliveryAcceptanceService.accept(request),
 });
 
+// The Vercel Board adapter. It runs only where this node is the recorded
+// custodian; the credential and claim tokens never leave this node.
+const boardService = routeAliasDatabase ? new BrokerBoardService({
+  nodeId,
+  operatorId: operatorActorId,
+  database: routeAliasDatabase,
+  connectionsDirectory: join(controlHome, "board"),
+  recordWork: (record, options) => recordCollaborationDurably(record, options),
+  appendWorkEvent: appendCollaborationEventDurably,
+  work: id => runtime.collaborationRecord(id),
+  workItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  persistActor: upsertActorDurably,
+  placeWorkChange: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context) as never,
+  deliver: request => deliveryAcceptanceService.accept(request),
+  flight: id => journal.getFlight(id),
+  warn: (message, error) => console.warn(`[openscout-runtime] ${message}`, error ?? ""),
+}) : undefined;
+
 const terminalReportDeliveryService = new BrokerTerminalReportDeliveryService({
   nodeId,
   flightById: (id) => journal.getFlight(id),
@@ -3609,6 +3628,7 @@ const routeRequest = createBrokerHttpRouter({
   rendezvousService,
   externalSessionService,
   t3Service,
+  boardService,
   routeAliasService,
   agentRosterService,
   sessionNameService,
@@ -4263,6 +4283,7 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
   }, 60_000).unref();
 
   slackWorkerSupervisor?.start();
+  void boardService?.start().catch(error => console.error("[openscout-runtime] board adapter did not start:", error));
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4288,6 +4309,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   meshApprovalShare.stop();
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
+  await boardService?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });
