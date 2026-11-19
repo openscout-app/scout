@@ -4,13 +4,17 @@ import { ScoutCliError } from "../errors.ts";
 import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
 
 export const BOARD_HELP = [
-  "scout board connect --url <board url> --credential secret_cli:<entry>|env:<NAME>|file:<absolute path>",
+  "scout board connect --team <team ID or slug> [--board scout] --credential secret_cli:<entry>|env:<NAME>|file:<absolute path>",
+  "scout board connect --url <board url> --credential ...",
   "    [--id <connection>] [--channels work,decisions] [--probe-channel scout-probe] [--allow <principal>,...] [--no-probe]",
   "    [--experimental-marker [--takeover]]",
   "scout board status [--connection <id>]",
   "scout board claim --connection <id> --task <board task id> --agent <scout agent id> [--confirm-owner]",
   "",
   "Connects this node as the custodian of one Vercel Board, as the operator's principal with the `scout` profile.",
+  "--team names your Vercel team's board by name (default: scout). Scout finds the board or makes it, makes the channels,",
+  "and reaches it through the Board worker, which runs @vercel/board on Node 24 (set SCOUT_BOARD_NODE on the broker).",
+  "--url names a board that serves Board's documented protocol, such as a `vb serve` board.",
   "The credential is a reference: Scout reads it on the broker and never prints it. Do not pass a token here.",
   "For Vercel, create an access token once and store it with: secret set <entry>. Do not reuse the Vercel CLI login.",
   "Connect runs a probe: it creates, claims and completes one task in the probe channel, and saves the connection only if that works.",
@@ -22,7 +26,7 @@ export const BOARD_HELP = [
 type Parsed = { method: "GET" | "POST"; path: string; body?: Record<string, unknown>; kind: "connect" | "status" | "claim" };
 
 const VALUE_FLAGS: Record<string, string[]> = {
-  connect: ["--url", "--credential", "--id", "--channels", "--probe-channel", "--allow"],
+  connect: ["--url", "--team", "--board", "--credential", "--id", "--channels", "--probe-channel", "--allow"],
   status: ["--connection"],
   claim: ["--connection", "--task", "--agent"],
 };
@@ -66,10 +70,13 @@ export function parseBoardCommand(args: string[]): Parsed {
       ...(switches.has("--confirm-owner") ? { confirmOwner: true } : {}),
     } };
   }
-  if (!flags["--url"] || !flags["--credential"]) throw new ScoutCliError("scout board connect requires --url and --credential.");
+  if (flags["--url"] && (flags["--team"] || flags["--board"])) throw new ScoutCliError("Name the board with --team and --board, or with --url, not both.");
+  if (flags["--board"] && !flags["--team"]) throw new ScoutCliError("--board needs --team.");
+  if ((!flags["--url"] && !flags["--team"]) || !flags["--credential"]) throw new ScoutCliError("scout board connect requires --team (or --url) and --credential.");
   if (switches.has("--takeover") && !switches.has("--experimental-marker")) throw new ScoutCliError("--takeover applies only with --experimental-marker.");
   return { kind: "connect", method: "POST", path: scoutBrokerPaths.v1.boardConnect, body: {
-    url: flags["--url"], credential: parseCredentialReference(flags["--credential"]),
+    ...(flags["--url"] ? { url: flags["--url"] } : { team: flags["--team"], ...(flags["--board"] ? { board: flags["--board"] } : {}) }),
+    credential: parseCredentialReference(flags["--credential"]),
     ...(flags["--id"] ? { id: flags["--id"] } : {}),
     ...(flags["--channels"] ? { channels: list(flags["--channels"]) } : {}),
     ...(flags["--probe-channel"] ? { probeChannel: flags["--probe-channel"] } : {}),
