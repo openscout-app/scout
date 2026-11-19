@@ -214,7 +214,7 @@ run("connect by team and board name: finds or makes the board, its channels, and
   expect(JSON.stringify(response)).not.toContain("test-token-0123");
 
   // The same worker serves the connection: plan, mirror, promote, claim. The claim token stays in runtime custody.
-  const plan = await h.service.plan({ connectionId: "vb", channel: "scout/work", planningTaskId: "task-1", requestId: "req-1", actorId: "agent-1", tasks: [{ key: "a", text: "First" }, { key: "b", text: "Second", needs: [{ key: "a" }] }] });
+  const plan = await h.service.plan({ connectionId: "vb", channel: "scout/work", planningTaskId: "task-1", requestId: "req-1", actorId: "operator", tasks: [{ key: "a", text: "First" }, { key: "b", text: "Second", needs: [{ key: "a" }] }] });
   expect(plan.tasks.map(task => task.state)).toEqual(["ready", "waiting"]);
   await h.service.pump("vb");
   const first = plan.tasks[0]!;
