@@ -66,18 +66,34 @@ export function decidePermissionSupervisor(
 const LOCAL_SCRIPT = /^(?:test|lint|typecheck|check|build)(?::[\w.-]+)*$/;
 const OUTSIDE_PROJECT_PATH = /(?:^|\s|=|@)(?:~|\/)|\.\./;
 const ATTACHED_ABSOLUTE_PATH = /^--?[A-Za-z][A-Za-z0-9-]*=?(?:\/|~)/;
+const HTTP_URL = /^https?:\/\/\S+$/i;
+const FILE_URL = /\bfile:/i;
 
 function classifyPermissionCommandRisk(command: string | null): ContinuationRisk {
   const risk = classifyContinuationRisk(command);
   if (!command) return risk;
   const words = command.trim().split(/\s+/);
-  if (OUTSIDE_PROJECT_PATH.test(command.replace(/\bhttps?:\/\/\S+/giu, ""))
+  const pathText = words.filter((word, index) => !HTTP_URL.test(word) || !remoteHttpOperand(words, index)).join(" ");
+  if (FILE_URL.test(pathText) || OUTSIDE_PROJECT_PATH.test(pathText)
     || words.some(word => ATTACHED_ABSOLUTE_PATH.test(word))) return "unknown";
   if (risk !== "workspace") return risk;
   if (/^(?:bun|npm|pnpm|yarn)$/.test(words[0] ?? "") && words[1] === "run" && !LOCAL_SCRIPT.test(words[2] ?? "")) {
     return "unknown";
   }
   return risk;
+}
+
+function remoteHttpOperand(words: string[], index: number): boolean {
+  const executable = words[0]?.toLowerCase();
+  if (executable === "curl") {
+    if (index !== words.length - 1) return false;
+    const previous = words[index - 1] ?? "";
+    return previous === "--url" || !previous.startsWith("-");
+  }
+  if (executable === "git" && words[1]?.toLowerCase() === "push") {
+    return index === 2 || (words[2] === "--" && index === 3);
+  }
+  return false;
 }
 
 function withinProject(projectRoot: string, cwd: string): boolean {

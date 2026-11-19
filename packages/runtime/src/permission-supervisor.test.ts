@@ -134,18 +134,41 @@ describe("permission supervisor", () => {
   });
 
   test("network and publish grants do not permit outside filesystem effects", () => {
-    for (const text of [claude("curl -o/tmp/outside https://example.com"), codex("curl -o/tmp/outside https://example.com", project)]) {
-      expect(decidePermissionSupervisor(prompt(text), grants("unattended")).act).toBe("notify");
+    for (const text of [claude("cat https://example.com/../../../../etc/hosts"), codex("cat https://example.com/../../../../etc/hosts", project)]) {
+      expect(decidePermissionSupervisor(prompt(text), grants()).act).toBe("notify");
     }
-    for (const text of [claude("git push /tmp/outside HEAD"), codex("git push /tmp/outside HEAD", project)]) {
-      expect(decidePermissionSupervisor(prompt(text), grants("silent")).act).toBe("notify");
+    const networkCommands = [
+      "curl -o/tmp/outside https://example.com",
+      "curl file:///etc/hosts",
+      "curl --output=https://example.com/../../../../tmp/outside https://example.com",
+      "curl --output https://example.com/../../../../tmp/outside https://example.com",
+      "curl --create-dirs -so https://example.com/../../../../tmp/outside https://example.com",
+      "curl --create-dirs --output-dir https://example.com/../../../../tmp --output outside https://example.com",
+    ];
+    for (const command of networkCommands) {
+      for (const text of [claude(command), codex(command, project)]) {
+        expect(decidePermissionSupervisor(prompt(text), grants("unattended")).act).toBe("notify");
+      }
+    }
+    for (const command of ["git push /tmp/outside HEAD", "git push file:///tmp/outside HEAD"]) {
+      for (const text of [claude(command), codex(command, project)]) {
+        expect(decidePermissionSupervisor(prompt(text), grants("silent")).act).toBe("notify");
+      }
     }
   });
 
   test("higher grants retain their in-project network and publish meaning", () => {
-    expect(decidePermissionSupervisor(prompt(claude("curl -o dist/result https://example.com")), grants("unattended")).act).toBe("continue");
-    expect(decidePermissionSupervisor(prompt(codex("curl -o dist/result https://example.com", project)), grants("unattended")).act).toBe("continue");
-    expect(decidePermissionSupervisor(prompt(claude("git push origin HEAD")), grants("silent")).act).toBe("continue");
-    expect(decidePermissionSupervisor(prompt(codex("git push origin HEAD", project)), grants("silent")).act).toBe("continue");
+    const networkCommands = [
+      "curl -o dist/result https://example.com",
+      "curl https://example.com/../../../../tmp/outside",
+    ];
+    for (const command of networkCommands) {
+      expect(decidePermissionSupervisor(prompt(claude(command)), grants("unattended")).act).toBe("continue");
+      expect(decidePermissionSupervisor(prompt(codex(command, project)), grants("unattended")).act).toBe("continue");
+    }
+    for (const command of ["git push origin HEAD", "git push https://example.com/repo.git HEAD"]) {
+      expect(decidePermissionSupervisor(prompt(claude(command)), grants("silent")).act).toBe("continue");
+      expect(decidePermissionSupervisor(prompt(codex(command, project)), grants("silent")).act).toBe("continue");
+    }
   });
 });
