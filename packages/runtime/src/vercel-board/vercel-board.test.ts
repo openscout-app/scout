@@ -521,6 +521,21 @@ test("a claim is an ordinary ask in the channel's room: no work item, and the ag
   expect(chain.handoffs.map(handoff => handoff.id)).toEqual(handoffs.map(handoff => handoff.id));
 });
 
+test("fan-in gets the full Scout dependency result, attributed and quoted", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  const upstream = h.board.createTask({ channel: "work", text: "Gather sources" });
+  const downstream = h.board.createTask({ channel: "work", text: "Summarize the sources", needs: [upstream] });
+  await h.service.claim({ connectionId: "c1", taskId: upstream, agentId: "agent-1", actorId: "operator" });
+  const output = "x".repeat(1200) + "\rFinal source: https://example.com/source";
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
+  await h.service.pump("c1");
+  await h.service.claim({ connectionId: "c1", taskId: downstream, agentId: "agent-2", actorId: "operator" });
+  const prompt = h.deliveries.at(-1)!.body;
+  expect(prompt).toContain(`Dependency ${upstream} (completed; channel work):`);
+  expect(prompt).toContain("\n> Final source: https://example.com/source");
+});
+
 test("Board shows an excerpt while Scout retains the full result for the task", async () => {
   const h = serviceHarness();
   await h.connect();
