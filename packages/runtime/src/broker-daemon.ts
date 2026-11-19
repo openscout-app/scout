@@ -3753,10 +3753,13 @@ async function routeBrokerHttpRequest(
   response: RuntimeHttpResponseLike,
 ): Promise<void> {
   if (!startupTrafficGate.admits(request.method, request.url ?? "/")) {
+    const startup = startupTrafficGate.snapshot();
     json(response, 503, {
       error: "broker_restoring",
-      detail: "This route requires context that is still restoring. Registration and covered reads are available as reported by startup capabilities.",
-      startup: startupTrafficGate.snapshot(),
+      detail: startup.nextRetryAt !== undefined
+        ? "Dispatch is paused while SQLite recovers. Scout retries automatically. Retry the same request ID once mutationsAdmitted is true."
+        : "This route requires context that is still restoring. Registration and covered reads are available as reported by startup capabilities.",
+      startup,
       retryable: true,
     });
     return;
@@ -3840,6 +3843,84 @@ const secretRedaction = await bootstrapSecretRedaction({ patchConsole: true });
 console.log(`[openscout-runtime] secret redaction armed (${secretRedaction.registered} value(s)${
   secretRedaction.schemaPath ? `, schema ${secretRedaction.schemaPath}` : ", no .env.schema found"
 })`);
+
+let projectionRetryDelayMs = 2_000;
+let projectionRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function restoreStartupProjection(): Promise<void> {
+  let canonicalStartupFailure = false;
+  try {
+    if (startupTrafficGate.snapshot().nextRetryAt !== undefined) {
+      await storageMonitor.refresh();
+      const pressure = storageMonitor.admissionPressure();
+      if (pressure) throw new Error(pressure);
+    }
+    if (shuttingDown) return;
+    projectionWarmStarted = true;
+    await projection.warm();
+    if (!sqliteDisabled) {
+      // Wait for the original replay, then schedule its accepted startup suffix
+      // before enabling live writes. No payload closure is retained for that
+      // suffix, and writes after its barrier queue strictly behind catch-up.
+      await projection.flush();
+      let catchUp: Promise<void> = Promise.resolve();
+      await durableStore.runWrite(async () => {
+        await controlEventWrites;
+        const boundary = await projection.captureStartupCatchUpBoundary();
+        catchUp = projection.catchUpStartup(boundary);
+        void catchUp.catch(() => {});
+        deferStartupProjection = false;
+      }).catch((error) => {
+        // A failed canonical event append or journal barrier is not a derived
+        // projection failure: never keep accepting writes on that evidence.
+        canonicalStartupFailure = true;
+        throw error;
+      });
+      await catchUp;
+      startupTrafficGate.restoringSessions();
+      const persistedObservedSessions = await projection.persistedActiveObservedSessionUpdates();
+      if (shuttingDown) return;
+      const status = projection.statusSnapshot();
+      if (status.state !== "ready") throw new Error(status.detail ?? "SQLite projection is unavailable.");
+      observedSessionReducer = new ObservedSessionReducer(projection);
+      if (persistedObservedSessions !== null) {
+        const hydration = observedSessionReducer.hydratePersistedActiveSessions(
+          persistedObservedSessions,
+        );
+        const lifecycleSeeds = replacePersistedActiveObservedSessionSeeds(
+          persistedObservedSessions.map((update) => ({
+            source: update.source,
+            sourceSessionId: update.sourceSessionId,
+            lastActivityAt: update.lastActivityAt,
+            project: update.project,
+            projectRoot: update.projectRoot,
+            cwd: update.cwd,
+          })),
+        );
+        if (hydration.dropped > 0 || lifecycleSeeds.dropped > 0) {
+          console.warn(
+            `[openscout-runtime] bounded observed-session restart seed: `
+            + `${hydration.hydrated} reducer rows, ${lifecycleSeeds.seeded} lifecycle rows, `
+            + `${hydration.dropped + lifecycleSeeds.dropped} dropped`,
+          );
+        }
+      }
+      unsubscribeObservedSessionReducer = subscribeObservedSessionReducer(observedSessionReducer);
+    }
+    deferStartupProjection = false;
+    startupTrafficGate.admitMutations();
+  } catch (error) {
+    if (shuttingDown) return;
+    if (canonicalStartupFailure) throw error;
+    // SQLite is derived. A healthy canonical journal still supports core
+    // registration and snapshots, but cannot certify projection-backed work.
+    deferStartupProjection = true;
+    projection.retireStartupWorker(error);
+    startupTrafficGate.degradeProjection(error, Date.now() + projectionRetryDelayMs);
+    projectionRetryDelayMs = Math.min(projectionRetryDelayMs * 2, 60_000);
+    console.error("[openscout-runtime] startup projection degraded; core remains available", startupTrafficGate.snapshot());
+  }
+}
 
 try {
   // §11.3: plaintext always on loopback; mesh TLS listeners are added by the
@@ -3934,73 +4015,7 @@ try {
     await sleep(startupBoundaryTestDelayMs);
   }
   await bootstrapIdentityWrite;
-  let canonicalStartupFailure = false;
-  try {
-    projectionWarmStarted = true;
-    await projection.warm();
-    if (!sqliteDisabled) {
-      // Wait for the original replay, then schedule its accepted startup suffix
-      // before enabling live writes. No payload closure is retained for that
-      // suffix, and writes after its barrier queue strictly behind catch-up.
-      await projection.flush();
-      let catchUp: Promise<void> = Promise.resolve();
-      await durableStore.runWrite(async () => {
-        await controlEventWrites;
-        const boundary = await projection.captureStartupCatchUpBoundary();
-        catchUp = projection.catchUpStartup(boundary);
-        void catchUp.catch(() => {});
-        deferStartupProjection = false;
-      }).catch((error) => {
-        // A failed canonical event append or journal barrier is not a derived
-        // projection failure: never keep accepting writes on that evidence.
-        canonicalStartupFailure = true;
-        throw error;
-      });
-      await catchUp;
-      startupTrafficGate.restoringSessions();
-      observedSessionReducer = new ObservedSessionReducer(projection);
-      const persistedObservedSessions = await projection.persistedActiveObservedSessionUpdates();
-      if (persistedObservedSessions !== null) {
-        const hydration = observedSessionReducer.hydratePersistedActiveSessions(
-          persistedObservedSessions,
-        );
-        const lifecycleSeeds = replacePersistedActiveObservedSessionSeeds(
-          persistedObservedSessions.map((update) => ({
-            source: update.source,
-            sourceSessionId: update.sourceSessionId,
-            lastActivityAt: update.lastActivityAt,
-            project: update.project,
-            projectRoot: update.projectRoot,
-            cwd: update.cwd,
-          })),
-        );
-        if (hydration.dropped > 0 || lifecycleSeeds.dropped > 0) {
-          console.warn(
-            `[openscout-runtime] bounded observed-session restart seed: `
-            + `${hydration.hydrated} reducer rows, ${lifecycleSeeds.seeded} lifecycle rows, `
-            + `${hydration.dropped + lifecycleSeeds.dropped} dropped`,
-          );
-        }
-      }
-      unsubscribeObservedSessionReducer = subscribeObservedSessionReducer(observedSessionReducer);
-    }
-    deferStartupProjection = false;
-    startupTrafficGate.admitMutations();
-  } catch (error) {
-    if (canonicalStartupFailure) throw error;
-    // SQLite is derived. A healthy canonical journal still supports core
-    // registration and snapshots, but cannot certify projection-backed work.
-    deferStartupProjection = true;
-    durableStore.abandonProjectedEntries();
-    projection.close();
-    startupTrafficGate.degradeProjection(error);
-    console.error("[openscout-runtime] startup projection degraded; core remains available", startupTrafficGate.snapshot());
-  }
-  if (startupTrafficGate.snapshot().mutationsAdmitted) {
-    startPresenceSampling();
-    registerActiveScoutBrokerService(brokerService);
-    peerDelivery.start();
-  }
+  await restoreStartupProjection();
   console.log(`[openscout-runtime] broker listening on 127.0.0.1:${port} (scope: ${advertiseScope}, url: ${brokerUrl})`);
   console.log(`[openscout-runtime] broker local socket ${brokerSocketPath}`);
   if (scoutbotProcessEnabled) scoutbotService.start();
@@ -4072,8 +4087,8 @@ setInterval(() => { void refreshStorageStatus(); }, 30_000).unref();
 
 const otlpReceiver = localAdminKey ? undefined : await startBrokerOtlpReceiver(controlHome);
 
-setTimeout(() => {
-  if (!startupTrafficGate.snapshot().mutationsAdmitted) return;
+function recoverStartupWork(): void {
+  if (shuttingDown) return;
   recoverInvocationResultReplies();
   recoverTerminalReports();
   recoverTerminalWorkPromotions();
@@ -4111,7 +4126,7 @@ setTimeout(() => {
   });
   routeAliasService?.sweepExpired();
   reconcileAgentRoster("startup");
-}, 0).unref();
+}
 
 function sweepAndCompactMeshNodes(): void {
   if (!trustedPeerStore) return;
@@ -4148,8 +4163,13 @@ setInterval(() => {
   }
 }, runtimeHeartbeatIntervalMs).unref();
 
-// Background coordination must obey the same capability boundary as HTTP.
-if (startupTrafficGate.snapshot().mutationsAdmitted) {
+// Run the same startup work exactly once after ordinary or delayed admission.
+function startBrokerCoordination(): void {
+  startPresenceSampling();
+  registerActiveScoutBrokerService(brokerService);
+  peerDelivery.start();
+  setTimeout(recoverStartupWork, 0).unref();
+
   if (!meshInstanceRefusal) {
     meshDiscoveryService.discoverPeers().catch((error) => {
       console.error("[openscout-runtime] initial mesh discovery failed:", error);
@@ -4233,6 +4253,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
     return;
   }
   shuttingDown = true;
+  clearTimeout(projectionRetryTimer);
   hostKeepAwake?.stop();
   capabilityMatrixService.stop();
   tailscaleListenerGuard.stop();
@@ -4318,3 +4339,32 @@ if (Number.isFinite(parentPid) && parentPid > 0 && parentPid !== process.pid) {
   }, 2_000);
   parentWatcher.unref();
 }
+
+// A retry only reopens the derived SQLite worker. The broker, registered
+// sessions and canonical journal stay live while the storage fault clears.
+function coordinateWhenReady(): void {
+  if (shuttingDown) return;
+  const { mutationsAdmitted, nextRetryAt } = startupTrafficGate.snapshot();
+  if (mutationsAdmitted) {
+    startBrokerCoordination();
+    return;
+  }
+  if (nextRetryAt === undefined) return;
+  projectionRetryTimer = setTimeout(async () => {
+    try {
+      await restoreStartupProjection();
+    } catch (error) {
+      // A failed canonical append/barrier is fatal, just as on the first pass.
+      startupTrafficGate.fail(error);
+      console.error("[openscout-runtime] canonical startup recovery failed:", error);
+      await shutdownBroker(1);
+      return;
+    }
+    if (startupTrafficGate.snapshot().mutationsAdmitted) {
+      console.log("[openscout-runtime] startup projection recovered; dispatch ready");
+    }
+    coordinateWhenReady();
+  }, Math.max(0, nextRetryAt - Date.now()));
+  projectionRetryTimer.unref();
+}
+coordinateWhenReady();
