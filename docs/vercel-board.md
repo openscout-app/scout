@@ -1,8 +1,8 @@
 # Vercel Board adapter: engineering plan
 
-Status: plan, 2026-11-18. The adapter is in progress under
-`packages/runtime/src/board/`. This document states intended behavior. Read it
-before you change that directory.
+Status: plan and implementation notes, 2026-11-19. The adapter is under
+`packages/runtime/src/vercel-board/`. This document states intended behavior.
+Read it before you change that directory.
 
 Evidence: every statement about Board comes from the Board 0.52.0 documentation
 shipped in the `@vercel/board` package. No statement here was verified against
@@ -11,11 +11,19 @@ a running board. The credential exchange is the least certain; see
 
 ## What we are building
 
-A team posts planned work as tasks on a Vercel Board. Scout shows those tasks
-as work items, and a Scout agent on any host of the operator's mesh can claim a
-task and complete it. Board remains the writer of its messages, tasks, claims
-and labels. Scout is one participant on the board. Scout is not a replica of
-the board.
+A team coordinates on a Vercel Board. Scout projects the board the way it
+projects Slack:
+
+- Each followed channel is a Scout chat room. The room shows every thread and
+  message in the channel, from Scout's copy of the channel.
+- An operator claim is an ordinary Scout ask, dispatched in the channel's room
+  with the task bound to it. The agent's answer goes back to the board as the
+  task's result.
+- Nothing lands on Scout's work board by itself. A Board task becomes a Scout
+  work item only when the operator promotes it.
+
+Board remains the writer of its messages, tasks, claims and labels. Scout is
+one participant on the board.
 
 The reason to build it: Board's documentation says that nothing wakes an agent
 after its turn ends, and its remedy (watchers) needs a Vercel deployment. The
@@ -23,18 +31,21 @@ Scout runtime is already a long-running process that can wake agents.
 
 Two existing parts of core set the pattern:
 
-- Board tasks follow the [T3 adapter](./t3-orchestrator.md). The T3 adapter
-  projects cards from an external board into work items through
-  `ExternalWorkContext`, and the external system remains the writer of its
-  board.
-- Board thread replies follow the Slack integration: one serial delivery lane
-  per thread, with a stored request and response.
+- The Slack integration: an external channel shows as a Scout room, and Scout's
+  own acts are ordinary Scout messages and flights.
+- The [T3 adapter](./t3-orchestrator.md), for a promoted task only. It projects
+  an external card into a work item through `ExternalWorkContext`, and the
+  external system remains the writer of its board.
 
 ## Decisions
 
 | Decision | Reason |
 | --- | --- |
-| Project tasks only. Bind a thread only when Scout is engaged in it. | A full mirror makes Scout a replica of a log it does not own. That breaks "Observe, don't absorb" in [architecture](./architecture.md). Board has its own viewer for chat. |
+| Mirror the followed channels into runtime-owned tables, never into Scout's message log. | Board messages are edited, deleted and change task state in place. An append-only log cannot hold that without replays and duplicates. A table keyed by message ID at its latest `version` can. This keeps "Observe, don't absorb" in [architecture](./architecture.md): the copy is observed source material, not Scout messages. |
+| Only Scout's own acts are Scout messages and flights. | An operator claim, the dispatched ask and the agent's reply are Scout's. Everything else in a room renders from the copy. |
+| A Board task becomes a work item only on promote. | A team board holds far more tasks than the operator wants on Scout's work board. |
+| Hand-offs go on the live stream, not into a ledger. | The goal is understanding who handed what to whom, not permanence. The copy's task events already hold them. |
+| A mention wakes no agent. | Board text comes from teammates and synced platforms. Only an operator act starts an agent. |
 | Ship observe and claim together. | A read-only projection is a weaker copy of Board's viewer. A task completed by an agent on a second host is the first result that proves the adapter. |
 | The first board is the Vercel team board, single user. | Settled by the operator. The local board (`vb serve`) is the test backend. Design for Vercel's limits (300-second leases, 30-day feed, shared rate limit); the local board then needs no special case. |
 | Only planned work goes on Board. Tasks between agents stay in Scout. | Writing every Scout task to a rate-limited external API would flood the board and make Scout depend on Vercel to run. |
@@ -62,9 +73,9 @@ The planning tool is the only path that creates a Board task from Scout.
 rule: a task is on the board because someone called the planning tool, not
 because an agent judged it important.
 
-The planning tool must not create a Scout work item. The work item appears
-through projection, under the same deterministic ID, when the task's event
-arrives.
+The planning tool must not create a Scout work item. Planned tasks show in the
+channel's room. A planned task becomes a work item only when the operator
+promotes it, under a deterministic ID.
 
 ## Setup
 
@@ -74,17 +85,21 @@ arrives.
    login: its refresh token rotates, and a failed refresh wipes the CLI's auth
    file, so two processes that share it log each other out.
 2. The operator runs
-   `scout board connect --team <team> --board scout --credential secret_cli:<entry>`.
-3. Scout finds or makes the named board `scout` on the operator's team, with
-   the channels `work` and `decisions`. `@vercel/board` makes a named board on
-   first use. Scout does not use the team's shared default board.
-4. Scout records the custodian host for the connection.
-5. Scout creates, claims and completes one probe task in a scratch channel.
-6. Scout reports the connection as verified only after the probe task
+   `scout integration connect vercel-board --team <team> --board scout --credential secret_cli:<entry>`.
+   On a plan that allows one board, the operator names that board:
+   `--board General`.
+3. The worker finds or makes the named board as the person, before it narrows
+   the caller. A caller narrowed with `x-board-can` names channels only, so
+   Vercel refuses it a board it would have to make (403).
+4. Scout makes the channels `scout/work` and `scout/decisions`, and the probe
+   channel `scout/probe`. The prefix keeps them apart from a shared board's own
+   channels. `--channels` and `--probe-channel` change them. `--mirror` names
+   the channels Scout keeps a copy of; the default is every followed channel.
+5. Scout records the custodian host and makes a Scout room for each followed
+   channel.
+6. Scout creates, claims and completes one probe task in the probe channel.
+7. Scout reports the connection as verified only after the probe task
    completes.
-
-After setup the operator does not need the Board CLI. Board's viewer remains
-available for inspection.
 
 ## Boundaries
 
@@ -94,8 +109,9 @@ Vercel Board  (canonical: messages, tasks, claims, labels, grants)
      |   |  HTTPS, operator's credential, profile "scout", x-board-can
      |   v
 Custodian runtime  (one per board and principal)
-  follower   long-poll /events per followed channel, cursor
-  projector  task root to work item (ExternalWorkContext)
+  follower   bulk backfill, then long-poll /events per mirrored channel, cursor
+  mirror     messages at their latest version, task events (hand-offs)
+  projector  promoted task root to work item (ExternalWorkContext)
   custody    claim epoch and token, renew timer
   outbox     posts, claims, settles; one serial lane per thread
      ^   |
@@ -113,9 +129,9 @@ Agents on any host
   otherwise do everything, grants included.
 - The cursor, the claim tokens and the outbox must not be replicated across
   mesh nodes.
-- Board content enters Scout in two forms only: a projected work item, or a
-  delivered message in an engaged thread. There is no general message mirror
-  and no backfill.
+- Board content enters Scout in three forms only: the copy of a mirrored
+  channel, a read-through view of any other followed channel, and the work
+  item of a promoted task. Board text in the copy is never a Scout message.
 - Scout content leaves only through an explicit act: a planned task, a reply,
   a claim, a settle or a block. Scout conversations are not mirrored out.
 - Every outbound write is outward-facing. A post on the board can reach Slack
@@ -129,20 +145,22 @@ Agents on any host
 
 | Board | Scout | Rule |
 | --- | --- | --- |
-| Board (URL and name) | A board connection | Holds the URL, credential reference, followed channels, `can`, allowlist and custodian host. |
-| Channel | Nothing | A filter on the connection. A Board channel is not a Scout channel. |
-| Task (root message and `task`) | Work item with `externalContext` | `adapterId: "vercel-board"`, `instanceId` is the connection, `workItemId` is the root ID, `sourceState` keeps Board's spelling. The Scout ID is a hash of (connection, root ID). |
-| `needs` | `depends_on` relations | The target uses the same hash, so a dependency resolves before its own event arrives. |
-| Task labels | Work item labels, prefixed | Skip `board.*`; those labels repeat the state. |
-| Engaged thread | Conversation with a `ConversationBinding` | `platform: "vercel-board"`, `externalThreadId` is the root ID. |
-| Reply in an engaged thread | Delivered message from a mapped actor | Idempotency key is (connection, Board message ID). An upstream edit updates the message. An upstream delete tombstones it. |
-| Any other thread | Nothing | Read on demand. |
+| Board (URL and name) | A board connection | Holds the URL, credential reference, followed and mirrored channels, `can`, allowlist and custodian host. |
+| Channel | A Scout room | One room per followed channel. ID: `stableChannelId("vercel-board:<connection>:<channel>")`. The operator is always in it; each dispatched agent is added. |
+| Message (root or reply) | A row in `vercel_board_messages` | Keyed by (connection, message ID), at its latest `version`. Keeps `by` (actor, principal, profile), `origin`, `noSync`, labels, task state. |
+| Task (root message and `task`) | The same row, with `task_state` | A work item only after promote. |
+| Promoted task | Work item with `externalContext` | `adapterId: "vercel-board"`, `instanceId` is the connection, `workItemId` is the root ID, `sourceState` keeps Board's spelling. The Scout ID is a hash of (connection, root ID). |
+| `needs` on a promoted task | `depends_on` relations | The target uses the same hash, so a dependency resolves before its own promote. |
+| Task labels on a promoted task | Work item labels, prefixed `vercel-board:` | Skip `board.*`; those labels repeat the state. |
+| Task event | A row in `vercel_board_task_events`, and a `vercel_board.handoff` event on the live stream | See [Hand-offs](#hand-offs). |
 | Actor (principal and profile) | Scoped Scout actor, keyed on the principal ID | Display only. A mapped actor has no Scout authority. |
 | Reactions, schedules, schemas, grants | Nothing in v1 | Attachment metadata can be listed. Bytes are fetched on demand. |
 
-A thread is engaged when one of these is true: Scout holds or held the claim
-on its task, an allowlisted actor mentioned the `scout` profile in it, or the
-operator followed it.
+`origin` is `scout` for a message Scout wrote (the operator's principal with
+the `scout` profile), the sync key in `from` for a post a sync provider
+carried in, and `board` otherwise. Scout must not post a row back to the board:
+the copy only reads, so no echo loop can start. Board's own `noSync` and
+`origin` keep a synced post from going back to its platform.
 
 ### Task state
 
@@ -177,18 +195,142 @@ operator followed it.
 - Which lane shows each state, including the In review lane, is decided in the
   apps. It is out of scope here.
 
+## The mirror
+
+A followed channel is in one of two modes.
+
+- **Not mirrored.** A view reads the channel through in one bulk call
+  (`GET /messages?channel=…&limit=…`) and keeps nothing.
+- **Mirrored.** Scout keeps a copy: a bulk backfill, then deltas from the
+  channel's feed.
+
+Status shows each channel's state:
+
+| State | Meaning |
+| --- | --- |
+| `not_mirrored` | The channel is followed for claims and views, with no copy. |
+| `backfilling` | The first bulk read is running. |
+| `mirrored` | The copy is current. Status gives the cursor, the time of the last delta and the message count. |
+| `re_reading` | The cursor was rejected or too old, and the channel is being read in bulk again. |
+
+Sync rules:
+
+- One cursor per mirrored channel. A narrowed caller reads each channel's own
+  feed.
+- Backfill takes the feed's head first, then reads the newest 500 messages in
+  one call and the channel's task list in pages. Each open task the copy holds
+  and both reads omit is read by ID; a missing one becomes a tombstone.
+  Following then starts at that head, so nothing after it is missed.
+- Following long-polls `GET /events?channel=…&after=<cursor>&wait=300`. Each
+  event carries its message as it is after the event. The copy applies
+  `event.message` without a read and drops any view at or below the stored
+  `version`.
+- A read whose cursor is past ours means a delta is waiting: fetch it.
+- The feed keeps 30 days. A cursor older than 29 days, or an `invalid_cursor`
+  answer, starts a re-read. The copy never replays.
+- An edit overwrites the text. A delete leaves a tombstone with no text and no
+  labels. Task state is a field on the root's row.
+- The cursor moves in the same transaction as the rows it covers, by compare
+  and swap. A second follower on the same store loses its commit and changes
+  nothing.
+- A periodic refresh re-lists the tasks and takes any newer version. It does
+  not move the cursor.
+
+Views are bulk and cheap. A mirrored channel's view is one indexed query on
+`vercel_board_messages`. A hand-off chain is one indexed query on
+`vercel_board_task_events`. Neither view calls the board.
+
+Board text is quoted source material. Every row and view carries
+`trust: "board_source"`. A client must render it as quoted text with its
+author, and an agent must not take it as an instruction.
+
+## Hand-offs
+
+The runtime emits each task hand-off on its live stream, beside asks and
+flights, as the ephemeral control event `vercel_board.handoff`. Hand-offs come
+from the feed's task events. They are not posted as status replies, and they
+are not stored in a separate ledger: each is derivable again from
+`vercel_board_task_events`.
+
+Kinds: `created` (`planned` when the planning tool wrote it), `assigned`,
+`claimed`, `released`, `expired`, `completed`, `failed`, `blocked`,
+`unblocked`, `reopened` and `canceled`. `task.renewed` is a lease renewal and is
+not a hand-off. `task.ready` has no actor and is not a hand-off. `task.expired`
+has no actor.
+
+The event payload is `{ handoff }`:
+
+```ts
+type VercelBoardHandoff = {
+  id: string;            // "vercel-board:<connection>:<feed cursor>": stable, dedupe key
+  source: "vercel_board";
+  connectionId: string;
+  channel: string;
+  taskId: string;        // the Board task root ID: the join key
+  kind: VercelBoardHandoffKind;
+  at: number;            // the event's own time, epoch ms
+  cursor: string;        // the feed cursor, or "derived:…" for a backfilled task
+  actor: { actor: string; principal: string; profile: string | null; scoutActorId?: string } | null;
+  to: string | null;     // the Board actor the task went to, when the kind has one
+  epoch?: number;        // the claim epoch
+  title?: string;        // created and planned
+  result?: string;       // completed
+  reason?: string;       // failed, blocked, canceled
+  scout?: { agentId: string; flightId?: string; attemptId: string }; // when the claim is Scout's
+  derived?: true;        // inferred from the task's state at a backfill
+};
+```
+
+The actor comes from the event's `by`. When Scout holds the claim, `scout`
+names the agent, the flight and the custody attempt, and `actor.scoutActorId`
+is that agent.
+
+One task's chain, from the copy:
+
+```sql
+SELECT * FROM vercel_board_task_events
+WHERE connection_id = ?1 AND task_id = ?2
+ORDER BY at, rowid;
+```
+
+The same chain over the API is
+`GET /v1/integrations/vercel-board/handoffs?connection=<id>&task=<task ID>`,
+and on the CLI
+`scout integration handoffs vercel-board --connection <id> --task <task ID>`.
+On the live stream, filter `vercel_board.handoff` events on
+`payload.handoff.taskId`.
+
+A hand-off row is a fold over one task's chain, joined by task ID:
+
+| Field | From |
+| --- | --- |
+| dispatched at | `at` of the `claimed` event (or `assigned` when the task went to someone by name) |
+| from | `actor` of the `created`, `planned` or `assigned` event |
+| to | `to` of the `claimed` or `assigned` event |
+| task | `taskId`, with `title` from `created` or `planned` |
+| source | `source` (`vercel_board`) |
+| state | `kind` of the newest event |
+| finished at | `at` of the `completed` or `failed` event |
+| result | `result` (completed) or `reason` (failed) |
+
+A task the copy first saw at a backfill has no events of its own. The
+follower derives its hand-offs from its state (created, then claimed,
+completed, failed, blocked or canceled) and marks them `derived`.
+
 ## Where state lives
 
 | State | Store | Leaves the custodian |
 | --- | --- | --- |
 | Messages, tasks, claims, labels | Board | Not Scout's |
-| Connection: URL, channels, `can`, allowlist, custodian host | Runtime config | No |
+| Connection: URL, channels, mirror, `can`, allowlist, custodian host | Runtime config | No |
 | Board credential | A credential reference, as the Slack integration uses | No. Never in argv, logs, status or records. |
-| Feed cursor for each followed channel | SQLite, in the same transaction as the projection it covers | No |
-| Last seen `version` for each task root | SQLite | No |
+| Feed cursor and last delta time for each mirrored channel | `vercel_board_cursors`, in the same transaction as the rows it covers | No |
+| Copy of each mirrored channel | `vercel_board_messages` | Views only |
+| Task events | `vercel_board_task_events` | As `vercel_board.handoff` on the live stream |
+| Promotions | `vercel_board_promotions` | No |
 | Claim custody: task, epoch, token, expiry, holding agent, Scout work-claim generation | SQLite, outside the journal and outside every read model | No |
 | Outbox: intended write, client `id`, attempts, result | SQLite | No |
-| Projected work items, thread bindings | Runtime journal | Yes, as ordinary Scout records |
+| Rooms, the dispatched ask, the agent's reply, promoted work items | Runtime journal | Yes, as ordinary Scout records |
 
 The runtime stores the claim token raw, because the runtime presents it to
 Board. With 300-second leases, a restart that loses tokens loses every claim.
@@ -201,9 +343,9 @@ Losing a claim is a normal event. Each case below has one named outcome.
 
 | Case | Outcome |
 | --- | --- |
-| Follow | Reads are at-least-once. The projector applies an event only when its `version` is higher than the stored one. The cursor advances in the same transaction as the upserts. |
-| Cursor rejected, or idle longer than the feed keeps | Do not replay. For each followed channel, list the open tasks and upsert each. Fetch individually each item that Scout shows open and the list omits. Then follow from the head. Run the same reconcile on a slow timer. |
-| First connect | Head plus the reconcile. No history. |
+| Follow | Reads are at-least-once. The copy applies a message only when its `version` is higher than the stored one. The cursor advances in the same transaction as the rows. A hand-off is recorded once, keyed on its feed cursor. |
+| Cursor rejected, or idle longer than the feed keeps | Do not replay. Re-read the channel in bulk, as a backfill, then follow from the head. |
+| First connect | A bulk backfill: the head, the newest 500 messages, the task list. Older threads arrive when they change. |
 | Claim answer lost | The claim request has no idempotency key, and Board shows the token once. Scout holds a claim it cannot use. Request the shortest lease on a first claim, let it lapse, and claim again. This is a known stall of at most 300 seconds. Do not retry the claim request. |
 | Claim order | The runtime grants the Scout work claim only after the Board claim lands. It stores Scout's lease generation beside Board's `epoch`. |
 | Renew | The custodian renews at a third of the lease, and only while the Scout flight for the work is alive. A dead agent stops renewals, and Board hands the task to another worker. |
@@ -211,7 +353,7 @@ Losing a claim is a normal event. Each case below has one named outcome.
 | Settle answer lost | A retry returns `claim_lost`, which is ambiguous. Read the task. If the task is in the settled state and its `epoch` equals Scout's, the first attempt landed. |
 | Custodian offline while an agent finishes | The result waits in the outbox. If the task is `ready` again and its `epoch` is still Scout's, claim again and complete with the stored result. Otherwise keep the result as a Scout record, show the item as waiting with "finished here, claim lost", and ask the operator. |
 | Post or reply answer lost | The client `id` derives from the Scout message ID. Read the post by that `id` before a retry. |
-| Root deleted upstream | Blank the title and summary in Scout, not only the state. Scout must not keep text that the team deleted. |
+| Root deleted upstream | The copy keeps a tombstone with no text. A promoted task's work item loses its title and summary, not only its state. Scout must not keep text that the team deleted. |
 | Credential expired | The connection moves to `auth_expired` and names the fix. Claims lapse. Items show as stale with the time of the last good read. The connection must not hang. |
 | Rate limit (429) | Honor `Retry-After`. Renewals go first, then reads, then reconcile. The limit is shared with every other Board client that uses the operator's credential. |
 
@@ -229,9 +371,8 @@ main risk of this adapter.
   decision.
 - **No automatic claim in v1.** A claim starts from the operator, or from an
   agent the operator asked.
-- **Mentions.** A mention of the `scout` profile wakes an agent only when the
-  author is on the allowlist. A mention by any other author raises operator
-  attention and wakes no agent.
+- **Mentions.** A mention of the `scout` profile wakes no agent. It shows in
+  the room like any other message.
 - **Quoted text.** The runtime delivers task and reply text to an agent as
   quoted source material, with its author and Board ID. The text is not an
   instruction from the operator.
@@ -257,9 +398,9 @@ V1 is single user. Four rules in v1 keep a second person from being a rewrite:
 | Phase | Scope | Exit check |
 | --- | --- | --- |
 | 0. Spike | Credential and transport. Answers open questions 1 to 3. | Each question has a written answer. |
-| 1. Observe | Connection, follower, projector, reconcile, `scout board connect`. | Stop the runtime during a feed read and restart it. Scout's work items then match the board's task list exactly. |
+| 1. Observe | Connection, follower, mirror, `scout integration connect vercel-board`. | Stop the runtime during a feed read and restart it. The copy then matches the board's messages and task states exactly. |
 | 2. Claim and settle | Custody, renew timer, outbox, operator-started claims, the planning tool. | An agent on a second host completes a task, and the board shows it completed by the `scout` profile. Each lost-claim case in [Failure outcomes](#failure-outcomes) gives its named outcome. |
-| 3. Engaged threads | Bindings, inbound replies as Scout tasks, outbound replies, `block` and `unblock`. | To be written with the phase. |
+| 3. Rooms and mirror | Channel rooms, the bulk backfill and deltas, the hand-off stream, promote. | A mirrored channel's view and a task's chain each come from one query, with no board call. |
 | 4. Apps | Board items in the web and Mac apps. This work is in the apps repository, after core merges. | Not in this repository. |
 | 5. Serve the protocol | A decision, not a commitment. See [Not in v1](#not-in-v1). | |
 
@@ -269,18 +410,19 @@ Phases 1 and 2 ship together.
 
 ```text
 packages/protocol/src/
-  board.ts            connection and mapping types
-packages/runtime/src/board/
+  vercel-board.ts     connection, mirror, hand-off and request types
+packages/runtime/src/vercel-board/
   connection.ts       config, validation, allowlist
-  client.ts           HTTP: events, tasks, posts, claims
-  follower.ts         long-poll, cursor, reconcile
-  projection.ts       task to work item; pure
+  client.ts           HTTP: events, messages, tasks, posts, claims
+  follower.ts         bulk backfill, long-poll, cursor, refresh
+  mirror.ts           the copy and the task events; hand-off records
+  projection.ts       promoted task to work item; pure
   custody.ts          claim, renew, settle
   outbox.ts           client IDs, serial lanes
-  service.ts          wiring, as in t3/
-  schema.ts           cursor, version, custody, outbox tables
+  service.ts          wiring, rooms, dispatch, promote, views
+  schema.ts           cursor, message, task event, promotion, custody, outbox tables
   worker.ts           supervisor and transport for the Board worker
-packages/board-worker/src/
+packages/vercel-board-worker/src/
   worker.mjs          the Board worker: @vercel/board, pinned at 0.52.0
 ```
 
@@ -289,7 +431,7 @@ packages/board-worker/src/
 - A team board in Vercel's API does not serve Board's documented protocol, so
   a supervised worker process holds the credential, as the Slack worker does.
   The worker runs `@vercel/board` on Node 24, started under
-  `secret run --map <entry>=BOARD_TOKEN`. The worker is
+  `secret run --map <entry>=VERCEL_BOARD_TOKEN`. The worker is
   transport only. Claim tokens, the renew timer and the cursor stay in the
   runtime, and each claim write carries its epoch and token to the worker. The
   worker accepts a closed set of typed operations. The worker is not a general
@@ -300,9 +442,26 @@ packages/board-worker/src/
   state machine.
 - Run `bun run sync-exec:fence` if the adapter adds a worker process.
 
+## Runtime stalls
+
+A dev broker logged `slow_sqlite` for the adapter's queries at 1.0 to 1.2
+seconds, on tables of a few rows. The queries are not slow. The same queries
+take 0 to 15 ms from a separate connection, and a WAL reader is not blocked by
+a long write transaction, a checkpoint or a schema change (44 ms at most in a
+repro). The broker's own health check logged main-thread stalls of 1 to 3
+seconds from startup, before any board activity, and other subsystems' queries
+were caught in the same stalls. The cause is a process-wide stall (CPU
+contention or garbage collection), not lock waits. The adapter's timers showed
+up because they ran the most frequent queries.
+
+The fix on the adapter side: the custody and outbox timers keep an in-memory
+quiet flag for each connection, and run no SQL while nothing is held or
+pending. A write that starts a claim or queues a post clears the flag.
+
 ## Not in v1
 
-- A general message mirror, Board channels as Scout channels, backfill.
+- Board messages in Scout's message log.
+- History older than the newest 500 messages of a channel at backfill.
 - Every Scout task on Board.
 - Reactions, schedules, schemas, grants and attachment bytes.
 - A Board profile for each agent.
@@ -352,10 +511,10 @@ that were made after the architecture review.
      Recommendation: accept this for v1, record the planning task's Scout ID
      in a label on each planned task, and decide before pool rules or a second
      person whether a planned task needs an operator confirmation.
-   - One piece of work must be one work item. A Scout task today creates its
-     own work item. When the runtime dispatches a Board task to an agent, the
-     dispatch must attach to the projected item and must not create a second
-     item. The mechanism is not designed yet.
+   - One piece of work must be one work item. Answered: a claim on a task
+     that is not promoted is an ordinary ask in the channel's room and makes
+     no work item. A claim on a promoted task attaches the ask to that work
+     item through `collaborationRecordId`, and makes no second item.
 5. **Custodian lease on (board, principal): the key is right, and the store
    is still open.** A per-board key was wrong for two people, and it was also
    unenforceable: no lease in one person's runtime can fence another person's
@@ -375,6 +534,4 @@ that were made after the architecture review.
    working, and Board's `completed` is final. For a Board item, a reopen
    should set acceptance to reopened and create a Scout follow-up item, and
    must not move `state`. This needs a rule in the lifecycle code.
-8. **Mention matching.** The documentation is inconsistent about server-side
-   mention matching on Vercel's board. Match mentions in the runtime on the
-   stored actor ID until this is tested.
+8. **Mention matching.** Moot for now: a mention wakes no agent.
