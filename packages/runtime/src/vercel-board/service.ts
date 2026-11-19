@@ -634,6 +634,10 @@ export class BrokerVercelBoardService {
    * become work items only when the operator promotes one.
    */
   async plan(request: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
+    // Match claim's trusted-local actor convention. This is not proof of a human caller.
+    if (request.actorId !== this.options.operatorId) {
+      throw new VercelBoardServiceError(403, "operator_required", "Only the operator submits a plan to Board.");
+    }
     const live = this.requireLive(request.connectionId);
     if (!live.config.channels.includes(request.channel)) {
       throw new VercelBoardServiceError(400, "channel_not_followed", `Channel ${request.channel} is not followed by connection ${request.connectionId}. Followed: ${live.config.channels.join(", ")}.`);
@@ -641,7 +645,7 @@ export class BrokerVercelBoardService {
     if (!Array.isArray(request.tasks) || !request.tasks.length || request.tasks.length > MAX_PLAN_TASKS) {
       throw new VercelBoardServiceError(400, "invalid_request", `A plan holds 1 to ${MAX_PLAN_TASKS} tasks.`);
     }
-    for (const field of ["planningTaskId", "requestId", "actorId"] as const) {
+    for (const field of ["planningTaskId", "requestId"] as const) {
       if (typeof request[field] !== "string" || !request[field].trim()) throw new VercelBoardServiceError(400, "invalid_request", `${field} is required.`);
     }
     const keys = new Set<string>();

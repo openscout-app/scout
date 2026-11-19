@@ -590,18 +590,28 @@ test("a promoted task an outside worker claims follows the board, and an unpromo
   expect(h.records.get(vercelBoardWorkId("c1", plain))).toBeUndefined();
 });
 
+test("a named non-operator cannot submit a plan to Board", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  await expect(h.service.plan({
+    connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r",
+    actorId: "agent-planner", tasks: [{ text: "Publish this" }],
+  })).rejects.toMatchObject({ status: 403, code: "operator_required" });
+  expect((await h.service.messages({ connectionId: "c1", channel: "work" })).messages).toEqual([]);
+});
+
 test("the planning tool writes Board tasks only, labeled with the planning task; they show in the room, not on the kanban", async () => {
   const h = serviceHarness();
   await h.connect();
   await h.service.pump("c1");
-  const plan = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "work-plan-1", requestId: "req-1", actorId: "agent-planner",
+  const plan = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "work-plan-1", requestId: "req-1", actorId: "operator",
     tasks: [{ key: "a", text: "Design" }, { key: "b", text: "Build", needs: [{ key: "a" }] }] });
   expect(plan.conversationId).toBe(vercelBoardRoomId("c1", "work"));
   expect(plan.tasks.map(task => task.state)).toEqual(["ready", "waiting"]);
   const root = h.board.message(plan.tasks[1]!.taskId)!;
-  expect(root.labels).toMatchObject({ "scout.plan": "work-plan-1", "scout.agent": "agent-planner" });
+  expect(root.labels).toMatchObject({ "scout.plan": "work-plan-1", "scout.agent": "operator" });
   expect(root.task!.needs).toEqual([plan.tasks[0]!.taskId]);
-  const again = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "work-plan-1", requestId: "req-1", actorId: "agent-planner",
+  const again = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "work-plan-1", requestId: "req-1", actorId: "operator",
     tasks: [{ key: "a", text: "Design" }, { key: "b", text: "Build", needs: [{ key: "a" }] }] });
   expect(again.tasks.map(task => task.taskId)).toEqual(plan.tasks.map(task => task.taskId));
   await h.service.pump("c1");
@@ -609,7 +619,7 @@ test("the planning tool writes Board tasks only, labeled with the planning task;
   const view = await h.service.messages({ connectionId: "c1", channel: "work" });
   expect(view.messages.filter(message => message.task).map(message => [message.text, message.origin])).toEqual([["Design", "scout"], ["Build", "scout"]]);
   expect(h.live.map(event => event.payload.handoff.kind)).toEqual(["planned", "planned"]);
-  await expect(h.service.plan({ connectionId: "c1", channel: "elsewhere", planningTaskId: "p", requestId: "r", actorId: "a", tasks: [{ text: "x" }] }))
+  await expect(h.service.plan({ connectionId: "c1", channel: "elsewhere", planningTaskId: "p", requestId: "r", actorId: "operator", tasks: [{ text: "x" }] }))
     .rejects.toBeInstanceOf(VercelBoardServiceError);
 });
 

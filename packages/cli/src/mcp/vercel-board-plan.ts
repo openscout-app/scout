@@ -18,7 +18,7 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
     {
       title: "Plan Work on a Vercel Board",
       description:
-        "Write planned tasks to a connected Vercel Board, with needs between them. This is the only way Scout puts work on a Board; use it for planned work only, never for ordinary tasks between agents (use ask for those). "
+        "Submit planned tasks as the operator to a connected Vercel Board, with needs between them. This is the only way Scout puts work on a Board; use it for planned work only, never for ordinary tasks between agents (use ask for those). "
         + "OUTWARD-FACING: each task is posted on the team's board as the operator, and Board's own sync can carry it to Slack or GitHub. "
         + "A planned task is open to any worker under the operator's principal from the moment it is written. "
         + "The tool creates Board tasks only. They show in the channel's Scout room (conversationId); none becomes a Scout work item unless the operator promotes it. "
