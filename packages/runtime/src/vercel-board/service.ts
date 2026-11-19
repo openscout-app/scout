@@ -46,6 +46,7 @@ export interface BrokerVercelBoardServiceOptions {
   placeWorkChange?(before: WorkItemRecord, after: WorkItemRecord, context: { now: number; moveId: string; actorId: string }): { record: WorkItemRecord; move?: { review?: string } & Record<string, unknown> };
   deliver?(request: ScoutDeliverRequest): Promise<ScoutDeliverResponse>;
   flight(id: string): FlightRecord | undefined;
+  cancelFlight?(id: string, reason: string): Promise<void>;
   /** Make or update a channel's Scout room. Merges participants; never removes one. */
   ensureRoom?(room: ConversationDefinition): Promise<void>;
   /** Put a hand-off on the runtime's live stream, beside asks and flights. Not persisted: the mirror is its record. */
@@ -170,6 +171,7 @@ export class BrokerVercelBoardService {
       connection: config, transport, store, now: this.now,
       dispatch: input => this.dispatch(live, input),
       flight: id => this.options.flight(id),
+      cancelFlight: this.options.cancelFlight,
       notify: notice => this.onCustody(live, notice),
     });
     return live;
@@ -505,7 +507,7 @@ export class BrokerVercelBoardService {
     const workId = notice.row.workId;
     if (notice.kind === "lost" && this.options.deliver && notice.row.flightId) {
       const flight = this.options.flight(notice.row.flightId);
-      if (flight && !["completed", "failed", "cancelled"].includes(flight.state)) {
+      if (flight && (!["completed", "failed", "cancelled"].includes(flight.state) || flight.metadata?.vercelBoardClaimLost === true)) {
         await this.options.deliver({
           requestId: vercelBoardScopedId("vercel-board-lost", live.config.id, notice.row.attemptId), requesterId: this.options.operatorId, requesterNodeId: this.options.nodeId,
           target: { kind: "agent_id", agentId: notice.row.agentId }, intent: "tell",

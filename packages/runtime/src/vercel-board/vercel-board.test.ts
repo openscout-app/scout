@@ -419,6 +419,7 @@ test("experimental board marker: a second node refuses without takeover, and a r
 // ---- service ------------------------------------------------------------------
 
 function serviceHarness() {
+  const cancelled: { id: string; reason: string }[] = [];
   const time = clock();
   const board = new FakeVercelBoard({ now: time.now });
   const db = database();
@@ -448,6 +449,10 @@ function serviceHarness() {
       return { kind: "delivery", accepted: true, flight, receipt: { flightId: flight.id } } as unknown as ScoutDeliverResponse;
     },
     flight: id => flights.get(id),
+    cancelFlight: async (id, reason) => {
+      cancelled.push({ id, reason });
+      flights.set(id, { ...flights.get(id)!, state: "cancelled", error: reason, metadata: { vercelBoardClaimLost: true } });
+    },
     ensureRoom: async room => {
       const current = rooms.get(room.id);
       rooms.set(room.id, current ? { ...current, participantIds: [...new Set([...current.participantIds, ...room.participantIds])] } : room);
@@ -457,7 +462,7 @@ function serviceHarness() {
   cleanup.push(() => { void service.stop(); });
   const connect = (extra: Record<string, unknown> = {}) => service.connect({ url: URL_, id: "c1", channels: ["work"], credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" }, ...extra });
   const workItems = () => [...records.values()].filter(record => record.kind === "work_item");
-  return { time, board, service, records, events, deliveries, flights, rooms, live, connect, workItems };
+  return { time, board, service, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
 }
 
 test("connect reads the principal, makes the channels and a room for each, and is verified only after the probe task completes", async () => {
@@ -519,6 +524,19 @@ test("a claim is an ordinary ask in the channel's room: no work item, and the ag
   expect(h.live.every(event => event.kind === "vercel_board.handoff")).toBe(true);
   const chain = await h.service.handoffs({ connectionId: "c1", taskId: id });
   expect(chain.handoffs.map(handoff => handoff.id)).toEqual(handoffs.map(handoff => handoff.id));
+});
+
+test("claim loss cancels the dispatched Scout flight without settling Board again", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  const taskId = h.board.createTask({ channel: "work", text: "A task" });
+  await h.service.claim({ connectionId: "c1", taskId, agentId: "agent-1", actorId: "operator" });
+  h.board.editAsOther(taskId, "Changed by a teammate");
+  await h.service.pump("c1");
+  expect(h.cancelled).toEqual([{ id: "flight-1", reason: "The Board task moved on: root edited by someone else." }]);
+  expect(h.flights.get("flight-1")!.state).toBe("cancelled");
+  expect(h.board.count("POST", `/tasks/${taskId}/complete`)).toBe(0);
+  expect(h.board.count("POST", `/tasks/${taskId}/fail`)).toBe(0);
 });
 
 test("fan-in gets the full Scout dependency result, attributed and quoted", async () => {
