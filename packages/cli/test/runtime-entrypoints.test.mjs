@@ -25,6 +25,15 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { FileBackedBrokerJournal } from ${sourceImport("broker-journal.ts")};
 import { WorkerSQLiteProjection } from ${sourceImport("sqlite-projection-worker.ts")};
+import { resolveVercelBoardWorkerScript, VercelBoardWorkerSupervisor, VercelBoardWorkerTransport } from ${sourceImport("vercel-board/worker.ts")};
+assert.equal(resolveVercelBoardWorkerScript(), join(import.meta.dir, "vercel-board-worker.mjs"));
+const board = new VercelBoardWorkerSupervisor({
+  target: {kind: "memory"}, profile: "scout", can: "work=read,post,react,label", credential: null,
+});
+try {
+  const transport = new VercelBoardWorkerTransport(board);
+  assert.ok((await transport.me()).principal);
+} finally { board.stop(); }
 const comparable = value => JSON.parse(JSON.stringify(value));
 const control = process.argv[2];
 const journalPath = join(control, "journal.jsonl");

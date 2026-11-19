@@ -28,7 +28,7 @@ export class VercelBoardWorkerError extends Error {
 export interface VercelBoardWorkerOptions {
   /** The Node executable. Default: SCOUT_VERCEL_BOARD_NODE, then `node` on PATH. */
   node?: string;
-  /** The worker script. Default: the one shipped with this checkout. */
+  /** The worker script. Default: the worker shipped with the runtime. */
   script?: string;
   /** The secret helper. Default: `secret` on PATH. */
   secretExecutable?: string;
@@ -49,11 +49,13 @@ const READ_TIMEOUT_MS = 30_000;
 const WRITE_TIMEOUT_MS = 45_000;
 const WRITES = new Set(["ensureChannel", "post", "createTask", "createBatch", "claim", "renew", "complete", "fail", "release", "labels"]);
 
-/** Resolve only the worker shipped with this checkout, never a command from a caller. */
+/** Resolve only the worker shipped with this runtime, never a command from a caller. */
 export function resolveVercelBoardWorkerScript(): string {
+  const bundled = fileURLToPath(new URL("./vercel-board-worker.mjs", import.meta.url));
+  if (existsSync(bundled)) return bundled;
   const script = fileURLToPath(new URL("../../../vercel-board-worker/src/worker.mjs", import.meta.url));
   if (!existsSync(script)) {
-    throw new VercelBoardWorkerError("worker_unavailable", "The Board worker is not installed with this runtime. It ships in the Scout checkout under packages/vercel-board-worker.", "Run the broker from a Scout checkout, then run: bun install");
+    throw new VercelBoardWorkerError("worker_unavailable", "The Board worker is missing from this runtime.", "Reinstall Scout or rebuild the CLI from a checkout");
   }
   return script;
 }
