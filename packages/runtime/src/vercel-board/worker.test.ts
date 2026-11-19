@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
 import type { CollaborationEvent, CollaborationRecord, FlightRecord, ScoutDeliverRequest, ScoutDeliverResponse, WorkItemRecord } from "@openscout/protocol";
 import { validateVercelBoardConnectionConfig, vercelTeamBoardUrl } from "@openscout/protocol";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { openControlPlaneSqliteDatabase } from "../sqlite-adapter.js";
 import { migrateControlPlaneDatabaseSchema } from "../control-plane-migrations.js";
 import { VercelBoardHttpError, VercelBoardUnknownOutcomeError } from "./client.js";
@@ -13,10 +13,37 @@ import { VercelBoardStore } from "./store.js";
 import { VercelBoardWorkerSupervisor, VercelBoardWorkerTransport, vercelBoardWorkerCommand } from "./worker.js";
 
 // These tests run the real worker process, with `@vercel/board`'s in-memory
-// board (`local({ memory: true })`). No network. The worker needs Node 22.18
-// or newer; SCOUT_VERCEL_BOARD_TEST_NODE picks the binary.
-const NODE = process.env.SCOUT_VERCEL_BOARD_TEST_NODE ?? Bun.which("node");
+// board (`local({ memory: true })`). No network. SCOUT_VERCEL_BOARD_TEST_NODE
+// picks the binary. Otherwise the tests take the first `node` on PATH that can
+// run that board: real Node (not Bun's `node` shim), 22.18 or newer, whose
+// `node:sqlite` binds numbered parameters. Node 24.0.0 cannot, so it is passed over.
+const FIT_FOR_MEMORY_BOARD = `
+  if (process.versions.bun) process.exit(2);
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  if (major < 22 || (major === 22 && minor < 18)) process.exit(3);
+  const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
+  process.exit(new DatabaseSync(":memory:").prepare("select ?1 as v").all(1)[0].v === 1 ? 0 : 4);
+`;
+function nodesOnPath(): string[] {
+  const found: string[] = [];
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, "node");
+    try { accessSync(candidate, constants.X_OK); } catch { continue; }
+    if (!found.includes(candidate)) found.push(candidate);
+  }
+  return found;
+}
+const fitForMemoryBoard = (node: string) => Bun.spawnSync([node, "--no-warnings", "-e", FIT_FOR_MEMORY_BOARD], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+const PATH_NODES = nodesOnPath();
+const NODE = process.env.SCOUT_VERCEL_BOARD_TEST_NODE ?? PATH_NODES.find(fitForMemoryBoard) ?? Bun.which("node");
 const run = NODE ? test : test.skip;
+/** A Node on PATH that cannot run the in-memory board, to check how the worker refuses it. */
+const UNFIT_NODE = PATH_NODES.find(node => {
+  const real = Bun.spawnSync([node, "-p", "process.versions.bun ? '' : process.versions.node"]).stdout.toString().trim();
+  const [major, minor] = real.split(".").map(Number);
+  return Boolean(real) && (major! > 22 || (major === 22 && minor! >= 18)) && !fitForMemoryBoard(node);
+});
 const CAN = "work=read,post,react,label;decisions=read,post,react,label;scout-probe=read,post,react,label";
 const cleanup: (() => void | Promise<void>)[] = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
@@ -71,6 +98,14 @@ run("the worker carries the closed set: tasks, claims, posts, labels and the eve
   expect(JSON.stringify(feed)).not.toContain(claimed.claim.token);
   expect((await transport.message(task.id))?.task?.state).toBe("completed");
   expect(await transport.message("999999")).toBeNull();
+});
+
+test.skipIf(!UNFIT_NODE)("on a Node whose SQLite cannot bind numbered parameters, the in-memory board fails at start and says why", async () => {
+  const worker = new VercelBoardWorkerSupervisor({ target: { kind: "memory" }, profile: "scout", can: CAN, credential: null }, { node: UNFIT_NODE!, restartBackoffMs: 0 });
+  cleanup.push(() => worker.stop());
+  const error = await worker.start().then(() => undefined, error => error);
+  expect(error).toMatchObject({ status: 503, code: "worker_unavailable" });
+  expect(String(error.message)).toContain("cannot bind numbered SQLite parameters");
 });
 
 run("x-board-can narrows every call: a channel outside it is refused", async () => {

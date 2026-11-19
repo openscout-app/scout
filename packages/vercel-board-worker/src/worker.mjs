@@ -241,11 +241,33 @@ export function parseBootstrap(line) {
   return { generation: value.generation, profile: value.profile, can: value.can, target };
 }
 
+/**
+ * Whether this Node's `node:sqlite` binds numbered parameters (`?1`). The
+ * in-memory board keeps its tables in SQLite and numbers every parameter.
+ * Node 24.0.0 refuses them ("column index out of range"), and the board then
+ * retries its table writes forever, so a call hangs instead of failing.
+ */
+export function sqliteBindsNumberedParameters() {
+  let db;
+  try {
+    const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
+    db = new DatabaseSync(":memory:");
+    return db.prepare("select ?1 as v").all(1)[0]?.v === 1;
+  } catch {
+    return false;
+  } finally {
+    try { db?.close(); } catch { /* not open */ }
+  }
+}
+
 /** Make the narrowed client. Only `scout`'s profile and `can` from the bootstrap; callers cannot change them. */
 export async function openClient(bootstrap, { token, upstream } = {}) {
   const { board } = await import("@vercel/board");
   let handle;
   if (bootstrap.target.kind === "memory") {
+    if (!sqliteBindsNumberedParameters()) {
+      throw new Error(`Node ${process.version} cannot bind numbered SQLite parameters, and the in-memory board needs them. Run the worker on a Node that can, such as 22.22 or 26.`);
+    }
     const { local } = await import("@vercel/board/backend-local");
     handle = board({ backend: local({ memory: true }) });
   } else {
