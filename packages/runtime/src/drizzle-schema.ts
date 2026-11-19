@@ -1213,6 +1213,81 @@ export const integrationWorkerLeasesTable = sqliteTable("integration_worker_leas
   check("integration_worker_state_check", sql`${table.state} IN ('starting', 'connected', 'stopped')`),
 ]);
 
+// -- board_* ------------------------------------------------------------------
+// Custodian-local Vercel Board state (src/board). Not replicated, not
+// journaled, and not read by any read model: board_custody holds raw claim
+// tokens that the runtime presents to Board.
+export const boardCursorsTable = sqliteTable("board_cursors", {
+  connectionId: text("connection_id").notNull(),
+  channel: text("channel").notNull(),
+  cursor: text("cursor").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.connectionId, table.channel] })]);
+
+export const boardVersionsTable = sqliteTable("board_versions", {
+  connectionId: text("connection_id").notNull(),
+  rootId: text("root_id").notNull(),
+  version: integer("version").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.connectionId, table.rootId] })]);
+
+export const boardCustodyTable = sqliteTable("board_custody", {
+  connectionId: text("connection_id").notNull(),
+  taskId: text("task_id").notNull(),
+  attemptId: text("attempt_id").notNull(),
+  epoch: integer("epoch"),
+  token: text("token"),
+  until: integer("until"),
+  leaseSeconds: integer("lease_seconds").notNull(),
+  agentId: text("agent_id").notNull(),
+  workId: text("work_id").notNull(),
+  startedBy: text("started_by").notNull(),
+  flightId: text("flight_id"),
+  state: text("state").notNull(),
+  outcome: text("outcome"),
+  result: text("result"),
+  detail: text("detail"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.attemptId] }),
+  check("board_custody_state_check", sql`${table.state} IN ('claiming', 'claim_unknown', 'held', 'settling', 'settled', 'lost')`),
+  check("board_custody_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'failed', 'released')`),
+  index("idx_board_custody_task").on(table.connectionId, table.taskId, table.state),
+]);
+
+export const boardOutboxTable = sqliteTable("board_outbox", {
+  connectionId: text("connection_id").notNull(),
+  clientId: text("client_id").notNull(),
+  lane: text("lane").notNull(),
+  kind: text("kind").notNull(),
+  request: text("request").notNull(),
+  state: text("state").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  response: text("response"),
+  error: text("error"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.clientId] }),
+  check("board_outbox_kind_check", sql`${table.kind} IN ('post', 'plan')`),
+  check("board_outbox_state_check", sql`${table.state} IN ('pending', 'unknown', 'done', 'failed')`),
+  index("idx_board_outbox_lane").on(table.connectionId, table.lane, table.state, table.createdAt),
+]);
+
+export const boardCustodianLeasesTable = sqliteTable("board_custodian_leases", {
+  connectionId: text("connection_id").notNull(),
+  principal: text("principal").notNull(),
+  ownerId: text("owner_id").notNull(),
+  generation: integer("generation").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.principal] }),
+  check("board_custodian_generation_check", sql`${table.generation} >= 1`),
+]);
+
 export const integrationSlackThreadsTable = sqliteTable("integration_slack_threads", {
   operationId: text("operation_id").notNull().references(() => integrationSetupOperationsTable.id, { onDelete: "restrict" }),
   channelId: text("channel_id").notNull(), threadTs: text("thread_ts").notNull(), bindingRevision: integer("binding_revision").notNull(),
@@ -1236,6 +1311,11 @@ export const controlPlaneDrizzleSchema = {
   integrationSlackThreadsTable,
   integrationSlackDeliveriesTable,
   integrationWorkerLeasesTable,
+  boardCursorsTable,
+  boardVersionsTable,
+  boardCustodyTable,
+  boardOutboxTable,
+  boardCustodianLeasesTable,
   integrationSetupOperationsTable,
   integrationSetupRequestsTable,
   nodes: nodesTable,
