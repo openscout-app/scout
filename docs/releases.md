@@ -144,6 +144,50 @@ node scripts/release-notes.mjs <version>
 `scripts/release-notes.test.mjs` fails when a section from 0.5.1 on has no
 headline bullet.
 
+## 0.5.2 shared MCP
+
+Scout's MCP server can now run as one shared process for every local session,
+and delivery into a terminal refuses to type into a composer it cannot see
+empty. Install with `bun add -g @openscout/scout`.
+
+### What's changed
+
+* Serve Scout MCP to every local session from one shared process
+* Refuse terminal delivery when the composer cannot be shown to be empty
+* Park an idle Codex app-server after 60 minutes and resume it on the next
+  message
+* Let the operator name a session, and keep that name across aliases
+* Offer Allow always on native Claude permission requests
+* Watch memory from scoutd, with per-role limits that explain themselves
+
+### Shared MCP
+
+- `scout mcp install --shared` runs the shared server under scout-base and
+  registers each client on disk.
+- Each call is credited to its Codex thread; a call whose thread or folder is
+  unknown is refused.
+- A stop drains the server after a grace period instead of cutting
+  connections.
+- New read-only tools list work in progress and read a worktree's diff.
+
+### Asks and sessions
+
+- A finished session task continues in that session.
+- `scout wait` and `scout status` take the session id an ask was sent to.
+- A reply can say a task is blocked and keep its flight waiting.
+- Follow-ups that cannot be delivered are refused, and continuations route to
+  their session.
+- Session and agent records carry the work item link and current task, and
+  record the model and effort from the running session.
+
+### Runtime and host health
+
+- Mesh listeners rebind when interface addresses change, and any address of
+  this machine counts as the same runtime.
+- Tail discovery reports agent CPU, memory and tokens.
+- Notifications use the host as their title and name agents and projects
+  briefly; large questions stay within the push size limit.
+
 ## 0.5.1 ask and reply
 
 Scout now has two verbs for moving work. `scout ask` sends anything: new work,
