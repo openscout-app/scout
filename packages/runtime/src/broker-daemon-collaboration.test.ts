@@ -512,7 +512,14 @@ test("failed work retry traverses HTTP acceptance once and keeps one work item",
   expect(snapshot.collaborationRecords["retry-work"]).toMatchObject({ state: "working" });
   await broker.postJson(h.baseUrl, "/v1/flights", { ...snapshot.flights[retry.flightId], state: "failed", completedAt: Date.now(),
     error: "Fixture disk failure", metadata: { failureCause: "disk_full" } });
-  const refused = await broker.postJsonStatus(h.baseUrl, "/v1/work/retry", { workId: "retry-work", attempt: 2 });
-  expect(refused.status).toBe(409);
-  expect(refused.body).toMatchObject({ error: expect.stringContaining("Free disk space first") });
+  // The cause only sets the retryable hint; an explicit retry without an attempt takes the next one.
+  const waiting = await broker.getJson<import("./registry.js").RuntimeRegistrySnapshot>(h.baseUrl, "/v1/snapshot");
+  expect(waiting.collaborationRecords["retry-work"]).toMatchObject({ waitingOn: { kind: "failed_run", cause: "disk_full", retryable: false } });
+  const second = await broker.postJson<import("@openscout/protocol").WorkRetryResponse>(h.baseUrl, "/v1/work/retry", { workId: "retry-work" });
+  expect(second).toMatchObject({ workId: "retry-work", attempt: 2 });
+  expect(second.invocationId).not.toBe(retry.invocationId);
+  const after = await broker.getJson<import("./registry.js").RuntimeRegistrySnapshot>(h.baseUrl, "/v1/snapshot");
+  expect(after.collaborationRecords["retry-work"]?.metadata?.failedRunRetry).toEqual({ attempt: 2, sourceFlightId: retry.flightId });
+  const skipped = await broker.postJsonStatus(h.baseUrl, "/v1/work/retry", { workId: "retry-work", attempt: 4 });
+  expect(skipped.status).toBe(409);
 }, 15_000);
