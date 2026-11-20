@@ -1,4 +1,5 @@
-import type { FlightRecord, InvocationRequest, QuestionRecord } from "@openscout/protocol";
+import type { FlightRecord, InvocationRequest, QuestionRecord, ScoutAttribution } from "@openscout/protocol";
+import { brokerAttributionFromMetadata } from "./broker-attribution.js";
 import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-permission.js";
 import { PERMISSION_SUPERVISOR_ACTOR_ID, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
@@ -48,8 +49,11 @@ export class BrokerPermissionService {
       ownerId: this.deps.operatorId, nextMoveOwnerId: this.deps.operatorId,
       conversationId: invocation.conversationId,
       createdAt: Date.now(), updatedAt: Date.now(),
-      metadata: { permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
-        invocationId: invocation.id, flightId: flight?.id, version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels } },
+      metadata: {
+        ...(brokerAttributionFromMetadata(invocation.metadata) ? { attribution: brokerAttributionFromMetadata(invocation.metadata) } : {}),
+        permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
+          invocationId: invocation.id, flightId: flight?.id, version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels },
+      },
     };
     const pending: Pending = { invocationId: invocation.id, prompt, busy: false, done: false };
     this.pending.set(id, pending);
@@ -136,7 +140,7 @@ export class BrokerPermissionService {
     if (record?.state === "open") await this.close(id, answer, "closed");
   }
 
-  async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict): Promise<void> {
+  async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict, operatorAttribution?: ScoutAttribution): Promise<void> {
     const opened = this.deps.read(id);
     if (!opened || opened.state !== "open") throw new PermissionRequestEndedError("Permission request is already settled.", false);
     // A restart loses the waiter. Rebind to the session, or settle the record.
@@ -154,9 +158,18 @@ export class BrokerPermissionService {
     let actuated = false;
     try {
       if (!await pending.prompt.isCurrent()) throw new Error("Permission prompt is no longer present. Refresh.");
+      const parent = brokerAttributionFromMetadata(record.metadata);
+      const attribution: ScoutAttribution = automatic
+        ? { actorId: PERMISSION_SUPERVISOR_ACTOR_ID, rootActorId: parent?.rootActorId ?? PERMISSION_SUPERVISOR_ACTOR_ID, source: "system" }
+        : {
+          actorId: operatorAttribution?.actorId ?? this.deps.operatorId,
+          rootActorId: parent?.rootActorId ?? operatorAttribution?.rootActorId ?? this.deps.operatorId,
+          source: operatorAttribution?.source ?? "unverified",
+          ...(operatorAttribution?.claimedActorId ? { claimedActorId: operatorAttribution.claimedActorId } : {}),
+        };
       // Mark actuation durably before keys. A failed send is ambiguous: never replay automatically.
       await this.deps.record({ ...record, updatedAt: Date.now(), metadata: { ...record.metadata, permissionActuation: {
-        decision, at: Date.now(), status: "attempt",
+        decision, at: Date.now(), status: "attempt", attribution,
         ...(automatic ? { initiatedBy: PERMISSION_SUPERVISOR_ACTOR_ID, reason: automatic.reason, grant: automatic.grant, risk: automatic.risk } : {}),
       } } });
       // An adopted prompt outlived its flight. The session itself is still waiting on it.

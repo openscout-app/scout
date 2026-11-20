@@ -33,6 +33,22 @@ test("persists an admitted event before returning acceptance and strips unused v
   f.request({ action: "receive", envelope: { ...f.envelope(), envelope_id: "retry-envelope" } });
   expect(f.database.query("SELECT * FROM integration_slack_events").all()).toHaveLength(1);
 });
+test("persists user-attributed operator posts and rejects bot-only messages", async () => {
+  const f = await fixture();
+  const operator = f.envelope();
+  operator.payload.event.bot_id = "BCLIENT";
+  expect(f.request({ action: "receive", envelope: operator }).accepted).toBe(true);
+
+  const botOnly = f.envelope("EvBotOnly");
+  botOnly.payload.event.bot_id = "BBOT";
+  delete (botOnly.payload.event as Partial<typeof botOnly.payload.event>).user;
+  expect(f.request({ action: "receive", envelope: botOnly }).accepted).toBe(false);
+
+  const pending = f.request({ action: "pending" }).events as Array<{ envelope: typeof operator }>;
+  expect(pending.map(row => row.envelope.payload.event_id)).toEqual(["Ev1"]);
+  expect(pending[0]!.envelope.payload.event).toMatchObject({ user: "U1", bot_id: "BCLIENT" });
+});
+
 test("failed earlier work blocks its thread while another thread can progress", async () => {
   const f = await fixture();
   f.request({ action: "receive", envelope: f.envelope() });

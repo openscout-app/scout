@@ -9,6 +9,24 @@ export function canonicalRequest(value: unknown): string {
   if (value && typeof value === "object") return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canonicalRequest(v)}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }
+
+function withoutRuntimeAttribution(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const result = { ...payload } as Record<string, unknown>;
+  for (const key of ["messageMetadata", "invocationMetadata", "metadata"]) {
+    const metadata = result[key];
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || !("attribution" in metadata)) continue;
+    const entries = Object.entries(metadata).filter(([name]) => name !== "attribution");
+    result[key] = entries.length ? Object.fromEntries(entries) : undefined;
+  }
+  const workItem = result.workItem as Record<string, unknown> | undefined;
+  if (workItem && typeof workItem === "object" && !Array.isArray(workItem) && workItem.metadata && typeof workItem.metadata === "object" && !Array.isArray(workItem.metadata) && "attribution" in workItem.metadata) {
+    const metadata = workItem.metadata as Record<string, unknown>;
+    const entries = Object.entries(metadata).filter(([name]) => name !== "attribution");
+    result.workItem = { ...workItem, metadata: entries.length ? Object.fromEntries(entries) : undefined };
+  }
+  return result;
+}
 /** Only operation owners may raise this, after proving that NO local or remote
  * effect occurred. Transport errors alone are never proof. Each new throw site
  * must explain why no local or remote effect can have occurred there. */
@@ -194,10 +212,10 @@ export class BrokerRequestReceipts {
     let fingerprint: string;
     try {
       // Transport correlation is fixed on first acceptance, not command content.
-      // Do not strip nested payload fields or fields of unrelated operations.
+      // Exclude only trace correlation and runtime attribution; application metadata stays significant.
       const command = (operation === "deliver" || operation === "invoke") && payload
         && typeof payload === "object" && !Array.isArray(payload)
-        ? Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "traceparent"))
+        ? withoutRuntimeAttribution(Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "traceparent")))
         : payload;
       const encoded = canonicalRequest(command);
       lease?.resize(Buffer.byteLength(encoded));

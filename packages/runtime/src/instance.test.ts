@@ -1041,4 +1041,10 @@ describe("repair", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("attribution key files never reach agent or multiplexer environments", () => {
+    const base = { ...process.env, OPENSCOUT_ATTRIBUTION_KEY_FILE: "/private/attribution-key" };
+    expect(buildUserSpawnEnvironment(base).OPENSCOUT_ATTRIBUTION_KEY_FILE).toBeUndefined();
+    expect(buildMultiplexerServerEnvironment(base).OPENSCOUT_ATTRIBUTION_KEY_FILE).toBeUndefined();
+  });
 });

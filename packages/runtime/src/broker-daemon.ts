@@ -1,11 +1,12 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { SCOUT_TASKS_CAPABILITY, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
+import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -547,6 +548,8 @@ if (meshInstanceRefusal) {
   console.log(`[openscout-runtime] mesh off: ${meshInstanceRefusal}`);
 }
 const localAdminKey = readLocalAdminKey(process.env.OPENSCOUT_LOCAL_ADMIN_KEY_FILE);
+const attributionKey = localAdminKey ?? readLocalAdminKey(process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE);
+delete process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
 removeLocalAdminEnvironment(process.env);
 requireProtectedAccessState(dbPath, Boolean(localAdminKey));
 if (localAdminKey) { process.umask(0o077); protectAccessDirectories(controlHome, supportDirectory, dbPath); }
@@ -704,6 +707,7 @@ const meshIngressGate = createMeshIngressGate({
   },
   irohEndpointId: () => localIrohEntrypoint?.endpointId,
   localAdminKey,
+  attributionKey,
   keyConflict: (id) => [Boolean(trustedPeerStore?.knownTrustedPeerKey(id)), Boolean(guestGrantStore?.knownKey(id)), Boolean(meshAccessStore?.knownDevice(id)), Boolean(meshAccessStore?.knownPrincipal(id))].filter(Boolean).length > 1,
   scopedAccess: meshAccessStore ? {
     knownDevice: (keyId) => meshAccessStore.knownDevice(keyId),
@@ -2218,7 +2222,10 @@ if (process.env.OPENSCOUT_ATTACHMENTS_DISABLED !== "1" && !sqliteDisabled) {
       conversation: id => runtime.conversation(id),
       authorizeActor: principal => {
         // Mesh host reads never inherit this broker's local operator privileges.
-        if (principal.actorId === operatorActorId) return principal.nodeId === nodeId;
+        if (principal.actorId === operatorActorId) {
+          return principal.nodeId === nodeId
+            && (principal.attribution === undefined || principal.attribution.source === "local-admin" || principal.attribution.source === "system");
+        }
         const agent = runtime.agent(principal.actorId);
         if (agent) return agent.authorityNodeId === principal.nodeId;
         const endpoints = Object.values(runtime.peek().endpoints).filter(e => e.agentId === principal.actorId);
@@ -2290,6 +2297,70 @@ const t3Service = new BrokerT3Service({
   postMessage: postConversationMessage,
   deliver: request => deliveryAcceptanceService.accept(request),
 });
+
+async function interruptFlightSession(invocation: InvocationRequest, flight: FlightRecord): Promise<boolean> {
+  // Never signal a card's newer session when the referenced task used another.
+  const sessionId = flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId;
+  const endpoint = Object.values(runtime.snapshot().endpoints).find(item => item.agentId === invocation.targetAgentId
+    && item.nodeId === nodeId && item.sessionId === sessionId);
+  if (!endpoint || !sessionId || flight.state === "queued" || flight.state === "waking") return false;
+  if (endpoint.transport !== "tmux") return false;
+  return (await interruptLocalAgent(endpoint.agentId, sessionId)).ok;
+}
+
+async function cancelBoardFlight(flightId: string, reason: string): Promise<void> {
+  const flight = journal.getFlight(flightId);
+  if (!flight || isTerminalFlightState(flight.state)) return;
+  const invocation = knownInvocations.get(flight.invocationId) ?? journal.getInvocation(flight.invocationId);
+  if (!invocation || invocation.metadata?.source !== VERCEL_BOARD_ADAPTER_ID) return;
+  const stillThisFlight = () => {
+    const current = journal.getCurrentFlightForInvocation(invocation.id);
+    return Boolean(current?.id === flight.id && !isTerminalFlightState(current.state) && !current.metadata?.taskFinalReplyMessageId);
+  };
+  await persistFlight({
+    ...flight, state: "cancelled", completedAt: Date.now(), error: reason,
+    summary: "Board moved on; Scout cancelled this run. The worktree was kept.",
+    metadata: { ...flight.metadata, vercelBoardClaimLost: true },
+  }, stillThisFlight);
+  const current = journal.getCurrentFlightForInvocation(invocation.id);
+  if (current?.id === flight.id && current.state === "cancelled" && current.metadata?.vercelBoardClaimLost === true) {
+    await interruptFlightSession(invocation, flight);
+  }
+}
+
+// The Vercel Board adapter. It runs only where this node is the recorded
+// custodian; the credential and claim tokens never leave this node.
+const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
+  nodeId,
+  operatorId: operatorActorId,
+  database: routeAliasDatabase,
+  connectionsDirectory: join(controlHome, "vercel-board"),
+  recordWork: (record, options) => recordCollaborationDurably(record, options),
+  appendWorkEvent: appendCollaborationEventDurably,
+  work: id => runtime.collaborationRecord(id),
+  workItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  persistActor: upsertActorDurably,
+  placeWorkChange: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context) as never,
+  deliver: request => deliveryAcceptanceService.accept(request),
+  flight: id => journal.getFlight(id),
+  cancelFlight: cancelBoardFlight,
+  // One room per followed channel: merge the roster, never drop anyone already in it.
+  ensureRoom: async (room) => {
+    await durableRecords.updateConversation(room.id, current => {
+      if (!current) return room;
+      const participantIds = [...new Set([...current.participantIds, ...room.participantIds])];
+      if (participantIds.length === current.participantIds.length) return undefined;
+      return { ...current, participantIds };
+    });
+  },
+  // Live only, beside asks and flights. The mirror's task events are the record.
+  publish: (event) => {
+    controlStreams.streamEphemeralEvent(event);
+    publishEphemeralControlEvent(event);
+  },
+  createId: () => createRuntimeId("evt"),
+  warn: (message, error) => console.warn(`[openscout-runtime] ${message}`, error ?? ""),
+}) : undefined;
 
 const terminalReportDeliveryService = new BrokerTerminalReportDeliveryService({
   nodeId,
@@ -3242,15 +3313,7 @@ const taskService = new BrokerTaskService({
     return attachmentService.withTaskImage(message, image, commit);
   },
   accept: payload => deliveryAcceptanceService.accept(payload, { receiptReserved: true, admissionReserved: true }),
-  interrupt: async (invocation, flight) => {
-    // Never signal a card's newer session when the referenced task used another.
-    const sessionId = flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId;
-    const endpoint = Object.values(runtime.snapshot().endpoints).find(item => item.agentId === invocation.targetAgentId
-      && item.nodeId === nodeId && item.sessionId === sessionId);
-    if (!endpoint || !sessionId || flight.state === "queued" || flight.state === "waking") return false;
-    if (endpoint.transport !== "tmux") return false;
-    return (await interruptLocalAgent(endpoint.agentId, sessionId)).ok;
-  },
+  interrupt: interruptFlightSession,
   forward: async (home, kind, payload) => {
     const node = runtime.snapshot().nodes[home];
     if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY) || !node.brokerUrl) throw new Error(`task home ${home} requires ${SCOUT_TASKS_CAPABILITY} and a reachable broker`);
@@ -3491,6 +3554,7 @@ const routeRequest = createBrokerHttpRouter({
   shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
     service: attachmentService, nodeId,
+    snapshot: () => runtime.snapshot(),
     notifyOperator: createOperatorAttachmentNotifier({
       service: () => attachmentService, operatorActorId,
       ensureOperator: () => ensureBrokerActorForDelivery(operatorActorId),
@@ -3565,6 +3629,7 @@ const routeRequest = createBrokerHttpRouter({
   meshId,
   operatorActorId,
   runtime,
+  attributionSnapshot: () => runtime.snapshot(),
   journal,
   knownInvocations,
   brokerService,
@@ -3611,6 +3676,7 @@ const routeRequest = createBrokerHttpRouter({
   rendezvousService,
   externalSessionService,
   t3Service,
+  vercelBoardService,
   routeAliasService,
   agentRosterService,
   sessionNameService,
@@ -4265,6 +4331,7 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
   }, 60_000).unref();
 
   slackWorkerSupervisor?.start();
+  void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4290,6 +4357,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   meshApprovalShare.stop();
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
+  await vercelBoardService?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });
