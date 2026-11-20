@@ -1290,6 +1290,7 @@ export const vercelBoardCustodyTable = sqliteTable("vercel_board_custody", {
   agentId: text("agent_id").notNull(),
   workId: text("work_id").notNull(),
   startedBy: text("started_by").notNull(),
+  profile: text("profile"),
   flightId: text("flight_id"),
   state: text("state").notNull(),
   outcome: text("outcome"),
@@ -1299,9 +1300,19 @@ export const vercelBoardCustodyTable = sqliteTable("vercel_board_custody", {
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.connectionId, table.attemptId] }),
-  check("vercel_board_custody_state_check", sql`${table.state} IN ('claiming', 'claim_unknown', 'held', 'settling', 'settled', 'lost')`),
-  check("vercel_board_custody_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'failed', 'released')`),
+  check("vercel_board_custody_state_check", sql`${table.state} IN ('claiming', 'claim_unknown', 'held', 'blocked', 'settling', 'settled', 'lost')`),
+  check("vercel_board_custody_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'failed', 'released', 'blocked')`),
   index("idx_vercel_board_custody_task").on(table.connectionId, table.taskId, table.state),
+]);
+
+export const vercelBoardRolesTable = sqliteTable("vercel_board_roles", {
+  connectionId: text("connection_id").notNull(),
+  agentId: text("agent_id").notNull(),
+  role: text("role").notNull(),
+  declaredBy: text("declared_by").notNull(),
+  declaredAt: integer("declared_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.agentId, table.role] }),
 ]);
 
 export const vercelBoardOutboxTable = sqliteTable("vercel_board_outbox", {
@@ -1364,6 +1375,7 @@ export const controlPlaneDrizzleSchema = {
   vercelBoardTaskEventsTable,
   vercelBoardPromotionsTable,
   vercelBoardCustodyTable,
+  vercelBoardRolesTable,
   vercelBoardOutboxTable,
   vercelBoardCustodianLeasesTable,
   integrationSetupOperationsTable,
