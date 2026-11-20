@@ -203,6 +203,26 @@ CREATE INDEX IF NOT EXISTS idx_terminal_session_registry_updated
 // that remembers only a session name is worthless after a reboot. No foreign
 // keys: a workspace may reference surfaces on hosts this node cannot currently
 // reach, and losing a host must not delete the layout.
+/**
+ * Role slots: one short, cited summary per role assignment (the PM's Kanban
+ * summary first). A cache the role rewrites, not history, so not journaled.
+ * Applied as an additive migration beside the Drizzle chain, like
+ * terminal_workspaces.
+ */
+export const CONTROL_PLANE_ROLE_SLOTS_SQLITE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS role_slots (
+  assignment_id TEXT PRIMARY KEY,
+  role_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  stamp_json TEXT NOT NULL,
+  sentences_json TEXT NOT NULL,
+  written_by_id TEXT NOT NULL,
+  written_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_role_slots_role
+  ON role_slots (role_id);
+`;
+
 export const CONTROL_PLANE_TERMINAL_WORKSPACE_SQLITE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS terminal_workspaces (
   id TEXT PRIMARY KEY,

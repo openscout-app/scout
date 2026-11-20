@@ -130,8 +130,19 @@ export type VercelBoardHandoffEvent = ControlEventBase<"vercel_board.handoff", {
   handoff: VercelBoardHandoff;
 }>;
 
+/**
+ * A role wrote its slot. Ephemeral: the slot row is the record; a reader that
+ * missed this reads the slot.
+ */
+export type RoleSlotWrittenEvent = ControlEventBase<"role.slot.written", {
+  assignmentId: ScoutId;
+  roleId: string;
+  version: number;
+}>;
+
 export type ControlEvent =
   | MeshBridgeLifecycleEvent
+  | RoleSlotWrittenEvent
   | VercelBoardHandoffEvent
   | NodeUpsertedEvent
   | ActorRegisteredEvent
@@ -165,6 +176,7 @@ export type ControlEvent =
 export const EPHEMERAL_CONTROL_EVENT_KINDS: ReadonlySet<ControlEvent["kind"]> = new Set<ControlEvent["kind"]>([
   "presence.updated",
   "vercel_board.handoff",
+  "role.slot.written",
 ]);
 
 /** True when the event must never be persisted or backlogged. */
