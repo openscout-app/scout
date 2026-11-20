@@ -91,6 +91,7 @@ export type ScoutAskReceipt = {
   state: ScoutAskState;
   ids: {
     targetAgentId?: string;
+    sessionId?: string;
     invocationId?: string;
     flightId?: string;
     conversationId?: string;

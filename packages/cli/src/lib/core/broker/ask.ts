@@ -233,6 +233,8 @@ export function buildScoutAskReceipt(input: {
     ...(parentCompletion ? { parentCompletion } : {}),
     ids: compactAskIds({
       targetAgentId: input.result.flight?.targetAgentId,
+      sessionId: typeof input.result.flight?.metadata?.targetSessionId === "string"
+        ? input.result.flight.metadata.targetSessionId : undefined,
       invocationId: input.result.flight?.invocationId,
       flightId: input.result.flight?.id,
       conversationId: input.result.conversationId,
