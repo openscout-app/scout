@@ -32,7 +32,10 @@ const board = new VercelBoardWorkerSupervisor({
 });
 try {
   const transport = new VercelBoardWorkerTransport(board);
-  assert.ok((await transport.me()).principal);
+  // Either answer proves the bundle started its sibling worker: only worker.mjs
+  // sends the refusal, on a Node whose SQLite cannot bind numbered parameters.
+  try { assert.ok((await transport.me()).principal); }
+  catch (error) { assert.match(String(error?.message), /cannot bind numbered SQLite parameters/); }
 } finally { board.stop(); }
 const comparable = value => JSON.parse(JSON.stringify(value));
 const control = process.argv[2];
