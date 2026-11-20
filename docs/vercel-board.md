@@ -55,7 +55,7 @@ Two existing parts of core set the pattern:
 | Only a role-kept task the operator or Scout wrote starts on its own, and only in a self-serve channel. | Board text can come from teammates and from systems that sync into the board. Elsewhere, and for any other task, the operator starts the claim. The runtime matches each task once; after a release, a failure or a lost lease, the operator decides. |
 | Roles are a closed list in the connection: `scout`, `builder`, `reviewer`. | Each is a Board profile of the operator's principal. `scout` plans; the others work. A task kept for a role (`for`) can be claimed only as that role. |
 | A task settles only on a verb. | A final `reply --ref` completes it and `--failed` fails it. A turn that ends without a verb releases it, so a refusal never reads as completed. `--waiting-on` holds it on the board as `blocked` and stops renewing; the answer lifts the hold and Scout claims again as the same role. |
-| Scout's writes are `noSync`. | One path per Slack channel: Board's sync does not copy Scout's posts and tasks out, until the operator chooses otherwise. |
+| Scout's writes are `noSync` by default. Only `syncChannels` may publish them through Board's sync. | One outbound writer per Slack channel: a Board-linked channel uses Board sync, never an independent Scout bridge writer. |
 | Promote is frozen. | The code stays; nothing new builds on it. |
 | A `failed` task shows as waiting, labeled failed. | Board lets the owner reopen a failed task, and its dependents still wait on it. Someone owes a move. Scout does not add a failed state. |
 | Board owns `state`. Scout owns acceptance. | One writer per field. A move from Scout is a command to Board; the result returns as an event. |
@@ -63,6 +63,14 @@ Two existing parts of core set the pattern:
 | Key actors, the allowlist and the custodian lease on the principal ID. | A second person can be added later without migrating records. See [Multi-user readiness](#multi-user-readiness). |
 | One custodian runtime holds each board connection. | The cursor, the claim tokens and the outbox need a single fenced writer. The mesh gives reachability, not consensus. |
 | Do not add a shared integration framework. | T3, Slack and Board have different shapes. Two or three providers do not justify one. |
+
+`syncChannels` is empty by default. For a channel the operator explicitly maps
+through Board's Slack sync, planned task roots and completed or failed
+settlement replies carry `noSync: false`, so Board is the only outbound writer
+to Slack. The reply uses the existing per-thread outbox, a deterministic client
+ID, the claiming role and the acting agent label. Scout's direct Slack bridge
+must be disabled for that channel. Every other write, including setup probes,
+stays `noSync`.
 
 ## Roles
 

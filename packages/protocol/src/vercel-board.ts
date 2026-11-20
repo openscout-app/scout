@@ -92,6 +92,8 @@ export interface VercelBoardConnectionConfig {
    * Absent means none.
    */
   selfServe?: string[];
+  /** Board channels whose Scout writes may be mirrored by Board's sync providers. */
+  syncChannels?: string[];
   /** The node recorded as custodian. A record, not a cross-host fence. */
   custodianNodeId: string;
   credential: VercelBoardCredentialReference;
@@ -228,6 +230,8 @@ export function validateVercelBoardConnectionConfig(value: unknown): string[] {
     || new Set(c.roles).size !== c.roles.length || !c.roles.includes(c.profile as string))) errors.push("roles must be 1-16 distinct profile names that include profile");
   if (c.selfServe !== undefined && (!Array.isArray(c.selfServe) || !c.selfServe.every(channel => Array.isArray(c.channels) && c.channels.includes(channel))
     || new Set(c.selfServe).size !== c.selfServe.length)) errors.push("selfServe must list distinct channels from channels");
+  if (c.syncChannels !== undefined && (!Array.isArray(c.syncChannels) || !c.syncChannels.every(channel => Array.isArray(c.channels) && c.channels.includes(channel))
+    || new Set(c.syncChannels).size !== c.syncChannels.length)) errors.push("syncChannels must list distinct channels from channels");
   if (typeof c.custodianNodeId !== "string" || !c.custodianNodeId.trim()) errors.push("custodianNodeId is required");
   errors.push(...validateVercelBoardCredentialReference(c.credential));
   if (typeof c.connectedAt !== "number" || !Number.isFinite(c.connectedAt)) errors.push("connectedAt must be a timestamp");
@@ -278,6 +282,8 @@ export interface VercelBoardConnectionStatus {
   /** The profiles Scout writes as, and the channels where role-kept tasks start on their own. */
   roles?: string[];
   selfServe?: string[];
+  /** Board channels whose Scout writes may be mirrored by Board's sync providers. */
+  syncChannels?: string[];
   /** The agents that declared a role, oldest first. */
   declared?: { agentId: string; role: string }[];
   outbox: { pending: number; unknown: number; failed: number };
@@ -303,6 +309,8 @@ export interface VercelBoardConnectRequest {
   roles?: string[];
   /** Channels where role-kept tasks start without the operator. Default: none. */
   selfServe?: string[];
+  /** Board channels whose Scout writes may be mirrored by Board's sync providers. */
+  syncChannels?: string[];
   /** Run the setup probe: create, claim and complete one task. Default true. */
   probe?: boolean;
 }

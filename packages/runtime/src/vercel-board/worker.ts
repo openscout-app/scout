@@ -392,7 +392,7 @@ export class VercelBoardWorkerTransport implements VercelBoardTransport {
     return answer.message ? parseVercelBoardMessage(answer.message) : null;
   }
 
-  async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string }) {
+  async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string; noSync?: boolean }) {
     return parseVercelBoardMessage(record(await this.call("post", { ...input }), "post").message);
   }
 
@@ -401,11 +401,11 @@ export class VercelBoardWorkerTransport implements VercelBoardTransport {
     return answer.message ? parseVercelBoardMessage(answer.message) : null;
   }
 
-  async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[] }) {
+  async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[]; noSync?: boolean }) {
     return parseVercelBoardMessage(record(await this.call("createTask", { ...input }), "task").task);
   }
 
-  async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string }) {
+  async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string; noSync?: boolean }) {
     const answer = record(await this.call("createBatch", { ...input }), "batch");
     if (!Array.isArray(answer.tasks)) throw invalid("tasks");
     return answer.tasks.map(parseVercelBoardMessage);

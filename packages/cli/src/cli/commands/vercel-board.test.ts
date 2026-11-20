@@ -41,8 +41,8 @@ test("role declares the calling agent, or another agent as the operator", () => 
   const other = parseVercelBoardCommand(["role", "--connection", "c1", "--role", "builder", "--agent", "agent-b", "--remove"], {});
   expect(other.body).toEqual({ connectionId: "c1", role: "builder", agentId: "agent-b", actorId: "operator", remove: true });
   expect(() => parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], {})).toThrow(/--agent/);
-  const connect = parseVercelBoardCommand(["connect", "--team", "t", "--credential", "env:T", "--roles", "scout,reviewer", "--self-serve", "scout/work"], {});
-  expect(connect.body).toMatchObject({ roles: ["scout", "reviewer"], selfServe: ["scout/work"] });
+  const connect = parseVercelBoardCommand(["connect", "--team", "t", "--credential", "env:T", "--roles", "scout,reviewer", "--self-serve", "scout/work", "--sync-channels", "scout/work"], {});
+  expect(connect.body).toMatchObject({ roles: ["scout", "reviewer"], selfServe: ["scout/work"], syncChannels: ["scout/work"] });
 });
 
 test("the integration command dispatches every verb the Board help names", () => {
