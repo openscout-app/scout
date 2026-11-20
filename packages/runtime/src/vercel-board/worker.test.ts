@@ -104,6 +104,16 @@ run("the worker carries the closed set: tasks, claims, posts, labels and the eve
   expect(await transport.message("999999")).toBeNull();
 });
 
+run("an operator-enabled Board write may sync, while the default stays local", async () => {
+  const { transport } = memoryWorker();
+  const local = await transport.post({ channel: "work", text: "Local only", id: "scout-local-post" });
+  expect(local.noSync).toBe(true);
+  const synced = await transport.post({ channel: "work", text: "Publish this", id: "scout-synced-post", noSync: false });
+  expect(synced.noSync).toBe(false);
+  const batch = await transport.createBatch({ channel: "work", id: "scout-synced-plan", noSync: false, tasks: [{ text: "Publish the task" }] });
+  expect(batch[0]!.noSync).toBe(false);
+}, WORKER_TEST_TIMEOUT_MS);
+
 test.skipIf(!UNFIT_NODE)("on a Node whose SQLite cannot bind numbered parameters, the in-memory board fails at start and says why", async () => {
   const worker = new VercelBoardWorkerSupervisor({ target: { kind: "memory" }, profile: "scout", can: CAN, credential: null }, { node: UNFIT_NODE!, restartBackoffMs: 0 });
   cleanup.push(() => worker.stop());

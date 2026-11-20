@@ -37,10 +37,10 @@ export interface VercelBoardTransport {
   /** One channel's messages across its threads, oldest first: the newest `limit`, or with `after` the ones since. One call. */
   channelMessages(query: { channel: string; after?: string; limit?: number }): Promise<{ messages: VercelBoardWireMessage[]; cursor: string | null }>;
   message(id: string): Promise<VercelBoardWireMessage | null>;
-  post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string }): Promise<VercelBoardWireMessage>;
+  post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string; noSync?: boolean }): Promise<VercelBoardWireMessage>;
   postById(id: string): Promise<VercelBoardWireMessage | null>;
-  createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[] }): Promise<VercelBoardWireMessage>;
-  createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string }): Promise<VercelBoardWireMessage[]>;
+  createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[]; noSync?: boolean }): Promise<VercelBoardWireMessage>;
+  createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string; noSync?: boolean }): Promise<VercelBoardWireMessage[]>;
   batch(id: string): Promise<VercelBoardWireMessage[] | null>;
   /** No idempotency key and the token shows once. Callers must never retry it after an unknown outcome. */
   claim(taskId: string, leaseSeconds: number): Promise<{ task: VercelBoardWireMessage; claim: VercelBoardClaimGrant }>;
@@ -179,8 +179,8 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     }
   }
 
-  async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string }) {
-    const answer = await this.request<Record<string, any>>("POST", "/messages", { body: { ...input, noSync: VERCEL_BOARD_NO_SYNC }, operation: "post" });
+  async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string; noSync?: boolean }) {
+    const answer = await this.request<Record<string, any>>("POST", "/messages", { body: { ...input, noSync: input.noSync ?? VERCEL_BOARD_NO_SYNC }, operation: "post" });
     return parseVercelBoardMessage(answer.message);
   }
 
@@ -194,13 +194,13 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     }
   }
 
-  async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[] }) {
-    const answer = await this.request<Record<string, any>>("POST", "/tasks", { body: { ...input, noSync: VERCEL_BOARD_NO_SYNC }, operation: "task_create" });
+  async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[]; noSync?: boolean }) {
+    const answer = await this.request<Record<string, any>>("POST", "/tasks", { body: { ...input, noSync: input.noSync ?? VERCEL_BOARD_NO_SYNC }, operation: "task_create" });
     return parseVercelBoardMessage(answer.task);
   }
 
-  async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string }) {
-    const answer = await this.request<Record<string, any>>("POST", "/tasks/batch", { body: { ...input, tasks: input.tasks.map(task => ({ ...task, noSync: VERCEL_BOARD_NO_SYNC })) }, operation: "task_batch" });
+  async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string; noSync?: boolean }) {
+    const answer = await this.request<Record<string, any>>("POST", "/tasks/batch", { body: { ...input, tasks: input.tasks.map(task => ({ ...task, noSync: input.noSync ?? VERCEL_BOARD_NO_SYNC })) }, operation: "task_batch" });
     if (!Array.isArray(answer.tasks)) throw new VercelBoardHttpError(502, "remote_error", "POST /tasks/batch answered no tasks.");
     return answer.tasks.map(parseVercelBoardMessage);
   }
@@ -264,9 +264,8 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
 
 /** The agent label every outbound write carries, cut to Board's label value limit. */
 /**
- * Scout's writes stay on the board: Board's own sync does not carry them to
- * Slack or another platform, so each Slack channel has one path in. Until the
- * operator chooses otherwise, every post, reply and task Scout writes is noSync.
+ * Scout's writes stay on the board unless the operator explicitly enables a
+ * channel for Board sync. This is the default, not a second outbound writer.
  */
 export const VERCEL_BOARD_NO_SYNC = true;
 

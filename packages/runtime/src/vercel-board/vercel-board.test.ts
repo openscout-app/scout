@@ -937,3 +937,32 @@ test("every write Scout makes is noSync: posts, the probe and planned tasks", as
     else expect(body.noSync).toBe(true);
   }
 });
+
+test("only sync-enabled channels publish plans and one attributed settlement reply", async () => {
+  const h = serviceHarness();
+  await expect(h.connect({ syncChannels: ["notes"] })).rejects.toThrow("syncChannels must name channels");
+  const connected = await h.connect({ channels: ["work", "notes"], syncChannels: ["work"] });
+  expect(connected.connection.syncChannels).toEqual(["work"]);
+  const plan = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r", actorId: "operator", tasks: [{ text: "Build it" }] });
+  const batch = h.board.requests.find(request => request.method === "POST" && request.path === "/tasks/batch")!.body as { noSync: boolean; tasks: { noSync: boolean }[] };
+  expect(batch.noSync).toBe(false);
+  expect(batch.tasks.every(task => task.noSync === false)).toBe(true);
+
+  const taskId = plan.tasks[0]!.taskId;
+  await h.service.claim({ connectionId: "c1", taskId, agentId: "agent-1", actorId: "operator" });
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Build fixed.", metadata: { completedByBrokerReply: true } } as FlightRecord);
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  const replies = h.board.requests.filter(request => request.method === "POST" && request.path === "/messages" && (request.body as { re?: string }).re === taskId);
+  expect(replies).toHaveLength(1);
+  expect(replies[0]!.body).toMatchObject({ text: "Build fixed.", noSync: false, labels: { "scout.agent": "agent-1" } });
+  expect(replies[0]!.body).not.toHaveProperty("profile");
+  await h.service.pump("c1");
+  expect(h.board.requests.filter(request => request.method === "POST" && request.path === "/messages" && (request.body as { re?: string }).re === taskId)).toHaveLength(1);
+
+  await h.service.plan({ connectionId: "c1", channel: "notes", planningTaskId: "p2", requestId: "r2", actorId: "operator", tasks: [{ text: "Keep this here" }] });
+  const local = h.board.requests.filter(request => request.method === "POST" && request.path === "/tasks/batch").at(-1)!.body as { noSync: boolean; tasks: { noSync: boolean }[] };
+  expect(local.noSync).toBe(true);
+  expect(local.tasks.every(task => task.noSync === true)).toBe(true);
+  expect((await h.service.status("c1"))[0]).toMatchObject({ syncChannels: ["work"] });
+});

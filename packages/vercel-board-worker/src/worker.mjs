@@ -163,8 +163,8 @@ export const operations = {
     catch (error) { if (notFound(error)) return { message: null }; throw error; }
   },
   async post(client, args) {
-    // Scout's writes stay on the board, off every synced platform.
-    const input = { text: typeof args.text === "string" ? args.text : "", ...(args.labels ? { labels: args.labels } : {}), id: text(args.id, "id"), noSync: true };
+    // Only an operator-enabled sync channel may publish Scout's Board writes.
+    const input = { text: typeof args.text === "string" ? args.text : "", ...(args.labels ? { labels: args.labels } : {}), id: text(args.id, "id"), noSync: args.noSync !== false };
     const message = args.re ? await client.reply(String(args.re), input) : await client.post(text(args.channel, "channel"), input);
     return { message: withoutMentions(message) };
   },
@@ -174,14 +174,14 @@ export const operations = {
   },
   async createTask(client, args) {
     const answer = await client.tasks.create(text(args.channel, "channel"), {
-      text: text(args.text, "text"), id: text(args.id, "id"), noSync: true,
+      text: text(args.text, "text"), id: text(args.id, "id"), noSync: args.noSync !== false,
       ...(args.labels ? { labels: args.labels } : {}), ...(args.needs?.length ? { needs: args.needs } : {}),
     });
     return { task: answer.task };
   },
   async createBatch(client, args) {
     if (!Array.isArray(args.tasks)) throw Object.assign(new Error("tasks is required"), { status: 400, code: "invalid_request" });
-    return { tasks: await client.tasks.createMany(text(args.channel, "channel"), args.tasks.map(task => ({ ...task, noSync: true })), { id: text(args.id, "id") }) };
+    return { tasks: await client.tasks.createMany(text(args.channel, "channel"), args.tasks.map(task => ({ ...task, noSync: args.noSync !== false })), { id: text(args.id, "id") }) };
   },
   // Vercel's API has no batch lookup by client ID. A batch sent again with the same ID is the same batch.
   async batch() {
