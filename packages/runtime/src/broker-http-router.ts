@@ -1,5 +1,6 @@
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { RoleSlotError } from "./role-slots-store.js";
+import { RolePassError } from "./role-pass-scheduler.js";
 import { roleSlotBoardCards } from "./broker-roles-http.js";
 import { BrokerVercelBoardService, VercelBoardServiceError, VercelBoardConnectionError } from "./vercel-board/service.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
@@ -360,6 +361,10 @@ export type BrokerHttpRouterDeps = {
   openRolesDb?: () => ControlPlaneSqliteDatabase | null;
   /** Live fan-out for an event whose record is elsewhere (SSE clients and the in-memory bus); never persisted. */
   publishEphemeralEvent?: (event: ControlEvent) => void;
+  /** The unended flight holding a role pass lock, for the slot read. */
+  runningRolePass?: (assignmentId: string) => { flightId: string } | null;
+  /** Page open: return the running pass, or start one when the slot is behind. */
+  ensureRolePass?: (assignmentId: string) => Promise<{ flightId: string | null; started: boolean; behind: boolean }>;
   /**
    * Mesh trust cone (docs/proposals/mesh-trust-cone.md): enrollment handshake
    * endpoints and the signed node card. When absent, the trust routes 404 and
@@ -2247,9 +2252,27 @@ export function createBrokerHttpRouter(
       }
       const roleId = url.searchParams.get("roleId")?.trim();
       if (!roleId) throw new Error("roleId is required");
-      json(response, 200, brokerReadRoleSlots(db, roleId, roleSlotBoardCards(deps.workLifecycles)));
+      json(response, 200, brokerReadRoleSlots(db, roleId, roleSlotBoardCards(deps.workLifecycles), deps.runningRolePass));
     } catch (error) {
       badRequest(response, error);
+    }
+    return;
+  }
+
+  const rolePassMatch = method === "POST"
+    ? url.pathname.match(/^\/v1\/roles\/slots\/([^/]+)\/pass$/)
+    : null;
+  if (rolePassMatch) {
+    try {
+      if (!deps.ensureRolePass) {
+        json(response, 503, { error: "role_pass_unavailable", detail: "role passes are not running" });
+        return;
+      }
+      const result = await deps.ensureRolePass(decodeURIComponent(rolePassMatch[1] ?? ""));
+      json(response, 200, result);
+    } catch (error) {
+      if (error instanceof RolePassError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
     }
     return;
   }

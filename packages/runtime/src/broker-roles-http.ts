@@ -67,29 +67,47 @@ export function brokerAppendMissionLog(
  */
 export function roleSlotBoardCards(work: {
   board(query: { lifecycleId?: string; closedSince?: number; limit?: number }): {
-    lifecycle: { lifecycle: { stations: ReadonlyArray<{ id: string; state: string }> } };
+    lifecycle: { lifecycle: { stations: ReadonlyArray<{ id: string; state: string; name?: string }> } };
     items: ReadonlyArray<{ workId: string; station: string; revision: number }>;
   };
 } | undefined): RoleSlotBoardCard[] | null {
   if (!work) return null;
   const board = work.board({ limit: 2000 });
-  const settled = new Set(board.lifecycle.lifecycle.stations.filter((s) => s.state === "done" || s.state === "cancelled").map((s) => s.id));
-  return board.items.map((item) => ({ workId: item.workId, revision: item.revision, open: !settled.has(item.station) }));
+  const stations = board.lifecycle.lifecycle.stations;
+  const settled = new Set(stations.filter((s) => s.state === "done" || s.state === "cancelled").map((s) => s.id));
+  const names = new Map(stations.map((s) => [s.id, s.name ?? s.id]));
+  return board.items.map((item) => ({
+    workId: item.workId,
+    revision: item.revision,
+    open: !settled.has(item.station),
+    station: item.station,
+    stationName: names.get(item.station) ?? item.station,
+  }));
 }
 
-/** A board card as the slot's `behind` needs it: its revision, and whether its station is still open. */
-export type RoleSlotBoardCard = { workId: string; revision: number; open: boolean };
+/** A board card as the slot's `behind` and a pass need it: its revision, its station, and whether that station is still open. */
+export type RoleSlotBoardCard = { workId: string; revision: number; open: boolean; station: string; stationName: string };
 
 /**
  * Each active holder of a role with its slot and whether the board moved
  * since that slot was written. `behind` is null when the board is not readable.
  * A read never starts a pass.
  */
-export function brokerReadRoleSlots(db: BrokerRolesDb, roleId: string, boardCards: RoleSlotBoardCard[] | null) {
+export function brokerReadRoleSlots(
+  db: BrokerRolesDb,
+  roleId: string,
+  boardCards: ReadonlyArray<Pick<RoleSlotBoardCard, "workId" | "revision" | "open">> | null,
+  runningPass?: (assignmentId: string) => { flightId: string } | null,
+) {
   return {
     slots: listRoleAssignments(db, { roleId, activeOnly: true }).map((assignment) => {
       const slot = readRoleSlot(db, assignment.id);
-      return { assignment, slot, behind: boardCards ? roleSlotBehind(slot?.stamp, boardCards) : null };
+      return {
+        assignment,
+        slot,
+        behind: boardCards ? roleSlotBehind(slot?.stamp, boardCards) : null,
+        pass: runningPass?.(assignment.id) ?? null,
+      };
     }),
   };
 }

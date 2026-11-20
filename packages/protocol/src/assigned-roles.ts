@@ -99,6 +99,31 @@ export interface ScoutRoleDefinition {
    * "project". The runtime refuses a second holder unless the assigner opts out.
    */
   singleHolder?: readonly ScoutRoleAssignmentScope["kind"][];
+  /**
+   * The role runs a pass when work changes: one ask to the holder, coalesced.
+   * A work change marks the assignment dirty; after `quietMs` without another
+   * change, or `maxWaitMs` after the first, one pass starts. Changes made by
+   * the holder itself never mark it.
+   */
+  pass?: ScoutRolePassPolicy;
+}
+
+export interface ScoutRolePassPolicy {
+  quietMs: number;
+  maxWaitMs: number;
+}
+
+/**
+ * Invocation metadata that marks an ask as a role pass. The value is the
+ * assignment id. An unended flight with this mark is the pass lock, and a
+ * marked ask never becomes a work item.
+ */
+export const SCOUT_ROLE_PASS_METADATA_KEY = "rolePass" as const;
+
+/** The assignment a role pass runs for, or null when the metadata carries no mark. */
+export function rolePassAssignmentId(metadata: MetadataMap | undefined): ScoutId | null {
+  const value = metadata?.[SCOUT_ROLE_PASS_METADATA_KEY];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 /** Orchestrator lifecycle: auto post-ask / post-work summary into mission log. */
@@ -149,6 +174,7 @@ export const SCOUT_PM_ROLE: ScoutRoleDefinition = {
   hooks: [],
   actions: [SCOUT_SLOT_WRITE],
   singleHolder: ["agent"],
+  pass: { quietMs: 20_000, maxWaitMs: 120_000 },
 };
 
 /** Built-in catalog. Future roles (qa, sre, reviewer) append here. */
@@ -561,4 +587,35 @@ export function validateMissionLogEntryFields(
   }
 
   return errors.length === 0 ? { ok: true } : { ok: false, errors };
+}
+
+/**
+ * The sentences a role pass answered with. The answer ends with a JSON object
+ * `{"sentences": [{"text", "cites"}]}`, bare or in a ```json fence; the last
+ * such object wins. Null when there is none, so a pass that only talked
+ * leaves the slot alone.
+ */
+export function parseRolePassAnswer(output: string | undefined): ScoutRoleSlotSentence[] | null {
+  if (!output?.trim()) return null;
+  const candidates: string[] = [];
+  for (const match of output.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/g)) candidates.push(match[1]!);
+  const start = output.lastIndexOf("{\"sentences\"");
+  if (start >= 0) candidates.push(output.slice(start, output.lastIndexOf("}") + 1));
+  candidates.push(output);
+  for (const text of candidates.reverse()) {
+    try {
+      const value = JSON.parse(text.trim()) as unknown;
+      if (!value || typeof value !== "object" || !Array.isArray((value as { sentences?: unknown }).sentences)) continue;
+      return ((value as { sentences: unknown[] }).sentences).map((sentence) => {
+        const entry = (sentence ?? {}) as { text?: unknown; cites?: unknown };
+        return {
+          text: typeof entry.text === "string" ? entry.text : "",
+          cites: Array.isArray(entry.cites) ? entry.cites.filter((cite): cite is string => typeof cite === "string") : [],
+        };
+      });
+    } catch {
+      // Not this candidate.
+    }
+  }
+  return null;
 }
