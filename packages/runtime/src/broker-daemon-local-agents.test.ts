@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -159,6 +159,38 @@ describe("broker daemon local agent routing", () => {
       agentId: actorId, displayName: cards[0]?.displayName, cwd: projectRoot, worktree: "unknown",
       harness: "claude", model: "claude-fable-5.2",
     });
+  }, 15_000);
+
+  test("keeps a fresh Claude ask and its work durable when the work page is unavailable", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "scout-work-page-project-"));
+    broker.temporaryDirectories.add(projectRoot);
+    const harness = await broker.startBroker({
+      devInstance: true,
+      env: { OPENSCOUT_DISABLE_SQLITE: "1", OPENSCOUT_CORE_AGENTS: "" },
+    });
+    const ask = {
+      requestId: "dev-work-page-unavailable",
+      target: { kind: "project_path", projectPath: projectRoot },
+      execution: { harness: "claude", session: "new" },
+      intent: "task_ask",
+      task: { version: 1 },
+      body: "Check this project.",
+      ensureAwake: false,
+      workItem: { id: "work-page-unavailable", title: "Check this project" },
+    };
+    const response = await broker.postJson(harness.baseUrl, "/v1/deliver", ask);
+    const records = await broker.getJson<Array<{ id: string; kind: string }>>(
+      harness.baseUrl, "/v1/collaboration/records",
+    );
+    expect(records).toContainEqual(expect.objectContaining({ id: ask.workItem.id, kind: "work_item" }));
+    expect(existsSync(join(harness.controlHome, "control-plane.sqlite"))).toBe(false);
+    expect(response).toMatchObject({
+      accepted: true,
+      flight: { id: expect.any(String) },
+      workItem: { id: ask.workItem.id },
+      workPageUnavailable: true,
+    });
+    expect(await broker.postJson(harness.baseUrl, "/v1/deliver", ask)).toEqual(response);
   }, 15_000);
 
   test("applies a broker runtime profile to a fresh current-project session", async () => {

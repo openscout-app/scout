@@ -200,6 +200,7 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
     createdAt: number;
   }) => Promise<DeliveryWorkItemResolution>;
   deliveryWorkItemResolutionForTell: (payload: ScoutDeliverRequest) => DeliveryWorkItemResolution;
+  workPageAvailable?: () => boolean;
   prepareDeliveryWorkItemIfNeeded?: BrokerDeliveryAcceptanceServiceOptions["recordDeliveryWorkItemIfNeeded"];
   postConversationMessage: (message: MessageRecord) => Promise<unknown>;
   acceptInvocation: (invocation: InvocationRequest, message?: MessageRecord, workItem?: DeliveryWorkItemResolution["pendingCreation"]) => Promise<FlightRecord>;
@@ -347,6 +348,19 @@ export class BrokerDeliveryAcceptanceService {
   }
 
   async accept(
+    payload: ScoutDeliverRequest,
+    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean; executionPayload?: ScoutDeliverRequest } = {},
+  ): Promise<ScoutDeliverResponse> {
+    const response = await this.acceptDelivery(payload, options);
+    // This is live read-model status, not part of the durable receipt. In
+    // particular, a retry should get a usable link after projection recovers.
+    if (response.kind === "delivery" && response.workItem && this.options.workPageAvailable?.() === false) {
+      return { ...response, workPageUnavailable: true };
+    }
+    return response;
+  }
+
+  private async acceptDelivery(
     payload: ScoutDeliverRequest,
     options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean; executionPayload?: ScoutDeliverRequest } = {},
   ): Promise<ScoutDeliverResponse> {

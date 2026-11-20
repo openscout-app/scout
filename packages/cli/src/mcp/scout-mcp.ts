@@ -1360,6 +1360,7 @@ const askResultSchema = z.object({
 
 const askReceiptSchema = z.object({
   recording: z.literal("recorded").optional(),
+  workPageUnavailable: z.literal(true).optional(),
   notificationStatus: z.enum(["not_requested", "requested_unconfirmed"]).optional(),
   workerInterrupted: z.boolean().optional(),
   completion: completionStateSchema.extend({ invocationId: z.string(), flightId: z.string() }).optional(),
@@ -1715,7 +1716,8 @@ function renderMcpAskPrimitiveSummary(receipt: ScoutAskReceipt): string {
           ? ` MCP notification was not scheduled; use invocations_wait with flightId=${receipt.ids.flightId}.`
           : " MCP notification was not scheduled.";
     }
-    return `Ask ${receipt.state}${target}${flight}${work}.${delivery}`;
+    const workPage = receipt.workPageUnavailable ? " Work was recorded, but its page is unavailable on this broker." : "";
+    return `Ask ${receipt.state}${target}${flight}${work}.${workPage}${delivery}`;
   }
   if (receipt.next) {
     return `Ask was not sent: ${receipt.next.reason}`;
@@ -1812,6 +1814,7 @@ function buildScoutFollowArtifacts(
     conversationId: string | null;
     workItem: ScoutTrackedWorkItem | null;
     workId?: string | null;
+    workPageUnavailable?: true;
     flightId?: string | null;
     invocationId?: string | null;
     targetSessionId?: string | null;
@@ -1823,7 +1826,7 @@ function buildScoutFollowArtifacts(
     flightId: input.flight?.id ?? input.flightId ?? null,
     invocationId: input.flight?.invocationId ?? input.invocationId ?? null,
     conversationId: input.conversationId ?? metadataStringValue(input.flight?.metadata, "conversationId"),
-    workId: input.workItem?.id
+    workId: input.workPageUnavailable ? null : input.workItem?.id
       ?? input.workId
       ?? metadataStringValue(input.flight?.metadata, "workId")
       ?? metadataStringValue(input.flight?.metadata, "collaborationRecordId"),
@@ -4824,6 +4827,7 @@ export function createScoutMcpServer(options: {
           {
             flight,
             workId: structuredContent.ids.workId,
+            workPageUnavailable: structuredContent.workPageUnavailable,
             flightId: structuredContent.ids.flightId,
             invocationId: structuredContent.ids.invocationId,
             conversationId: structuredContent.ids.conversationId ?? null,
@@ -4885,6 +4889,7 @@ export function createScoutMcpServer(options: {
         flightId: structuredContent.ids.flightId,
         invocationId: structuredContent.ids.invocationId,
         workId: structuredContent.ids.workId,
+        workPageUnavailable: structuredContent.workPageUnavailable,
         workItem: null,
         conversationId: structuredContent.ids.conversationId ?? null,
         targetAgentId: structuredContent.ids.targetAgentId ?? null,

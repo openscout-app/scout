@@ -4,6 +4,7 @@ import { isTerminalFlightState } from "./broker-local-invocation-helpers.js";
 import {
   assertValidCollaborationEvent,
   assertValidCollaborationRecord,
+  rolePassAssignmentId,
   type CollaborationEvent,
   type CollaborationPriority,
   type CollaborationRecord,
@@ -344,6 +345,8 @@ export class BrokerWorkItemStore {
   };
 
   readonly deliveryWorkItemResolutionForTell = (payload: ScoutDeliverRequest): DeliveryWorkItemResolution => {
+    // A role pass never links a card: its end would move the card and start another pass.
+    if (rolePassAssignmentId(payload.invocationMetadata)) return { record: null };
     const collaborationRecordId = payload.collaborationRecordId?.trim();
     return {
       record: null,
@@ -494,7 +497,8 @@ export class BrokerWorkItemStore {
 
   private buildDeliveryWorkItem(input: RecordDeliveryWorkItemInput): CollaborationRecord | null {
     const workItem = input.payload.workItem;
-    if (!workItem?.title?.trim()) {
+    // A role pass never becomes a card, or the pass would trigger itself.
+    if (!workItem?.title?.trim() || rolePassAssignmentId(input.payload.invocationMetadata)) {
       return null;
     }
     const source =

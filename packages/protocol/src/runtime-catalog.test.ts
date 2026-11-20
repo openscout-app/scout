@@ -12,7 +12,12 @@ describe("runtime catalog", () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.catalog.revision).toMatch(/^\d{4}-\d{2}-\d{2}\.\d+$/u);
-    expect(parsed.catalog.harnesses.find((entry) => entry.id === "codex")?.models[0])
+    const codex = parsed.catalog.harnesses.find((entry) => entry.id === "codex");
+    expect(codex?.models.slice(0, 2)).toEqual([
+      expect.objectContaining({ id: "gpt-6.2-sol", label: "6.2 Sol", enabled: true, contextWindowTokens: 500_000 }),
+      expect.objectContaining({ id: "gpt-6.2-astra", label: "6.2 Astra", enabled: true, contextWindowTokens: 272_000 }),
+    ]);
+    expect(codex?.models.find((model) => model.default))
       .toEqual(expect.objectContaining({
         id: "gpt-6-astra",
         label: "6 Astra",

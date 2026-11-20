@@ -23,6 +23,7 @@ import {
   createBrokerHttpRouter,
   type BrokerHttpRouterDeps,
 } from "./broker-http-router.js";
+import { RolePassError } from "./role-pass-scheduler.js";
 import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
 import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
@@ -1134,6 +1135,65 @@ describe("createBrokerHttpRouter", () => {
     expect(harness.cursorBodies).toEqual([{ actorId: "agent-1", lastReadSeq: 7 }]);
   });
 
+  test("writes a role slot as its holder, announces it, and refuses a stale version", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrateControlPlaneDatabaseSchema(db);
+      const published: unknown[] = [];
+      const harness = createHarness({ openRolesDb: () => db, publishEphemeralEvent: (event) => published.push(event) });
+
+      const assigned = await requestRouter(harness, "POST", "/v1/roles/assignments", {
+        body: { roleId: "pm", agentId: "agent-pm", scope: { kind: "agent" } },
+      });
+      expect(assigned.response.status).toBe(201);
+      const assignmentId = (assigned.body as { assignment: { id: string } }).assignment.id;
+      const path = `/v1/roles/slots/${encodeURIComponent(assignmentId)}`;
+      const body = { actorId: "agent-pm", expectedVersion: 0, stamp: { "work-a": 2 }, sentences: [{ text: "One run failed.", cites: ["work-a"] }] };
+
+      const written = await requestRouter(harness, "POST", path, { body });
+      expect(written.response.status).toBe(200);
+      expect(written.body).toMatchObject({ slot: { assignmentId, version: 1, writtenById: "agent-pm" } });
+      expect(published).toEqual([expect.objectContaining({
+        kind: "role.slot.written", actorId: "agent-pm", payload: { assignmentId, roleId: "pm", version: 1 },
+      })]);
+
+      const stale = await requestRouter(harness, "POST", path, { body });
+      expect(stale.response.status).toBe(409);
+      expect(stale.body).toMatchObject({ currentVersion: 1 });
+
+      const uncited = await requestRouter(harness, "POST", path, { body: { ...body, expectedVersion: 1, sentences: [{ text: "Busy day.", cites: [] }] } });
+      expect(uncited.response.status).toBe(400);
+      expect(published).toHaveLength(1);
+
+      const read = await requestRouter(harness, "GET", "/v1/roles/slots?roleId=pm");
+      expect(read.response.status).toBe(200);
+      expect(read.body).toMatchObject({ slots: [{ assignment: { id: assignmentId }, slot: { version: 1 }, behind: null, pass: null }] });
+
+      const noPasses = await requestRouter(harness, "POST", `${path}/pass`);
+      expect(noPasses.response.status).toBe(503);
+
+      const ensured: string[] = [];
+      const passing = createHarness({
+        openRolesDb: () => db,
+        runningRolePass: () => ({ flightId: "flight-pass" }),
+        ensureRolePass: async (id) => {
+          ensured.push(id);
+          if (id !== assignmentId) throw new RolePassError(404, `No active assignment ${id} with a pass.`);
+          return { flightId: "flight-pass", started: false, behind: true };
+        },
+      });
+      const ensure = await requestRouter(passing, "POST", `${path}/pass`);
+      expect(ensure.response.status).toBe(200);
+      expect(ensure.body).toEqual({ flightId: "flight-pass", started: false, behind: true });
+      expect((await requestRouter(passing, "POST", "/v1/roles/slots/role-missing/pass")).response.status).toBe(404);
+      expect(ensured).toEqual([assignmentId, "role-missing"]);
+      const withPass = await requestRouter(passing, "GET", "/v1/roles/slots?roleId=pm");
+      expect(withPass.body).toMatchObject({ slots: [{ pass: { flightId: "flight-pass" } }] });
+    } finally {
+      db.close();
+    }
+  });
+
   test("routes assigned-role and mission-log writes through the broker database", async () => {
     const unavailable = createHarness();
     const unavailableResult = await requestRouter(
@@ -1151,7 +1211,7 @@ describe("createBrokerHttpRouter", () => {
       const catalog = await requestRouter(harness, "GET", "/v1/roles/catalog");
       expect(catalog.response.status).toBe(200);
       expect(catalog.body).toMatchObject({
-        roles: [expect.objectContaining({ id: "orchestrator" })],
+        roles: [expect.objectContaining({ id: "orchestrator" }), expect.objectContaining({ id: "pm", actions: ["slot.write"] })],
       });
 
       const assigned = await requestRouter(harness, "POST", "/v1/roles/assignments", {

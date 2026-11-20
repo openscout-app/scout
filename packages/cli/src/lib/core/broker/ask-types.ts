@@ -103,6 +103,7 @@ export type ScoutAskReceipt = {
   executionResolution?: ScoutExecutionResolution;
   workerInterrupted?: boolean;
   recording?: "recorded";
+  workPageUnavailable?: true;
   notificationStatus?: "not_requested" | "requested_unconfirmed";
   completion?: ScoutCompletionState & { invocationId: string; flightId: string };
   parentCompletion?: { flightId: string; revision: number };
