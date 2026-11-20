@@ -146,8 +146,10 @@ export const STALE_WORKING_FLIGHT_NO_ENDPOINT_GRACE_MS = 2 * 60_000;
  * starts its target elsewhere (another host, a fresh session) records a
  * placeholder flight first and then the flight that carries the work. The
  * placeholder has no dispatch of its own, so nothing closes it when the work
- * ends. Only a later attempt counts: a late result from an older attempt never
- * closes a newer one that is still running.
+ * ends. A placeholder is known by its missing dispatch, so a twin that started
+ * on another host's clock still closes it. Any other open flight closes only
+ * for a later attempt: a late result from an older attempt never closes a
+ * newer one that is still running.
  */
 export function supersedingTwinFlight(
   snapshot: Pick<RuntimeSnapshot, "flights">,
@@ -155,16 +157,24 @@ export function supersedingTwinFlight(
 ): FlightRecord | null {
   if (!isWorkingFlightState(flight.state)) return null;
   const startedAt = flight.startedAt ?? 0;
+  const placeholder = isUndispatchedFlight(flight);
   let twin: FlightRecord | null = null;
   for (const candidate of Object.values(snapshot.flights)) {
     if (candidate.id === flight.id
       || candidate.invocationId !== flight.invocationId
       || candidate.targetAgentId !== flight.targetAgentId
       || !isTerminalFlightState(candidate.state)
-      || (candidate.startedAt ?? 0) < startedAt) continue;
+      || (!placeholder && (candidate.startedAt ?? 0) < startedAt)) continue;
     if (!twin || flightTimestamp(candidate) > flightTimestamp(twin)) twin = candidate;
   }
   return twin;
+}
+
+/** A flight that never reached a target: no dispatch acknowledgement and no submission. */
+function isUndispatchedFlight(flight: FlightRecord): boolean {
+  if (flight.metadata?.dispatchAck !== undefined) return false;
+  const outcome = flight.metadata?.dispatchOutcome as { status?: unknown } | undefined;
+  return outcome?.status === "not_submitted";
 }
 
 /** The open flight, closed with the outcome its twin already reported. */

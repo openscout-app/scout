@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { namedChannelNaturalKey } from "@openscout/protocol";
 
 import { STALE_LOCAL_DELIVERY_GRACE_MS } from "./broker-flight-lifecycle-service.js";
+import { createInvocationResultReplyIntent, invocationResultMessageId } from "./broker-invocation-result-delivery-service.js";
 import { createBrokerDaemonTestHarness } from "./test-helpers/broker-daemon-harness.test";
 
 const broker = createBrokerDaemonTestHarness();
@@ -662,4 +663,113 @@ describe("broker daemon reconciliation", () => {
     expect(snapshot.flights["flt-same-arc"]?.error).toContain("without a live broker task");
     expect(typeof snapshot.flights["flt-same-arc"]?.completedAt).toBe("number");
   }, 15_000);
+
+  test("a placeholder closed at boot leaves its finished twin current and the twin's result is delivered", async () => {
+    const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
+    const firstHarness = await broker.startBroker({ controlHome });
+    await broker.seedBasicConversation(firstHarness);
+    firstHarness.child.kill();
+    await firstHarness.child.exited.catch(() => {});
+    broker.harnesses.delete(firstHarness);
+
+    const startedAt = Date.now() - 20_000;
+    const completedAt = startedAt + 5_000;
+    const invocationId = "inv-twin-fabric";
+    const resultReply = createInvocationResultReplyIntent(invocationId, {
+      id: invocationResultMessageId(invocationId),
+      conversationId: "channel.shared",
+      actorId: "fabric",
+      originNodeId: firstHarness.nodeId,
+      class: "agent",
+      body: "twin result",
+      policy: "durable",
+      visibility: "workspace",
+      createdAt: completedAt,
+      metadata: { flightId: "flt-twin" },
+    } as never);
+    const dispatchAck = { endpointId: "endpoint-fabric", nodeId: firstHarness.nodeId, harness: "claude", sessionId: "relay-fabric" };
+    appendFileSync(
+      join(controlHome, "broker-journal.jsonl"),
+      [
+        { kind: "invocation.record", invocation: {
+          id: invocationId, requesterId: "operator", requesterNodeId: firstHarness.nodeId, targetAgentId: "fabric",
+          action: "consult", task: "are you there?", conversationId: "channel.shared", ensureAwake: true, stream: false,
+          createdAt: startedAt,
+        } },
+        // The placeholder: recorded first, never dispatched, still waking.
+        { kind: "flight.record", flight: {
+          id: "flt-placeholder", invocationId, requesterId: "operator", targetAgentId: "fabric", state: "waking",
+          summary: "Fabric waking.", startedAt,
+          metadata: { dispatchOutcome: { status: "not_submitted", checkedAt: startedAt } },
+        } },
+        // The twin did the work; its result reply has not been posted yet.
+        { kind: "flight.record", flight: {
+          id: "flt-twin", invocationId, requesterId: "operator", targetAgentId: "fabric", state: "completed",
+          summary: "Fabric replied.", output: "twin result", startedAt: startedAt + 100, completedAt,
+          metadata: { dispatchAck, resultReply },
+        } },
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+    );
+
+    const secondHarness = await broker.startBroker({ controlHome });
+    const snapshot = await broker.waitFor(async () => broker.getJson<{
+      flights: Record<string, { state: string; metadata?: Record<string, unknown> }>;
+      messages: Record<string, { body: string }>;
+    }>(secondHarness.baseUrl, "/v1/snapshot"), (next) => next.flights["flt-placeholder"]?.state === "completed"
+      && (next.flights["flt-twin"]?.metadata?.resultReply as { status?: string } | undefined)?.status === "delivered",
+    // Boot reconciliation waits for reply recovery; allow for a loaded host.
+    { attempts: 200 });
+
+    expect(snapshot.flights["flt-placeholder"]?.metadata?.supersededByFlightId).toBe("flt-twin");
+    expect(snapshot.messages[invocationResultMessageId(invocationId)]?.body).toBe("twin result");
+    const detail = await broker.getJson<{ flight: { id: string; metadata?: Record<string, unknown> } }>(
+      secondHarness.baseUrl, `/v1/invocations/${invocationId}`);
+    expect(detail.flight.id).toBe("flt-twin");
+    expect(detail.flight.metadata?.dispatchAck).toEqual(dispatchAck);
+  }, 40_000);
+
+  test("an explicit-completion placeholder closes once behind its settled twin", async () => {
+    const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
+    const firstHarness = await broker.startBroker({ controlHome });
+    await broker.seedBasicConversation(firstHarness);
+    firstHarness.child.kill();
+    await firstHarness.child.exited.catch(() => {});
+    broker.harnesses.delete(firstHarness);
+
+    const startedAt = Date.now() - 20_000;
+    const invocationId = "inv-twin-explicit";
+    const completion = { version: 1, revision: 0, obligations: [] };
+    appendFileSync(
+      join(controlHome, "broker-journal.jsonl"),
+      [
+        { kind: "invocation.record", invocation: {
+          id: invocationId, requesterId: "operator", requesterNodeId: firstHarness.nodeId, targetAgentId: "fabric",
+          action: "consult", task: "are you there?", conversationId: "channel.shared", ensureAwake: true, stream: false,
+          createdAt: startedAt, metadata: { completion: { mode: "explicit" } },
+        } },
+        { kind: "flight.record", flight: {
+          id: "flt-explicit-placeholder", invocationId, requesterId: "operator", targetAgentId: "fabric", state: "waking",
+          summary: "Fabric waking.", startedAt,
+          metadata: { completion, dispatchOutcome: { status: "not_submitted", checkedAt: startedAt } },
+        } },
+        { kind: "flight.record", flight: {
+          id: "flt-explicit-twin", invocationId, requesterId: "operator", targetAgentId: "fabric", state: "failed",
+          summary: "Fabric failed.", error: "boom", startedAt: startedAt + 100, completedAt: startedAt + 5_000,
+          metadata: { completion, dispatchAck: { endpointId: "endpoint-fabric", nodeId: firstHarness.nodeId } },
+        } },
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+    );
+
+    const secondHarness = await broker.startBroker({ controlHome });
+    const snapshot = await broker.waitFor(async () => broker.getJson<{
+      flights: Record<string, { state: string; error?: string; metadata?: Record<string, unknown> }>;
+    }>(secondHarness.baseUrl, "/v1/snapshot"), (next) => next.flights["flt-explicit-placeholder"]?.state === "failed",
+      { attempts: 200 });
+
+    expect(snapshot.flights["flt-explicit-placeholder"]).toMatchObject({
+      error: "boom", metadata: { supersededByFlightId: "flt-explicit-twin" },
+    });
+    const detail = await broker.getJson<{ flight: { id: string } }>(secondHarness.baseUrl, `/v1/invocations/${invocationId}`);
+    expect(detail.flight.id).toBe("flt-explicit-twin");
+  }, 40_000);
 });

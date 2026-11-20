@@ -852,6 +852,44 @@ describe("flights superseded by a finished twin", () => {
     expect(harness.snapshot.flights.newer.state).toBe("running");
   });
 
+  test("a twin that started on another host's earlier clock still closes the undispatched placeholder", async () => {
+    const twin = testFlight({ id: "twin", state: "completed", startedAt: 400, completedAt: 9_000, output: "done",
+      metadata: { dispatchAck: { endpointId: "endpoint-remote" } } });
+    const harness = twinHarness([placeholder, twin]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder).toEqual(expect.objectContaining({
+      state: "completed",
+      metadata: expect.objectContaining({ supersededByFlightId: "twin" }),
+    }));
+  });
+
+  test("an earlier-started finished flight never closes a dispatched flight", async () => {
+    const dispatched = testFlight({ id: "dispatched", state: "running", startedAt: 1_000,
+      metadata: { dispatchAck: { endpointId: "endpoint-1" } } });
+    const older = testFlight({ id: "older", state: "failed", startedAt: 400, completedAt: 9_000, error: "late" });
+    const harness = twinHarness([dispatched, older]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    // Stale-endpoint reconciliation may still close it, but never as a copy of the older flight.
+    expect(harness.snapshot.flights.dispatched.metadata?.supersededByFlightId).toBeUndefined();
+  });
+
+  test("reconciliation logs a closed placeholder only when it records one", async () => {
+    const twin = testFlight({ id: "twin", state: "completed", startedAt: 1_100, completedAt: 9_000, output: "done" });
+    // A flight held for a specific final reply refuses the copy, so nothing is written.
+    const held = { ...placeholder, metadata: { ...placeholder.metadata, taskFinalReplyMessageId: "reply-1" } };
+    const harness = twinHarness([held, twin]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder.state).toBe("waking");
+    expect(harness.warnings.filter((line) => line.includes("closed flight placeholder"))).toEqual([]);
+  });
+
   test("a placeholder whose invocation is still running locally stays open", async () => {
     const twin = testFlight({ id: "twin", state: "completed", startedAt: 1_100, completedAt: 9_000, output: "done" });
     const harness = twinHarness([placeholder, twin], { activeInvocationIds: ["invocation-1"] });
