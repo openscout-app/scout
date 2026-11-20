@@ -168,6 +168,7 @@ import {
   shutdownLocalSessionEndpoint,
   shouldDisableGeneratedCodexEndpoint,
   sleepLocalAgentSession,
+  codexEndpointResumeThreadId,
 } from "./local-agents.js";
 import {
   DEFAULT_RELAY_AGENT_SESSION_IDLE_TTL_MS,
@@ -3226,7 +3227,10 @@ const unavailableTargetService = new BrokerUnavailableTargetService({
     if (!projectRoot) return null;
     try { if (!statSync(projectRoot).isDirectory()) return null; } catch { return null; }
     if (!areHarnessBinariesAvailable({ harness: endpoint.harness, transport: endpoint.transport })) return null;
-    return { projectRoot, harness: endpoint.harness };
+    const resumesSessionId = endpoint.transport === "codex_app_server"
+      ? codexEndpointResumeThreadId(endpoint)
+      : undefined;
+    return { projectRoot, harness: endpoint.harness, ...(resumesSessionId ? { resumesSessionId } : {}) };
   },
   isEndpointAlive: (endpoint) => localEndpointCanReceive(endpoint, isLocalAgentEndpointAlive),
   supportsQueue: (endpoint) => endpoint.nodeId === nodeId && localEndpointSupportsQueue(
