@@ -169,16 +169,35 @@ export async function startRexAgent<T>(
   }
 }
 
-async function rexScreenTail(args: string[]): Promise<string> {
-  const frame = JSON.parse(await rex(["block", "call", ...args, "format", '{"format":"text","trim":true,"max_bytes":65536}']));
+async function rexScreenTail(args: string[], format: "text" | "html" = "text"): Promise<string> {
+  const frame = JSON.parse(await rex(["block", "call", ...args, "format", JSON.stringify({ format, trim: true, max_bytes: 65536 })]));
   if (!frame.id) return frame.content;
   if (!Number.isSafeInteger(frame.total) || frame.total < 1) throw new Error("Rex could not provide the current terminal screen.");
   // format returns the beginning of a large scrollback. Read the recent tail
   // of that same snapshot, with enough room for JSON escaping of its bytes.
-  const range = { id: frame.id, offset: Math.max(0, frame.total - 8192), max_bytes: 65536 };
+  const range = { id: frame.id, offset: Math.max(0, frame.total - (format === "html" ? 32768 : 8192)), max_bytes: 65536 };
   const tail = JSON.parse(await rex(["block", "call", ...args, "blob_read", JSON.stringify(range)]));
   if (!tail.eof || typeof tail.data !== "string") throw new Error("Rex returned an incomplete terminal screen.");
   return tail.data;
+}
+
+const COMPOSER_PROMPT = /^\s*[❯›](?:\s|$)/u;
+const FAINT_RUN = /<div style="[^"]*\bopacity:\s*0?\.\d+[^"]*">[^<]*<\/div>/g;
+
+function htmlText(html: string): string {
+  return html.replace(/<[^>]*>/g, "")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&quot;/g, "\"").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+/**
+ * True when the last prompt line of an HTML screen read holds no typed text.
+ * Claude and Codex draw their placeholder faint (opacity below 1), so a faint
+ * run after the prompt glyph is not input. A picker row or unsent text is.
+ */
+export function rexComposerIsEmpty(html: string): boolean {
+  const composer = html.split("\n").filter(line => COMPOSER_PROMPT.test(htmlText(line))).at(-1);
+  return composer !== undefined && htmlText(composer.replace(FAINT_RUN, "")).replace(COMPOSER_PROMPT, "").trim() === "";
 }
 
 export async function sendRexPrompt(surface: RexSurface, pid: number, harness: string, text: string): Promise<void> {
@@ -203,8 +222,12 @@ export async function sendRexPrompt(surface: RexSurface, pid: number, harness: s
   if (!modes.modes?.some((m: { name: string; set: boolean }) => m.name === "bracketed_paste" && m.set === true)) {
     throw new Error("Rex harness is not ready for pasted input. Check its terminal.");
   }
-  // A live TUI can be displaying a trust, update or session picker. Confirm
-  // that a fresh marker actually landed in the chat composer before Enter.
+  // Paste nothing unless the screen shows an empty chat composer. A trust,
+  // update or session picker, or text the operator has not sent, refuses here.
+  if (!rexComposerIsEmpty(await rexScreenTail(args, "html"))) {
+    throw new Error(`Rex block ${surface.blockId} has no empty, ready ${harness} composer. Inspect its window before retrying.`);
+  }
+  // Confirm that a fresh marker actually landed in the composer before Enter.
   const marker = `[Scout ${randomUUID().slice(0, 8)}]`;
   const paste = (value: string) => rex(["send", ...args], "\x1b[200~" + value + "\x1b[201~");
   await paste(marker + " ");
@@ -219,7 +242,19 @@ export async function sendRexPrompt(surface: RexSurface, pid: number, harness: s
       break;
     }
   }
-  if (!inComposer) throw new Error(`Rex block ${surface.blockId} has no empty, ready ${harness} composer. Inspect its window before retrying.`);
+  if (!inComposer) {
+    // The composer was empty before the paste, so erasing the marker's own
+    // characters restores it. A later ask then finds an empty composer again.
+    let erased = false;
+    try {
+      await requireForeground();
+      await rex(["send-key", ...args, ...Array.from({ length: marker.length + 1 }, () => "backspace")]);
+      erased = true;
+    } catch { /* reported below */ }
+    throw new Error(`Rex block ${surface.blockId} did not show the Scout marker in its ${harness} composer`
+      + (erased ? "; the marker was erased." : "; the marker could not be erased.")
+      + " Inspect its window before retrying.");
+  }
   await requireForeground();
   await paste(text);
   await new Promise(resolve => setTimeout(resolve, 150));

@@ -262,6 +262,21 @@ export async function isAttachedLiveTerminalEndpointAlive(endpoint: AgentEndpoin
   return Boolean(pane && pane.tty === endpoint.metadata?.liveTty);
 }
 
+/**
+ * Liveness check for the wait after an ask was delivered. A dead harness pid
+ * ends the wait. A failed surface read (a Rex CLI timeout or a busy server) is
+ * not evidence that the harness exited: report it as unknown (null) and keep
+ * waiting, as the endpoint sync service does.
+ */
+export async function attachedLiveTerminalExitedError(endpoint: AgentEndpoint, goneError: string): Promise<string | null> {
+  try {
+    return await isAttachedLiveTerminalEndpointAlive(endpoint) ? null : goneError;
+  } catch {
+    const pid = livePid(endpoint);
+    return pid && processAlive(pid) ? null : goneError;
+  }
+}
+
 export type LiveHarnessProcess = {
   pid: number;
   harness: LiveTerminalHarness;

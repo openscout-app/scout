@@ -174,6 +174,7 @@ import {
   describeAttachedLiveTerminal,
   isAttachedLiveTerminalEndpoint,
   isAttachedLiveTerminalEndpointAlive,
+  attachedLiveTerminalExitedError,
   isAttachedLiveTerminalEndpointAliveSnapshot,
   sendGhosttyPrompt,
 } from "./live-terminal-session.js";
@@ -7006,7 +7007,7 @@ async function invokeAttachedLiveTerminalEndpoint(
     flightId,
     askedAt,
     timeoutSeconds: invocation.timeoutMs ? Math.max(30, Math.floor(invocation.timeoutMs / 1000)) : 300,
-    exitedError: async () => await isAttachedLiveTerminalEndpointAlive(endpoint) ? null : goneError,
+    exitedError: () => attachedLiveTerminalExitedError(endpoint, goneError),
     blockedError: harness === "claude" && endpoint.transport === "tmux"
       ? async () => claudeLoginBlockedError(await captureTmuxPaneTail(endpoint.pane!, 40).catch(() => ""))
       : undefined,

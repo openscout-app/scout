@@ -2,6 +2,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentEndpoint } from "@openscout/protocol";
+import { attachedLiveTerminalExitedError } from "./live-terminal-session.js";
 import { isRexSurface, readRexStatus, sendRexPrompt, startRexAgent, type RexSurface } from "./rex-terminal.js";
 
 const uuid = "61d4a135-ee83-46b0-b598-9ec8ee75c913";
@@ -18,12 +20,16 @@ const dir = path.dirname(process.argv[1]);
 const args = process.argv.slice(2);
 const target = JSON.parse(fs.readFileSync(path.join(dir, "surface")));
 const mode = fs.readFileSync(path.join(dir, "mode"), "utf8");
+const composerFile = path.join(dir, "composer");
+const composer = () => fs.existsSync(composerFile) ? fs.readFileSync(composerFile, "utf8") : (mode === "unsent" ? "draft" : "");
 fs.appendFileSync(path.join(dir, "calls"), JSON.stringify(args) + "\\n");
 const reply = value => console.log(JSON.stringify(value));
 if (args.includes("new")) {
   reply({ window_id: target.windowId, block_ids: [target.blockId] });
 } else if (args.includes("process")) {
-  reply({ foreground: { pid: 12345, name: "version", invoked_path: "/bin/claude" }, last_exit: null });
+  if (mode === "timeout") { process.stderr.write("rex: request timed out\\n"); process.exit(1); }
+  reply({ foreground: { pid: 12345, name: "version", invoked_path: "/bin/claude" },
+    last_exit: mode === "exited" ? { exit_code: 0 } : null });
 } else if (args.includes("program_status")) {
   reply({ records: [{ state: "blocked", kind: "permission", progress: 42, ...(mode === "blocked" ? { owner: { pid: 12345 } } : {}) }] });
 } else if (args.includes("modes")) {
@@ -31,11 +37,18 @@ if (args.includes("new")) {
 } else if (args.includes("send")) {
   const pasted = fs.readFileSync(0, "utf8");
   fs.appendFileSync(path.join(dir, "input"), JSON.stringify(pasted) + "\\n");
-  const marker = pasted.match(/\\[Scout [0-9a-f]+\\]/);
-  if (marker) fs.writeFileSync(path.join(dir, "marker"), marker[0]);
+  fs.writeFileSync(composerFile, composer() + pasted.replace(/\\x1b\\[20[01]~/g, ""));
+} else if (args.includes("send-key")) {
+  const erase = args.filter(key => key === "backspace").length;
+  if (erase) fs.writeFileSync(composerFile, composer().slice(0, Math.max(0, composer().length - erase)));
 } else if (args.includes("format")) {
-  reply({ content: mode === "picker" ? "› 1. Trust folder" : "❯ " + fs.readFileSync(path.join(dir, "marker"), "utf8") });
-} else if (!args.includes("send-key") && !args.includes("close")) {
+  const html = JSON.parse(args.at(-1)).format === "html";
+  const typed = composer().trimEnd();
+  if (mode === "picker") reply({ content: html ? '<div style="font-weight: bold;">&#8250; 1. Trust folder</div>' : "› 1. Trust folder" });
+  else if (html) reply({ content: typed ? "&#10095;&#160;" + typed
+    : '&#10095;&#160;<div style="display: inline;opacity: 0.5;">Try &quot;edit&quot;</div>' });
+  else reply({ content: "❯ " + (mode === "slow" ? "" : typed) });
+} else if (!args.includes("close")) {
   throw Error("unexpected rex command");
 }
 `;
@@ -104,5 +117,35 @@ test("never submits to a replaced process or a startup picker", async () => {
   await writeFile(join(dir, "mode"), "picker");
   await expect(sendRexPrompt(surface, 12345, "claude", "task")).rejects.toThrow("composer");
   expect((await calls()).some(argv => argv.includes("send-key"))).toBe(false);
-  expect(await readFile(join(dir, "input"), "utf8")).not.toContain("task");
+  expect((await calls()).some(argv => argv.includes("send"))).toBe(false);
+});
+
+test("never pastes beside unsent composer text", async () => {
+  await writeFile(join(dir, "mode"), "unsent");
+  await expect(sendRexPrompt(surface, 12345, "claude", "task")).rejects.toThrow("no empty, ready claude composer");
+  expect((await calls()).some(argv => argv.includes("send") || argv.includes("send-key"))).toBe(false);
+});
+
+test("erases an unconfirmed marker so the next ask finds an empty composer", async () => {
+  await writeFile(join(dir, "mode"), "slow");
+  await expect(sendRexPrompt(surface, 12345, "claude", "task")).rejects.toThrow("the marker was erased");
+  expect(await readFile(join(dir, "composer"), "utf8")).toBe("");
+  expect((await calls()).some(argv => argv.includes("Enter"))).toBe(false);
+  await writeFile(join(dir, "mode"), "composer");
+  await sendRexPrompt(surface, 12345, "claude", "task");
+  expect((await readFile(join(dir, "composer"), "utf8")).match(/\[Scout [0-9a-f]+\]/g)).toHaveLength(1);
+});
+
+test("keeps waiting for a delivered ask when a Rex read fails, and ends it when the harness exits", async () => {
+  const endpoint = {
+    transport: "rex", harness: "claude",
+    metadata: { attachedLive: true, livePid: process.pid, terminalSurface: surface },
+  } as unknown as AgentEndpoint;
+  await writeFile(join(dir, "mode"), "timeout");
+  expect(await attachedLiveTerminalExitedError(endpoint, "gone")).toBeNull();
+  await writeFile(join(dir, "mode"), "exited");
+  expect(await attachedLiveTerminalExitedError(endpoint, "gone")).toBe("gone");
+  await writeFile(join(dir, "mode"), "timeout");
+  const dead = { ...endpoint, metadata: { ...endpoint.metadata, livePid: 2 ** 22 + 7 } } as AgentEndpoint;
+  expect(await attachedLiveTerminalExitedError(dead, "gone")).toBe("gone");
 });
