@@ -50,4 +50,8 @@ export const POST_LIMITS = {
   linkTitleCharacters: 200,
   records: 5000,
   listLimit: 500,
+  listDefault: 200,
+  /** One agent may post the same message this many times within `repeatWindowMs`; the next copy is refused. */
+  repeatMax: 3,
+  repeatWindowMs: 60 * 60 * 1000,
 } as const;

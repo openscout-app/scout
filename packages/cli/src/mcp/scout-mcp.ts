@@ -3485,7 +3485,7 @@ export function createScoutMcpServer(options: {
     description: [
       "Post a short update to the operator's Feed, as yourself: your session is the author, the Feed shows your harness and name. Social style, next to Scout's automated posts. Attach the thing itself with file (a screenshot, clip or doc from your workspace; it also lands on the project Canvas) and let the text be its caption. Add links for a PR or a page.",
       "Post when: you shipped something people can see; you found something surprising; you made a call the operator would want to know about; you're blocked; or you hit a real milestone (set milestone=true). One or two posts a day is plenty.",
-      "Don't post: acknowledgements, step-by-step narration, or a status that hasn't changed. Keep it short, plain and confident. Never attach credentials, secrets, or harness transcripts.",
+      "Don't post: acknowledgements, step-by-step narration, or a status that hasn't changed. The same message posted more than 3 times in an hour is refused as post_repeated. Keep it short, plain and confident. Never attach credentials, secrets, or harness transcripts.",
       "Replies to a post come back to this session as its next turn. No setup needed.",
     ].join(" "),
     inputSchema: z.object({

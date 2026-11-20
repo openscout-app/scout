@@ -1,3 +1,5 @@
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { POST_LIMITS, type AgentEndpoint, type ScoutPost } from "@openscout/protocol";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
@@ -5,7 +7,7 @@ import type { RuntimeHttpRequestLike, RuntimeHttpResponseLike } from "./portable
 import { json, readRequestBody } from "./broker-http-helpers.js";
 import { endpointStronglyMatchesSession } from "./broker-endpoint-selection.js";
 import { BrokerShowStore, ShowError } from "./broker-show-store.js";
-import { BrokerPostStore, PostError, postFromShow } from "./broker-post-store.js";
+import { BrokerPostStore, PostError, postFromShow, preparePost } from "./broker-post-store.js";
 
 export const callerSchema = z.object({
   actorId: z.string().min(1).max(256),
@@ -92,24 +94,33 @@ export async function handlePostRoute(request: RuntimeHttpRequestLike, response:
     if (create) {
       const parsed = inputSchema.safeParse(await readRequestBody(request, { maxBytes: 32_768, requireJsonContentType: true }));
       if (!parsed.success) throw new PostError("invalid_post_request");
-      const { caller, file, ...input } = parsed.data;
+      const { caller, file, milestone } = parsed.data;
       const session = resolveCallerSession(deps.snapshot(), caller, "post");
-      if (file && !deps.shows) throw new PostError("post_files_unavailable", 503);
-      const show = file ? await deps.shows!.show({ path: file, caption: input.text, currentDirectory: caller.currentDirectory, agentId: caller.actorId, sessionId: session.sessionId, harness: session.harness }) : undefined;
+      // Refuse a bad post before its file becomes a show.
+      const { text, links } = preparePost(parsed.data);
+      const shows = deps.shows;
+      if (file && !shows) throw new PostError("post_files_unavailable", 503);
+      const attachment = file && shows ? {
+        // The show store resolves the path the same way and refuses what it cannot read.
+        key: await realpath(resolve(caller.currentDirectory, file)).catch(() => resolve(caller.currentDirectory, file)),
+        keyOf: (showId: string) => shows.get(showId).then(show => show.sourcePath, () => undefined),
+        attach: () => shows.show({ path: file, caption: text, currentDirectory: caller.currentDirectory, agentId: caller.actorId, sessionId: session.sessionId, harness: session.harness }),
+      } : undefined;
       const name = deps.authorName?.({ agentId: caller.actorId, harness: session.harness, sessionId: session.sessionId, endpoint: session.endpoint });
-      const post = await store.post({ ...input, currentDirectory: caller.currentDirectory, show, author: { agentId: caller.actorId, sessionId: session.sessionId, harness: session.harness, name } });
+      const post = await store.post({ text, links, milestone, currentDirectory: caller.currentDirectory, file: attachment, author: { agentId: caller.actorId, sessionId: session.sessionId, harness: session.harness, name } });
       json(response, 201, { post });
     } else {
       const since = Number(url.searchParams.get("since") ?? 0);
       if (!Number.isSafeInteger(since) || since < 0) throw new PostError("invalid_post_since");
-      const limit = Number(url.searchParams.get("limit") ?? 200);
+      const limit = Number(url.searchParams.get("limit") ?? POST_LIMITS.listDefault);
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > POST_LIMITS.listLimit) throw new PostError("invalid_post_limit");
       json(response, 200, { posts: await listPosts(deps, since, limit) });
     }
   } catch (error) {
     if (error instanceof CallerMismatchError) { json(response, 409, { error: error.message, detail: error.detail }); return true; }
     const known = error instanceof PostError || error instanceof ShowError;
-    json(response, known ? (error as PostError).status : 400, { error: known ? (error as Error).message : "post_failed" });
+    const detail = error instanceof PostError ? error.detail : undefined;
+    json(response, known ? (error as PostError).status : 400, { error: known ? (error as Error).message : "post_failed", ...(detail ? { detail } : {}) });
   }
   return true;
 }

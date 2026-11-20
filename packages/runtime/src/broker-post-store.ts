@@ -5,7 +5,7 @@ import { POST_LIMITS, type ScoutPost, type ScoutPostAuthor, type ScoutPostLink, 
 import { resolveShowWorkspace, ShowError } from "./broker-show-store.js";
 
 export class PostError extends Error {
-  constructor(message: string, readonly status = 400) { super(message); }
+  constructor(message: string, readonly status = 400, readonly detail?: string) { super(message); }
 }
 
 export type PostInput = {
@@ -14,9 +14,30 @@ export type PostInput = {
   milestone?: boolean;
   currentDirectory: string;
   author: Omit<ScoutPostAuthor, "nodeId">;
-  /** The show this post carries, already committed by the show store. */
-  show?: ScoutShow;
+  /**
+   * The file this post carries. `key` names the file for the repeat rule and
+   * `keyOf` names the file an earlier post's show holds. `attach` stores it as
+   * a show, and runs only once the post is accepted, so a refused post leaves
+   * no show behind.
+   */
+  file?: { key: string; keyOf: (showId: string) => Promise<string | undefined>; attach: () => Promise<ScoutShow> };
 };
+
+export type PostLimits = { records: number; repeatMax?: number; repeatWindowMs?: number };
+
+/** Trimmed text and checked links; throws the same refusal the store would. */
+export function preparePost(input: { text: string; links?: ScoutPostLink[] }): { text: string; links?: ScoutPostLink[] } {
+  const text = input.text.trim();
+  if (!text) throw new PostError("post_text_required");
+  if (text.length > POST_LIMITS.textCharacters) throw new PostError("post_text_too_long");
+  const links = cleanLinks(input.links);
+  return { text, ...(links ? { links } : {}) };
+}
+
+/** Same message: same text up to case and whitespace, same links in any order. */
+function messageKey(text: string, links: ScoutPostLink[] | undefined): string {
+  return JSON.stringify([text.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim(), (links ?? []).map(link => link.url).sort()]);
+}
 
 function cleanLinks(links: ScoutPostLink[] | undefined): ScoutPostLink[] | undefined {
   if (!links?.length) return undefined;
@@ -55,7 +76,7 @@ export class BrokerPostStore {
   /** An interrupted append left a line with no newline; the next append starts a fresh line. */
   private torn = false;
   private listeners = new Set<(post: ScoutPost) => void>();
-  constructor(readonly directory: string, readonly nodeId: string, readonly limits: { records: number } = POST_LIMITS) {}
+  constructor(readonly directory: string, readonly nodeId: string, readonly limits: PostLimits = POST_LIMITS) {}
 
   private get file(): string { return join(this.directory, "posts.jsonl"); }
 
@@ -88,11 +109,10 @@ export class BrokerPostStore {
   }
 
   private async commit(input: PostInput): Promise<ScoutPost> {
-    const text = input.text.trim();
-    if (!text) throw new PostError("post_text_required");
-    if (text.length > POST_LIMITS.textCharacters) throw new PostError("post_text_too_long");
-    const links = cleanLinks(input.links);
+    const { text, links } = preparePost(input);
     const posts = await this.load();
+    await this.refuseRepeat(posts, input, text, links);
+    const show = input.file ? await input.file.attach() : undefined;
     let workspace: Awaited<ReturnType<typeof resolveShowWorkspace>> | undefined;
     try { workspace = await resolveShowWorkspace(input.currentDirectory); }
     catch (error) { if (!(error instanceof ShowError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -101,7 +121,7 @@ export class BrokerPostStore {
     const post: ScoutPost = {
       id: randomUUID(), source: "post", author,
       ...(workspace ? { projectRoot: workspace.projectRoot, project: basename(workspace.projectRoot), worktree: workspace.worktree, ...(workspace.branch ? { branch: workspace.branch } : {}) } : {}),
-      text, ...(links ? { links } : {}), ...(input.show ? { file: postFileFromShow(input.show) } : {}),
+      text, ...(links ? { links } : {}), ...(show ? { file: postFileFromShow(show) } : {}),
       ...(input.milestone ? { milestone: true } : {}),
       createdAt: Math.max(Date.now(), (posts.at(-1)?.createdAt ?? 0) + 1),
     };
@@ -121,5 +141,29 @@ export class BrokerPostStore {
     }
     for (const listener of this.listeners) { try { listener(post); } catch {} }
     return post;
+  }
+
+  /**
+   * Spam guard, not a quota: refuse a message the same agent already posted
+   * `repeatMax` times within `repeatWindowMs`. Distinct posts and milestones
+   * follow the same rule, so distinct posts are never capped.
+   */
+  private async refuseRepeat(posts: ScoutPost[], input: PostInput, text: string, links: ScoutPostLink[] | undefined): Promise<void> {
+    const max = this.limits.repeatMax ?? POST_LIMITS.repeatMax;
+    const windowMs = this.limits.repeatWindowMs ?? POST_LIMITS.repeatWindowMs;
+    const key = messageKey(text, links);
+    const after = Date.now() - windowMs;
+    let repeats = 0;
+    for (let i = posts.length - 1; i >= 0 && posts[i]!.createdAt > after; i--) {
+      const earlier = posts[i]!;
+      if (earlier.author.agentId !== input.author.agentId || messageKey(earlier.text, earlier.links) !== key) continue;
+      if (Boolean(earlier.file) !== Boolean(input.file)) continue;
+      if (earlier.file && input.file && await input.file.keyOf(earlier.file.showId) !== input.file.key) continue;
+      repeats += 1;
+    }
+    if (repeats >= max) {
+      const minutes = Math.round(windowMs / 60_000);
+      throw new PostError("post_repeated", 429, `${input.author.agentId} already posted this message ${repeats} times in the last ${minutes} minutes; post something new instead of repeating it`);
+    }
   }
 }

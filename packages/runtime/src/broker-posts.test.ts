@@ -115,3 +115,68 @@ test("keeps the newest records past the cap and recovers from a torn line", asyn
   await restarted.post({ text: "four", currentDirectory: workspace, author });
   expect((await new BrokerPostStore(join(dir, "posts"), "node-test").list()).map(p => p.text)).toEqual(["two", "three", "four"]);
 });
+
+test("a refused post that carries a file stores no show", async () => {
+  const { workspace, deps } = await fixture();
+  await writeFile(join(workspace, "shot.png"), "png");
+  const caller = { actorId: "agent-a", currentDirectory: workspace };
+  const badLink = await http(deps, "/v1/posts", { method: "POST", body: { text: "The header", file: "shot.png", links: [{ url: "ftp://example.test/file" }], caller } });
+  expect(badLink).toMatchObject({ status: 400, body: { error: "post_link_must_be_http" } });
+  const blank = await http(deps, "/v1/posts", { method: "POST", body: { text: " \n\t ", file: "shot.png", caller } });
+  expect(blank).toMatchObject({ status: 400, body: { error: "post_text_required" } });
+  expect(await deps.shows!.listAll()).toEqual([]);
+  expect((await http(deps, "/v1/posts")).body.posts).toEqual([]);
+  // The corrected retry stores exactly one show, carried by its post.
+  expect((await http(deps, "/v1/posts", { method: "POST", body: { text: "The header", file: "shot.png", caller } })).status).toBe(201);
+  expect(await deps.shows!.listAll()).toHaveLength(1);
+  expect((await http(deps, "/v1/posts")).body.posts.map((p: { source: string }) => p.source)).toEqual(["post"]);
+});
+
+test("refuses the same message repeated past the limit and says why", async () => {
+  const { workspace, deps } = await fixture();
+  const caller = { actorId: "agent-a", currentDirectory: workspace };
+  const send = (body: Record<string, unknown>, who = caller) => http(deps, "/v1/posts", { method: "POST", body: { ...body, caller: who } });
+  for (const text of ["Build is green", "  build IS   green ", "Build is green"]) expect((await send({ text })).status).toBe(201);
+  const repeated = await send({ text: "Build is green" });
+  expect(repeated.status).toBe(429);
+  expect(repeated.body.error).toBe("post_repeated");
+  expect(repeated.body.detail).toContain("already posted this message 3 times in the last 60 minutes");
+  // A milestone flag does not launder a repeat.
+  expect((await send({ text: "Build is green", milestone: true })).body.error).toBe("post_repeated");
+  // A different link, another agent, or new text is a different message.
+  expect((await send({ text: "Build is green", links: [{ url: "https://example.test/run/2" }] })).status).toBe(201);
+  expect((await send({ text: "Build is green" }, { actorId: "agent-b", currentDirectory: workspace })).status).toBe(201);
+  expect((await send({ text: "Build is red" })).status).toBe(201);
+  expect(await deps.store!.list()).toHaveLength(6);
+});
+
+test("the same text with the same file repeats; with another file it does not", async () => {
+  const { workspace, deps } = await fixture();
+  await writeFile(join(workspace, "a.png"), "a");
+  await writeFile(join(workspace, "b.png"), "b");
+  const caller = { actorId: "agent-a", currentDirectory: workspace };
+  const send = (file?: string) => http(deps, "/v1/posts", { method: "POST", body: { text: "New screenshot", ...(file ? { file } : {}), caller } });
+  for (let i = 0; i < 3; i++) expect((await send("a.png")).status).toBe(201);
+  expect((await send("a.png")).body.error).toBe("post_repeated");
+  expect((await send("b.png")).status).toBe(201);
+  expect((await send()).status).toBe(201);
+  // The refused copy left no show behind.
+  expect(await deps.shows!.listAll()).toHaveLength(4);
+});
+
+test("distinct posts are never capped, milestones included", async () => {
+  const { workspace, store } = await fixture({}, 1000);
+  const author = { agentId: "agent-a" };
+  for (let i = 0; i < 20; i++) await store.post({ text: `Step ${i} shipped`, milestone: i % 2 === 0, currentDirectory: workspace, author });
+  expect(await store.list()).toHaveLength(20);
+}, 30_000);
+
+test("a repeat outside the window goes through", async () => {
+  const { dir, workspace } = await fixture();
+  const store = new BrokerPostStore(join(dir, "short"), "node-test", { records: 100, repeatMax: 1, repeatWindowMs: 50 });
+  const author = { agentId: "agent-a" };
+  await store.post({ text: "Same", currentDirectory: workspace, author });
+  await expect(store.post({ text: "Same", currentDirectory: workspace, author })).rejects.toThrow("post_repeated");
+  await new Promise(resolve => setTimeout(resolve, 80));
+  expect((await store.post({ text: "Same", currentDirectory: workspace, author })).text).toBe("Same");
+});
