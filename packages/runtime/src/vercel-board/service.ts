@@ -1015,7 +1015,7 @@ function readThrough(config: VercelBoardConnectionConfig, message: VercelBoardWi
     connectionId: config.id, id: message.id, channel: message.channel, re: message.re, replyTo: message.replyTo ?? null, version: message.version,
     text: message.deleted ? "" : message.text, labels: message.deleted ? {} : message.labels, by: message.by ?? null,
     origin: vercelBoardOriginOf(message, config), noSync: message.noSync === true, deleted: message.deleted,
-    ...(task ? { task: { state: task.state, owner: task.owner, for: task.for, epoch: task.epoch, claim: task.claim, result: task.result, reason: task.reason } } : {}),
+    ...(task ? { task: { state: task.state, owner: task.owner, needs: task.needs, for: task.for, epoch: task.epoch, claim: task.claim, result: task.result, reason: task.reason } } : {}),
     createdAt: message.createdAt ? Date.parse(message.createdAt) : null, editedAt: message.editedAt ? Date.parse(message.editedAt) : null, trust: "board_source",
   };
 }

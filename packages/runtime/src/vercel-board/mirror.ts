@@ -237,7 +237,7 @@ function mirrored(row: MessageSql): VercelBoardMirroredMessage {
     connectionId: row.connection_id, id: row.message_id, channel: row.channel, re: row.root_id, replyTo: row.reply_to, version: row.version,
     text: row.text, labels: JSON.parse(row.labels_json), by: row.author_actor && row.author_principal ? { actor: row.author_actor, principal: row.author_principal, profile: row.author_profile } : null,
     origin: row.origin, noSync: row.no_sync === 1, deleted: row.deleted === 1,
-    ...(row.task_state && task ? { task: { state: row.task_state as VercelBoardTaskState, owner: task.owner, for: task.for ?? null, epoch: task.epoch ?? 0, claim: task.claim ?? null, result: task.result ?? null, reason: task.reason ?? null } } : {}),
+    ...(row.task_state && task ? { task: { state: row.task_state as VercelBoardTaskState, owner: task.owner, needs: task.needs ?? [], for: task.for ?? null, epoch: task.epoch ?? 0, claim: task.claim ?? null, result: task.result ?? null, reason: task.reason ?? null } } : {}),
     createdAt: row.created_at, editedAt: row.edited_at, trust: "board_source",
   };
 }

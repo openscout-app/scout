@@ -668,6 +668,7 @@ test("the planning tool writes Board tasks only, labeled with the planning task;
   expect(h.workItems()).toEqual([]);
   const view = await h.service.messages({ connectionId: "c1", channel: "work" });
   expect(view.messages.filter(message => message.task).map(message => [message.text, message.origin])).toEqual([["Design", "scout"], ["Build", "scout"]]);
+  expect(view.messages.find(message => message.text === "Build")?.task?.needs).toEqual([plan.tasks[0]!.taskId]);
   expect(h.live.map(event => event.payload.handoff.kind)).toEqual(["planned", "planned"]);
   await expect(h.service.plan({ connectionId: "c1", channel: "elsewhere", planningTaskId: "p", requestId: "r", actorId: "operator", tasks: [{ text: "x" }] }))
     .rejects.toBeInstanceOf(VercelBoardServiceError);
@@ -678,7 +679,8 @@ test("a mirrored channel's view is one query on the copy; an unmirrored one is o
   const response = await h.connect({ channels: ["work", "notes"], mirror: ["work"] });
   expect(response.connection.mirror).toEqual(["work"]);
   h.board.createTask({ channel: "work", text: "w" });
-  h.board.createTask({ channel: "notes", text: "n" });
+  const noteDependency = h.board.createTask({ channel: "notes", text: "n dependency" });
+  h.board.createTask({ channel: "notes", text: "n", needs: [noteDependency] });
   await h.service.pump("c1");
   const reads = () => h.board.requests.filter(request => request.method === "GET" && request.path === "/messages").length;
   const before = reads();
@@ -688,7 +690,8 @@ test("a mirrored channel's view is one query on the copy; an unmirrored one is o
   expect(reads()).toBe(before);
   const notes = await h.service.messages({ connectionId: "c1", channel: "notes" });
   expect(notes).toMatchObject({ state: "not_mirrored" });
-  expect(notes.messages.map(message => [message.text, message.trust])).toEqual([["n", "board_source"]]);
+  expect(notes.messages.map(message => [message.text, message.trust])).toEqual([["n dependency", "board_source"], ["n", "board_source"]]);
+  expect(notes.messages[1]?.task?.needs).toEqual([noteDependency]);
   expect(reads()).toBe(before + 1);
   const [status] = await h.service.status("c1");
   expect(status!.mirror.map(entry => [entry.channel, entry.state])).toEqual([["work", "mirrored"], ["notes", "not_mirrored"]]);
