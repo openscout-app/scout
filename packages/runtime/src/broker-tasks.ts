@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, SCOUT_TASKS_CAPABILITY, validateTaskReply,
   type AgentHarness, type FlightRecord, type InvocationRequest, type MessageRecord, type ScoutDeliverRequest,
-  type ScoutDeliverResponse, type ScoutTaskReply, parseReplyWaitingOn } from "@openscout/protocol";
+  type ScoutDeliverResponse, type ScoutTaskReply, parseReplyWaitingOn, flightWaitingOn } from "@openscout/protocol";
 import { ProvenRequestFailure } from "./broker-request-receipts.js";
 import { readMessageRecord } from "./broker-message-records.js";
 import { endpointStronglyMatchesSession } from "./broker-endpoint-selection.js";
@@ -21,6 +21,11 @@ export function followupAudience(invocation: InvocationRequest, flight: FlightRe
   if (invocation.metadata?.humanOwned === true) return { notify: [invocation.targetAgentId], reason: "thread_reply" };
   if (flight.state === "queued" || flight.state === "waking") return { delivery: "none" };
   if (taskTerminal(flight) || flight.metadata?.taskFinalReplyMessageId) throw finishedTaskError(invocation.id);
+  // A worker that blocked with `reply --waiting-on question|review` ended its turn to wait for
+  // this answer, so the answer starts the next turn instead of joining a live one. A permission
+  // wait is answered through its permission request.
+  const waiting = flight.state === "waiting" ? flightWaitingOn(flight) : undefined;
+  if (waiting && waiting.kind !== "permission") return { notify: [invocation.targetAgentId], reason: "thread_reply" };
   const session = flightSessionTrace(flight).at(-1);
   const sessionId = session?.sessionId ?? invocation.execution?.targetSessionId;
   const harness = session?.harness ?? invocation.execution?.harness;

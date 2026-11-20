@@ -232,6 +232,20 @@
       "when": 1794892744353,
       "tag": "0033_session_names",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1795060296080,
+      "tag": "0034_vercel_board_custodian_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1795136746437,
+      "tag": "0035_vercel_board_roles",
+      "breakpoints": true
     }
   ]
 }

@@ -26,6 +26,7 @@ import {
 import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
 import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
+import { VercelBoardServiceError } from "./vercel-board/service.js";
 import { createRuntimeRegistrySnapshot, queryRuntimeNotificationRouting } from "./registry.js";
 import {
   TrustEndpointRateLimiter,
@@ -615,6 +616,29 @@ describe("createBrokerHttpRouter", () => {
     expect((one.body as any).processes.map((p: any) => [p.pid, p.parentChain.length])).toEqual([[22, 2]]);
     expect((one.body as any).transcripts.map((t: any) => t.sessionId)).toEqual(["b"]);
     expect((one.body as any).totals.total).toBe(2);
+  });
+
+  test("board routes: status, error codes with the fix, local-only mutation, unavailable without the adapter", async () => {
+    const calls: string[] = [];
+    const vercelBoardService = {
+      status: async (id?: string) => { calls.push(`status:${id ?? "*"}`); return [{ id: "c1", state: "following" }]; },
+      connect: async () => { throw new VercelBoardServiceError(401, "auth_refused", "Board refused the credential.", "Store a new token and run scout board connect again."); },
+      claim: async (input: { taskId: string }) => { calls.push(`claim:${input.taskId}`); return { taskId: input.taskId }; },
+      plan: async () => { throw new Error("unexpected"); },
+    };
+    const harness = createHarness({ vercelBoardService: vercelBoardService as never });
+    expect((await requestRouter(harness, "GET", "/v1/integrations/vercel-board/status?connection=c1")).body).toEqual({ connections: [{ id: "c1", state: "following" }] });
+    const refused = await requestRouter(harness, "POST", "/v1/integrations/vercel-board/connect", { body: { url: "http://127.0.0.1:1" } });
+    expect(refused.response.status).toBe(401);
+    expect(refused.body).toEqual({ error: "auth_refused", message: "Board refused the credential.", fix: "Store a new token and run scout board connect again." });
+    expect((await requestRouter(harness, "POST", "/v1/integrations/vercel-board/claim", { body: { taskId: "7" } })).body).toEqual({ taskId: "7" });
+    const remote = await requestRouter(harness, "POST", "/v1/integrations/vercel-board/claim", {
+      body: { taskId: "8" }, transportContext: { transport: "remote", remoteAddress: "192.168.1.50" } as never,
+    });
+    expect(remote.response.status).toBe(403);
+    expect((await requestRouter(harness, "POST", "/v1/integrations/vercel-board/nope", { body: {} })).response.status).toBe(404);
+    expect(calls).toEqual(["status:c1", "claim:7"]);
+    expect((await requestRouter(createHarness(), "GET", "/v1/integrations/vercel-board/status")).response.status).toBe(503);
   });
 
   test("session names: set over HTTP, applied to tail discovery and observed sessions, machine-local", async () => {
