@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { hasExplicitCompletion, failedRunCause, failedRunRetryable, FAILED_RUN_ACTIONS,
+import { hasExplicitCompletion,
   type CollaborationRecord, type FlightRecord, type InvocationRequest, type ScoutDeliverRequest, type ScoutDeliverResponse,
   type WorkItemRecord, type WorkRetryRequest, type WorkRetryResponse } from "@openscout/protocol";
 import type { BrokerDurableStore } from "./broker-durable-store.js";
@@ -8,7 +8,9 @@ import { isFailedWork, newestWorkFlight, projectWorkFlight } from "./broker-fail
 import { readMessageRecord } from "./broker-message-records.js";
 import { WorkLifecycleError } from "./broker-work-lifecycles.js";
 
-type RetryIntent = { refused?: true; attempt: number; sourceFlightId: string; request: ScoutDeliverRequest };
+/** `request` is dropped once the attempt's receipt is stored on the work item. */
+type RetryIntent = { refused?: true; attempt: number; sourceFlightId: string; request?: ScoutDeliverRequest };
+type ResolvedRetry = WorkRetryRequest & { attempt: number };
 type Options = {
   nodeId: string;
   snapshot(): RuntimeRegistrySnapshot;
@@ -29,11 +31,13 @@ export class BrokerWorkRetryService {
   private readonly active = new Map<string, Promise<WorkRetryResponse>>();
   constructor(private readonly options: Options) {}
 
-  readonly retry = (input: WorkRetryRequest): Promise<WorkRetryResponse> => {
-    if (typeof input?.workId !== "string" || !input.workId.trim() || !Number.isSafeInteger(input.attempt) || input.attempt < 1) {
-      throw new WorkLifecycleError(400, "work_retry requires workId and a positive integer attempt. Start at 1; reuse it after an uncertain receipt.");
+  readonly retry = (request: WorkRetryRequest): Promise<WorkRetryResponse> => {
+    if (typeof request?.workId !== "string" || !request.workId.trim()
+      || (request.attempt !== undefined && (!Number.isSafeInteger(request.attempt) || request.attempt < 1))) {
+      throw new WorkLifecycleError(400, "work_retry requires workId; attempt, when given, is a positive integer. Omit it for the next attempt; reuse it after an uncertain receipt.");
     }
-    input = { workId: input.workId.trim(), attempt: input.attempt };
+    const workId = request.workId.trim();
+    const input: ResolvedRetry = { workId, attempt: request.attempt ?? this.nextAttempt(workId) };
     const key = workRetryRequestId(input.workId, input.attempt);
     const active = this.active.get(key);
     if (active) return active;
@@ -42,7 +46,17 @@ export class BrokerWorkRetryService {
     return pending;
   };
 
-  private accepted(input: WorkRetryRequest, requestId: string): WorkRetryResponse | undefined {
+  /** The pending attempt after an uncertain receipt, otherwise one past the newest attempt. */
+  private nextAttempt(workId: string): number {
+    const metadata = this.options.record(workId)?.metadata;
+    const prior = metadata?.failedRunRetry as RetryIntent | undefined;
+    const receipts = metadata?.workRetryReceipts as Record<string, WorkRetryResponse> | undefined;
+    if (prior && !prior.refused && !receipts?.[prior.attempt]) return prior.attempt;
+    const newest = Math.max(prior?.attempt ?? 0, ...Object.keys(receipts ?? {}).map(Number).filter(Number.isSafeInteger));
+    return newest + 1;
+  }
+
+  private accepted(input: ResolvedRetry, requestId: string): WorkRetryResponse | undefined {
     const record = this.options.record(input.workId);
     const receipts = record?.metadata?.workRetryReceipts as Record<string, WorkRetryResponse> | undefined;
     const receipt = receipts?.[input.attempt];
@@ -54,7 +68,7 @@ export class BrokerWorkRetryService {
     return invocation && flight ? { ...input, requestId, invocationId: invocation.id, flightId: flight.id } : undefined;
   }
 
-  private async run(input: WorkRetryRequest, requestId: string): Promise<WorkRetryResponse> {
+  private async run(input: ResolvedRetry, requestId: string): Promise<WorkRetryResponse> {
     // Check before state validation: repeated attempts remain receipts even after Done/Drop.
     const existing = this.accepted(input, requestId);
     if (existing) { await this.settle(input, existing); return existing; }
@@ -66,16 +80,16 @@ export class BrokerWorkRetryService {
       if (!record || !isFailedWork(record, flight) || flight?.state !== "failed") {
         throw new WorkLifecycleError(409, `Work ${input.workId} is not waiting on its newest failed run. Read the work item; use Done or Drop, or create a new ask.`);
       }
-      const cause = failedRunCause(flight);
-      if (!failedRunRetryable(cause)) throw new WorkLifecycleError(409, `Work ${input.workId} cannot retry cause ${cause}. ${FAILED_RUN_ACTIONS[cause]}`);
+      // The cause's `retryable` flag is a hint on the card; an explicit retry is never refused by cause.
       const prior = record.metadata?.failedRunRetry as RetryIntent | undefined;
       if (prior?.attempt === input.attempt) {
         if (prior.refused) throw new WorkLifecycleError(409, `Retry attempt ${input.attempt} was refused before execution. Fix the target, then use attempt ${input.attempt + 1}.`);
+        if (!prior.request) throw new WorkLifecycleError(409, `Retry attempt ${input.attempt} already has a receipt. Read the work item.`);
         intent = prior; return [];
       }
       const expected = (prior?.attempt ?? 0) + 1;
       if (input.attempt !== expected) throw new WorkLifecycleError(409, `Next retry attempt is ${expected}; reuse an earlier attempt only to recover its receipt.`);
-      if (prior && !prior.refused && !this.accepted({ workId: input.workId, attempt: prior.attempt }, prior.request.requestId!)) {
+      if (prior && !prior.refused && !this.accepted({ workId: input.workId, attempt: prior.attempt }, workRetryRequestId(input.workId, prior.attempt))) {
         throw new WorkLifecycleError(409, `Retry attempt ${prior.attempt} has an uncertain receipt. Repeat that attempt before starting another.`);
       }
       const original = snapshot.invocations[flight.invocationId];
@@ -98,7 +112,7 @@ export class BrokerWorkRetryService {
         async () => { await this.options.apply(next); }, { enqueueProjection: false });
     });
     await this.options.durableStore.applyProjectedEntries(entries);
-    const result = await this.options.accept(intent.request);
+    const result = await this.options.accept(intent.request!);
     if (!result.accepted) {
       const refusedEntries = await this.options.durableStore.runWrite(async () => {
         const record = this.options.record(input.workId);
@@ -138,23 +152,32 @@ export class BrokerWorkRetryService {
     return { target: { kind: "project_path", projectPath: endpoint.cwd }, harness: endpoint.harness };
   }
 
-  private async settle(input: WorkRetryRequest, receipt: WorkRetryResponse): Promise<void> {
+  private async settle(input: ResolvedRetry, receipt: WorkRetryResponse): Promise<void> {
     const entries = await this.options.durableStore.runWrite(async () => {
       const record = this.options.record(input.workId);
       const snapshot = this.options.snapshot();
       if (!record || record.kind !== "work_item") return [];
       const receipts = record.metadata?.workRetryReceipts as Record<string, WorkRetryResponse> | undefined;
-      if (receipts?.[input.attempt]?.requestId === receipt.requestId) return [];
+      const intent = record.metadata?.failedRunRetry as RetryIntent | undefined;
+      // The receipt replaces the reserved command: keep no copy of the ask body or attachments.
+      const { request: _request, ...slimIntent } = intent ?? {} as RetryIntent;
+      const retained = intent?.attempt === input.attempt && intent.request ? { failedRunRetry: slimIntent } : {};
+      if (receipts?.[input.attempt]?.requestId === receipt.requestId) {
+        if (!retained.failedRunRetry) return [];
+        const next = { ...record, metadata: { ...record.metadata, ...retained } };
+        return this.options.durableStore.commitEntries({ kind: "collaboration.record", record: next },
+          async () => { await this.options.apply(next); }, { enqueueProjection: false });
+      }
       const flight = snapshot.flights[receipt.flightId];
       const latest = newestWorkFlight(input.workId, Object.values(snapshot.invocations), Object.values(snapshot.flights));
       const now = Date.now();
       const canProject = flight && latest?.id === flight.id && isFailedWork(record)
-        && (record.metadata?.failedRunRetry as RetryIntent | undefined)?.attempt === input.attempt;
+        && intent?.attempt === input.attempt;
       const projected = canProject ? projectWorkFlight(record, flight, now) : record;
       const actorId = flight?.requesterId ?? record.requestedById ?? record.createdById;
       const placed = canProject ? this.options.place?.(record, projected, { now, actorId, moveId: `${receipt.requestId}:move` }) : undefined;
       const placedRecord = placed?.record ?? projected;
-      const next = { ...placedRecord, metadata: { ...placedRecord.metadata,
+      const next = { ...placedRecord, metadata: { ...placedRecord.metadata, ...retained,
         workRetryReceipts: { ...receipts, [input.attempt]: receipt } } };
       const event = { id: `${receipt.requestId}:accepted`, recordId: record.id, recordKind: "work_item" as const,
         kind: "progressed" as const, actorId, at: now, summary: `Retry attempt ${input.attempt} accepted.`,

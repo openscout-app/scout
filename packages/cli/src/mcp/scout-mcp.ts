@@ -5719,8 +5719,8 @@ export function createScoutMcpServer(options: {
 
   server.registerTool("work_retry", {
     title: "Retry Failed Scout Work",
-    description: "Send the original ask again to the same target in a fresh session. Only endpoint_lost and harness_start failures can retry. Start attempt at 1 and reuse it after an uncertain receipt; increment after that retry fails or admission refuses to start a run. Never retries automatically.",
-    inputSchema: z.object({ workId: z.string(), attempt: z.number().int().positive() }),
+    description: "Send the original ask again to the same target in a fresh session, whatever the failure cause; the item's retryable flag is only a hint. Omit attempt for the next one. Reuse an attempt to recover its receipt after an uncertain result. Never retries automatically.",
+    inputSchema: z.object({ workId: z.string(), attempt: z.number().int().positive().optional() }),
     outputSchema: z.object({ workId: z.string(), attempt: z.number(), requestId: z.string(), invocationId: z.string(), flightId: z.string() }),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
   }, async input => {

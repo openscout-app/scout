@@ -12,7 +12,7 @@ import { BrokerWorkRetryService } from "./broker-work-retry.js";
 const paths: string[] = [];
 afterEach(() => { for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
-async function fixture(cause: string = "harness_start") {
+async function fixture(cause: string | null = "harness_start") {
   const directory = mkdtempSync(join(tmpdir(), "work-retry-test-")); paths.push(directory);
   const path = join(directory, "journal.ndjson");
   let journal = new FileBackedBrokerJournal(path); await journal.load();
@@ -21,7 +21,7 @@ async function fixture(cause: string = "harness_start") {
     ensureAwake: true, stream: false, createdAt: 10,
     execution: { harness: "codex", model: "test-model", session: "existing", targetSessionId: "broken-session", reasoningEffort: "high" } };
   let failed: FlightRecord = { id: "failed-flight", invocationId: original.id, targetAgentId: "agent-1", requesterId: "operator",
-    startedAt: 10, completedAt: 20, state: "failed", error: "Deliberately unrelated error prose", metadata: { failureCause: cause } };
+    startedAt: 10, completedAt: 20, state: "failed", error: "Deliberately unrelated error prose", ...(cause === null ? {} : { metadata: { failureCause: cause } }) };
   const work: WorkItemRecord = projectWorkFlight({ id: "work-1", kind: "work_item", state: "working", acceptanceState: "none",
     title: "Change", ownerId: "agent-1", createdById: "operator", requestedById: "operator", nextMoveOwnerId: "agent-1", createdAt: 10, updatedAt: 10 }, failed, 20);
   await journal.appendEntries([{ kind: "agent.upsert", agent: { id: "agent-1" } as AgentDefinition },
@@ -80,6 +80,7 @@ test("concurrent and repeated retry calls produce one fresh ask and one receipt 
       collaborationRecordId: "work-1", execution: { session: "new", harness: "codex", model: "test-model", reasoningEffort: "high" } });
     expect(f.calls[0]!.execution?.targetSessionId).toBeUndefined();
     expect(f.journal().getCollaborationRecord("work-1")).toMatchObject({ state: "working" });
+    expect(f.journal().getCollaborationRecord("work-1")?.metadata?.failedRunRetry).not.toHaveProperty("request");
     await f.reopen();
     expect(await f.service().retry(input)).toEqual(a); expect(f.calls).toHaveLength(1);
     expect(f.journal().listCollaborationEvents({ recordId: "work-1" })).toHaveLength(1);
@@ -113,12 +114,72 @@ test("a second attempt is distinct and an older attempt still returns its receip
   } finally { await f.close(); }
 });
 
-test.each(FAILED_RUN_CAUSES)("retry policy refuses or accepts %s with an actionable result", async cause => {
+test.each([...FAILED_RUN_CAUSES, null])("an explicit retry is accepted for cause %s; retryable is only a hint", async cause => {
   const f = await fixture(cause);
   try {
-    const retry = f.service().retry({ workId: "work-1", attempt: 1 });
-    if (cause === "endpoint_lost" || cause === "harness_start") await retry;
-    else { await expect(retry).rejects.toThrow(`cannot retry cause ${cause}`); expect(f.calls).toHaveLength(0); }
+    const waiting = f.journal().getCollaborationRecord("work-1") as WorkItemRecord;
+    expect(waiting.waitingOn).toMatchObject({ kind: "failed_run", cause: cause ?? "unknown",
+      retryable: cause === "endpoint_lost" || cause === "harness_start" });
+    const receipt = await f.service().retry({ workId: "work-1" });
+    expect(receipt).toMatchObject({ workId: "work-1", attempt: 1 });
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]).toMatchObject({ body: f.original.task, execution: { session: "new" } });
+  } finally { await f.close(); }
+});
+
+test("an omitted attempt defaults to the next one and a repeat recovers the receipt", async () => {
+  const f = await fixture("harness_error");
+  try {
+    const a = await f.service().retry({ workId: "work-1" });
+    expect(a.attempt).toBe(1);
+    expect(await f.service().retry({ workId: "work-1", attempt: 1 })).toEqual(a);
+    await f.failRetry();
+    const b = await f.service().retry({ workId: "work-1" });
+    expect(b.attempt).toBe(2); expect(b.requestId).not.toBe(a.requestId);
+    expect(await f.service().retry({ workId: "work-1", attempt: 2 })).toEqual(b);
+    expect(f.calls).toHaveLength(2);
+    await expect(f.service().retry({ workId: "work-1", attempt: 4 })).rejects.toThrow("not waiting on its newest failed run");
+  } finally { await f.close(); }
+});
+
+test("an omitted attempt repeats the pending attempt after an uncertain receipt", async () => {
+  const f = await fixture();
+  try {
+    f.setFailure("before");
+    await expect(f.service().retry({ workId: "work-1" })).rejects.toThrow("uncertain");
+    f.setFailure("none");
+    const receipt = await f.service().retry({ workId: "work-1" });
+    expect(receipt.attempt).toBe(1);
+    expect(f.calls).toHaveLength(2); expect(f.calls[1]).toEqual(f.calls[0]);
+  } finally { await f.close(); }
+});
+
+test("an omitted attempt moves past a refused attempt", async () => {
+  const f = await fixture();
+  try {
+    f.setFailure("refuse");
+    await expect(f.service().retry({ workId: "work-1" })).rejects.toThrow("use attempt 2");
+    f.setFailure("none");
+    expect((await f.service().retry({ workId: "work-1" })).attempt).toBe(2);
+  } finally { await f.close(); }
+});
+
+test("the stored receipt replaces the reserved copy of the ask body and attachments", async () => {
+  const f = await fixture();
+  try {
+    f.setFailure("after");
+    await expect(f.service().retry({ workId: "work-1", attempt: 1 })).rejects.toThrow("uncertain");
+    const reserved = f.journal().getCollaborationRecord("work-1")?.metadata?.failedRunRetry as Record<string, unknown>;
+    expect(reserved).toMatchObject({ attempt: 1, sourceFlightId: "failed-flight", request: { body: f.original.task } });
+    f.setFailure("none"); await f.reopen();
+    const receipt = await f.service().retry({ workId: "work-1", attempt: 1 });
+    const metadata = f.journal().getCollaborationRecord("work-1")?.metadata ?? {};
+    expect(metadata.failedRunRetry).toEqual({ attempt: 1, sourceFlightId: "failed-flight" });
+    expect(JSON.stringify(metadata)).not.toContain(f.original.task);
+    expect((metadata.workRetryReceipts as Record<string, unknown>)[1]).toEqual(receipt);
+    await f.reopen();
+    expect(await f.service().retry({ workId: "work-1", attempt: 1 })).toEqual(receipt);
+    expect(f.calls).toHaveLength(1);
   } finally { await f.close(); }
 });
 
@@ -139,6 +200,7 @@ test("skipping attempts and invalid attempts fail immediately", async () => {
   try {
     await expect(f.service().retry({ workId: "work-1", attempt: 2 })).rejects.toThrow("Next retry attempt is 1");
     expect(() => f.service().retry({ workId: "work-1", attempt: 0 })).toThrow("positive integer");
+    expect(() => f.service().retry({ workId: " " })).toThrow("requires workId");
   } finally { await f.close(); }
 });
 

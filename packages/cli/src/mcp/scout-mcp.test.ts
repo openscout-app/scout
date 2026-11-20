@@ -2832,17 +2832,19 @@ test("show MCP is discoverable and sends local path, caption and resolved caller
 });
 
 
-test("work_retry forwards only the explicit idempotent work attempt and returns runtime diagnostics", async () => {
+test("work_retry forwards the work id and optional idempotent attempt and returns runtime diagnostics", async () => {
   const calls: unknown[] = [];
   const { client } = await connectTestServer({ retryWorkItem: async input => {
     calls.push(input);
-    if (input.attempt === 2) throw new Error("Work cannot retry cause disk_full. Free disk space first.");
-    return { ...input, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" };
+    if (input.attempt === 2) throw new Error("Next retry attempt is 1; reuse an earlier attempt only to recover its receipt.");
+    return { workId: input.workId, attempt: input.attempt ?? 1, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" };
   } });
   const result = await client.callTool({ name: "work_retry", arguments: { workId: "work-1", attempt: 1 } });
   expect(calls).toEqual([{ workId: "work-1", attempt: 1 }]);
   expect(result.structuredContent).toEqual({ workId: "work-1", attempt: 1, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" });
   const refused = await client.callTool({ name: "work_retry", arguments: { workId: "work-1", attempt: 2 } });
   expect(refused.isError).toBe(true);
-  expect(JSON.stringify(refused.content)).toContain("Free disk space first");
+  expect(JSON.stringify(refused.content)).toContain("Next retry attempt is 1");
+  await client.callTool({ name: "work_retry", arguments: { workId: "work-1" } });
+  expect(calls.at(-1)).toEqual({ workId: "work-1" });
 });
