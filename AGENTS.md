@@ -65,6 +65,7 @@ person whose machine it is.
   `bun run --cwd packages/<name> check`. Protocol, runtime, pairing, cli,
   agent-sessions, session-trace, and mesh-extension have one.
 - Run the narrowest affected tests while you work.
+- When changing tests or removing behavior, use [test hygiene](.agents/skills/test-hygiene/SKILL.md) to tidy the suite through judgment.
 - New or changed process spawning or shell execution: `bun run sync-exec:fence`.
 - Before you hand off a change: `bun run check` and `bun run test:changed`.
 - Before merge: run `bun run test:unit` once per pull request on the exact head.
@@ -83,7 +84,10 @@ person whose machine it is.
   feedback when authorized. Public issues are not an agent work queue.
 - Follow [branches and promotion](CONTRIBUTING.md#branches-and-promotion).
   Start topic worktrees from fork `origin/main` and open pull requests against
-  `arach/scout:main`. Drafts, reviews and fixes stay on the fork. When a fork
+  `arach/scout:main` with `gh pr create --repo arach/scout --base main`. A
+  plain `gh pr create` in a fork checkout targets the parent repository,
+  `openscout-app/scout`, unless `gh repo set-default arach/scout` has been run
+  in that clone. Drafts, reviews and fixes stay on the fork. When a fork
   pull request merges, promote it the same day with a pull request from
   `arach:main` into `openscout-app/scout:main`, then fast-forward fork `main`.
   Never push topic branches or open topic pull requests on

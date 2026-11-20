@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS,
+  claudeInstanceScoutMcpArgs,
   SCOUT_MESSAGE_ATTACHMENTS_CONTEXT_KEY,
   SUPPORTED_LOCAL_AGENT_HARNESSES,
   SUPPORTED_SCOUT_HARNESSES,
@@ -31,6 +32,7 @@ import {
   normalizeLocalAgentSystemPrompt,
   renderLocalAgentSystemPromptTemplate,
   resolveLocalAgentContextWindowUsage,
+  resolveLocalAgentBunScoutEntry,
   resolveLocalAgentScoutCliPath,
   startLocalAgent,
   stripLocalAgentReplyMetadata,
@@ -45,7 +47,8 @@ import { shutdownCodexAppServerAgent } from "./codex-app-server";
 import { DeliveryBlockedError } from "./delivery-blocked";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const scoutCli = `bun ${JSON.stringify(join(repoRoot, "packages", "cli", "bin", "scout.mjs"))}`;
+// The Bun entry depends on whether this checkout has a built CLI; its own tests are in "local agent Bun Scout entry".
+const scoutCli = `bun ${JSON.stringify(resolveLocalAgentBunScoutEntry())}`;
 const scoutSkillPath = join(repoRoot, ".agents", "skills", "scout", "SKILL.md");
 const originalCodexBin = process.env.OPENSCOUT_CODEX_BIN;
 const originalCodeXBin = process.env.CODEX_BIN;
@@ -79,6 +82,37 @@ describe("local agent Scout CLI path", () => {
     mkdirSync(dirname(cli), { recursive: true });
     writeFileSync(cli, "// workspace CLI\n");
     expect(resolveLocalAgentScoutCliPath(join(root, "packages", "runtime", directory))).toBe(cli);
+  });
+});
+
+describe("local agent Bun Scout entry", () => {
+  function workspace(files: string[]): string {
+    const root = mkdtempSync(join(tmpdir(), "scout-bun-entry-"));
+    tempPaths.add(root);
+    for (const file of ["packages/cli/bin/scout.mjs", ...files]) {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), "// cli\n");
+    }
+    return root;
+  }
+
+  test("an unbuilt checkout runs the CLI source, since bin/scout.mjs needs dist/main.mjs", () => {
+    const root = workspace(["packages/cli/src/main.ts"]);
+    expect(resolveLocalAgentBunScoutEntry(join(root, "packages", "runtime", "src"))).toBe(join(root, "packages", "cli", "src", "main.ts"));
+  });
+
+  test("a built checkout keeps bin/scout.mjs", () => {
+    const root = workspace(["packages/cli/src/main.ts", "packages/cli/dist/main.mjs"]);
+    expect(resolveLocalAgentBunScoutEntry(join(root, "packages", "runtime", "src"))).toBe(join(root, "packages", "cli", "bin", "scout.mjs"));
+  });
+
+  test("a published bundle keeps its installed bin/scout.mjs", () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-bun-entry-packaged-"));
+    tempPaths.add(root);
+    const cli = join(root, "bin", "scout.mjs");
+    mkdirSync(dirname(cli), { recursive: true });
+    writeFileSync(cli, "// installed CLI\n");
+    expect(resolveLocalAgentBunScoutEntry(join(root, "dist", "runtime"))).toBe(cli);
   });
 });
 
@@ -1657,5 +1691,37 @@ describe("a session Scout continues itself", () => {
     const place = { via: "scout-app", location: "the ChatGPT app", transcriptOffset: 10 } as const;
     expect(flatSessionWasTypedInPlace({ phase: "typing", since: 1, at: 2, ...place })).toBe(true);
     expect(flatSessionWasTypedInPlace({ phase: "typed", since: 1, at: 2, ...place })).toBe(true);
+  });
+});
+
+describe("claudeInstanceScoutMcpArgs", () => {
+  const cli = "'/opt/bin/bun' '/repo/packages/cli/src/main.ts'";
+
+  test("a non-prod instance gives its Claude agents a scout MCP that reaches it", () => {
+    const args = claudeInstanceScoutMcpArgs({ OPENSCOUT_INSTANCE: "dev-board" }, cli);
+    expect(args[0]).toBe("--mcp-config");
+    expect(JSON.parse(args[1]!)).toEqual({
+      mcpServers: {
+        scout: {
+          type: "stdio",
+          command: "/bin/sh",
+          args: ["-c", `exec ${cli} mcp`],
+          env: { OPENSCOUT_CLIENT_INSTANCE: "dev-board" },
+        },
+      },
+    });
+  });
+
+  test("prod agents keep the user's shared scout MCP", () => {
+    expect(claudeInstanceScoutMcpArgs({}, cli)).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs({ OPENSCOUT_INSTANCE: "prod" }, cli)).toEqual([]);
+  });
+
+  test("an agent's own MCP config, or no runtime CLI, adds nothing", () => {
+    const env = { OPENSCOUT_INSTANCE: "dev-board" };
+    expect(claudeInstanceScoutMcpArgs(env, cli, ["--mcp-config", "/tmp/mcp.json"])).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs(env, cli, ["--mcp-config=/tmp/mcp.json"])).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs(env, cli, ["--strict-mcp-config"])).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs(env, null)).toEqual([]);
   });
 });

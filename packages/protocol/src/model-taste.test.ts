@@ -5,7 +5,7 @@ import { buildOrchestrationProviderMap } from "./orchestration-provider-map.js";
 
 test("taste resolves reviewed family and gateway IDs rather than storing model versions", () => {
   const resolved = resolveScoutModelTaste(SCOUT_MODEL_TASTE, SCOUT_RUNTIME_CATALOG);
-  expect(resolved.sol?.route.model).toBe("gpt-6.1-sol");
+  expect(resolved.sol?.route.model).toBe("gpt-6.2-sol");
   expect(resolved.grok?.route.model).toBe("grok-4.7");
   expect(resolved.glm?.route.model).toBe("opencode-go/glm-5.3");
   expect(resolved.kimi?.route.model).toBeNull();

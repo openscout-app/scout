@@ -79,6 +79,7 @@ export * from "./session-task.js";
 export * from "./mcp-core-tools.js";
 
 export * from "./integrations.js";
+export * from "./vercel-board.js";
 export * from "./slack-manifest.js";
 
 export * from "./room-listening.js";
@@ -91,6 +92,7 @@ export * from "./attachments.js";
 export type { ObservedSessionIdentity, ObservedSessionLink, SessionReadAvailability, HostReadAvailability, ObservedSessionSource, ObservedSessionRead, ObservedSessionInventory } from "./observed-sessions.js";
 
 export type { ObservedSessionMaterialFile, ObservedSessionMaterials } from "./session-materials.js";
+export * from "./session-names.js";
 
 export * from "./host-attention.js";
 export * from "./tasks.js";

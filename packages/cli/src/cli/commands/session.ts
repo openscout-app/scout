@@ -44,6 +44,7 @@ import {
   resolveScoutSenderId,
 } from "../../lib/core/broker/service.ts";
 import { askScoutApp } from "../scout-app-socket.ts";
+import { runSessionNamesAction, runSessionRenameAction } from "./session-rename.ts";
 import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
 import { wrapUserSpawnPaneCommand } from "@openscout/runtime/terminal-environment";
 import { buildMultiplexerServerEnvironment, buildUserSpawnEnvironment } from "@openscout/runtime/instance";
@@ -67,6 +68,8 @@ Usage:
                                             Move a live Claude/Grok TUI into tmux, same session
   scout session pin [--session <codex-thread-id>] [--title <name>]
                                             Pin a ChatGPT-app Codex chat as a desktop figure
+  scout session rename <selector> <name...>  Name a session for what it is doing now (--clear, --self, --harness)
+  scout session names                       List the session names you have set
 
 Options (intake):
   --harness <name>      Harness that owns the source session (claude, codex, pi)
@@ -161,9 +164,16 @@ export async function runSessionCommand(context: ScoutCommandContext, args: stri
     case "move":
       await runSessionTransferAction(context, args.slice(1));
       return;
+    case "rename":
+    case "name":
+      await runSessionRenameAction(context, args.slice(1));
+      return;
+    case "names":
+      await runSessionNamesAction(context, args.slice(1));
+      return;
     default:
       throw new ScoutCliError(
-        `unknown session action: ${action} (try: scout session intake|list|address|fork|send|touched|pin|transfer <session-id>)`,
+        `unknown session action: ${action} (try: scout session intake|list|address|fork|send|touched|pin|transfer|rename <session-id>)`,
       );
   }
 }

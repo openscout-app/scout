@@ -206,6 +206,71 @@ The log append endpoint requires `actorId`, `kind`, `intent`, and `status` and
 enforces the same assignment gate (apart from the explicit system/operator
 override used by trusted control-plane writers).
 
+### The PM Role And Its Slot
+
+The second built-in role is **pm**. It keeps one short summary of the work
+board current. One agent holds it, at agent scope; a second assignment is
+refused unless the operator passes `--allow-multiple`. A role definition names
+the scopes where it allows one holder (`singleHolder`): the orchestrator allows
+one per mission, the PM one in all.
+
+The summary lives in the role's **slot**: a row per assignment, rewritten on
+each pass. It is a cache, not history, so it is not journaled and the mission
+log is untouched. A slot holds:
+
+- `sentences`: at most six, each with the card ids it is about. A sentence that
+  cites no card, or cites a card outside the stamp, is refused.
+- `stamp`: each card id the writer read, with that card's revision.
+- `version`: bumped on every write. A writer sends the version it read, and a
+  stale one gets `409` with the current version.
+
+Only the active holder of an assignment whose role lists `slot.write` may write
+it. The runtime compares only the slot's own version, never the whole board, so
+a summary written while the board moved still lands; readers see that through
+`behind`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/roles/slots?roleId=pm` | Each active holder with its slot and `behind`: true when an open card's revision differs from the stamp, or a stamped card changed since (including one that closed). |
+| `POST /v1/roles/slots/:assignmentId` | Write the slot: `actorId`, `expectedVersion` (0 for the first write), `stamp`, `sentences`. |
+
+A write publishes the live event `role.slot.written` with the assignment, role
+and new version. It is never persisted; a client that missed it reads the slot.
+A read never starts a pass.
+
+### PM Passes
+
+The runtime starts a **pass** to rewrite the slot. A role opts in with a `pass`
+policy in its definition; the PM's is a 20-second quiet window and a 2-minute
+longest wait.
+
+- **When.** Each assignment has one dirty bit and no queue. A change to a work
+  item sets it. The holder's own changes, read from the actor on the
+  collaboration event, never set it. A pass starts once the board has been
+  quiet for the quiet window, or when the longest wait runs out. A change that
+  lands during a pass waits for it; a completed pass that leaves the bit set
+  starts one more. A failed pass starts nothing until the next change.
+- **One at a time.** A pass is an ask marked `metadata.rolePass` with the
+  assignment id. One unended flight carrying that mark is the lock, so it holds
+  across a runtime restart. A marked ask never becomes or links a work item.
+- **Page open.** `POST /v1/roles/slots/:assignmentId/pass` returns
+  `{ flightId, started, behind }`. It returns the running pass, starts one only
+  when the slot is `behind`, and otherwise starts nothing. The slot read
+  carries `pass: { flightId }` while one runs. A client posts once per mount,
+  and only when the read says `behind`.
+- **Who and where.** The requester is the runtime's `system` actor, so no one's
+  chat collects passes. Each pass runs in a fresh background session of the
+  holder (`execution: { session: "new", placement: "background" }`).
+- **Evidence.** Code seeds the brief: the last slot, the cards that changed
+  since its stamp, and the open cards, each with its station, state, owner,
+  next move and waiting-on. Done cards that did not change are never read. The
+  stamp is the cards the brief showed, at their revisions then.
+- **Answer.** The pass ends with one JSON block,
+  `{"sentences": [{"text": "...", "cites": ["<card id>"]}]}`. When its flight
+  completes, the runtime writes the slot as the holder, with the version and
+  stamp from the pass's own invocation, never from the answer. A cite outside
+  that stamp, or a newer slot, leaves the slot alone and logs why.
+
 ### Broker Lifecycle Floor
 
 The runtime supplies one deterministic lifecycle floor today. When an ask's

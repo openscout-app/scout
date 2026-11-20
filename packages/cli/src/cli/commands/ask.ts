@@ -34,7 +34,7 @@ export function renderAskCommandHelp(): string {
     "", "Ask creates a task and returns on acceptance, not completion. Use scout wait <handle> to wait.",
     "  --to <agent>          recipient; repeat for one independent task/receipt per target",
     "  --project <path>      capability route; add --harness, --model, --effort, or --on <host>",
-    "  --ref <task>          follow up on unfinished work without creating another task",
+    "  --ref <task>          add context before agent dispatch; an active turn refuses --ref",
     "  --ref <task> --cancel explicitly cancel; receipt reports worker interruption",
     "  --continue <task>     successor to a completed, failed, or cancelled task",
     "  --fyi                 deliberate no-answer message; no task/work record",
@@ -76,6 +76,10 @@ export function renderAskCommandHelp(): string {
   ].join("\n");
 }
 
+function buildAskLinks(receipt: ScoutAskReceipt, env: NodeJS.ProcessEnv) {
+  return buildFlightLinks({ ...receipt.ids, workId: receipt.workPageUnavailable ? undefined : receipt.ids.workId }, env);
+}
+
 export function renderScoutAskReceipt(value: {
   receipt: ScoutAskReceipt;
   replyMode: NonNullable<ScoutAskCommandOptions["replyMode"]>;
@@ -102,6 +106,7 @@ export function renderScoutAskReceipt(value: {
     `${pieces.join(" · ")}.`,
     delivery,
     value.replyMode === "notify" && !terminal ? "Scout will surface the completion when it arrives." : null,
+    value.receipt.workPageUnavailable ? "Work was recorded, but its page is unavailable on this broker." : null,
     value.links?.work ? `Follow the task: ${value.links.work}` : null,
     waitRef ? `Follow: scout wait ${quoteWaitReference(waitRef)} --timeout 600` : "No wait reference returned; inspect the ask receipt.",
   ].filter((line): line is string => Boolean(line)).join("\n");
@@ -424,6 +429,7 @@ export async function runAskWithOptions(
       receipt,
       options.targetLabel
         ?? options.existingTargetHandle
+        ?? renderBindingRef(options.task?.continue ?? options.task?.ref)
         ?? (options.runtimeProfile ? `profile:${options.runtimeProfile}` : undefined),
     ));
   }
@@ -460,7 +466,7 @@ export async function runAskWithOptions(
         receipt,
         replyMode,
         flight,
-        links: buildFlightLinks(receipt.ids, context.env),
+        links: buildAskLinks(receipt, context.env),
         ...(options.onHost ? { onHost: options.onHost } : {}),
       },
       renderScoutAskReceipt,
@@ -504,7 +510,7 @@ export async function runAskWithOptions(
       bindingRef: renderBindingRef(receipt.ids.bindingRef),
       receipt,
       flight: completed,
-      links: buildFlightLinks(receipt.ids, context.env),
+      links: buildAskLinks(receipt, context.env),
       output: renderScoutAskInlineResult({
         conversationId: receipt.ids.conversationId ?? null,
         messageId: receipt.ids.messageId ?? null,
@@ -514,7 +520,9 @@ export async function runAskWithOptions(
         timedOut,
       }),
     },
-    (value) => [value.output, value.links.work ? `Follow the task: ${value.links.work}` : null].filter(Boolean).join("\n"),
+    (value) => [value.output,
+      value.receipt.workPageUnavailable ? "Work was recorded, but its page is unavailable on this broker." : null,
+      value.links.work ? `Follow the task: ${value.links.work}` : null].filter(Boolean).join("\n"),
   );
 }
 

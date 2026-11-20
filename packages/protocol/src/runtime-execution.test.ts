@@ -65,7 +65,7 @@ describe("runtime execution contracts", () => {
     expect(SCOUT_RUNTIME_EFFORT_CATALOG.find((entry) => entry.id === "ultra")).toEqual(
       expect.objectContaining({
         harnesses: ["codex"],
-        models: ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"],
+        models: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"],
       }),
     );
   });

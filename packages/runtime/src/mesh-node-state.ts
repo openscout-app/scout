@@ -136,6 +136,8 @@ export type MeshNodeStateDeps = {
   nodeId: string;
   meshId: string | null;
   actorDisplayName: (snapshot: RuntimeRegistrySnapshot, actorId: string) => string;
+  /** Session names (operator, then current work); null keeps the endpoint's display name. */
+  sessionNamer?: () => (endpoint: AgentEndpoint) => string | null;
   now?: () => number;
   rosterLimit?: number;
   sessionLimit?: number;
@@ -158,6 +160,7 @@ export type MeshNodeStateQuery = {
  */
 export function readMeshNodeState(deps: MeshNodeStateDeps, query: MeshNodeStateQuery = {}): MeshNodeStateReport {
   const snapshot = deps.snapshot();
+  const nameSession = deps.sessionNamer?.();
   const node = snapshot.nodes?.[deps.nodeId] ?? null;
   const limit = deps.rosterLimit ?? MESH_NODE_STATE_ROSTER_LIMIT;
 
@@ -231,8 +234,9 @@ export function readMeshNodeState(deps: MeshNodeStateDeps, query: MeshNodeStateQ
       truncated: sessions.length >= sessionLimit,
       items: sessions.slice(0, sessionLimit).map((endpoint) => ({
         id: endpoint.id,
-        title: typeof endpoint.metadata?.displayName === "string"
-          ? endpoint.metadata.displayName.slice(0, SUMMARY_MAX) : null,
+        title: nameSession?.(endpoint)?.slice(0, SUMMARY_MAX)
+          ?? (typeof endpoint.metadata?.displayName === "string"
+            ? endpoint.metadata.displayName.slice(0, SUMMARY_MAX) : null),
         address: runtimeSessionAddressForEndpoint(snapshot, endpoint),
         agentId: endpoint.agentId,
         harness: endpoint.harness ?? null,
