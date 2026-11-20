@@ -4,7 +4,7 @@ import { openPermissionRequestId } from "./broker-blocked-reply.js";
 import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
 import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
 import { isDeepStrictEqual } from "node:util";
-import { canonicalMessageRecord } from "./message-record-canonical.js";
+import { canonicalMessageIdentity } from "./message-record-canonical.js";
 import { selectMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
 import type {
   AgentDefinition,
@@ -146,8 +146,8 @@ export class BrokerMessageService {
       const accepted = forwarded.message;
       if (accepted !== undefined) {
         if (!accepted || accepted.id !== message.id || !Number.isFinite(accepted.createdAt)
-          || !(isIdempotentMessageRetry(canonicalMessageRecord(accepted), canonicalMessageRecord(completionMessage))
-            || isDeepStrictEqual(canonicalMessageRecord(accepted), canonicalMessageRecord(message)))) {
+          || !(isIdempotentMessageRetry(canonicalMessageIdentity(accepted), canonicalMessageIdentity(completionMessage))
+            || isDeepStrictEqual(canonicalMessageIdentity(accepted), canonicalMessageIdentity(message)))) {
           throw new Error(`authority ${forwarded.authorityNodeId} returned a conflicting canonical message for ${message.id}`);
         }
         // A retry's timestamp/provenance is not proof of what the authority stored.

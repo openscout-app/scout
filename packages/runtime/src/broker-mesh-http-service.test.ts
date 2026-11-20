@@ -796,6 +796,19 @@ test("canonical mesh admission preserves exact legacy retries without client IDs
   expect(h.committedEntries).toHaveLength(0);
 });
 
+test("canonical mesh retries ignore only runtime attribution", async () => {
+  const existing = message({ metadata: { application: "original", context: { attribution: "application-data" } } });
+  const h = createHarness({ messages: { [existing.id]: existing } });
+  const forwarded = { ...existing, metadata: { ...existing.metadata,
+    attribution: { actorId: "operator", rootActorId: "operator", source: "unverified" } } };
+  expect(await h.service.receiveMessageBundle(messageBundle({ message: forwarded }))).toMatchObject({
+    status: 200, body: { duplicate: true, message: existing },
+  });
+  await expect(h.service.receiveMessageBundle(messageBundle({ message: { ...forwarded,
+    metadata: { ...forwarded.metadata, application: "changed" } } }))).rejects.toThrow("conflicts with existing record");
+  expect(h.messages[existing.id]).toEqual(existing);
+});
+
 test("canonical mesh admission cannot overwrite an existing blob message with a conflicting no-blob message", async () => {
   const existing = message({ attachments: [{ id: "evidence", mediaType: "image/png",
     blob: { sha256: "a".repeat(64), mediaType: "image/png", byteSize: 8 } }] });

@@ -6,6 +6,8 @@ import {
   MODEL_WINDOW_OVERRIDES,
 } from "./model-catalog.js";
 
+import { RUNTIME_MODEL_CONTEXT_WINDOWS } from "./runtime-model-windows.generated.js";
+
 describe("model catalog (models.dev-backed)", () => {
   test("Claude windows are per VERSION (5 ≠ 4.5)", () => {
     expect(catalogContextWindowTokens("claude-opus-5")).toBe(1_000_000);
@@ -52,8 +54,11 @@ describe("model catalog (models.dev-backed)", () => {
   });
 
   test("adopts context windows from scoutd's live catalog without a rebuild", () => {
-    applyRuntimeModelContextWindows({ "grok-live": 777_000 });
-    expect(catalogContextWindowTokens("grok-live")).toBe(777_000);
-    applyRuntimeModelContextWindows({ "gpt-6-astra": 1_050_000, "grok-4.6": 500_000 });
+    try {
+      applyRuntimeModelContextWindows({ "grok-live": 777_000 });
+      expect(catalogContextWindowTokens("grok-live")).toBe(777_000);
+    } finally {
+      applyRuntimeModelContextWindows(RUNTIME_MODEL_CONTEXT_WINDOWS);
+    }
   });
 });

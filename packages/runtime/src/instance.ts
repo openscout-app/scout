@@ -1438,6 +1438,7 @@ export function buildUserSpawnEnvironment(base: Env = process.env): Env {
   const keepOverrides = instance !== null && isProdOpenScoutInstance(instance);
   const keys = keepOverrides ? OPENSCOUT_SPAWN_MARKER_ENV_KEYS : OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS;
   for (const key of keys) delete env[key];
+  delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
   env[OPENSCOUT_CLIENT_INSTANCE_ENV_KEY] = instance ?? OPENSCOUT_PROD_INSTANCE;
   return env;
 }
@@ -1451,6 +1452,7 @@ export function buildUserSpawnEnvironment(base: Env = process.env): Env {
 export function buildMultiplexerServerEnvironment(base: Env = process.env): Env {
   const env: Env = { ...base };
   for (const key of OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS) delete env[key];
+  delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
   return env;
 }
 

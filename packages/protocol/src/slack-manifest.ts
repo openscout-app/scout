@@ -53,7 +53,7 @@ export function slackAppManifest(appName = "Scout", mode: "generic" | "project" 
       },
       bot_user: {
         display_name: appName,
-        always_online: false,
+        always_online: true,
       },
       ...(mode === "generic" ? { slash_commands: [
         {

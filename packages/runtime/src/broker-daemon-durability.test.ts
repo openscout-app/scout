@@ -1,6 +1,6 @@
 import { decodeJournalLine } from "./broker-journal-framing.js";
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -203,6 +203,42 @@ describe("broker daemon durability routes", () => {
     try { expect(db.query("SELECT display_name FROM actors WHERE id = ?").get(actor.id)).toEqual({ display_name: actor.displayName }); }
     finally { db.close(); }
   }, 15_000);
+
+  test("restores dispatch in the same broker after projection storage becomes writable again", async () => {
+    const controlHome = mkdtempSync(join(tmpdir(), "scout-projection-retry-"));
+    broker.temporaryDirectories.add(controlHome);
+    // Obstruct only the worker's quarantine database. This also exercises a
+    // worker that exits while preparing its health reply, as a full disk can.
+    const blockedFile = join(controlHome, "broker-journal.jsonl.quarantine.sqlite");
+    mkdirSync(blockedFile);
+    const harness = await broker.startBroker({ controlHome, waitForMutationReady: false });
+    type Health = { startup: { mutationsAdmitted: boolean; state: string; nextRetryAt?: number; error?: string | null } };
+    const health = () => broker.getJson<Health>(harness.baseUrl, "/health");
+    const first = await broker.waitFor(health, row => row.startup.nextRetryAt !== undefined);
+    expect(first.startup).toMatchObject({ state: "degraded", mutationsAdmitted: false });
+    const actor = { id: "registered-during-retry", kind: "agent", displayName: "Recovery" };
+    await broker.postJson(harness.baseUrl, "/v1/actors", actor);
+    const second = await broker.waitFor(health, row => (row.startup.nextRetryAt ?? 0) > first.startup.nextRetryAt!);
+    expect(second.startup.mutationsAdmitted).toBe(false);
+    expect((await broker.requestJson(harness.baseUrl, "/v1/invocations", { method: "POST", body: "{}" })).status).toBe(503);
+    rmdirSync(blockedFile);
+    const ready = await broker.waitFor(health, row => row.startup.mutationsAdmitted, { attempts: 120 });
+    expect(ready.startup).toMatchObject({ state: "ready", error: null });
+    expect(ready.startup.nextRetryAt).toBeUndefined();
+    expect(harness.child.exitCode).toBeNull();
+    await broker.seedBasicConversation(harness);
+    await broker.postJson(harness.baseUrl, "/v1/messages", {
+      id: "after-projection-recovery", conversationId: "channel.shared",
+      actorId: "operator", originNodeId: harness.nodeId, class: "agent",
+      body: "Recovered", visibility: "workspace", policy: "durable", createdAt: Date.now(),
+    });
+    const messages = await broker.getJson<Array<{ id: string }>>(harness.baseUrl, "/v1/messages?conversationId=channel.shared");
+    expect(messages.some(message => message.id === "after-projection-recovery")).toBe(true);
+    const db = new Database(join(controlHome, "control-plane.sqlite"), { readonly: true });
+    try {
+      expect(db.query("SELECT display_name FROM actors WHERE id = ?").get(actor.id)).toEqual({ display_name: actor.displayName });
+    } finally { db.close(); }
+  }, 25_000);
 
   test("keeps canonical registration available after a historical projection failure", async () => {
     const controlHome = mkdtempSync(join(tmpdir(), "scout-degraded-startup-"));

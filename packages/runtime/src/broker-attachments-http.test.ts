@@ -20,7 +20,7 @@ function deps() {
 test("core-only attachment HTTP routes call the service without web or cookie auth", async () => {
   const d = deps(), res = response();
   expect(await handleAttachmentRoute(request(read),res,new URL(`http://localhost${ATTACHMENT_READ_PATH}`),d)).toBe(true);
-  expect(res.status).toBe(200); expect(d.calls).toEqual([{ input: {conversationId:"c",messageId:"m",blobId:"a".repeat(64),mode:"text"}, principal:{actorId:"agent",nodeId:"n"} }]);
+  expect(res.status).toBe(200); expect(d.calls).toEqual([{ input: {conversationId:"c",messageId:"m",blobId:"a".repeat(64),mode:"text"}, principal:{actorId:"agent",attribution:{actorId:"agent",rootActorId:"agent",source:"unverified"},nodeId:"n"} }]);
 });
 test("local upload route is strict and rejects paths, URLs, IDs and remote/scoped callers", async () => {
   const input = { actorId:"agent",requestId:"r",conversationId:"c",body:"hello",attachments:[{data:"YQ==",mediaType:"text/plain"}] };
@@ -53,7 +53,7 @@ test("destination preserves verified node authority and never defaults a remote 
   const d=deps(),input={path:ATTACHMENT_READ_PATH,method:"POST",body:read};
   const req=request(input,"/v1/mesh/web-request",{transport:"remote",peer:{keyId:"verified",tier:"control"}});
   expect((await executeHostAttachmentRead(input,req,"/v1/mesh/web-request",d)).status).toBe(200);
-  expect(d.calls).toEqual([{input:{conversationId:"c",messageId:"m",blobId:"a".repeat(64),mode:"text"},principal:{actorId:"agent",nodeId:"peer"}}]);
+  expect(d.calls).toEqual([{input:{conversationId:"c",messageId:"m",blobId:"a".repeat(64),mode:"text"},principal:{actorId:"agent",attribution:{actorId:"agent",rootActorId:"agent",source:"unverified"},nodeId:"peer"}}]);
   req.transportContext={transport:"remote"}; req.headers["x-openscout-forwarded-node-id"]="peer";
   expect((await executeHostAttachmentRead(input,req,"/v1/mesh/web-request",d)).status).toBe(403);
   req.transportContext={transport:"remote",peer:{keyId:"unknown",tier:"control"}};
@@ -103,7 +103,7 @@ test("fixed local operator attachment route cannot select a target, answer or bl
   }
   expect(calls).toEqual([]);
   const res=response();await handleAttachmentRoute(request(notifyInput,notifyPath),res,new URL(`http://localhost${notifyPath}`),d);
-  expect(res.status).toBe(200);expect(calls).toEqual([{input:notifyInput,principal:{actorId:"agent",nodeId:"n"}}]);
+  expect(res.status).toBe(200);expect(calls).toEqual([{input:notifyInput,principal:{actorId:"agent",attribution:{actorId:"agent",rootActorId:"agent",source:"unverified"},nodeId:"n"}}]);
 });
 test("operator attachment route refuses remote, missing, peer, scoped and forwarded authority before effects",async()=>{
   let calls=0; const d={...deps(),notifyOperator:async()=>{calls++;return {ok:true};}};

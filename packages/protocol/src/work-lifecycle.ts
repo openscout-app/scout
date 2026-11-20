@@ -12,6 +12,7 @@
  * a reviewer agent settles it later on a heartbeat. No model runs on a move.
  */
 import type { WorkItemRecord, WorkItemState } from "./collaboration.js";
+import type { ScoutAttribution } from "./common.js";
 
 export const WORK_LIFECYCLE_SCHEMA = "openscout.work-lifecycle.v1" as const;
 
@@ -432,6 +433,7 @@ export interface WorkMoveRequest {
   workId: string;
   to: WorkStationId;
   actorId?: string;
+  attribution?: ScoutAttribution;
   note?: string;
   evidence?: WorkMoveEvidence[];
   /** A waiting reason, required by stations that map to `waiting`. */
@@ -463,6 +465,7 @@ export interface WorkReviewRequest {
   /** The placement revision the reviewer judged; a later move makes the review stale. */
   revision: number;
   actorId?: string;
+  attribution?: ScoutAttribution;
   note?: string;
 }
 

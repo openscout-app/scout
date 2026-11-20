@@ -295,6 +295,8 @@ export async function runRoleCommand(
         agentId: options.agentId,
         scope,
         assignedById: options.assignedById,
+        enforceSingleHolder: !options.allowMultiple,
+        // Older runtimes read only this name.
         enforceSingleOrchestrator: !options.allowMultiple,
       },
     );
