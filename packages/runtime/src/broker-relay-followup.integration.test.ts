@@ -76,3 +76,24 @@ test("continue with a copied ref routes a finished cardless task back to its rel
   expect(next.message.body).toContain("Finished the original brief.");
   expect(await broker.waitFor(async () => relay.pasteCount(), count => count === 2)).toBe(2);
 }, 30_000);
+
+test("an ask to a managed tmux Claude session stays open through a turn end until its task reply", async () => {
+  const relay = await runningRelay();
+  const detail = () => broker.getJson<{ invocation: { metadata?: Record<string, unknown> }; flight: FlightRecord }>(
+    relay.baseUrl, `/v1/invocations/${relay.ask.flight!.invocationId}`);
+  const accepted = await detail();
+  expect(accepted.invocation.metadata).toMatchObject({
+    completion: { mode: "explicit" }, completionEndpointId: "worker-endpoint",
+  });
+  // The session ends an interim turn: the adapter reports its output as a result.
+  await broker.postJson(relay.baseUrl, "/v1/flights", {
+    ...accepted.flight, state: "completed", output: "Started the build; reporting back when it lands.", completedAt: Date.now(),
+  });
+  const interim = (await detail()).flight;
+  expect(interim).toMatchObject({ state: "waiting", metadata: {
+    completion: { awaitingFinal: true }, awaitingFinalOutput: "Started the build; reporting back when it lands.",
+  } });
+  expect(interim.output).toBeUndefined();
+  await relay.answerTask();
+  expect((await detail()).flight.output).toBe("Finished the original brief.");
+}, 30_000);

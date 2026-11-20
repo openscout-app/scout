@@ -3373,7 +3373,7 @@ export const SCOUT_MCP_INSTRUCTIONS = [
   "- Which machines exist, what they hold: `hosts_list` (live; each machine's projects and the exact ask for it). Don't know an agent's name: `agents_search`. Never invent names.",
   "- After an ask: the receipt is proof it was accepted; `invocations_wait` / `invocations_get` follow it, including work running on another machine.",
   "- The operator: `ask` with operator=true for a task, fyi=true for news; notify=true requests a push for news.",
-  "- Answer with `reply` by task ref. progress=true updates its work record without closing it; the harness final turn is already an answer.",
+  "- Answer with `reply` by task ref. progress=true updates its work record without closing it. If the ask requires a task reply, only a final reply by ref completes it; otherwise the harness final turn is already the answer.",
   "- When Scout cannot do what you need, say which call failed and how, instead of working around it silently.",
 ].join("\n");
 
@@ -4104,7 +4104,7 @@ export function createScoutMcpServer(options: {
 
   server.registerTool("reply", {
     title: "Reply",
-    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     inputSchema: z.object({
       requestId: z.string().min(1).max(256).optional().describe("Reuse after an uncertain receipt."),
       ref: z.string().min(1).optional(), to: z.string().min(1).optional(),

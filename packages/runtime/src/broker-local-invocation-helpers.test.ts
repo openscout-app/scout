@@ -9,6 +9,8 @@ import type {
 
 import { createInMemoryControlRuntime } from "./broker.js";
 import {
+  AWAITING_FINAL_REPLY_IDLE_MS,
+  awaitingFinalReplyExitReason,
   applyInvocationStatusPatch,
   compareLocalEndpointPreference,
   dispatchAckStrategyForEndpoint,
@@ -726,5 +728,55 @@ describe("broker local invocation helpers", () => {
       isInvocationActive: () => false,
       now: 10_000 + STALE_WORKING_FLIGHT_NO_ENDPOINT_GRACE_MS,
     })).toBe("target agent agent-1 has no registered endpoint after 120s");
+  });
+});
+
+describe("a flight awaiting its task reply", () => {
+  const since = 1_000_000;
+  const awaiting = (input: Partial<FlightRecord> = {}) => testFlight({
+    id: "awaiting", state: "waiting", startedAt: since - 60_000,
+    metadata: { completion: { version: 1, revision: 0, obligations: [], awaitingFinal: true }, awaitingFinalSince: since },
+    ...input,
+  });
+  const snapshotWith = (endpoints: AgentEndpoint[], agent: Partial<AgentDefinition> = {}) => createInMemoryControlRuntime({
+    agents: { "agent-1": testAgent(agent) },
+    endpoints: Object.fromEntries(endpoints.map((endpoint) => [endpoint.id, endpoint])),
+    invocations: { "invocation-1": testInvocation({ metadata: { completion: { mode: "explicit" }, completionEndpointId: "endpoint-1" } }) },
+    flights: {},
+  }, { localNodeId: "node-1" }).snapshot();
+  const tmux = (input: Partial<AgentEndpoint> = {}) => testEndpoint({ harness: "claude", transport: "tmux", ...input });
+  const active = { isInvocationActive: () => true };
+
+  test("exits when its session is gone, even though the broker counts it active", () => {
+    const snapshot = snapshotWith([]);
+    expect(awaitingFinalReplyExitReason(snapshot, awaiting(), since + 10 * 60_000))
+      .toBe("the session for agent-1 is gone; no task reply can arrive");
+    expect(staleWorkingFlightReason(snapshot, awaiting(), { ...active, now: since + 10 * 60_000 }))
+      .toContain("no task reply can arrive");
+  });
+
+  test("exits when its endpoint stopped or its agent was retired", () => {
+    expect(awaitingFinalReplyExitReason(snapshotWith([tmux({ state: "offline" })]), awaiting(), since + 1))
+      .toBe("endpoint endpoint-1 is offline; no task reply can arrive");
+    expect(awaitingFinalReplyExitReason(snapshotWith([tmux()], { metadata: { retiredFromFleet: true } }), awaiting(), since + 1))
+      .toContain("was retired from the fleet");
+  });
+
+  test("waits while its session is idle within the window, then exits", () => {
+    const snapshot = snapshotWith([tmux()]);
+    expect(awaitingFinalReplyExitReason(snapshot, awaiting(), since + AWAITING_FINAL_REPLY_IDLE_MS - 1)).toBeNull();
+    expect(awaitingFinalReplyExitReason(snapshot, awaiting(), since + AWAITING_FINAL_REPLY_IDLE_MS))
+      .toBe("the session ended its turn without a task reply and stayed idle for 30 min");
+  });
+
+  test("a new turn in its session restarts the window", () => {
+    const snapshot = snapshotWith([tmux({ state: "active", metadata: { lastStartedAt: since + 20 * 60_000 } })]);
+    expect(awaitingFinalReplyExitReason(snapshot, awaiting(), since + AWAITING_FINAL_REPLY_IDLE_MS)).toBeNull();
+  });
+
+  test("a running or ordinary waiting flight is not its concern", () => {
+    const snapshot = snapshotWith([]);
+    expect(awaitingFinalReplyExitReason(snapshot, awaiting({ state: "running" }), since + AWAITING_FINAL_REPLY_IDLE_MS)).toBeNull();
+    expect(awaitingFinalReplyExitReason(snapshot, awaiting({ metadata: {} }), since + AWAITING_FINAL_REPLY_IDLE_MS)).toBeNull();
   });
 });

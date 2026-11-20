@@ -315,9 +315,17 @@ export class BrokerFlightLifecycleService {
             || !explicitReplyMatchesFlight(reply, invocation, previous, this.options.runtime.snapshot().flights, this.options.journal.getFlight?.bind(this.options.journal))) {
             if (flightToRecord.metadata?.completedByBrokerReply === true) return;
             const { resultReply: _result, failureStage: _failure, ...metadata } = flightToRecord.metadata ?? {};
+            // Keep the turn's own output: if no task reply ever arrives, the
+            // flight fails with it instead of losing it.
+            const awaitingFinalOutput = flightToRecord.output ?? previous.metadata?.awaitingFinalOutput;
+            // A repeated report of the same turn end keeps the clock it started.
+            const repeatedSince = previous.state === "waiting" && completion.awaitingFinal === true
+              ? previous.metadata?.awaitingFinalSince : undefined;
+            const awaitingFinalSince = typeof repeatedSince === "number" ? repeatedSince : this.now();
             flightToRecord = { ...flightToRecord, state: "waiting", completedAt: undefined, output: undefined, error: undefined,
               summary: "Execution ended; awaiting an explicit final reply.",
-              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true } } };
+              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true }, awaitingFinalSince,
+                ...(awaitingFinalOutput !== undefined ? { awaitingFinalOutput } : {}) } };
           }
         }
       }
@@ -487,8 +495,10 @@ export class BrokerFlightLifecycleService {
       }
 
       const agent = snapshot.agents[flight.targetAgentId] as AgentDefinition | undefined;
+      const unrepliedOutput = flight.metadata?.awaitingFinalOutput;
       const reconciledFlight: FlightRecord = {
         ...flight,
+        ...(typeof unrepliedOutput === "string" && unrepliedOutput ? { output: unrepliedOutput } : {}),
         state: "failed",
         summary: `${agent?.displayName ?? flight.targetAgentId} did not finish cleanly.`,
         error: `Stale running flight reconciled: ${reason}`,
