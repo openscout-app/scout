@@ -23,6 +23,7 @@ import {
   createBrokerHttpRouter,
   type BrokerHttpRouterDeps,
 } from "./broker-http-router.js";
+import { RolePassError } from "./role-pass-scheduler.js";
 import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
 import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
@@ -1166,7 +1167,28 @@ describe("createBrokerHttpRouter", () => {
 
       const read = await requestRouter(harness, "GET", "/v1/roles/slots?roleId=pm");
       expect(read.response.status).toBe(200);
-      expect(read.body).toMatchObject({ slots: [{ assignment: { id: assignmentId }, slot: { version: 1 }, behind: null }] });
+      expect(read.body).toMatchObject({ slots: [{ assignment: { id: assignmentId }, slot: { version: 1 }, behind: null, pass: null }] });
+
+      const noPasses = await requestRouter(harness, "POST", `${path}/pass`);
+      expect(noPasses.response.status).toBe(503);
+
+      const ensured: string[] = [];
+      const passing = createHarness({
+        openRolesDb: () => db,
+        runningRolePass: () => ({ flightId: "flight-pass" }),
+        ensureRolePass: async (id) => {
+          ensured.push(id);
+          if (id !== assignmentId) throw new RolePassError(404, `No active assignment ${id} with a pass.`);
+          return { flightId: "flight-pass", started: false, behind: true };
+        },
+      });
+      const ensure = await requestRouter(passing, "POST", `${path}/pass`);
+      expect(ensure.response.status).toBe(200);
+      expect(ensure.body).toEqual({ flightId: "flight-pass", started: false, behind: true });
+      expect((await requestRouter(passing, "POST", "/v1/roles/slots/role-missing/pass")).response.status).toBe(404);
+      expect(ensured).toEqual([assignmentId, "role-missing"]);
+      const withPass = await requestRouter(passing, "GET", "/v1/roles/slots?roleId=pm");
+      expect(withPass.body).toMatchObject({ slots: [{ pass: { flightId: "flight-pass" } }] });
     } finally {
       db.close();
     }

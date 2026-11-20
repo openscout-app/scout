@@ -6,7 +6,7 @@ import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
+import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -117,6 +117,7 @@ import { BrokerDurableActionHttpService } from "./broker-durable-action-http-ser
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
 import { bootstrapSecretRedaction } from "./secret-redaction-bootstrap.js";
 import { applyRoleLifecycleForTerminalFlight } from "./role-lifecycle.js";
+import { RolePassService } from "./role-pass-service.js";
 import { BrokerRepoTailService } from "./broker-repo-tail-service.js";
 import { BrokerRendezvousService } from "./broker-rendezvous-service.js";
 import { BrokerOperatorAttentionService } from "./broker-operator-attention-service.js";
@@ -451,6 +452,8 @@ const healthResponder = new BrokerHealthResponder({
 // scoutd watches the runtime's memory; when it asks, the runtime says what it holds.
 installMemorySnapshot({ role: "scout-broker", probes: { tail: () => tailMemoryStats() } });
 let nodeId = process.env.OPENSCOUT_NODE_ID?.trim() ?? "";
+// Declared early: role passes open it from the event path during startup.
+let rolesControlPlaneDb: import("bun:sqlite").Database | null = null;
 const tailnetWebHosts = readTailscaleSelfWebHostsSync();
 // The named web doorway this node answers for — same resolution the local edge
 // and the web server use for `advertisedHost`. Peers read it to open this
@@ -1305,9 +1308,32 @@ type LegacyRelayMessage = {
   channel?: string;
 };
 
+// Role passes (the PM's summary): coalesce work changes into one ask to the
+// holder, and write its answer to the slot when the pass ends.
+const rolePasses = sqliteDisabled ? null : new RolePassService({
+  nodeId,
+  openDb: () => openRolesControlPlaneDb(),
+  work: workLifecycles,
+  runtime,
+  invocations: () => Object.values(runtime.snapshot().invocations),
+  deliver: (request) => deliveryAcceptanceService.accept(request),
+  publish: publishEphemeralRuntimeEvent,
+  warn: (message, error) => console.warn(message, error ?? ""),
+});
+
+function publishEphemeralRuntimeEvent(event: ControlEvent): void {
+  controlStreams.streamEphemeralEvent(event);
+  publishEphemeralControlEvent(event);
+}
+
 runtime.subscribe((event) => {
   controlStreams.streamEvent(event);
   publishControlEvent(event);
+  try {
+    rolePasses?.noteEvent(event);
+  } catch (error) {
+    console.warn("[openscout-runtime] role pass scheduling failed", error);
+  }
   if (event.kind === "agent.registered" || event.kind === "agent.endpoint.upserted") {
     scheduleAgentRosterReconcile();
   }
@@ -1607,6 +1633,8 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
       const db = new Database(dbPath);
       try {
         db.exec("PRAGMA busy_timeout = 2500;");
+        const passNote = rolePasses?.applyTerminalFlight(db as never, flight, invocation);
+        if (passNote) console.log(`[openscout-runtime] ${passNote}`);
         const result = applyRoleLifecycleForTerminalFlight(db as never, {
           flight,
           invocation,
@@ -3827,13 +3855,11 @@ const routeRequest = createBrokerHttpRouter({
     }
   },
   openRolesDb: openRolesControlPlaneDb,
-  publishEphemeralEvent: (event) => {
-    controlStreams.streamEphemeralEvent(event);
-    publishEphemeralControlEvent(event);
-  },
+  publishEphemeralEvent: publishEphemeralRuntimeEvent,
+  runningRolePass: (assignmentId) => rolePasses?.runningPass(assignmentId) ?? null,
+  ...(rolePasses ? { ensureRolePass: (assignmentId: string) => rolePasses.ensure(assignmentId) } : {}),
 });
 
-let rolesControlPlaneDb: import("bun:sqlite").Database | null = null;
 function openRolesControlPlaneDb() {
   if (sqliteDisabled) return null;
   try {
