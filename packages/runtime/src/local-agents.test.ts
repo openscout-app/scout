@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS,
+  claudeInstanceScoutMcpArgs,
   SCOUT_MESSAGE_ATTACHMENTS_CONTEXT_KEY,
   SUPPORTED_LOCAL_AGENT_HARNESSES,
   SUPPORTED_SCOUT_HARNESSES,
@@ -1657,5 +1658,37 @@ describe("a session Scout continues itself", () => {
     const place = { via: "scout-app", location: "the ChatGPT app", transcriptOffset: 10 } as const;
     expect(flatSessionWasTypedInPlace({ phase: "typing", since: 1, at: 2, ...place })).toBe(true);
     expect(flatSessionWasTypedInPlace({ phase: "typed", since: 1, at: 2, ...place })).toBe(true);
+  });
+});
+
+describe("claudeInstanceScoutMcpArgs", () => {
+  const cli = "'/opt/bin/bun' '/repo/packages/cli/src/main.ts'";
+
+  test("a non-prod instance gives its Claude agents a scout MCP that reaches it", () => {
+    const args = claudeInstanceScoutMcpArgs({ OPENSCOUT_INSTANCE: "dev-board" }, cli);
+    expect(args[0]).toBe("--mcp-config");
+    expect(JSON.parse(args[1]!)).toEqual({
+      mcpServers: {
+        scout: {
+          type: "stdio",
+          command: "/bin/sh",
+          args: ["-c", `exec ${cli} mcp`],
+          env: { OPENSCOUT_CLIENT_INSTANCE: "dev-board" },
+        },
+      },
+    });
+  });
+
+  test("prod agents keep the user's shared scout MCP", () => {
+    expect(claudeInstanceScoutMcpArgs({}, cli)).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs({ OPENSCOUT_INSTANCE: "prod" }, cli)).toEqual([]);
+  });
+
+  test("an agent's own MCP config, or no runtime CLI, adds nothing", () => {
+    const env = { OPENSCOUT_INSTANCE: "dev-board" };
+    expect(claudeInstanceScoutMcpArgs(env, cli, ["--mcp-config", "/tmp/mcp.json"])).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs(env, cli, ["--mcp-config=/tmp/mcp.json"])).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs(env, cli, ["--strict-mcp-config"])).toEqual([]);
+    expect(claudeInstanceScoutMcpArgs(env, null)).toEqual([]);
   });
 });
