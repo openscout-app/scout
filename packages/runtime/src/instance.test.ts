@@ -118,6 +118,33 @@ describe("derivation table", () => {
     }
   });
 
+  test("OPENSCOUT_INSTANCE_HOST_LABEL renames a non-prod node, never prod", () => {
+    const dev = deriveOpenScoutInstanceLayout({
+      ...base,
+      env: { OPENSCOUT_INSTANCE: "film", OPENSCOUT_INSTANCE_HOST_LABEL: "Studio.local" },
+    });
+    expect(dev).toMatchObject({
+      hostLabel: "studio",
+      nodeName: "studio-film",
+      nodeQualifier: "studio-film",
+      nodeId: "studio-film-openscout",
+      serviceLabel: "app.openscout.film",
+    });
+    expect(dev.root).toBe(`${HOME}/.openscout/instances/film`);
+
+    const blank = deriveOpenScoutInstanceLayout({
+      ...base,
+      env: { OPENSCOUT_INSTANCE: "film", OPENSCOUT_INSTANCE_HOST_LABEL: "  " },
+    });
+    expect(blank.nodeName).toBe("archie-film");
+
+    const prod = deriveOpenScoutInstanceLayout({
+      ...base,
+      env: { OPENSCOUT_INSTANCE: "prod", OPENSCOUT_INSTANCE_HOST_LABEL: "studio" },
+    });
+    expect(prod.nodeQualifier).toBe("archie");
+  });
+
   test("OPENSCOUT_INSTANCE_ROOT relocates the whole instance", () => {
     const layout = deriveOpenScoutInstanceLayout({
       ...base,
