@@ -10,6 +10,8 @@ const uuid = "61d4a135-ee83-46b0-b598-9ec8ee75c913";
 const surface: RexSurface = { backend: "rex", sessionId: "session:" + uuid, windowId: "window:" + uuid, blockId: "block:" + uuid };
 const originalPath = process.env.PATH;
 let dir: string;
+// Every fake Rex call spawns a process. Polling sends make about a dozen.
+const SEND_TIMEOUT_MS = 30_000;
 
 // Exercise the real argv/stdin boundary, including Rex's creation receipt and
 // the two independent checks of who owns input. No terminal server is needed.
@@ -106,7 +108,7 @@ test("delivers literal multiline input to the bound process after a composer rec
   const keys = (await calls()).filter(argv => argv.includes("send-key"));
   expect(keys).toHaveLength(1);
   expect(keys[0]?.slice(2)).toEqual(["send-key", "-s", surface.sessionId, "-b", surface.blockId, "Enter"]);
-});
+}, SEND_TIMEOUT_MS);
 
 test("never submits to a replaced process or a startup picker", async () => {
   await expect(sendRexPrompt(surface, 34567, "claude", "task")).rejects.toThrow("does not own input");
@@ -118,13 +120,13 @@ test("never submits to a replaced process or a startup picker", async () => {
   await expect(sendRexPrompt(surface, 12345, "claude", "task")).rejects.toThrow("composer");
   expect((await calls()).some(argv => argv.includes("send-key"))).toBe(false);
   expect((await calls()).some(argv => argv.includes("send"))).toBe(false);
-});
+}, SEND_TIMEOUT_MS);
 
 test("never pastes beside unsent composer text", async () => {
   await writeFile(join(dir, "mode"), "unsent");
   await expect(sendRexPrompt(surface, 12345, "claude", "task")).rejects.toThrow("no empty, ready claude composer");
   expect((await calls()).some(argv => argv.includes("send") || argv.includes("send-key"))).toBe(false);
-});
+}, SEND_TIMEOUT_MS);
 
 test("erases an unconfirmed marker so the next ask finds an empty composer", async () => {
   await writeFile(join(dir, "mode"), "slow");
@@ -134,7 +136,7 @@ test("erases an unconfirmed marker so the next ask finds an empty composer", asy
   await writeFile(join(dir, "mode"), "composer");
   await sendRexPrompt(surface, 12345, "claude", "task");
   expect((await readFile(join(dir, "composer"), "utf8")).match(/\[Scout [0-9a-f]+\]/g)).toHaveLength(1);
-});
+}, SEND_TIMEOUT_MS);
 
 test("keeps waiting for a delivered ask when a Rex read fails, and ends it when the harness exits", async () => {
   const endpoint = {
@@ -148,4 +150,4 @@ test("keeps waiting for a delivered ask when a Rex read fails, and ends it when 
   await writeFile(join(dir, "mode"), "timeout");
   const dead = { ...endpoint, metadata: { ...endpoint.metadata, livePid: 2 ** 22 + 7 } } as AgentEndpoint;
   expect(await attachedLiveTerminalExitedError(dead, "gone")).toBe("gone");
-});
+}, SEND_TIMEOUT_MS);
