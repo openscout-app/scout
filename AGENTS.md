@@ -84,7 +84,10 @@ person whose machine it is.
   feedback when authorized. Public issues are not an agent work queue.
 - Follow [branches and promotion](CONTRIBUTING.md#branches-and-promotion).
   Start topic worktrees from fork `origin/main` and open pull requests against
-  `arach/scout:main`. Drafts, reviews and fixes stay on the fork. When a fork
+  `arach/scout:main` with `gh pr create --repo arach/scout --base main`. A
+  plain `gh pr create` in a fork checkout targets the parent repository,
+  `openscout-app/scout`, unless `gh repo set-default arach/scout` has been run
+  in that clone. Drafts, reviews and fixes stay on the fork. When a fork
   pull request merges, promote it the same day with a pull request from
   `arach:main` into `openscout-app/scout:main`, then fast-forward fork `main`.
   Never push topic branches or open topic pull requests on
