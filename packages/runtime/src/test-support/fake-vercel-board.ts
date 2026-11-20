@@ -112,6 +112,16 @@ export class FakeVercelBoard {
   private actor(): { actor: string; principal: string; profile: string | null } {
     return this.profile === null ? { actor: this.principal, principal: this.principal, profile: null } : { actor: `${this.principal}+${this.profile}`, principal: this.principal, profile: this.profile };
   }
+  /** Another worker claims and completes a task with its own result. */
+  completeAs(id: string, actor: string, result: string): void {
+    const grant = this.claimAs(id, actor);
+    const message = this.messages.get(id)!;
+    const task = message.task!;
+    if (task.epoch !== grant.epoch) throw new Error("fake: claim moved");
+    task.claim = null; task.state = "completed"; task.result = result;
+    this.bump(message, "task.completed", { id, epoch: task.epoch, result, by: this.author(actor) });
+    this.readyDependents(id);
+  }
   /** Cancel a task outside Scout, ending any claim. */
   cancel(id: string, reason?: string): void {
     const message = this.messages.get(id)!;

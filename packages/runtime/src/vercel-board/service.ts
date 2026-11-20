@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  VERCEL_BOARD_ADAPTER_ID, VERCEL_BOARD_DEFAULT_BOARD, VERCEL_BOARD_LABELS, vercelBoardCanHeader, isVercelBoardChannelPath, isVercelBoardPrincipal, validateVercelBoardCredentialReference,
+  VERCEL_BOARD_ADAPTER_ID, VERCEL_BOARD_DEFAULT_BOARD, VERCEL_BOARD_LABELS, vercelBoardCanHeader, isVercelBoardChannelPath, isVercelBoardPrincipal, isVercelBoardProfileName, vercelBoardRoles, vercelBoardRoleActor, validateVercelBoardCredentialReference,
   validateVercelBoardVercelTarget, vercelTargetOfUrl, vercelTeamBoardUrl, type VercelBoardTarget,
   type ActorIdentity, type VercelBoardClaimRequest, type VercelBoardClaimResponse, type VercelBoardConnectRequest, type VercelBoardConnectResponse,
   type VercelBoardConnectionConfig, type VercelBoardConnectionState, type VercelBoardConnectionStatus, type VercelBoardPlanRequest, type VercelBoardPlanResponse,
@@ -19,7 +19,7 @@ import { VercelBoardCustodianError, VercelBoardCustodianLease, claimBoardCustodi
 import { VercelBoardMirror, vercelBoardHandoffRecord, vercelBoardOriginOf, type VercelBoardTaskEventRow } from "./mirror.js";
 import { VercelBoardOutbox } from "./outbox.js";
 import { vercelBoardActorId, vercelBoardPrincipalOf, vercelBoardScopedId, vercelBoardTaskWorkItem, vercelBoardWorkId, mergeBoardProjection } from "./projection.js";
-import { VercelBoardCursorConflictError, VercelBoardStore } from "./store.js";
+import { VercelBoardCursorConflictError, VercelBoardStore, type VercelBoardCustodyRow } from "./store.js";
 import type { VercelBoardWireMessage } from "./wire.js";
 import { VercelBoardWorkerError, VercelBoardWorkerSupervisor, VercelBoardWorkerTransport, type VercelBoardWorkerOptions } from "./worker.js";
 
@@ -94,6 +94,16 @@ const OUTBOX_MS = 15_000;
 const RECONCILE_MS = 10 * 60_000;
 const LEASE_RENEW_MS = 10_000;
 const MAX_PLAN_TASKS = 50;
+/**
+ * The role a task is kept for, read from its `for`: null when it is kept for
+ * nobody, the role when `for` is one of this connection's role actors, and
+ * undefined when it is kept for an actor Scout does not write as.
+ */
+export function vercelBoardRoleOf(config: Pick<VercelBoardConnectionConfig, "principal" | "profile" | "roles">, forActor: string | null | undefined): string | null | undefined {
+  if (!forActor) return null;
+  return vercelBoardRoles(config).find(role => vercelBoardRoleActor(config, role) === forActor);
+}
+
 /** `startedBy` on a claim the runtime made by matching a task to a role, not one the operator started. */
 export const VERCEL_BOARD_MATCHER_ID = "scout:vercel-board-matcher";
 
@@ -146,7 +156,7 @@ export class BrokerVercelBoardService {
     if (!config.vercel) throw new VercelBoardServiceError(400, "invalid_connection", "A team board connection must name its team and board.");
     return new VercelBoardWorkerSupervisor({
       target: memory ? { kind: "memory" } : { kind: "vercel", team: config.vercel.team, board: config.vercel.board },
-      profile: config.profile, can: vercelBoardCanHeader(config),
+      profile: config.profile, profiles: vercelBoardRoles(config), can: vercelBoardCanHeader(config),
       credential: memory ? null : config.credential,
       readToken: () => credential.token(),
     }, options);
@@ -468,11 +478,24 @@ export class BrokerVercelBoardService {
       }
       const task = root.task;
       const mine = task.state === "completed" ? live.store.custodyForEpoch(live.config.id, id, task.epoch) : null;
-      const result = mine?.state === "settled" && mine.outcome === "completed" ? mine.result ?? task.result : task.result;
+      const ours = mine?.state === "settled" && mine.outcome === "completed";
+      // A result reaches the agent only when Scout wrote it, or an allowlisted principal finished the task.
+      const finisher = task.state === "completed" && !ours ? this.completedBy(live, id, task.epoch) : null;
+      if (task.state === "completed" && !ours && (!finisher || !live.config.ownerAllowlist.includes(finisher))) {
+        lines.push("", `Dependency ${id} (completed; channel ${root.channel}): ${finisher ? `finished by ${finisher}, who is not on the allowlist` : "Scout does not know who finished it"}. Its result is withheld.`);
+        continue;
+      }
+      const result = ours ? mine!.result ?? task.result : task.result;
       lines.push("", `Dependency ${id} (${task.state}; channel ${root.channel}):`,
         ...(result != null ? result.split(/\r\n|\r|\n/).map(line => `> ${line}`) : ["No result was recorded."]));
     }
     return lines;
+  }
+
+  /** The principal that completed a task at an epoch, from the mirror's event chain. */
+  private completedBy(live: LiveConnection, taskId: string, epoch: number): string | null {
+    const event = live.mirror.chain(live.config.id, taskId).filter(entry => entry.kind === "completed" && (entry.epoch === null || entry.epoch === epoch)).at(-1);
+    return event?.actor?.principal ?? null;
   }
 
   private async dispatch(live: LiveConnection, input: { taskId: string; workId: string; agentId: string; startedBy: string; profile?: string; task: VercelBoardWireMessage; attemptId: string; dependencyContext?: { channel: string; owner: string; needs: string[]; lines: string[] } }): Promise<{ flightId: string }> {
@@ -557,31 +580,44 @@ export class BrokerVercelBoardService {
     const root = await live.transport.message(request.taskId);
     if (!root?.task || root.re !== null) throw new VercelBoardServiceError(404, "not_a_task", `Board message ${request.taskId} is not a task root.`);
     if (!live.config.channels.includes(root.channel)) throw new VercelBoardServiceError(409, "channel_not_followed", `Task ${request.taskId} is in ${root.channel}, which this connection does not follow.`);
+    // The task's owner and the root's author: either may have put the text there.
     const owner = vercelBoardPrincipalOf(root.task.owner);
-    if (!live.config.ownerAllowlist.includes(owner) && !request.confirmOwner) {
-      throw new VercelBoardServiceError(409, "owner_not_allowlisted", `Task ${request.taskId} is owned by ${owner}, who is not on the allowlist. Its text did not come from you.`,
+    const author = root.by?.principal ?? owner;
+    const outsider = [owner, author].find(principal => !live.config.ownerAllowlist.includes(principal));
+    if (outsider && !request.confirmOwner) {
+      throw new VercelBoardServiceError(409, "owner_not_allowlisted", `Task ${request.taskId} was ${outsider === owner ? "made" : "written"} by ${outsider}, who is not on the allowlist. Its text did not come from you.`,
         "Read the task on the board first. To dispatch it anyway, claim again with confirmOwner set.");
     }
     if (root.task.state !== "ready") throw new VercelBoardServiceError(409, "not_claimable", `Task ${request.taskId} is ${root.task.state}, not ready.`);
+    const role = vercelBoardRoleOf(live.config, root.task.for);
+    if (role === undefined) throw new VercelBoardServiceError(409, "task_assigned", `Task ${request.taskId} is kept for ${root.task.for}, which Scout does not write as. Roles: ${vercelBoardRoles(live.config).join(", ")}.`);
+    const { row, workId } = await this.startClaim(live, root, { agentId: request.agentId, startedBy: reportedCallerId ?? this.options.operatorId, profile: role ?? live.config.profile });
+    return { connectionId: live.config.id, taskId: root.id, conversationId: vercelBoardRoomId(live.config.id, root.channel), ...(workId ? { workId } : {}), epoch: row.epoch!, until: row.until!, agentId: row.agentId };
+  }
+
+  /** Claim a checked task as a role and hand it to an agent. The operator's claim and the matcher share it. */
+  private async startClaim(live: LiveConnection, root: VercelBoardWireMessage, input: { agentId: string; startedBy: string; profile: string }): Promise<{ row: VercelBoardCustodyRow; workId: string }> {
     // Resolve inputs before starting Board's short first lease.
-    const needs = root.task.needs;
-    const dependencyContext = { channel: root.channel, owner: root.task.owner, needs, lines: await this.dependencyContext(live, needs) };
+    const needs = root.task!.needs;
+    const dependencyContext = { channel: root.channel, owner: root.task!.owner, needs, lines: await this.dependencyContext(live, needs) };
     this.take(live, root);
     // No work item unless the operator promoted the task.
     const workId = live.mirror.promotion(live.config.id, root.id) ?? "";
     let row;
     try {
-      row = await live.custody.claim({ taskId: root.id, workId, agentId: request.agentId, startedBy: reportedCallerId ?? this.options.operatorId, dependencyContext });
+      row = await live.custody.claim({ taskId: root.id, workId, agentId: input.agentId, startedBy: input.startedBy, profile: input.profile, dependencyContext });
     } catch (error) {
       if (error instanceof VercelBoardClaimError) throw new VercelBoardServiceError(error.status, error.code, error.message);
       throw error;
     }
+    // Name the Scout agent on the task: every role is one principal, so the board alone cannot say which agent holds it.
+    await live.transport.as(input.profile).labels(root.id, { set: agentLabel(input.agentId) }).catch(() => undefined);
     if (workId) {
       // Show the agent as the owner now; the claim event re-projects the same way.
       const claimed = await live.transport.message(root.id).catch(() => null);
       if (claimed?.task) await this.projectRoot(live, claimed);
     }
-    return { connectionId: live.config.id, taskId: root.id, conversationId: vercelBoardRoomId(live.config.id, root.channel), ...(workId ? { workId } : {}), epoch: row.epoch!, until: row.until!, agentId: row.agentId };
+    return { row, workId };
   }
 
   /** A read straight from the board, of a mirrored channel: newer than the copy means the copy takes it. */
@@ -665,6 +701,13 @@ export class BrokerVercelBoardService {
 
   // ---- planning ---------------------------------------------------------
 
+  /** A plan's `for`: a role name, or the role's full actor. Anything else is refused, never guessed. */
+  private forActor(live: LiveConnection, value: string, index: number): string {
+    const role = vercelBoardRoles(live.config).find(name => name === value || vercelBoardRoleActor(live.config, name) === value);
+    if (!role) throw new VercelBoardServiceError(400, "invalid_request", `tasks[${index}].for must be one of this connection's roles: ${vercelBoardRoles(live.config).join(", ")}.`);
+    return vercelBoardRoleActor(live.config, role);
+  }
+
   /**
    * The only path that creates a Board task from Scout. It writes Board tasks
    * and nothing else: they show in the channel's room through the mirror, and
@@ -705,7 +748,7 @@ export class BrokerVercelBoardService {
         // Each planned task names the Scout task that planned it, and the acting agent.
         labels: { ...labels, [VERCEL_BOARD_LABELS.plan]: request.planningTaskId.slice(0, 256), ...agentLabel(request.actorId) },
         ...(task.needs?.length ? { needs: task.needs } : {}),
-        ...(task.for ? { for: task.for } : {}),
+        ...(task.for ? { for: this.forActor(live, task.for, index) } : {}),
       };
     });
     let roots: VercelBoardWireMessage[];
@@ -753,10 +796,19 @@ export class BrokerVercelBoardService {
     if (request.mirror !== undefined && (!Array.isArray(request.mirror) || !request.mirror.every(channel => channels.includes(channel)))) {
       throw new VercelBoardServiceError(400, "invalid_request", `mirror must name channels from: ${channels.join(", ")}.`);
     }
+    const profile = request.profile ?? VERCEL_BOARD_PROFILE;
+    if (request.roles !== undefined && (!Array.isArray(request.roles) || !request.roles.every(isVercelBoardProfileName))) {
+      throw new VercelBoardServiceError(400, "invalid_request", "roles must be Board profile names.");
+    }
+    if (request.selfServe !== undefined && (!Array.isArray(request.selfServe) || !request.selfServe.every(channel => channels.includes(channel)))) {
+      throw new VercelBoardServiceError(400, "invalid_request", `selfServe must name channels from: ${channels.join(", ")}.`);
+    }
     const id = request.id ?? `vercel-board-${createHash("sha256").update(target.url).digest("hex").slice(0, 12)}`;
     const draft: VercelBoardConnectionConfig = {
       id, url: target.url, transport: target.transport, ...(target.transport === "vercel_api" ? { vercel: target.vercel } : {}),
-      principal: "pending:pending", profile: request.profile ?? VERCEL_BOARD_PROFILE,
+      principal: "pending:pending", profile,
+      ...(request.roles !== undefined ? { roles: [...new Set([profile, ...request.roles])] } : {}),
+      ...(request.selfServe !== undefined ? { selfServe: [...new Set(request.selfServe)] } : {}),
       channels, ...(request.mirror !== undefined ? { mirror: [...new Set(request.mirror)] } : {}), probeChannel, ownerAllowlist: [], custodianNodeId: this.options.nodeId, credential: request.credential, connectedAt: this.now(),
     };
     const credential = new VercelBoardCredential(draft.credential, this.options.credentialOptions);
