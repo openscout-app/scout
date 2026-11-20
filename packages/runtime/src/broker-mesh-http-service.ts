@@ -2,7 +2,7 @@ import { MessageIdConflictError } from "./broker-message-idempotency.js";
 import { stampForwardedAskContext } from "./ask-context.js";
 import { readRuntimeMessage } from "./broker-message-records.js";
 import { isDeepStrictEqual } from "node:util";
-import { canonicalMessageRecord } from "./message-record-canonical.js";
+import { canonicalMessageIdentity } from "./message-record-canonical.js";
 import type {
   AgentDefinition,
   AgentEndpoint,
@@ -405,5 +405,5 @@ export class BrokerMeshHttpService {
 function sameCanonicalMessage(existing: MessageRecord, incoming: MessageRecord): boolean {
   // SQL/history reads normalize optional fields and child-table ordering.
   // Compare the same persisted representation on both sides of a retry.
-  return isDeepStrictEqual(canonicalMessageRecord(existing), canonicalMessageRecord(incoming));
+  return isDeepStrictEqual(canonicalMessageIdentity(existing), canonicalMessageIdentity(incoming));
 }

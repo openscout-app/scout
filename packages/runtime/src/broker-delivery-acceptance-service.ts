@@ -348,7 +348,7 @@ export class BrokerDeliveryAcceptanceService {
 
   async accept(
     payload: ScoutDeliverRequest,
-    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean } = {},
+    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean; executionPayload?: ScoutDeliverRequest } = {},
   ): Promise<ScoutDeliverResponse> {
     const response = await this.acceptDelivery(payload, options);
     // This is live read-model status, not part of the durable receipt. In
@@ -364,29 +364,30 @@ export class BrokerDeliveryAcceptanceService {
     options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean } = {},
   ): Promise<ScoutDeliverResponse> {
     throwIfAborted(options.signal);
-    validateTaskDelivery(payload, this.options.operatorActorId);
-    this.options.checkTaskPeer?.(payload);
-    validateSessionInputRequest(payload);
-    if (payload.sessionDelivery && (!this.options.requestReceipts || !this.options.submitSessionInput || !this.options.upsertSessionInputActor)) {
+    const execution = options.executionPayload ?? payload;
+    validateTaskDelivery(execution, this.options.operatorActorId);
+    this.options.checkTaskPeer?.(execution);
+    validateSessionInputRequest(execution);
+    if (execution.sessionDelivery && (!this.options.requestReceipts || !this.options.submitSessionInput || !this.options.upsertSessionInputActor)) {
       throw new Error("session_input_unsupported: broker requires durable session input receipts");
     }
     const admission = this.options.commandAdmission ?? this.defaultAdmission;
     if (options.receiptReserved) {
-      const release = options.admissionReserved ? undefined : admission.reserve(payload);
-      try { return await this.acceptCommand(payload); } finally { release?.(); }
+      const release = options.admissionReserved ? undefined : admission.reserve(execution);
+      try { return await this.acceptCommand(execution); } finally { release?.(); }
     }
-    if (payload.requestId && this.options.requestReceipts) {
-      const { requesterId } = callerContextForDelivery(payload, {
+    if (execution.requestId && this.options.requestReceipts) {
+      const { requesterId } = callerContextForDelivery(execution, {
         operatorActorId: this.options.operatorActorId, nodeId: this.options.nodeId,
       });
       // Both transport paths enter this boundary. Once reserved, caller abort
       // stops waiting; it cannot interrupt the broker-owned durable command.
-      return this.options.requestReceipts.run(requesterId, payload.requestId, "deliver", payload,
-        () => this.acceptCommand(payload),
-        async () => this.recoverReceipt(requesterId, payload.requestId!), () => admission.reserve(payload));
+      return this.options.requestReceipts.run(requesterId, execution.requestId, "deliver", payload,
+        () => this.acceptCommand(execution),
+        async () => this.recoverReceipt(requesterId, execution.requestId!), () => admission.reserve(execution));
     }
-    const release = admission.reserve(payload);
-    try { return await this.acceptCommand(payload, options); } finally { release(); }
+    const release = admission.reserve(execution);
+    try { return await this.acceptCommand(execution, options); } finally { release(); }
   }
 
   /** Router-owned receipts must reserve capacity before writing their unknown ledger entry. */

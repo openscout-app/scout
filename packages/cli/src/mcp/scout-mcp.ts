@@ -5,6 +5,7 @@ import { readTaskImage } from "../cli/task-image.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
+import { registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
 import { registerDiffTools } from "./diff-tools.ts";
@@ -87,6 +88,7 @@ import {
   type ScoutManagedLocalSessionAttachment,
   updateScoutWorkItem,
   moveScoutWorkItem,
+  planScoutBoardTasks,
   reviewScoutWorkMove,
   readScoutWorkLifecycles,
   waitForScoutFlight,
@@ -613,6 +615,7 @@ type ScoutMcpDependencies = {
     input: ScoutWorkItemUpdate,
   ) => Promise<ScoutTrackedWorkItem | null>;
   moveWorkItem?: typeof moveScoutWorkItem;
+  planBoardTasks?: typeof planScoutBoardTasks;
   reviewWorkMove?: typeof reviewScoutWorkMove;
   readWorkLifecycles?: typeof readScoutWorkLifecycles;
   waitForFlight: (
@@ -5774,6 +5777,11 @@ export function createScoutMcpServer(options: {
       return { content: createTextContent(structuredContent), structuredContent };
     },
   );
+
+  registerVercelBoardPlanTool(server, {
+    plan: deps.planBoardTasks ?? planScoutBoardTasks,
+    resolveSender: async (senderId, currentDirectory) => resolveMcpSenderId(deps, senderId, resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory), env),
+  });
 
   server.registerTool(
     "work_review",

@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/vercel-board/worker.test.ts",
+  "symbol": "Bun.spawnSync",
+  "category": "test",
+  "reason": "probes each node on PATH once, with a 10s bound, to pick one whose node:sqlite can run the in-memory Board worker",
+  "owner": "runtime"
+}

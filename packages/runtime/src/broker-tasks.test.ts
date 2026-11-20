@@ -1,7 +1,7 @@
 import { TaskClosedError } from "@openscout/protocol";
 import { BrokerMeshHttpService } from "./broker-mesh-http-service.js";
 import { forwardMeshMessage } from "./mesh-forwarding.js";
-import { BrokerTaskService } from "./broker-tasks.js";
+import { BrokerTaskService, followupAudience } from "./broker-tasks.js";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
@@ -616,4 +616,14 @@ test("blocked replies are validated", async () => {
   await expect(answer({ waitingOn: { kind: "deploy", summary: "x" } })).rejects.toThrow("--waiting-on");
   await expect(answer({ waitingOn: { kind: "review", summary: " " } })).rejects.toThrow("--waiting-on");
   await expect(answer({ progress: true, waitingOn: { kind: "review", summary: "x" } })).rejects.toThrow("cannot be combined");
+});
+
+test("an answer to a flight waiting on a question or review wakes the worker; a permission wait or live turn refuses it", () => {
+  const invocation = { id: "inv-1", targetAgentId: "agent.reviewer", metadata: {} } as never;
+  const flight = (state: string, kind?: string) => ({ id: "flt-1", invocationId: "inv-1", state,
+    metadata: kind ? { waitingOn: { kind, summary: "Should it stay?", since: 1, replyMessageId: "msg-q" } } : {} }) as never;
+  expect(followupAudience(invocation, flight("waiting", "question"))).toEqual({ notify: ["agent.reviewer"], reason: "thread_reply" });
+  expect(followupAudience(invocation, flight("waiting", "review"))).toEqual({ notify: ["agent.reviewer"], reason: "thread_reply" });
+  expect(() => followupAudience(invocation, flight("waiting", "permission"))).toThrow("cannot add context to the active turn");
+  expect(() => followupAudience(invocation, flight("running"))).toThrow("cannot add context to the active turn");
 });

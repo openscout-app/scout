@@ -550,4 +550,19 @@ describe("permission supervisor lifecycle", () => {
     expect(h.states).toEqual(["running"]);
     expect(h.records.get("permission-1")).toMatchObject({ state: "closed", answeredById: "operator" });
   });
+
+  test("an operator decision preserves the request's root actor", async () => {
+    const h = harness();
+    const parent = { actorId: "agent", rootActorId: "agent", source: "unverified" as const };
+    const waiting = h.service.wait({ ...invocation, metadata: { attribution: parent } }, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async () => {},
+    });
+    await until(() => h.notifications.length === 1);
+    await h.service.decide("permission-1", "v", "once", undefined, { actorId: "operator", rootActorId: "operator", source: "local-admin" });
+    await waiting;
+    expect(h.records.get("permission-1")?.metadata?.permissionActuation).toMatchObject({
+      attribution: { actorId: "operator", rootActorId: "agent", source: "local-admin" },
+    });
+  });
 });
