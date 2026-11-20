@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { parseVercelBoardCommand } from "./vercel-board.ts";
+import { VERCEL_BOARD_VERBS } from "./integration.ts";
+import { parseVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
 
 test("connect names a team board by team and board, and the credential by reference", () => {
   const parsed = parseVercelBoardCommand(["connect", "--team", "team_abc", "--board", "scout", "--credential", "secret_cli:scout-vercel"]);
@@ -42,4 +43,10 @@ test("role declares the calling agent, or another agent as the operator", () => 
   expect(() => parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], {})).toThrow(/--agent/);
   const connect = parseVercelBoardCommand(["connect", "--team", "t", "--credential", "env:T", "--roles", "scout,reviewer", "--self-serve", "scout/work"], {});
   expect(connect.body).toMatchObject({ roles: ["scout", "reviewer"], selfServe: ["scout/work"] });
+});
+
+test("the integration command dispatches every verb the Board help names", () => {
+  const named = [...VERCEL_BOARD_HELP.matchAll(/^scout integration (\w+) vercel-board/gm)].map(match => match[1]);
+  expect(named).toContain("role");
+  expect(named.filter(verb => !VERCEL_BOARD_VERBS.has(verb))).toEqual([]);
 });

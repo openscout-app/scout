@@ -659,7 +659,10 @@ export class BrokerVercelBoardService {
   async match(live: LiveConnection): Promise<void> {
     const { config, store, mirror } = live;
     const channels = (config.selfServe ?? []).filter(channel => vercelBoardMirroredChannels(config).includes(channel));
-    if (!channels.length || live.matching || live.state !== "following") return;
+    // "connecting" lasts until the first long poll returns, up to FOLLOW_WAIT_SECONDS on a
+    // quiet board. The task is read from the board again before any claim, so only an error
+    // state stops the matcher.
+    if (!channels.length || live.matching || (live.state !== "following" && live.state !== "connecting")) return;
     const declared = store.declaredRoles(config.id);
     if (!declared.length) return;
     live.matching = true;
