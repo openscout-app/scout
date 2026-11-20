@@ -200,6 +200,15 @@ answers, and sends only to that process. The Requests page and Scoutbot share
 this API through `useRequestActions`. No background resume, fork, or project hook
 is installed.
 
+Operator decisions and dismissal require a verified local operator proof. Set
+`OPENSCOUT_ATTRIBUTION_KEY_FILE` on the runtime and CLI to an owner-only key, or
+use the existing local-admin key. Unauthenticated requests receive 403 with
+`operator_attribution_required`; loopback alone does not establish operator
+identity. Actuation metadata records the verified `attribution`, including the
+acting actor and the original root actor. Automatic supervisor decisions use the
+`system` source, and unsigned person claims become `local-unverified` instead of
+being credited to the operator.
+
 Managed requests first consult the permission supervisor, which uses the same
 `$OPENSCOUT_HOME/continuation-policy.json` project grants as Herdr continuation.
 With no grant, the default `ask` level changes nothing. A `workspace` grant lets

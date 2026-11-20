@@ -967,7 +967,7 @@ describe("createScoutMcpServer", () => {
     expect(receivedAsk?.harness).toBe("codex");
   });
 
-  test("ask schedules MCP reply notifications in opt-in notify mode", async () => {
+  test.each([false, true])("ask schedules opt-in notifications (work page unavailable: %s)", async (workPageUnavailable) => {
     let receivedWaitOptions: unknown;
     const { client } = await connectTestServer({
       resolveSenderId: async () => "operator.main",
@@ -975,12 +975,14 @@ describe("createScoutMcpServer", () => {
       scoutAskHandler: async () => ({
         ok: true,
         state: "queued",
+        ...(workPageUnavailable ? { workPageUnavailable: true as const } : {}),
         ids: {
           targetAgentId: "talkie.main",
           conversationId: "dm.operator.talkie",
           messageId: "msg-1",
           invocationId: "inv-1",
           flightId: "flight-1",
+          workId: "work-1",
         },
       }),
       getFlight: async () => ({
@@ -989,6 +991,7 @@ describe("createScoutMcpServer", () => {
         requesterId: "operator.main",
         targetAgentId: "talkie.main",
         state: "running",
+        metadata: { collaborationRecordId: "work-1" },
       }),
       waitForFlight: async (_baseUrl, _flightId, options) => {
         receivedWaitOptions = options;
@@ -1003,6 +1006,7 @@ describe("createScoutMcpServer", () => {
       },
     }, {
       OPENSCOUT_MCP_ENABLE_NOTIFICATIONS: "1",
+      OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
     });
 
     const notificationPromise = new Promise<{
@@ -1039,7 +1043,11 @@ describe("createScoutMcpServer", () => {
       },
     });
 
+    const workUrl = workPageUnavailable ? null : "http://scout.test/work/work-1";
     expect(result.structuredContent).toMatchObject({
+      ...(workPageUnavailable ? { workPageUnavailable: true } : {}),
+      followUrl: workUrl ?? "http://scout.test/agents/talkie.main?tab=observe",
+      links: { work: workUrl },
       ok: true,
       state: "queued",
       delivery: "mcp_notification",
@@ -1050,10 +1058,15 @@ describe("createScoutMcpServer", () => {
       ids: {
         targetAgentId: "talkie.main",
         flightId: "flight-1",
+        workId: "work-1",
       },
     });
+    if (workPageUnavailable) expect(result.content).toContainEqual(expect.objectContaining({
+      text: expect.stringContaining("Work was recorded, but its page is unavailable"),
+    }));
 
     const notification = await notificationPromise;
+    expect(notification.params).toMatchObject({ workUrl, links: { work: workUrl } });
     expect(notification.params.status).toBe("completed");
     expect(notification.params.flightId).toBe("flight-1");
     expect(notification.params.output).toBe("talkie replied");

@@ -27,6 +27,7 @@ export type BrokerHarness = {
   child: ReturnType<typeof Bun.spawn>;
   outputDrain: Promise<void>[];
   localAdminKey?: string;
+  attributionKey: string;
 };
 
 export type TestConversationIdentity = {
@@ -78,7 +79,9 @@ export function createBrokerDaemonTestHarness() {
   const harnesses = new Set<BrokerHarness>();
   const adminKeys = new Map<string, string>();
   const brokerKeys = new Map<string, string>();
+  const protectedLocalUrls = new Set<string>();
   const adminHeaders = async (url: string, method: string, path: string, body?: string, signal?: AbortSignal): Promise<Record<string, string>> => {
+    if (method === "GET" && !protectedLocalUrls.has(url)) return {};
     if (!adminKeys.has(url)) return {};
     if (!brokerKeys.has(url)) {
       const response = await fetch(url + "/v1/node", { signal });
@@ -145,8 +148,15 @@ export function createBrokerDaemonTestHarness() {
     }
     const baseUrl = buildDefaultBrokerUrl(DEFAULT_BROKER_HOST, port);
     const localAdminKey = input.protectedLocal ? randomBytes(32).toString("hex") : undefined;
+    const attributionKey = localAdminKey ?? randomBytes(32).toString("hex");
+    const attributionKeyFile = join(controlHome, "attribution-key");
+    writeFileSync(attributionKeyFile, attributionKey, { mode: 0o600 });
+    adminKeys.set(baseUrl, attributionKey);
     const adminKeyFile = join(controlHome, "admin-key");
-    if (localAdminKey) { writeFileSync(adminKeyFile, localAdminKey, { mode: 0o600 }); adminKeys.set(baseUrl, localAdminKey); }
+    if (localAdminKey) {
+      writeFileSync(adminKeyFile, localAdminKey, { mode: 0o600 });
+      protectedLocalUrls.add(baseUrl);
+    }
     const derivedNodeId = `node-${basename(controlHome).toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`;
     const child = Bun.spawn({
       cmd: [process.execPath, "run", "--preload", join(import.meta.dir, "broker-storage-preload.ts"),
@@ -158,6 +168,7 @@ export function createBrokerDaemonTestHarness() {
         OPENSCOUT_BROKER_HOST: DEFAULT_BROKER_HOST,
         OPENSCOUT_ADVERTISE_SCOPE: "local",
         OPENSCOUT_LOCAL_ADMIN_KEY_FILE: undefined,
+        OPENSCOUT_ATTRIBUTION_KEY_FILE: attributionKeyFile,
         OPENSCOUT_BROKER_PORT: String(port),
         OPENSCOUT_BROKER_URL: baseUrl,
         OPENSCOUT_BROKER_SOCKET_PATH: join(controlHome, "broker.sock"),
@@ -201,7 +212,7 @@ export function createBrokerDaemonTestHarness() {
       throw new Error(`Owned broker failed startup: ${String(error)}\n${outputTail}`);
     }
     const node = await getJson<{ id: string }>(baseUrl, "/v1/node");
-    const harness = { baseUrl, controlHome, nodeId: node.id, child, outputDrain, localAdminKey };
+    const harness = { baseUrl, controlHome, nodeId: node.id, child, outputDrain, localAdminKey, attributionKey };
     harnesses.add(harness);
     return harness;
   }
