@@ -211,6 +211,8 @@ export interface ScoutDeliverAcceptedResponse {
   aliasResolution?: RouteAliasResolutionProof;
   flight?: FlightRecord;
   workItem?: WorkItemRecord;
+  /** Work was recorded, but the broker’s work-page projection is unavailable. */
+  workPageUnavailable?: true;
 }
 
 /**

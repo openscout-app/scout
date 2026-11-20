@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { readLocalAdminKey, signLocalAdminRequest } from "./mesh-access-local-auth.js";
 
 import type {
   ActorIdentity,
@@ -265,7 +266,7 @@ export type ActiveScoutBrokerService = {
   listMessageReactions?: (channelId: string) => Promise<MessageReactionRecord[]>;
   deliver?: (
     request: ScoutDeliverRequest,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; executionPayload?: ScoutDeliverRequest },
   ) => Promise<ScoutDeliverResponse>;
   invokeAgent?: (
     request: InvocationRequest & BrokerRouteTargetInput,
@@ -342,6 +343,25 @@ function lowercaseKeys(value: Record<string, string>): Record<string, string> {
 
 function requestBody(options: ScoutBrokerJsonRequestOptions<any>): string | undefined {
   return options.body === undefined ? undefined : JSON.stringify(options.body);
+}
+
+const brokerAttributionAudiences = new Map<string, string>();
+
+async function withBrokerAttribution<T>(baseUrl: string, path: string, options: ScoutBrokerJsonRequestOptions<T>): Promise<ScoutBrokerJsonRequestOptions<T>> {
+  const keyFile = process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  if (!keyFile || options.headers?.["x-openscout-local-admin"]) return options;
+  const key = readLocalAdminKey(keyFile);
+  if (!key) return options;
+  let destinationKeyId = brokerAttributionAudiences.get(baseUrl);
+  if (!destinationKeyId) {
+    const { response } = await requestBrokerWire(baseUrl, "/v1/node", { method: "GET", signal: options.signal, socketPath: options.socketPath });
+    const node = JSON.parse(response.text) as { card?: { keyId?: unknown } };
+    if (!response.ok || typeof node.card?.keyId !== "string") throw new Error("Operator attribution is unavailable: broker identity could not be verified");
+    destinationKeyId = node.card.keyId;
+    brokerAttributionAudiences.set(baseUrl, destinationKeyId);
+  }
+  const method = options.method ?? (options.body === undefined ? "GET" : "POST");
+  return { ...options, headers: { ...options.headers, ...signLocalAdminRequest(key, { method, path, body: requestBody(options), destinationKeyId }) } };
 }
 
 async function requestBrokerOverHttp<T>(
@@ -529,7 +549,7 @@ export async function requestScoutBrokerJsonWithTrace<T>(
   path: string,
   options: ScoutBrokerJsonRequestOptions<T> = {},
 ): Promise<ScoutBrokerJsonWithTrace<T>> {
-  const { response, trace } = await requestBrokerWire(baseUrl, path, options);
+  const { response, trace } = await requestBrokerWire(baseUrl, path, await withBrokerAttribution(baseUrl, path, options));
   let parsed: unknown;
   let parsedJson = false;
   if (response.text.length > 0) {

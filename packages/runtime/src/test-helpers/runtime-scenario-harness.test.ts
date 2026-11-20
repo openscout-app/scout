@@ -1,8 +1,10 @@
 import { test } from "bun:test";
 import { createServer } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { signLocalAdminRequest } from "../mesh-access-local-auth";
 
 import {
   SessionRegistry,
@@ -26,12 +28,14 @@ import type {
 import { DEFAULT_BROKER_HOST, buildDefaultBrokerUrl } from "../broker-process-manager";
 
 const runtimeDir = join(import.meta.dir, "..", "..");
+const scenarioAttributionAudiences = new Map<string, string>();
 
 export type ScenarioBroker = {
   baseUrl: string;
   controlHome: string;
   nodeId: string;
   child: ReturnType<typeof Bun.spawn>;
+  attributionKey: string;
 };
 
 type PairingBridgeSession = {
@@ -228,6 +232,8 @@ export class RuntimeScenarioHarness {
     const port = await allocateFreePort();
     const baseUrl = buildDefaultBrokerUrl(DEFAULT_BROKER_HOST, port);
     const derivedNodeId = `node-${basename(controlHome).toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`;
+    const attributionKey = randomBytes(32).toString("hex");
+    writeFileSync(join(controlHome, "attribution-key"), attributionKey, { mode: 0o600 });
     const child = Bun.spawn({
       cmd: [process.execPath, "run", "src/broker-daemon.ts"],
       cwd: runtimeDir,
@@ -251,6 +257,7 @@ export class RuntimeScenarioHarness {
         // A supervisor pins the instance on what it launches; unpinned, a
         // broker run from this checkout would take the dev default.
         OPENSCOUT_INSTANCE: "prod",
+        OPENSCOUT_ATTRIBUTION_KEY_FILE: join(controlHome, "attribution-key"),
         ...input.env,
       },
       stdout: "pipe",
@@ -258,7 +265,7 @@ export class RuntimeScenarioHarness {
     });
 
     // Retain cleanup custody even if readiness fails before startBroker returns.
-    const broker = { baseUrl, controlHome, nodeId: derivedNodeId, child };
+    const broker = { baseUrl, controlHome, nodeId: derivedNodeId, child, attributionKey };
     this.brokers.add(broker);
     await waitForScenarioMutationReady(baseUrl);
     const node = await this.get<NodeDefinition>(baseUrl, "/v1/node");
@@ -522,9 +529,22 @@ export class RuntimeScenarioHarness {
 
   async post<T>(brokerOrBaseUrl: ScenarioBroker | string, path: string, body: unknown): Promise<T> {
     const baseUrl = typeof brokerOrBaseUrl === "string" ? brokerOrBaseUrl : brokerOrBaseUrl.baseUrl;
+    let attributionHeaders: Record<string, string> = {};
+    if (typeof brokerOrBaseUrl !== "string") {
+      let destinationKeyId = scenarioAttributionAudiences.get(baseUrl);
+      if (!destinationKeyId) {
+        const node = await this.get<{ card: { keyId: string } }>(brokerOrBaseUrl, "/v1/node");
+        destinationKeyId = node.card.keyId;
+        scenarioAttributionAudiences.set(baseUrl, destinationKeyId);
+      }
+      attributionHeaders = signLocalAdminRequest(brokerOrBaseUrl.attributionKey, {
+        method: "POST", path, body: JSON.stringify(body), destinationKeyId,
+      });
+    }
     const response = await fetch(`${baseUrl}${path}`, {
       method: "POST",
       headers: {
+        ...attributionHeaders,
         "content-type": "application/json",
         accept: "application/json",
       },

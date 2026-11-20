@@ -70,7 +70,15 @@ git config --local pull.ff only
    another descriptive name. Existing `develop`, `core-split`, or historical
    branches are not integration or release bases.
 2. Push the topic branch and open its pull request against `arach/scout:main`.
-   Keep it a draft until it is ready for review.
+   Keep it a draft until it is ready for review. Name the repository:
+
+   ```bash
+   gh pr create --repo arach/scout --base main
+   ```
+
+   In a fork checkout, a plain `gh pr create` targets the parent repository,
+   `openscout-app/scout`, unless `gh repo set-default arach/scout` has been
+   run in that clone.
 3. If fork `main` advances, merge it into the topic branch and repeat the
    affected checks on the new head. Keep published history intact unless its
    owner authorizes a rewrite.

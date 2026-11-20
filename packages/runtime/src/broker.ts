@@ -255,6 +255,10 @@ export class InMemoryControlRuntime implements ControlRuntime {
     return this.registry.flights[flightId];
   }
 
+  invocation(invocationId: ScoutId): InvocationRequest | undefined {
+    return this.registry.invocations[invocationId];
+  }
+
   flightForInvocation(invocationId: ScoutId): FlightRecord | undefined {
     const flightId = this.flightIdByInvocationId.get(invocationId);
     return flightId ? this.registry.flights[flightId] : undefined;

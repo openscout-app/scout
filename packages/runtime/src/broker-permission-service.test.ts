@@ -4,11 +4,12 @@ import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, Permission
 import { configureManagedPermissionHandler, withManagedPermissionContext } from "./managed-permission.js";
 import { parseTmuxPermission, tmuxPermissionPrompt, waitForTmuxPermission } from "./tmux-permission.js";
 import { waitForReadyComposer } from "./local-agents.js";
+import type { PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
 const trust = `old scrollback\nAccessing workspace:\n /tmp/project\nQuick safety check: Is this a project you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel`;
 const tool = `Bash command\n rm -rf dist\nThis command requires approval\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again in this project\n   3. No\nEsc to cancel`;
 const invocation = { id: "inv", targetAgentId: "agent", conversationId: "chn-test" } as InvocationRequest;
-function harness(options: { reattach?: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>; localInvocation?: boolean } = {}) {
+function harness(options: { reattach?: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>; localInvocation?: boolean; supervisor?: () => PermissionSupervisorVerdict } = {}) {
   const records = new Map<string, QuestionRecord>();
   const states: string[] = [];
   const notifications: QuestionRecord[] = [];
@@ -18,6 +19,7 @@ function harness(options: { reattach?: (request: { sessionId: string; projectRoo
     operatorId: "operator", nodeId: "node", createId: () => "permission-1", record: async record => { assertValidCollaborationRecord(record); records.set(record.id, record); },
     read: id => records.get(id), requests: () => [...records.values()], flight: () => ({ id: "flt", state } as FlightRecord),
     localInvocation: () => options.localInvocation ?? true,
+    supervisor: options.supervisor,
     reattach: async request => { lookups.push(request.sessionId); return options.reattach ? options.reattach(request) : { sessionOpen: false }; },
     transition: async (_, value) => { states.push(value); state = value; },
     notify: (_, record) => { notifications.push(record); }, sleep: async () => { await new Promise(resolve => setTimeout(resolve, 1)); },
@@ -394,4 +396,173 @@ test("native raise stores the resolved conversation without replacing the harnes
   });
   expect(captured?.conversationId).toBe("chat-one");
   expect(captured?.metadata?.permissionRequest).toMatchObject({ sessionId: "native-session" });
+});
+
+describe("permission supervisor lifecycle", () => {
+  const approve: PermissionSupervisorVerdict = { act: "continue", reason: "workspace continues workspace", risk: "workspace", grant: "project:/work/app" };
+
+  test("approves once, skips operator notification, and records its authority", async () => {
+    const h = harness({ supervisor: () => approve });
+    const answers: string[] = [];
+    await h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async decision => { answers.push(decision); },
+    });
+    expect(answers).toEqual(["once"]);
+    expect(h.notifications).toHaveLength(0);
+    expect(h.states).toEqual(["running"]);
+    expect(h.records.get("permission-1")).toMatchObject({
+      state: "closed", answer: "once", answeredById: "permission-supervisor",
+      metadata: { permissionActuation: {
+        status: "attempt", initiatedBy: "permission-supervisor", reason: approve.reason, grant: approve.grant, risk: "workspace",
+      } },
+    });
+  });
+
+  test("a supervisor notify verdict follows the existing operator path", async () => {
+    const h = harness({ supervisor: () => ({ ...approve, act: "notify", reason: "workspace does not auto-continue network", risk: "network" }) });
+    const answers: string[] = [];
+    const waiting = h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "curl https://example.com", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async decision => { answers.push(decision); },
+    });
+    await until(() => h.notifications.length === 1);
+    expect(answers).toEqual([]);
+    expect(h.states).toEqual(["waiting"]);
+    await h.service.decide("permission-1", "v", "once");
+    await waiting;
+    expect(answers).toEqual(["once"]);
+    expect(h.records.get("permission-1")?.answeredById).toBe("operator");
+  });
+
+  test("an edit approval never chooses the session-wide allow option", async () => {
+    const h = harness({ supervisor: () => approve });
+    const edit = "Edit file\n src/app.ts\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session\n   3. No\nEsc to cancel";
+    let pane = edit;
+    const sent: string[][] = [];
+    const prompt = tmuxPermissionPrompt({
+      sessionId: "pane", projectRoot: "/work/app", text: edit,
+      capture: async () => pane, alive: async () => true,
+      send: async keys => { sent.push(keys); pane = "ready"; },
+    })!;
+    expect(prompt.decisions).toEqual(["once", "deny"]);
+    await h.service.wait(invocation, prompt);
+    expect(sent).toEqual([["Enter"]]);
+  });
+
+  test("a typographic apostrophe does not turn a persistent Edit choice into once", async () => {
+    const h = harness({ supervisor: () => approve });
+    const edit = "Edit file\n src/app.ts\nDo you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don’t ask again in this project\n   3. No\nEsc to cancel";
+    let pane = edit;
+    const sent: string[][] = [];
+    const prompt = tmuxPermissionPrompt({
+      sessionId: "pane", projectRoot: "/work/app", text: edit,
+      capture: async () => pane, alive: async () => true,
+      send: async keys => { sent.push(keys); pane = "ready"; },
+    })!;
+    expect(prompt.decisions).toEqual(["once", "project", "deny"]);
+    await h.service.wait(invocation, prompt);
+    expect(sent).toEqual([["Enter"]]);
+  });
+
+  test("an unrecognized Yes option is not a one-time choice", () => {
+    const ambiguous = "Edit file\n src/app.ts\nDo you want to proceed?\n ❯ 1. Yes, whenever you feel like it\n   2. No\nEsc to cancel";
+    expect(parseTmuxPermission(ambiguous, "/work/app")).toBeNull();
+  });
+
+  test("a tmux prompt becomes stale when its working directory changes", async () => {
+    let cwd = "/work/app";
+    const prompt = tmuxPermissionPrompt({
+      sessionId: "pane", projectRoot: "/work/app", cwd, currentCwd: async () => cwd, text: tool,
+      capture: async () => tool, alive: async () => true, send: async () => {},
+    })!;
+    expect(await prompt.isCurrent()).toBe(true);
+    cwd = "/work/outside";
+    expect(await prompt.isCurrent()).toBe(false);
+  });
+
+  test("a cwd change during the final capture blocks key delivery", async () => {
+    const h = harness({ supervisor: () => approve });
+    let cwd = "/work/app";
+    let captures = 0;
+    let sent = 0;
+    const prompt = tmuxPermissionPrompt({
+      sessionId: "pane", projectRoot: "/work/app", cwd, currentCwd: async () => cwd, text: tool,
+      capture: async () => { captures++; if (captures === 2) cwd = "/work/outside"; return tool; },
+      alive: async () => true, send: async () => { sent++; },
+    })!;
+    const waiting = h.service.wait(invocation, prompt);
+    await expect(waiting).rejects.toThrow("Permission prompt changed before key delivery");
+    expect(sent).toBe(0);
+    expect(h.notifications).toHaveLength(1);
+  });
+
+  test("an ambiguous automatic delivery notifies the operator and cannot be replayed", async () => {
+    const h = harness({ supervisor: () => approve });
+    let answers = 0;
+    const waiting = h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async () => { answers++; throw new Error("send failed"); },
+    });
+    await expect(waiting).rejects.toBeInstanceOf(PermissionDeliveryUnconfirmedError);
+    expect(answers).toBe(1);
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0]?.state).toBe("declined");
+    expect(h.records.get("permission-1")).toMatchObject({
+      state: "declined", answeredById: "permission-supervisor",
+      metadata: { permissionActuation: { status: "attempt", initiatedBy: "permission-supervisor" } },
+    });
+    await expect(h.service.decide("permission-1", "v", "once")).rejects.toThrow("settled");
+  });
+
+  test("an operator decision already in flight wins over the supervisor", async () => {
+    const h = harness({ supervisor: () => approve });
+    const record = h.service["deps"].record;
+    let releaseRecord!: () => void;
+    const recordGate = new Promise<void>(resolve => { releaseRecord = resolve; });
+    let deferred = false;
+    h.service["deps"].record = async value => {
+      await record(value);
+      if (value.state === "open" && !value.metadata?.permissionActuation && !deferred) {
+        deferred = true;
+        await recordGate;
+      }
+    };
+    let releaseAnswer!: () => void;
+    const answerGate = new Promise<void>(resolve => { releaseAnswer = resolve; });
+    let markAnswerStarted!: () => void;
+    const answerStarted = new Promise<void>(resolve => { markAnswerStarted = resolve; });
+    const answers: string[] = [];
+    const waiting = h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true,
+      answer: async decision => { answers.push(decision); markAnswerStarted(); await answerGate; },
+    });
+    await until(() => h.records.has("permission-1"));
+    const operator = h.service.decide("permission-1", "v", "once");
+    await answerStarted;
+    releaseRecord();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    releaseAnswer();
+    await Promise.all([operator, waiting]);
+    expect(answers).toEqual(["once"]);
+    expect(h.notifications).toHaveLength(0);
+    expect(h.states).toEqual(["running"]);
+    expect(h.records.get("permission-1")).toMatchObject({ state: "closed", answeredById: "operator" });
+  });
+
+  test("an operator decision preserves the request's root actor", async () => {
+    const h = harness();
+    const parent = { actorId: "agent", rootActorId: "agent", source: "unverified" as const };
+    const waiting = h.service.wait({ ...invocation, metadata: { attribution: parent } }, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async () => {},
+    });
+    await until(() => h.notifications.length === 1);
+    await h.service.decide("permission-1", "v", "once", undefined, { actorId: "operator", rootActorId: "operator", source: "local-admin" });
+    await waiting;
+    expect(h.records.get("permission-1")?.metadata?.permissionActuation).toMatchObject({
+      attribution: { actorId: "operator", rootActorId: "agent", source: "local-admin" },
+    });
+  });
 });

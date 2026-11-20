@@ -115,7 +115,7 @@ test("image read admission bounds stalled post-I/O rechecks to two and releases 
 test("the existing local HTTP read returns a large authorized notification image without a new endpoint", async () => {
   const f = fixture(), posted = await f.post(image(ATTACHMENT_LIMITS.readBytes + 1));
   const body = { ...f.request(posted.message), actorId: "operator" };
-  const req = Object.assign(Readable.from([JSON.stringify(body)]), { method: "POST", url: "/v1/attachments/read", headers: { "content-type": "application/json" }, transportContext: { transport: "unix-socket" } });
+  const req = Object.assign(Readable.from([JSON.stringify(body)]), { method: "POST", url: "/v1/attachments/read", headers: { "content-type": "application/json" }, transportContext: { transport: "unix-socket", operator: true } });
   let status = 0, encoded = "";
   const res = { writeHead(code: number) { status = code; }, end(value: string) { encoded = value; } };
   await handleAttachmentRoute(req as never, res, new URL("http://localhost/v1/attachments/read"), { nodeId: "local", service: f.service, peerNode: () => undefined });

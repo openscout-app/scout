@@ -72,7 +72,7 @@ export const INHERITED_MULTIPLEXER_PANE_ENV_KEYS = [
  * its `bun run dev` takes the checkout default, elsewhere prod applies, and
  * OPENSCOUT_CLIENT_INSTANCE alone tells its `scout` which broker to reach.
  */
-export const INHERITED_INSTANCE_ENV_KEYS = OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS;
+export const INHERITED_INSTANCE_ENV_KEYS = [...OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS, "OPENSCOUT_ATTRIBUTION_KEY_FILE"];
 
 /** Every identity a fresh top-level terminal must not inherit. */
 export const INHERITED_TERMINAL_IDENTITY_ENV_KEYS = [

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrokerRequestReceipts } from "./broker-request-receipts.js";
@@ -637,6 +637,29 @@ describe("BrokerDeliveryAcceptanceService", () => {
       expect(await reopened.service.accept(request)).toEqual(accepted);
       expect(reopened.acceptedInvocations).toHaveLength(0);
       await expect(reopened.service.accept({ ...request, body: "different work" })).rejects.toThrow("different content");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("pre-attribution requester-only receipts keep empty metadata and replay the execution copy", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-legacy-attribution-receipt-"));
+    try {
+      const request: ScoutDeliverRequest = {
+        requestId: "legacy-requester-only", requesterId: "operator", targetAgentId: "agent-1",
+        body: "same work", intent: "tell", messageMetadata: {}, invocationMetadata: {},
+      };
+      const original = { kind: "delivery", deliveryId: "legacy-delivery" } as const;
+      // The pre-V1 fingerprint removed only top-level trace correlation.
+      const fingerprint = createHash("sha256").update(canonicalRequest(request)).digest("hex");
+      const path = createHash("sha256").update(canonicalRequest(["operator", request.requestId, "deliver"])).digest("hex");
+      await writeFile(join(directory, `${path}.json`), JSON.stringify({
+        requesterId: "operator", requestId: request.requestId, operation: "deliver", fingerprint, state: "done", result: original,
+      }));
+      const execution: ScoutDeliverRequest = { ...request, caller: { actorId: "operator" },
+        messageMetadata: { attribution: { actorId: "operator", rootActorId: "operator", source: "local-admin" } } };
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory) });
+      expect(await harness.service.accept(request, { executionPayload: execution })).toEqual(original);
+      expect(harness.acceptedInvocations).toHaveLength(0);
+      expect(request.caller).toBeUndefined();
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
