@@ -17,6 +17,7 @@ export type BrokerStartupTrafficGateSnapshot = {
   coreReady?: boolean;
   historyReady?: boolean;
   error?: string | null;
+  nextRetryAt?: number;
   milestones?: Record<string, number>;
 };
 
@@ -29,6 +30,7 @@ export class BrokerStartupTrafficGate {
   private phase: NonNullable<BrokerStartupTrafficGateSnapshot["phase"]> = "starting";
   private coreReady = false;
   private historyReady = false;
+  private nextRetryAt?: number;
   private error: string | null = null;
   private milestones: Record<string, number> = {};
 
@@ -46,13 +48,15 @@ export class BrokerStartupTrafficGate {
     this.milestones.historyReadyAt = Date.now();
   }
   restoringSessions(): void { this.phase = "sessions"; }
-  degradeProjection(error: unknown): void {
+  degradeProjection(error: unknown, nextRetryAt?: number): void {
     this.mutationsAdmitted = false;
     this.phase = "degraded";
+    this.nextRetryAt = nextRetryAt;
     this.error = error instanceof Error ? error.message : String(error);
   }
   fail(error: unknown): void {
     this.phase = "failed";
+    this.nextRetryAt = undefined;
     this.error = error instanceof Error ? error.message : String(error);
   }
 
@@ -91,6 +95,8 @@ export class BrokerStartupTrafficGate {
 
   admitMutations(): void {
     this.mutationsAdmitted = true;
+    this.error = null;
+    this.nextRetryAt = undefined;
     this.phase = "ready";
     this.milestones.readyAt = Date.now();
   }
@@ -99,6 +105,7 @@ export class BrokerStartupTrafficGate {
     return {
       state: this.mutationsAdmitted ? "ready" : this.phase === "degraded" ? "degraded" : "restoring",
       mutationsAdmitted: this.mutationsAdmitted,
+      ...(this.nextRetryAt === undefined ? {} : { nextRetryAt: this.nextRetryAt }),
       ...(this.progressive ? { phase: this.phase, coreReady: this.coreReady, historyReady: this.historyReady, error: this.error, milestones: { ...this.milestones } } : {}),
     };
   }

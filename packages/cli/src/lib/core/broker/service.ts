@@ -74,6 +74,8 @@ import type {
   WorkMoveRequest,
   WorkMoveResponse,
   WorkReviewRequest,
+  VercelBoardPlanRequest,
+  VercelBoardPlanResponse,
   WorkReviewResponse,
 } from "@openscout/protocol";
 import {
@@ -479,6 +481,7 @@ export type ScoutAskResult = {
   sessionAlias?: string;
   executionResolution?: import("@openscout/protocol").ScoutExecutionResolution;
   workItem?: ScoutTrackedWorkItem;
+  workPageUnavailable?: true;
   unresolvedTarget?: string;
   targetDiagnostic?: ScoutAskTargetDiagnostic;
   preflightFailure?: {
@@ -4606,6 +4609,7 @@ export async function deliverScoutAsk(input: {
     sessionAlias: delivery.receipt?.sessionAlias ?? delivery.sessionAlias,
     executionResolution: delivery.receipt?.executionResolution,
     workItem,
+    ...(delivery.workPageUnavailable ? { workPageUnavailable: true } : {}),
   };
 }
 
@@ -5904,6 +5908,11 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   } catch (error) {
     throw workClaimConflictFrom(error) ?? error;
   }
+}
+
+/** The Board planning path: creates Board tasks only. Work items appear when the custodian projects them. */
+export async function planScoutBoardTasks(input: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
+  return brokerPostJson<VercelBoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.vercelBoardPlan, input);
 }
 
 export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {

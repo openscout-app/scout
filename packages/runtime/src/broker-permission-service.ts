@@ -1,5 +1,7 @@
-import type { FlightRecord, InvocationRequest, QuestionRecord } from "@openscout/protocol";
+import type { FlightRecord, InvocationRequest, QuestionRecord, ScoutAttribution } from "@openscout/protocol";
+import { brokerAttributionFromMetadata } from "./broker-attribution.js";
 import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-permission.js";
+import { PERMISSION_SUPERVISOR_ACTOR_ID, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
 export class PermissionDeliveryUnconfirmedError extends Error { readonly failureCause = "harness_error" as const; }
 /** Nothing can answer this request any more. Its record is settled. */
@@ -33,6 +35,7 @@ export class BrokerPermissionService {
     reattach: (request: { sessionId: string; projectRoot: string; text: string; native?: Record<string, unknown> }) => Promise<PermissionReattachment>;
     transition: (invocationId: string, state: "waiting" | "running", requestId: string | null) => Promise<unknown>;
     notify: (invocation: InvocationRequest, record: QuestionRecord, prompt: ManagedPermissionPrompt) => void;
+    supervisor?: (prompt: ManagedPermissionPrompt) => PermissionSupervisorVerdict;
     sleep?: (ms: number) => Promise<void>;
   }) {}
 
@@ -46,15 +49,31 @@ export class BrokerPermissionService {
       ownerId: this.deps.operatorId, nextMoveOwnerId: this.deps.operatorId,
       conversationId: invocation.conversationId,
       createdAt: Date.now(), updatedAt: Date.now(),
-      metadata: { permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
-        invocationId: invocation.id, flightId: flight?.id, version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels } },
+      metadata: {
+        ...(brokerAttributionFromMetadata(invocation.metadata) ? { attribution: brokerAttributionFromMetadata(invocation.metadata) } : {}),
+        permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
+          invocationId: invocation.id, flightId: flight?.id, version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels },
+      },
     };
     const pending: Pending = { invocationId: invocation.id, prompt, busy: false, done: false };
     this.pending.set(id, pending);
     try {
       await this.deps.record(record);
-      await this.deps.transition(invocation.id, "waiting", id);
-      this.deps.notify(invocation, record, prompt);
+      const automatic = this.deps.supervisor?.(prompt);
+      while (pending.busy && !pending.done) await this.sleep(500);
+      if (pending.error) throw pending.error;
+      if (!pending.done && automatic?.act === "continue") {
+        try {
+          await this.decide(id, prompt.version, "once", automatic);
+        } catch (error) {
+          this.deps.notify(invocation, this.deps.read(id) ?? record, prompt);
+          throw error;
+        }
+      }
+      if (!pending.done) {
+        await this.deps.transition(invocation.id, "waiting", id);
+        this.deps.notify(invocation, record, prompt);
+      }
       while (!pending.done) {
         await this.sleep(500);
         const currentFlight = this.deps.flight(invocation.id);
@@ -121,7 +140,7 @@ export class BrokerPermissionService {
     if (record?.state === "open") await this.close(id, answer, "closed");
   }
 
-  async decide(id: string, version: string, decision: PermissionDecision): Promise<void> {
+  async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict, operatorAttribution?: ScoutAttribution): Promise<void> {
     const opened = this.deps.read(id);
     if (!opened || opened.state !== "open") throw new PermissionRequestEndedError("Permission request is already settled.", false);
     // A restart loses the waiter. Rebind to the session, or settle the record.
@@ -139,14 +158,26 @@ export class BrokerPermissionService {
     let actuated = false;
     try {
       if (!await pending.prompt.isCurrent()) throw new Error("Permission prompt is no longer present. Refresh.");
+      const parent = brokerAttributionFromMetadata(record.metadata);
+      const attribution: ScoutAttribution = automatic
+        ? { actorId: PERMISSION_SUPERVISOR_ACTOR_ID, rootActorId: parent?.rootActorId ?? PERMISSION_SUPERVISOR_ACTOR_ID, source: "system" }
+        : {
+          actorId: operatorAttribution?.actorId ?? this.deps.operatorId,
+          rootActorId: parent?.rootActorId ?? operatorAttribution?.rootActorId ?? this.deps.operatorId,
+          source: operatorAttribution?.source ?? "unverified",
+          ...(operatorAttribution?.claimedActorId ? { claimedActorId: operatorAttribution.claimedActorId } : {}),
+        };
       // Mark actuation durably before keys. A failed send is ambiguous: never replay automatically.
-      await this.deps.record({ ...record, updatedAt: Date.now(), metadata: { ...record.metadata, permissionActuation: { decision, at: Date.now(), status: "attempt" } } });
+      await this.deps.record({ ...record, updatedAt: Date.now(), metadata: { ...record.metadata, permissionActuation: {
+        decision, at: Date.now(), status: "attempt", attribution,
+        ...(automatic ? { initiatedBy: PERMISSION_SUPERVISOR_ACTOR_ID, reason: automatic.reason, grant: automatic.grant, risk: automatic.risk } : {}),
+      } } });
       // An adopted prompt outlived its flight. The session itself is still waiting on it.
       const flight = pending.adopted ? undefined : this.deps.flight(pending.invocationId);
       if (flight && ENDED_FLIGHT_STATES.includes(flight.state)) throw new Error("Permission request's flight is no longer active.");
       actuated = true;
       await pending.prompt.answer(decision);
-      await this.close(id, decision, "closed");
+      await this.close(id, decision, "closed", automatic ? PERMISSION_SUPERVISOR_ACTOR_ID : undefined);
       pending.done = true;
     } catch (error) {
       pending.error = actuated
@@ -155,7 +186,7 @@ export class BrokerPermissionService {
       // Settle before the close write: if that write fails too, this request
       // must still never be answerable again.
       pending.done = true;
-      await this.close(id, `Decision delivery unconfirmed: ${error instanceof Error ? error.message : String(error)}`, "declined")
+      await this.close(id, `Decision delivery unconfirmed: ${error instanceof Error ? error.message : String(error)}`, "declined", automatic ? PERMISSION_SUPERVISOR_ACTOR_ID : undefined)
         .catch(() => undefined);
       throw pending.error;
     } finally {
@@ -274,9 +305,9 @@ export class BrokerPermissionService {
     return (this.deps.sleep ?? (value => new Promise(resolve => setTimeout(resolve, value))))(ms);
   }
 
-  private async close(id: string, answer: string, state: "closed" | "declined"): Promise<void> {
+  private async close(id: string, answer: string, state: "closed" | "declined", answeredById?: string): Promise<void> {
     const record = this.deps.read(id);
-    if (record) await this.deps.record({ ...record, state, answer, answeredById: this.deps.operatorId,
+    if (record) await this.deps.record({ ...record, state, answer, answeredById: answeredById ?? this.deps.operatorId,
       nextMoveOwnerId: undefined, answeredAt: Date.now(), closedAt: Date.now(), updatedAt: Date.now() });
   }
 }

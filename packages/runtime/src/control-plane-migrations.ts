@@ -2,6 +2,7 @@ import { WEB_READ_INDEXES_SQL } from "./web-read-indexes.js";
 import { INTEGRATION_SLACK_EVENTS_SCHEMA } from "./integration-slack-events.js";
 import { INTEGRATION_SLACK_DELIVERY_SCHEMA } from "./integration-slack-delivery.js";
 import { INTEGRATION_WORKER_SQLITE_SCHEMA } from "./integration-worker-leases.js";
+import { VERCEL_BOARD_CUSTODY_ROLES_SQL, VERCEL_BOARD_ROLES_SQL, VERCEL_BOARD_SQLITE_SCHEMA } from "./vercel-board/schema.js";
 import { INTEGRATION_SETUP_SQLITE_SCHEMA } from "./integration-setup-schema.js";
 import { GUEST_GRANTS_SQLITE_SCHEMA } from "./guest-access.js";
 import { existsSync } from "node:fs";
@@ -19,6 +20,7 @@ import {
   MACHINES_SQLITE_SCHEMA,
   CONTROL_PLANE_TERMINAL_SESSION_SQLITE_SCHEMA,
   CONTROL_PLANE_TERMINAL_WORKSPACE_SQLITE_SCHEMA,
+  CONTROL_PLANE_ROLE_SLOTS_SQLITE_SCHEMA,
 } from "./schema.js";
 import { resolveOpenScoutSupportPaths } from "./support-paths.js";
 import {
@@ -233,6 +235,15 @@ export const CONTROL_PLANE_SCHEMA_MIGRATIONS: ControlPlaneSchemaMigration[] = [
       if (!hasColumn(database, "briefings", "markdown")) {
         database.exec("ALTER TABLE briefings ADD COLUMN markdown TEXT");
       }
+    },
+  },
+  {
+    // Additive like terminal-workspaces: a new table an older build never
+    // reads, so no CONTROL_PLANE_SCHEMA_VERSION bump.
+    id: "role-slots",
+    description: "Creates role_slots: one cited summary per role assignment, written through slot.write.",
+    apply(database) {
+      database.exec(CONTROL_PLANE_ROLE_SLOTS_SQLITE_SCHEMA);
     },
   },
   {
@@ -530,6 +541,19 @@ WHERE latest.invocation_id = inv.id
     id: "web-read-ordering-indexes",
     description: "Indexes normalized history ordering and active invocation reads without scanning payload history.",
     apply(database) { database.exec(WEB_READ_INDEXES_SQL); },
+  },
+  {
+    id: "vercel-board-custodian-state",
+    description: "Adds custodian-local Vercel Board cursors, versions, claim custody, outbox and lease.",
+    apply(database) { database.exec(VERCEL_BOARD_SQLITE_SCHEMA); },
+  },
+  {
+    id: "vercel-board-custody-roles",
+    description: "Adds the claim's profile and a blocked state to Vercel Board custody, and the roles agents declare.",
+    apply(database) {
+      if (!hasColumn(database, "vercel_board_custody", "profile")) database.exec(VERCEL_BOARD_CUSTODY_ROLES_SQL);
+      database.exec(VERCEL_BOARD_ROLES_SQL);
+    },
   },
 ];
 

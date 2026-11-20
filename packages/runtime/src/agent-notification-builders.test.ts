@@ -120,7 +120,7 @@ describe("agent notification builders", () => {
       sender: { name: "cajun", agentId: "agent.cajun" },
       route: { open: "chat", messageId: "msg-1", conversationId: "dm" },
     });
-    expect(collapseAgentNotification(n)).toMatchObject({ title: "cajun is waiting on your answer", body: "Deploy now?" });
+    expect(collapseAgentNotification(n)).toMatchObject({ title: "Scout on mini", body: "cajun\nReply needed\nDeploy now?" });
   });
 
   test("a consult is a passive ask; a notify is passive text", () => {
@@ -210,7 +210,7 @@ describe("permission request notifications", () => {
       project: "web", host: "host-a", createdAt: 1, conversationId: "dm", messageId: "msg-ask", sessionId: "session-abc123",
     });
     const collapsed = collapseAgentNotification(n);
-    expect(collapsed).toMatchObject({ title: "web-schumann-15 wants to use a tool", subtitle: "web on host-a", body: "" });
+    expect(collapsed).toMatchObject({ title: "Scout on host-a", subtitle: "", body: "web-schumann-15 · web\nAllow a tool?" });
     expect(JSON.stringify(n)).not.toContain("observed evidence");
     expect(n).toMatchObject({
       level: "active",
@@ -219,10 +219,10 @@ describe("permission request notifications", () => {
     });
   });
 
-  test("a Bash permission reads like the Claude app's: who wants what, then what it is for", () => {
+  test("a Bash permission shows its source, request and purpose", () => {
     const text = dialog([" Bash command", "", "   gh pr list --state open", "   List open pull requests", "", " Permission rule Bash requires confirmation for this command."]);
-    const n = agentNotificationForPermissionRequest({ requestId: "p", text, agentName: "pike", agentId: "agent.pike", project: "scout", createdAt: 1 });
-    expect(collapseAgentNotification(n)).toMatchObject({ title: "pike wants to run a command", subtitle: "scout on arts-mini", body: "List open pull requests", level: "active" });
+    const n = agentNotificationForPermissionRequest({ requestId: "p", text, agentName: "pike", agentId: "agent.pike", project: "scout", host: "studio", createdAt: 1 });
+    expect(collapseAgentNotification(n)).toMatchObject({ title: "Scout on studio", subtitle: "", body: "pike · scout\nRun command?\nList open pull requests", level: "active" });
   });
 });
 

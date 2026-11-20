@@ -112,6 +112,21 @@ function createStore() {
 }
 
 describe("BrokerWorkItemStore", () => {
+  test("a role pass never becomes or links a work item", async () => {
+    const { runtime, appended, store } = createStore();
+    const marked = { source: "role-pass", rolePass: "role-pm-1" };
+    const input = (payload: ScoutDeliverRequest) => ({
+      payload, requestId: "deliver-1", requesterId: "system", targetAgentId: "agent-1", conversationId: "conversation-1", createdAt: 100,
+    });
+
+    expect(await store.recordDeliveryWorkItemIfNeeded(input(testPayload({ invocationMetadata: marked }))))
+      .toEqual({ record: null });
+    expect(await store.prepareDeliveryWorkItemIfNeeded(input(testPayload({ invocationMetadata: marked, workItem: undefined, collaborationRecordId: "work-9" }))))
+      .toEqual({ record: null });
+    expect(runtime.collaborationRecord("work-1")).toBeUndefined();
+    expect(appended).toHaveLength(0);
+  });
+
   test("records delivery work items and created events in one durable commit", async () => {
     const { runtime, appended, projected, store, durableStore, promote } = createStore();
 

@@ -80,7 +80,7 @@ export type ScoutAskNextCall = {
 };
 
 export type ScoutAskError = {
-  code: "broker_unreachable" | "invalid_request" | "preflight_failed" | "target_unroutable";
+  code: "broker_unreachable" | "invalid_request" | "preflight_failed" | "target_unroutable" | "task_followup_not_sent";
   message: string;
   /** The runtime's own refusal code, such as session_live_unbound, when it gave one. */
   reason?: string;
@@ -103,6 +103,7 @@ export type ScoutAskReceipt = {
   executionResolution?: ScoutExecutionResolution;
   workerInterrupted?: boolean;
   recording?: "recorded";
+  workPageUnavailable?: true;
   notificationStatus?: "not_requested" | "requested_unconfirmed";
   completion?: ScoutCompletionState & { invocationId: string; flightId: string };
   parentCompletion?: { flightId: string; revision: number };

@@ -53,6 +53,27 @@ authorization credentials. The optional Caddy edge only proxies web start and
 status controls for direct loopback clients; non-loopback requests receive 403
 even when they use a trusted `.scout.local` or tailnet hostname.
 
+Attribution V1 separates the acting actor from the original root actor. Runtime
+writes carry `metadata.attribution` with `actorId`, `rootActorId`, `source`, and
+an optional `claimedActorId`. An unauthenticated loopback caller cannot become a
+person: a claimed person identity is normalized to `local-unverified`, while an
+agent remains identified as an agent. In-process control-plane writers are marked
+`system`. Authenticated relay principals and valid operator proofs keep their
+verified identities. Mesh routes preserve origin actor ids but always mark them
+unverified, including on loopback forwards; a local operator proof does not
+verify a mesh payload's person identity. Parent links carry the root actor
+forward as provenance, not as delegated permission.
+
+For verified local operator attribution, set `OPENSCOUT_ATTRIBUTION_KEY_FILE` on
+the runtime and CLI to an owner-only key created with `scout mesh access
+admin-key create`. The existing local-admin key also works. Requests use the
+existing body-bound HMAC proof; the key itself never crosses the wire. The
+attribution key does not enable protected-ingress mode. Operator-only decisions
+and control commands require that proof. Without it, local work can continue as
+`local-unverified`, but it cannot claim to be the operator. This is attribution
+and approval correctness, not an enterprise account, tenant-isolation, or RBAC
+system.
+
 For the data boundary, read the [data model section of `architecture.md`](./architecture.md#the-data-model). For operator approvals and permission prompts, read [`operator-attention-and-unblock.md`](./operator-attention-and-unblock.md).
 
 ## Mesh Means Reachability

@@ -100,6 +100,15 @@ export type DiscoveredTranscript = {
   customTitle?: string | null;
   agentName?: string | null;
   aiTitle?: string | null;
+  /**
+   * Set by the runtime's tail read, never by a source. `sessionName` is the
+   * operator's name for the session, or the title of the work it is doing now
+   * (`sessionNameSource` says which); when present it is also `title`, and the
+   * harness's own title stays in `harnessTitle`.
+   */
+  sessionName?: string | null;
+  sessionNameSource?: "operator" | "work" | null;
+  harnessTitle?: string | null;
   /** Claude registry values, without inferred busy/idle semantics. */
   status?: "busy" | "idle" | "shell" | "waiting" | null;
   statusUpdatedAt?: number | null;

@@ -57,3 +57,5 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 env.d.ts
+# OpenScout local state
+.openscout/project.json

@@ -9,7 +9,12 @@ export type ObservedSessionRead = {
   identity: ObservedSessionIdentity;
   links: ObservedSessionLink[];
   cwd: string | null;
+  /** The session's name in Scout's order: operator name, then work title, then harness title. */
   title: string | null;
+  /** Which part `title` came from; null when the session has no name. */
+  titleSource?: import("./session-names.js").SessionNameSource | null;
+  /** The harness's own title, kept so a surface can show "renamed from …". */
+  harnessTitle?: string | null;
   observedAt: number;
   availability: SessionReadAvailability;
   identityConflict: boolean;

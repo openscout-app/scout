@@ -254,7 +254,7 @@ export function planWorkMove(
       id: `${context.moveId}:event`, recordId: record.id, recordKind: "work_item", kind: "progressed",
       actorId: request.actorId, at: context.now,
       summary: `Move to ${stationName(machine, request.to)} ${decision.verdict === "deny" ? "denied" : decision.verdict === "hold" ? "held" : "needs a decision"}: ${failed.map((r) => r.message).join(" ")}`,
-      metadata: { workMove: move },
+      metadata: { workMove: move, ...(request.attribution ? { attribution: request.attribution } : {}) },
     };
     return { decision, move, event };
   }
@@ -265,7 +265,7 @@ export function planWorkMove(
     kind: eventKindFor(record.state, placed.record.state, claimed),
     actorId: request.actorId, at: context.now,
     summary: `Moved from ${stationName(machine, decision.from)} to ${stationName(machine, request.to)}.${move.note ? ` ${move.note}` : ""}`,
-    metadata: { workMove: move },
+    metadata: { workMove: move, ...(request.attribution ? { attribution: request.attribution } : {}) },
   };
   return { decision, move, record: placed.record, event };
 }
@@ -322,6 +322,7 @@ export function planWorkReview(
   const placement = workPlacementOf(record);
   const review = (status: WorkMoveReviewStatus) => ({
     moveId: move.id, status, revision: request.revision, reviewerId: request.actorId,
+    ...(request.attribution ? { attribution: request.attribution } : {}),
     ...(request.note?.trim() ? { note: request.note.trim() } : {}), at: context.now,
   });
   const base = { id: context.eventId, recordId: record.id, recordKind: "work_item" as const, actorId: request.actorId, at: context.now };
