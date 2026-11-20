@@ -565,6 +565,17 @@ export class BrokerVercelBoardService {
           updatedAt: Math.max(existing.updatedAt, this.now()), metadata: { ...existing.metadata, vercelBoardScoutResult: notice.result.slice(0, 4000) } });
       }
     }
+    if (notice.kind === "settled" && (notice.outcome === "completed" || notice.outcome === "failed") && live.config.syncChannels?.length) {
+      const root = await live.transport.message(notice.row.taskId);
+      if (root && live.config.syncChannels?.includes(root.channel)) {
+        const result = (notice.row.result ?? (notice.outcome === "completed" ? "Done." : "The Scout agent failed.")).slice(0, 4000);
+        await live.outbox.post({
+          scoutId: `settlement:${notice.row.attemptId}`, lane: `thread:${root.id}`,
+          request: { re: root.id, text: notice.outcome === "failed" ? `Scout could not complete this task:\n${result}` : result,
+            labels: agentLabel(notice.row.agentId), noSync: false, profile: notice.row.profile ?? live.config.profile },
+        });
+      }
+    }
   }
 
   async claim(request: VercelBoardClaimRequest & { confirmOwner?: boolean }): Promise<VercelBoardClaimResponse> {
@@ -821,7 +832,7 @@ export class BrokerVercelBoardService {
     });
     let roots: VercelBoardWireMessage[];
     try {
-      roots = await live.outbox.plan({ scoutId: `plan:${request.requestId}`, lane: `plan:${request.channel}`, request: { channel: request.channel, tasks } });
+      roots = await live.outbox.plan({ scoutId: `plan:${request.requestId}`, lane: `plan:${request.channel}`, request: { channel: request.channel, tasks, noSync: !live.config.syncChannels?.includes(request.channel) } });
     } catch (error) {
       if (error instanceof VercelBoardUnknownOutcomeError || (error instanceof Error && error.name === "VercelBoardOutboxError")) {
         throw new VercelBoardServiceError(502, (error as { code?: string }).code ?? "outcome_unknown", error.message);
@@ -871,12 +882,16 @@ export class BrokerVercelBoardService {
     if (request.selfServe !== undefined && (!Array.isArray(request.selfServe) || !request.selfServe.every(channel => channels.includes(channel)))) {
       throw new VercelBoardServiceError(400, "invalid_request", `selfServe must name channels from: ${channels.join(", ")}.`);
     }
+    if (request.syncChannels !== undefined && (!Array.isArray(request.syncChannels) || !request.syncChannels.every(channel => channels.includes(channel)))) {
+      throw new VercelBoardServiceError(400, "invalid_request", `syncChannels must name channels from: ${channels.join(", ")}.`);
+    }
     const id = request.id ?? `vercel-board-${createHash("sha256").update(target.url).digest("hex").slice(0, 12)}`;
     const draft: VercelBoardConnectionConfig = {
       id, url: target.url, transport: target.transport, ...(target.transport === "vercel_api" ? { vercel: target.vercel } : {}),
       principal: "pending:pending", profile,
       ...(request.roles !== undefined ? { roles: [...new Set([profile, ...request.roles])] } : {}),
       ...(request.selfServe !== undefined ? { selfServe: [...new Set(request.selfServe)] } : {}),
+      ...(request.syncChannels !== undefined ? { syncChannels: [...new Set(request.syncChannels)] } : {}),
       channels, ...(request.mirror !== undefined ? { mirror: [...new Set(request.mirror)] } : {}), probeChannel, ownerAllowlist: [], custodianNodeId: this.options.nodeId, credential: request.credential, connectedAt: this.now(),
     };
     const credential = new VercelBoardCredential(draft.credential, this.options.credentialOptions);
@@ -975,7 +990,7 @@ export class BrokerVercelBoardService {
       verified: config.verifiedAt !== undefined, ...(live.lastGoodReadAt ? { lastGoodReadAt: live.lastGoodReadAt } : {}),
       cursors: config.channels.map(channel => { const cursor = store.cursor(config.id, channel); return { channel, stored: Boolean(cursor), ...(cursor ? { updatedAt: cursor.updatedAt } : {}) }; }),
       mirror: this.mirrorStatus(live),
-      custody: store.custodyCounts(config.id), outbox: store.outboxCounts(config.id),
+      custody: store.custodyCounts(config.id), outbox: store.outboxCounts(config.id), syncChannels: config.syncChannels ?? [],
       roles: vercelBoardRoles(config), selfServe: config.selfServe ?? [],
       declared: store.declaredRoles(config.id).map(({ agentId, role }) => ({ agentId, role })),
       ...(observed ? { localLease: observed } : {}),
@@ -998,7 +1013,7 @@ export class BrokerVercelBoardService {
         verified: config.verifiedAt !== undefined,
         cursors: config.channels.map(channel => ({ channel, stored: Boolean(store.cursor(config.id, channel)) })),
         mirror: config.channels.map(channel => ({ channel, state: vercelBoardMirroredChannels(config).includes(channel) ? "mirrored" as const : "not_mirrored" as const, conversationId: vercelBoardRoomId(config.id, channel) })),
-        custody: store.custodyCounts(config.id), outbox: store.outboxCounts(config.id),
+        custody: store.custodyCounts(config.id), outbox: store.outboxCounts(config.id), syncChannels: config.syncChannels ?? [],
       });
     }
     if (connectionId && !out.length) throw new VercelBoardServiceError(404, "not_found", `No board connection ${connectionId}.`, "Run: scout integration connect vercel-board --team <team> --board scout --credential secret_cli:<entry>");

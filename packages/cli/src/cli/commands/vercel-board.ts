@@ -8,7 +8,7 @@ export const VERCEL_BOARD_HELP = [
   "scout integration connect vercel-board --team <team ID or slug> [--board scout|General] --credential secret_cli:<entry>|env:<NAME>|file:<absolute path>",
   "scout integration connect vercel-board --url <board url> --credential ...",
   "    [--id <connection>] [--channels scout/work,scout/decisions] [--mirror <channel>,...] [--probe-channel scout/probe] [--allow <principal>,...] [--no-probe]",
-  "    [--roles scout,builder,reviewer] [--self-serve <channel>,...]",
+  "    [--roles scout,builder,reviewer] [--self-serve <channel>,...] [--sync-channels <channel>,...]",
   "    [--experimental-marker [--takeover]]",
   "scout integration status vercel-board [--connection <id>]",
   "scout integration claim vercel-board --connection <id> --task <board task id> --agent <scout agent id> [--confirm-owner]",
@@ -41,12 +41,14 @@ export const VERCEL_BOARD_HELP = [
   "A plan's task can be kept for one role. In a --self-serve channel, the runtime claims such a task, once, for an idle",
   "agent that declared the role, when the operator or Scout wrote it. Elsewhere, and after that one claim, the operator claims.",
   "role declares the calling agent's role (or --agent's, as the operator). Agents never claim; the runtime does.",
+  "--sync-channels opts followed channels into Board's outbound sync. Every other Scout write stays noSync; enable this",
+  "only where Board, not Scout's Slack bridge, owns outbound Slack messages. Completed and failed claims post one reply.",
 ].join("\n");
 
 type Parsed = { method: "GET" | "POST"; path: string; body?: Record<string, unknown>; kind: "connect" | "status" | "claim" | "promote" | "role" | "messages" | "handoffs" };
 
 const VALUE_FLAGS: Record<string, string[]> = {
-  connect: ["--url", "--team", "--board", "--credential", "--id", "--channels", "--mirror", "--probe-channel", "--allow", "--roles", "--self-serve"],
+  connect: ["--url", "--team", "--board", "--credential", "--id", "--channels", "--mirror", "--probe-channel", "--allow", "--roles", "--self-serve", "--sync-channels"],
   status: ["--connection"],
   claim: ["--connection", "--task", "--agent"],
   promote: ["--connection", "--task"],
@@ -146,6 +148,7 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
     ...(flags["--allow"] ? { ownerAllowlist: list(flags["--allow"]) } : {}),
     ...(flags["--roles"] ? { roles: list(flags["--roles"]) } : {}),
     ...(flags["--self-serve"] ? { selfServe: list(flags["--self-serve"]) } : {}),
+    ...(flags["--sync-channels"] ? { syncChannels: list(flags["--sync-channels"]) } : {}),
     ...(switches.has("--no-probe") ? { probe: false } : {}),
     ...(switches.has("--experimental-marker") ? { experimentalMarker: true } : {}),
     ...(switches.has("--takeover") ? { takeover: true } : {}),
@@ -168,6 +171,7 @@ function formatStatus(status: VercelBoardConnectionStatus): string {
     "  Channels:",
     ...channels,
     ...(status.roles ? [`  Roles: ${status.roles.join(", ")}; self-serve: ${status.selfServe?.length ? status.selfServe.join(", ") : "none"}`] : []),
+    `  Board sync: ${status.syncChannels?.length ? status.syncChannels.join(", ") : "off"}`,
     ...(status.declared?.length ? [`  Declared: ${status.declared.map(entry => `${entry.agentId} (${entry.role})`).join(", ")}`] : []),
     `  Claims: ${status.custody.held} held, ${status.custody.blocked ?? 0} held for a person, ${status.custody.settling} settling, ${status.custody.lost} lost; outbox: ${status.outbox.pending} pending, ${status.outbox.unknown} unknown, ${status.outbox.failed} failed`,
     ...(status.lastGoodReadAt ? [`  Last good read: ${new Date(status.lastGoodReadAt).toISOString()}`] : []),

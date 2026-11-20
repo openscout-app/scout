@@ -4,8 +4,8 @@ import { vercelBoardScopedId } from "./projection.js";
 import type { VercelBoardOutboxRow, VercelBoardStore } from "./store.js";
 import type { VercelBoardWireMessage } from "./wire.js";
 
-export type VercelBoardPostRequest = { channel?: string; re?: string; text: string; labels?: Record<string, string> };
-export type VercelBoardPlanBatchRequest = { channel: string; tasks: VercelBoardPlanTask[] };
+export type VercelBoardPostRequest = { channel?: string; re?: string; text: string; labels?: Record<string, string>; noSync?: boolean; profile?: string };
+export type VercelBoardPlanBatchRequest = { channel: string; tasks: VercelBoardPlanTask[]; noSync?: boolean };
 
 /** A Board client `id` from a Scout ID: the same Scout write always carries the same `id`. */
 export const vercelBoardClientId = (connectionId: string, scoutId: string): string => vercelBoardScopedId("scout", connectionId, scoutId);
@@ -87,8 +87,9 @@ export class VercelBoardOutbox {
     }
     store.markOutbox(connection.id, row.clientId, { state: row.state, attempt: true });
     try {
+      const { profile, ...postRequest } = row.request as VercelBoardPostRequest;
       const response = row.kind === "post"
-        ? await transport.post({ ...(row.request as VercelBoardPostRequest), id: row.clientId })
+        ? await (profile ? transport.as(profile) : transport).post({ ...postRequest, id: row.clientId })
         : await transport.createBatch({ ...(row.request as VercelBoardPlanBatchRequest), id: row.clientId });
       store.markOutbox(connection.id, row.clientId, { state: "done", response });
       return true;
