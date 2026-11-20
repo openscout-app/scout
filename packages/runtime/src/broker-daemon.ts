@@ -3337,6 +3337,7 @@ const operatorTaskExpiryTimer = setInterval(() => { void taskService.expireOpera
 operatorTaskExpiryTimer.unref();
 
 const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
+  workPageAvailable: () => projection.statusSnapshot().state === "ready",
   taskAsk: payload => taskService.ask(payload),
   recoverTaskFollowup: (actor, requestId) => taskService.recoverFollowup(actor, requestId),
   withTaskImage: (message, image, commit) => {
