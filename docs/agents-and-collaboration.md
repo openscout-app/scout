@@ -206,6 +206,38 @@ The log append endpoint requires `actorId`, `kind`, `intent`, and `status` and
 enforces the same assignment gate (apart from the explicit system/operator
 override used by trusted control-plane writers).
 
+### The PM Role And Its Slot
+
+The second built-in role is **pm**. It keeps one short summary of the work
+board current. One agent holds it, at agent scope; a second assignment is
+refused unless the operator passes `--allow-multiple`. A role definition names
+the scopes where it allows one holder (`singleHolder`): the orchestrator allows
+one per mission, the PM one in all.
+
+The summary lives in the role's **slot**: a row per assignment, rewritten on
+each pass. It is a cache, not history, so it is not journaled and the mission
+log is untouched. A slot holds:
+
+- `sentences`: at most six, each with the card ids it is about. A sentence that
+  cites no card, or cites a card outside the stamp, is refused.
+- `stamp`: each card id the writer read, with that card's revision.
+- `version`: bumped on every write. A writer sends the version it read, and a
+  stale one gets `409` with the current version.
+
+Only the active holder of an assignment whose role lists `slot.write` may write
+it. The runtime compares only the slot's own version, never the whole board, so
+a summary written while the board moved still lands; readers see that through
+`behind`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /v1/roles/slots?roleId=pm` | Each active holder with its slot and `behind`: true when an open card's revision differs from the stamp, or a stamped card changed since (including one that closed). |
+| `POST /v1/roles/slots/:assignmentId` | Write the slot: `actorId`, `expectedVersion` (0 for the first write), `stamp`, `sentences`. |
+
+A write publishes the live event `role.slot.written` with the assignment, role
+and new version. It is never persisted; a client that missed it reads the slot.
+A read never starts a pass.
+
 ### Broker Lifecycle Floor
 
 The runtime supplies one deterministic lifecycle floor today. When an ask's

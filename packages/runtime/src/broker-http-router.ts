@@ -1,4 +1,6 @@
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
+import { RoleSlotError } from "./role-slots-store.js";
+import { roleSlotBoardCards } from "./broker-roles-http.js";
 import { BrokerVercelBoardService, VercelBoardServiceError, VercelBoardConnectionError } from "./vercel-board/service.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
@@ -43,6 +45,7 @@ import type { RuntimeHttpRequestLike, RuntimeHttpResponseLike } from "./portable
 import { performance } from "node:perf_hooks";
 
 import type {
+  ControlEvent,
   A2AJsonRpcRequest,
   ActorIdentity,
   AgentEndpoint,
@@ -85,6 +88,8 @@ import type { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptan
 import {
   brokerAppendMissionLog,
   brokerAssignRole,
+  brokerReadRoleSlots,
+  brokerWriteRoleSlot,
   brokerListMissionLog,
   brokerListRoleAssignments,
   brokerRevokeRole,
@@ -353,6 +358,8 @@ export type BrokerHttpRouterDeps = {
    * role routes return 503 (tables owned by migrations; broker is writer).
    */
   openRolesDb?: () => ControlPlaneSqliteDatabase | null;
+  /** Live fan-out for an event whose record is elsewhere (SSE clients and the in-memory bus); never persisted. */
+  publishEphemeralEvent?: (event: ControlEvent) => void;
   /**
    * Mesh trust cone (docs/proposals/mesh-trust-cone.md): enrollment handshake
    * endpoints and the signed node card. When absent, the trust routes 404 and
@@ -2186,6 +2193,7 @@ export function createBrokerHttpRouter(
         agentId?: string;
         scope?: { kind?: string; missionId?: string; projectRoot?: string };
         assignedById?: string;
+        enforceSingleHolder?: boolean;
         enforceSingleOrchestrator?: boolean;
         metadata?: Record<string, unknown>;
       }>(request);
@@ -2198,6 +2206,7 @@ export function createBrokerHttpRouter(
         agentId: body.agentId.trim(),
         scope,
         assignedById: attributedActorId(body.assignedById),
+        enforceSingleHolder: body.enforceSingleHolder,
         enforceSingleOrchestrator: body.enforceSingleOrchestrator,
         metadata: body.metadata,
       }));
@@ -2225,6 +2234,65 @@ export function createBrokerHttpRouter(
       }));
     } catch (error) {
       badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/v1/roles/slots") {
+    try {
+      const db = deps.openRolesDb?.() ?? null;
+      if (!db) {
+        json(response, 503, { error: "roles_unavailable", detail: "control-plane roles store not open" });
+        return;
+      }
+      const roleId = url.searchParams.get("roleId")?.trim();
+      if (!roleId) throw new Error("roleId is required");
+      json(response, 200, brokerReadRoleSlots(db, roleId, roleSlotBoardCards(deps.workLifecycles)));
+    } catch (error) {
+      badRequest(response, error);
+    }
+    return;
+  }
+
+  const roleSlotWriteMatch = method === "POST"
+    ? url.pathname.match(/^\/v1\/roles\/slots\/([^/]+)$/)
+    : null;
+  if (roleSlotWriteMatch) {
+    try {
+      const db = deps.openRolesDb?.() ?? null;
+      if (!db) {
+        json(response, 503, { error: "roles_unavailable", detail: "control-plane roles store not open" });
+        return;
+      }
+      const assignmentId = decodeURIComponent(roleSlotWriteMatch[1] ?? "");
+      const body = await readRequestBody<{
+        actorId?: string;
+        expectedVersion?: number;
+        stamp?: Record<string, number>;
+        sentences?: Array<{ text: string; cites: string[] }>;
+      }>(request, { maxBytes: 256 * 1024 });
+      if (!body.actorId?.trim()) throw new Error("actorId is required");
+      const { slot } = brokerWriteRoleSlot(db, {
+        assignmentId,
+        actorId: attributedActorId(body.actorId),
+        expectedVersion: body.expectedVersion ?? -1,
+        stamp: body.stamp ?? {},
+        sentences: body.sentences ?? [],
+      });
+      deps.publishEphemeralEvent?.({
+        id: `role-slot-${slot.assignmentId}-${slot.version}`,
+        kind: "role.slot.written",
+        ts: slot.writtenAt,
+        actorId: slot.writtenById,
+        payload: { assignmentId: slot.assignmentId, roleId: slot.roleId, version: slot.version },
+      });
+      json(response, 200, { slot });
+    } catch (error) {
+      if (error instanceof RoleSlotError) {
+        json(response, error.status, { error: error.message, ...(error.currentVersion !== undefined ? { currentVersion: error.currentVersion } : {}) });
+      } else {
+        badRequest(response, error);
+      }
     }
     return;
   }
