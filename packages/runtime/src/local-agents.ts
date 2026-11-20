@@ -500,11 +500,30 @@ export function resolveLocalAgentScoutCliPath(moduleDirectory = MODULE_DIRECTORY
   return resolve(moduleDirectory, "..", "..", "..", "packages", "cli", "bin", "scout.mjs");
 }
 
+/**
+ * The CLI entry agents run with Bun. A checkout's packages/cli/bin/scout.mjs runs
+ * only a built dist/main.mjs and otherwise exits with "Bun entry is missing", so
+ * an unbuilt checkout gives agents the CLI's source entry. Published bundles keep
+ * their installed bin/scout.mjs.
+ */
+export function resolveLocalAgentBunScoutEntry(moduleDirectory = MODULE_DIRECTORY): string {
+  const cli = resolveLocalAgentScoutCliPath(moduleDirectory);
+  const cliRoot = dirname(dirname(cli));
+  const source = join(cliRoot, "src", "main.ts");
+  if (existsSync(join(cliRoot, "dist", "main.mjs")) || !existsSync(source)) return cli;
+  return source;
+}
+
 function legacyNodeBrokerRelayCommand(): string {
   return `node ${JSON.stringify(resolveLocalAgentScoutCliPath())}`;
 }
 
 function brokerRelayCommand(): string {
+  return `bun ${JSON.stringify(resolveLocalAgentBunScoutEntry())}`;
+}
+
+/** The Bun command earlier prompts used, so a prompt generated with it still reads as generated. */
+function previousBunBrokerRelayCommand(): string {
   return `bun ${JSON.stringify(resolveLocalAgentScoutCliPath())}`;
 }
 
@@ -888,7 +907,7 @@ function legacyLocalAgentSystemPromptCandidates(
   projectName: string,
   projectPath: string,
 ): string[] {
-  const relayCommandBases = ["openscout relay", brokerRelayCommand(), legacyNodeBrokerRelayCommand()];
+  const relayCommandBases = ["openscout relay", brokerRelayCommand(), previousBunBrokerRelayCommand(), legacyNodeBrokerRelayCommand()];
   const projectPathCandidates = projectPath.endsWith("/") ? [projectPath, projectPath.slice(0, -1)] : [projectPath, `${projectPath}/`];
   const candidates = new Set<string>();
 
@@ -908,7 +927,7 @@ function generatedLocalAgentSystemPromptCandidates(
   projectPath: string,
 ): string[] {
   const baseContext = buildLocalAgentTemplateContext(agentId, projectName, projectPath);
-  const relayCommands = [brokerRelayCommand(), legacyNodeBrokerRelayCommand()];
+  const relayCommands = [...new Set([brokerRelayCommand(), previousBunBrokerRelayCommand(), legacyNodeBrokerRelayCommand()])];
   const transportModes: Array<RelayRuntimeTransport | undefined> = [
     undefined,
     "tmux",
