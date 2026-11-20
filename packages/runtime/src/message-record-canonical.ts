@@ -73,3 +73,12 @@ export function canonicalMessageRecord(record: MessageRecord): MessageRecord {
     metadata: jsonCanonical(r.metadata),
   } as unknown as MessageRecord;
 }
+
+/** Receiving brokers derive attribution independently; it is not message identity. */
+export function canonicalMessageIdentity(record: MessageRecord): MessageRecord {
+  const canonical = canonicalMessageRecord(record);
+  if (!canonical.metadata || !("attribution" in canonical.metadata)) return canonical;
+  const metadata = { ...canonical.metadata };
+  delete metadata.attribution;
+  return { ...canonical, metadata: Object.keys(metadata).length ? metadata : undefined };
+}

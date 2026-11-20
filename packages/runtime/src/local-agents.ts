@@ -124,6 +124,7 @@ import {
   writeRelayAgentOverrides as writeRelayAgentOverridesToDisk,
   type RelayAgentOverride,
   type ResolvedRelayAgentConfig,
+  resolveRuntimeScoutCliInvocation,
 } from "./setup.js";
 import {
   relayAgentLogsDirectory,
@@ -175,7 +176,7 @@ import {
   isAttachedLiveTerminalEndpointAliveSnapshot,
   sendGhosttyPrompt,
 } from "./live-terminal-session.js";
-import { buildMultiplexerServerEnvironment } from "./instance.js";
+import { buildMultiplexerServerEnvironment, buildUserSpawnEnvironment, isProdOpenScoutInstance, OPENSCOUT_CLIENT_INSTANCE_ENV_KEY } from "./instance.js";
 
 const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const OPENSCOUT_REPO_ROOT = resolve(MODULE_DIRECTORY, "..", "..", "..");
@@ -499,11 +500,30 @@ export function resolveLocalAgentScoutCliPath(moduleDirectory = MODULE_DIRECTORY
   return resolve(moduleDirectory, "..", "..", "..", "packages", "cli", "bin", "scout.mjs");
 }
 
+/**
+ * The CLI entry agents run with Bun. A checkout's packages/cli/bin/scout.mjs runs
+ * only a built dist/main.mjs and otherwise exits with "Bun entry is missing", so
+ * an unbuilt checkout gives agents the CLI's source entry. Published bundles keep
+ * their installed bin/scout.mjs.
+ */
+export function resolveLocalAgentBunScoutEntry(moduleDirectory = MODULE_DIRECTORY): string {
+  const cli = resolveLocalAgentScoutCliPath(moduleDirectory);
+  const cliRoot = dirname(dirname(cli));
+  const source = join(cliRoot, "src", "main.ts");
+  if (existsSync(join(cliRoot, "dist", "main.mjs")) || !existsSync(source)) return cli;
+  return source;
+}
+
 function legacyNodeBrokerRelayCommand(): string {
   return `node ${JSON.stringify(resolveLocalAgentScoutCliPath())}`;
 }
 
 function brokerRelayCommand(): string {
+  return `bun ${JSON.stringify(resolveLocalAgentBunScoutEntry())}`;
+}
+
+/** The Bun command earlier prompts used, so a prompt generated with it still reads as generated. */
+function previousBunBrokerRelayCommand(): string {
   return `bun ${JSON.stringify(resolveLocalAgentScoutCliPath())}`;
 }
 
@@ -887,7 +907,7 @@ function legacyLocalAgentSystemPromptCandidates(
   projectName: string,
   projectPath: string,
 ): string[] {
-  const relayCommandBases = ["openscout relay", brokerRelayCommand(), legacyNodeBrokerRelayCommand()];
+  const relayCommandBases = ["openscout relay", brokerRelayCommand(), previousBunBrokerRelayCommand(), legacyNodeBrokerRelayCommand()];
   const projectPathCandidates = projectPath.endsWith("/") ? [projectPath, projectPath.slice(0, -1)] : [projectPath, `${projectPath}/`];
   const candidates = new Set<string>();
 
@@ -907,7 +927,7 @@ function generatedLocalAgentSystemPromptCandidates(
   projectPath: string,
 ): string[] {
   const baseContext = buildLocalAgentTemplateContext(agentId, projectName, projectPath);
-  const relayCommands = [brokerRelayCommand(), legacyNodeBrokerRelayCommand()];
+  const relayCommands = [...new Set([brokerRelayCommand(), previousBunBrokerRelayCommand(), legacyNodeBrokerRelayCommand()])];
   const transportModes: Array<RelayRuntimeTransport | undefined> = [
     undefined,
     "tmux",
@@ -1201,6 +1221,31 @@ export function normalizeGrokRuntimeLaunchArgs(value: unknown): string[] {
     "--allowedTools",
     DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS.join(","),
   ];
+}
+
+/**
+ * A Claude agent launched by a non-prod instance gets a `scout` MCP server that
+ * reaches the runtime that launched it. Without one, Claude loads the user's
+ * `scout` server, which is the prod runtime's shared MCP: that runtime does not
+ * know this instance's tasks, so the agent's reply fails with "unknown task". A
+ * `--mcp-config` server named `scout` replaces the user's one for that session.
+ * Prod agents keep the shared MCP. Codex gets the same from codex-launch-config.
+ */
+export function claudeInstanceScoutMcpArgs(
+  env: NodeJS.ProcessEnv,
+  invocation: string | null,
+  launchArgs: string[] = [],
+): string[] {
+  const instance = buildUserSpawnEnvironment(env)[OPENSCOUT_CLIENT_INSTANCE_ENV_KEY];
+  if (!instance || isProdOpenScoutInstance(instance) || !invocation) return [];
+  if (launchArgs.some((arg) => arg === "--mcp-config" || arg.startsWith("--mcp-config=") || arg === "--strict-mcp-config")) return [];
+  const scout = {
+    type: "stdio",
+    command: "/bin/sh",
+    args: ["-c", `exec ${invocation} mcp`],
+    env: { [OPENSCOUT_CLIENT_INSTANCE_ENV_KEY]: instance },
+  };
+  return ["--mcp-config", JSON.stringify({ mcpServers: { scout } })];
 }
 
 function normalizeRequestedModel(value: string | undefined): string | undefined {
@@ -4459,7 +4504,10 @@ function buildLocalAgentLaunchCommand(
   const harness = normalizeLocalAgentHarness(record.harness);
   const extraArgs = shellQuoteArguments(
     harness === "claude"
-      ? normalizeClaudeRuntimeLaunchArgs(record.launchArgs)
+      ? [
+        ...normalizeClaudeRuntimeLaunchArgs(record.launchArgs),
+        ...claudeInstanceScoutMcpArgs(process.env, resolveRuntimeScoutCliInvocation(), normalizeLocalAgentLaunchArgs(record.launchArgs)),
+      ]
       : harness === "grok"
         ? normalizeGrokRuntimeLaunchArgs(record.launchArgs)
         : normalizeLaunchArgsForHarness(harness, record.launchArgs),

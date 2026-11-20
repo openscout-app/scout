@@ -4,7 +4,7 @@ import { ATTACHMENT_LIMITS, type AttachmentReadResult, type ConversationDefiniti
 import { AttachmentBlobStore, attachmentHash } from "./attachment-blob-store.js";
 import { AttachmentError, blobRefSchema, decodeAttachment, imageMimes, isTextMime, postWithAttachmentsSchema, readAttachmentSchema, validateAttachmentBytes } from "./attachment-contract.js";
 import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
-export type AttachmentPrincipal = { actorId: string; nodeId: string };
+export type AttachmentPrincipal = { actorId: string; nodeId: string; attribution?: import("@openscout/protocol").ScoutAttribution };
 export type BrokerAttachmentServiceOptions = {
   nodeId: string;
   store?: AttachmentBlobStore;
@@ -119,7 +119,7 @@ export class BrokerAttachmentService {
       originNodeId: this.options.nodeId, class: "agent", body: request.body,
       ...(request.replyToMessageId ? { replyToMessageId: request.replyToMessageId } : {}),
       visibility: conversation.visibility, policy: "durable", createdAt: (this.options.now ?? Date.now)(),
-      metadata: { clientMessageId: id, ...(notifyOperator ? {
+      metadata: { clientMessageId: id, ...(principal.attribution ? { attribution: principal.attribution } : {}), ...(notifyOperator ? {
         source: "scout-notify", operatorSignal: { kind: "notify", blocking: false, replyExpectation: "none" },
         operatorSignalId: id, relayChannel: "dm", relayTarget: notifyOperator,
         relayTargetIds: principal.actorId === notifyOperator ? [] : [notifyOperator], relayMessageId: id,

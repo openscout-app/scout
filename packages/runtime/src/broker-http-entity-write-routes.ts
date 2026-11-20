@@ -17,6 +17,8 @@ import type {
 } from "@openscout/protocol";
 
 import type { ActiveScoutBrokerService } from "./broker-api.js";
+import type { RuntimeSnapshot } from "./scout-dispatcher.js";
+import { brokerAttributionFor, brokerAttributionFromMetadata, brokerAttributionRequiresOperator, brokerPersonActorIds } from "./broker-attribution.js";
 import { WorkClaimConflictError } from "./broker-work-claims.js";
 import {
   badRequest,
@@ -31,6 +33,7 @@ export type BrokerHttpEntityWriteRouteDeps = {
     "executeCommand" | "openThreadWatch" | "renewThreadWatch" | "closeThreadWatch"
   >;
   recordFlight: (flight: FlightRecord) => Promise<void>;
+  snapshot?: () => RuntimeSnapshot;
 };
 
 export type BrokerHttpEntityWriteRouteInput = {
@@ -46,8 +49,13 @@ export async function handleBrokerHttpEntityWriteRoute(
 ): Promise<boolean> {
   const { method, url, request, response, deps } = input;
   const { brokerService, recordFlight } = deps;
+  const attributionSnapshot = () => deps.snapshot?.() ?? ({ actors: {} } as RuntimeSnapshot);
 
   if (method === "POST" && url.pathname === "/v1/commands") {
+    if (!brokerAttributionRequiresOperator(request.transportContext)) {
+      json(response, 403, { error: "operator_attribution_required" });
+      return true;
+    }
     try {
       const command = await readRequestBody<ControlCommand>(request);
       const result = await brokerService.executeCommand(command);
@@ -102,6 +110,17 @@ export async function handleBrokerHttpEntityWriteRoute(
   if (method === "POST" && url.pathname === "/v1/actors") {
     try {
       const actor = await readRequestBody<ActorIdentity>(request);
+      const attribution = brokerAttributionFor({ claimedActorId: actor.id, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(attributionSnapshot()) });
+      if (actor.kind === "person" && (attribution.source === "unverified" || attribution.actorId !== actor.id)) {
+        json(response, 403, { error: "person_attribution_unverified" });
+        return true;
+      }
+      const existing = attributionSnapshot().actors?.[actor.id];
+      if (existing?.kind === "person" && actor.kind !== "person" && !brokerAttributionRequiresOperator(request.transportContext)) {
+        json(response, 403, { error: "person_attribution_unverified" });
+        return true;
+      }
       await brokerService.executeCommand({ kind: "actor.upsert", actor });
       json(response, 200, { ok: true, actorId: actor.id });
     } catch (error) {
@@ -113,6 +132,11 @@ export async function handleBrokerHttpEntityWriteRoute(
   if (method === "POST" && url.pathname === "/v1/agents") {
     try {
       const agent = await readRequestBody<AgentDefinition>(request);
+      const existing = attributionSnapshot().actors?.[agent.id];
+      if (existing?.kind === "person" && !brokerAttributionRequiresOperator(request.transportContext)) {
+        json(response, 403, { error: "person_attribution_unverified" });
+        return true;
+      }
       await brokerService.executeCommand({ kind: "agent.upsert", agent });
       json(response, 200, { ok: true, agentId: agent.id });
     } catch (error) {
@@ -163,9 +187,22 @@ export async function handleBrokerHttpEntityWriteRoute(
   if (method === "POST" && url.pathname === "/v1/collaboration/records") {
     try {
       const record = await readRequestBody<CollaborationRecord>(request);
+      const snapshot = attributionSnapshot();
+      const parent = brokerAttributionFromMetadata(record.parentId ? snapshot.collaborationRecords?.[record.parentId]?.metadata : undefined);
+      const attribution = brokerAttributionFor({ claimedActorId: record.createdById, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(snapshot), parent });
+      const attributed = {
+        ...record,
+        createdById: attribution.actorId,
+        ...(record.kind === "question" ? {
+          ...(record.askedById !== undefined ? { askedById: attribution.actorId } : {}),
+          ...(record.answeredById !== undefined ? { answeredById: attribution.actorId } : {}),
+        } : {}),
+        metadata: { ...record.metadata, attribution },
+      } as CollaborationRecord;
       const result = await brokerService.executeCommand({
         kind: "collaboration.upsert",
-        record,
+        record: attributed,
       });
       json(response, 200, result);
     } catch (error) {
@@ -178,9 +215,13 @@ export async function handleBrokerHttpEntityWriteRoute(
   if (method === "POST" && url.pathname === "/v1/collaboration/events") {
     try {
       const event = await readRequestBody<CollaborationEvent>(request);
+      const snapshot = attributionSnapshot();
+      const parent = brokerAttributionFromMetadata(snapshot.collaborationRecords?.[event.recordId]?.metadata);
+      const attribution = brokerAttributionFor({ claimedActorId: event.actorId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(snapshot), parent });
       const result = await brokerService.executeCommand({
         kind: "collaboration.event.append",
-        event,
+        event: { ...event, actorId: attribution.actorId, metadata: { ...event.metadata, attribution } },
       });
       json(response, 200, result);
     } catch (error) {
@@ -196,7 +237,11 @@ export async function handleBrokerHttpEntityWriteRoute(
   ) {
     try {
       const flight = await readRequestBody<FlightRecord>(request);
-      await recordFlight(flight);
+      const snapshot = attributionSnapshot();
+      const parent = brokerAttributionFromMetadata(snapshot.invocations?.[flight.invocationId]?.metadata);
+      const attribution = brokerAttributionFor({ claimedActorId: flight.requesterId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(snapshot), parent, unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+      await recordFlight({ ...flight, requesterId: attribution.actorId, metadata: { ...flight.metadata, attribution } });
       json(response, 200, { ok: true, flightId: flight.id });
     } catch (error) {
       badRequest(response, error);

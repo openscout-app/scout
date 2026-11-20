@@ -1,5 +1,14 @@
 export type ScoutId = string;
 
+export type ScoutAttributionSource = "local-admin" | "scoped" | "system" | "unverified";
+
+export interface ScoutAttribution {
+  actorId: ScoutId;
+  rootActorId: ScoutId;
+  source: ScoutAttributionSource;
+  claimedActorId?: ScoutId;
+}
+
 export type ActorKind =
   | "person"
   | "helper"
