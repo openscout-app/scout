@@ -3827,6 +3827,10 @@ const routeRequest = createBrokerHttpRouter({
     }
   },
   openRolesDb: openRolesControlPlaneDb,
+  publishEphemeralEvent: (event) => {
+    controlStreams.streamEphemeralEvent(event);
+    publishEphemeralControlEvent(event);
+  },
 });
 
 let rolesControlPlaneDb: import("bun:sqlite").Database | null = null;

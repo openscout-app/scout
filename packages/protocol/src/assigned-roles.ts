@@ -43,11 +43,14 @@ export type ScoutRoleLifecycleWhen = "target" | "requester" | "either";
 export const SCOUT_MISSION_LOG_APPEND = "mission_log.append" as const;
 export const SCOUT_WORK_CHILD_LINK = "work.child_link" as const;
 export const SCOUT_WORK_SET_NEXT_MOVE = "work.set_next_move" as const;
+/** Write the role's slot: one short summary the runtime keeps per assignment. Checked by the runtime. */
+export const SCOUT_SLOT_WRITE = "slot.write" as const;
 
 export const SCOUT_ROLE_ACTION_IDS = [
   SCOUT_MISSION_LOG_APPEND,
   SCOUT_WORK_CHILD_LINK,
   SCOUT_WORK_SET_NEXT_MOVE,
+  SCOUT_SLOT_WRITE,
 ] as const;
 
 /** Closed set for catalog authoring; open only at untrusted boundaries if needed. */
@@ -71,9 +74,10 @@ export interface ScoutRoleLifecycleBinding {
 /* ── Catalog ── */
 
 export const SCOUT_ORCHESTRATOR_ROLE_ID = "orchestrator" as const;
+export const SCOUT_PM_ROLE_ID = "pm" as const;
 
 /** Built-in role ids. Future roles append here and stay closed in the catalog. */
-export type ScoutBuiltinRoleId = typeof SCOUT_ORCHESTRATOR_ROLE_ID;
+export type ScoutBuiltinRoleId = typeof SCOUT_ORCHESTRATOR_ROLE_ID | typeof SCOUT_PM_ROLE_ID;
 
 /** Role id on definitions/assignments; catalog rows use built-ins. */
 export type ScoutRoleId = ScoutBuiltinRoleId | (string & {});
@@ -89,6 +93,12 @@ export interface ScoutRoleDefinition {
    * Fired by the broker at ask/work boundaries — not agent-loaded hooks.
    */
   lifecycle?: readonly ScoutRoleLifecycleBinding[];
+  /**
+   * Scope kinds in which only one agent may hold this role at a time: one per
+   * mission for "mission", one in all for "agent", one per project root for
+   * "project". The runtime refuses a second holder unless the assigner opts out.
+   */
+  singleHolder?: readonly ScoutRoleAssignmentScope["kind"][];
 }
 
 /** Orchestrator lifecycle: auto post-ask / post-work summary into mission log. */
@@ -125,12 +135,129 @@ export const SCOUT_ORCHESTRATOR_ROLE: ScoutRoleDefinition = {
     SCOUT_WORK_SET_NEXT_MOVE,
   ],
   lifecycle: SCOUT_ORCHESTRATOR_LIFECYCLE,
+  singleHolder: ["mission"],
+};
+
+/**
+ * PM: keeps the Kanban's summary current. Its only checked action is writing
+ * its slot; one agent holds it.
+ */
+export const SCOUT_PM_ROLE: ScoutRoleDefinition = {
+  id: SCOUT_PM_ROLE_ID,
+  label: "PM",
+  summary: "Keeps the Kanban's summary current and asks agents only what the records can't answer.",
+  hooks: [],
+  actions: [SCOUT_SLOT_WRITE],
+  singleHolder: ["agent"],
 };
 
 /** Built-in catalog. Future roles (qa, sre, reviewer) append here. */
 export const SCOUT_ROLE_CATALOG: readonly ScoutRoleDefinition[] = [
   SCOUT_ORCHESTRATOR_ROLE,
+  SCOUT_PM_ROLE,
 ] as const;
+
+/* ── Role slot: one short, cited summary per assignment ── */
+
+export const SCOUT_ROLE_SLOT_LIMITS = {
+  sentencesMax: 6,
+  sentenceMaxChars: 280,
+  citesPerSentenceMax: 8,
+  stampMax: 2000,
+} as const;
+
+/** Card id to the revision the writer read. What the summary is valid for. */
+export type ScoutRoleSlotStamp = Record<ScoutId, number>;
+
+/** One sentence of a slot, with the cards it is about. Every sentence cites at least one stamped card. */
+export interface ScoutRoleSlotSentence {
+  text: string;
+  cites: ScoutId[];
+}
+
+export interface ScoutRoleSlot {
+  assignmentId: ScoutId;
+  roleId: ScoutRoleId;
+  /** Bumps on every write; a writer sends the version it read. */
+  version: number;
+  stamp: ScoutRoleSlotStamp;
+  sentences: ScoutRoleSlotSentence[];
+  writtenById: ScoutId;
+  writtenAt: number;
+}
+
+export interface ScoutRoleSlotWriteInput {
+  assignmentId: ScoutId;
+  actorId: ScoutId;
+  /** The slot version the writer read; 0 when there was none. */
+  expectedVersion: number;
+  stamp: ScoutRoleSlotStamp;
+  sentences: ScoutRoleSlotSentence[];
+}
+
+/** Shape and citation check for a slot write. A sentence that cites no stamped card is refused. */
+export function validateRoleSlotWrite(input: Pick<ScoutRoleSlotWriteInput, "expectedVersion" | "stamp" | "sentences">): { ok: true } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const limits = SCOUT_ROLE_SLOT_LIMITS;
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) errors.push("expectedVersion must be a whole number, 0 or more");
+  const stamp = input.stamp && typeof input.stamp === "object" && !Array.isArray(input.stamp) ? input.stamp : null;
+  if (!stamp) errors.push("stamp must map card ids to revisions");
+  const stamped = Object.entries(stamp ?? {});
+  if (stamped.length > limits.stampMax) errors.push(`stamp holds at most ${limits.stampMax} cards`);
+  for (const [id, revision] of stamped) {
+    if (!id.trim() || !Number.isInteger(revision) || revision < 0) {
+      errors.push(`stamp entry ${JSON.stringify(id)} needs a whole revision`);
+      break;
+    }
+  }
+  if (!Array.isArray(input.sentences)) {
+    errors.push("sentences must be a list");
+    return { ok: false, errors };
+  }
+  if (input.sentences.length > limits.sentencesMax) errors.push(`at most ${limits.sentencesMax} sentences`);
+  input.sentences.forEach((sentence, index) => {
+    const n = index + 1;
+    const text = typeof sentence?.text === "string" ? sentence.text.trim() : "";
+    if (!text) errors.push(`sentence ${n} is empty`);
+    else if (text.length > limits.sentenceMaxChars) errors.push(`sentence ${n} is over ${limits.sentenceMaxChars} characters`);
+    const cites = Array.isArray(sentence?.cites) ? sentence.cites : [];
+    if (!cites.length) errors.push(`sentence ${n} cites no card`);
+    else if (cites.length > limits.citesPerSentenceMax) errors.push(`sentence ${n} cites more than ${limits.citesPerSentenceMax} cards`);
+    const unstamped = cites.filter((id) => typeof id !== "string" || !stamp || !Object.prototype.hasOwnProperty.call(stamp, id));
+    if (unstamped.length) errors.push(`sentence ${n} cites cards outside the stamp: ${unstamped.join(", ")}`);
+  });
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+/**
+ * True when the board moved since the slot was written: an open card whose
+ * revision differs from the stamp (or is missing from it), or a stamped card
+ * that has changed since, including one that closed. Cards gone from the board
+ * read are ignored.
+ */
+export function roleSlotBehind(
+  stamp: ScoutRoleSlotStamp | undefined,
+  cards: ReadonlyArray<{ workId: ScoutId; revision: number; open: boolean }>,
+): boolean {
+  const read = stamp ?? {};
+  for (const card of cards) {
+    const has = Object.prototype.hasOwnProperty.call(read, card.workId);
+    if (card.open && (!has || read[card.workId] !== card.revision)) return true;
+    if (!card.open && has && read[card.workId] !== card.revision) return true;
+  }
+  return false;
+}
+
+/** True when this agent may write the slot of this assignment: it holds it, and its role lists slot.write. */
+export function agentMayWriteRoleSlot(opts: {
+  agentId: string;
+  assignment: ScoutRoleAssignment;
+  catalog?: readonly ScoutRoleDefinition[];
+}): boolean {
+  const { assignment } = opts;
+  if (!assignment.active || assignment.agentId !== opts.agentId) return false;
+  return Boolean(scoutRoleDefinition(assignment.roleId, opts.catalog)?.actions.includes(SCOUT_SLOT_WRITE));
+}
 
 /* ── Assignment scope ── */
 

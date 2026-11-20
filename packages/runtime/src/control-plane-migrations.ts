@@ -20,6 +20,7 @@ import {
   MACHINES_SQLITE_SCHEMA,
   CONTROL_PLANE_TERMINAL_SESSION_SQLITE_SCHEMA,
   CONTROL_PLANE_TERMINAL_WORKSPACE_SQLITE_SCHEMA,
+  CONTROL_PLANE_ROLE_SLOTS_SQLITE_SCHEMA,
 } from "./schema.js";
 import { resolveOpenScoutSupportPaths } from "./support-paths.js";
 import {
@@ -234,6 +235,15 @@ export const CONTROL_PLANE_SCHEMA_MIGRATIONS: ControlPlaneSchemaMigration[] = [
       if (!hasColumn(database, "briefings", "markdown")) {
         database.exec("ALTER TABLE briefings ADD COLUMN markdown TEXT");
       }
+    },
+  },
+  {
+    // Additive like terminal-workspaces: a new table an older build never
+    // reads, so no CONTROL_PLANE_SCHEMA_VERSION bump.
+    id: "role-slots",
+    description: "Creates role_slots: one cited summary per role assignment, written through slot.write.",
+    apply(database) {
+      database.exec(CONTROL_PLANE_ROLE_SLOTS_SQLITE_SCHEMA);
     },
   },
   {
