@@ -14,7 +14,7 @@ export function renderReplyCommandHelp(): string {
     "While the task waits on an open permission request, a final reply is recorded as blocked on that request.",
     "Only the current recipient may answer. The first final reply wins; cancelled tasks reject replies.",
     "--to is a plain conversation reply and has no task lifecycle.",
-    "The harness final turn is already an automatic answer. Do not answer twice.",
+    "If the ask requires a task reply, use --ref. If it captures the harness final turn automatically, do not answer twice.",
   ].join("\n");
 }
 export function parseReplyCommandOptions(args: string[]) {
