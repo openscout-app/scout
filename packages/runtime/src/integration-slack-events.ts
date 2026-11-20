@@ -60,7 +60,7 @@ export class IntegrationSlackEvents {
       const envelope = parsedEnvelope.data;
       const { event, event_id: eventId } = envelope.payload;
       if (envelope.payload.team_id !== operation.workspaceId || envelope.payload.api_app_id !== operation.appId
-        || event.bot_id || event.subtype || event.user === operation.credentials?.botUserId
+        || (event.bot_id && !event.user) || event.subtype || event.user === operation.credentials?.botUserId
         || !operation.credentials?.allowedUserIds.includes(event.user)
         || (event.type === "message" && (event.channel_type !== "im" || !event.channel.startsWith("D")))
         || (event.type === "app_mention" && !operation.credentials.allowedChannelIds.includes(event.channel))) return { accepted: false };
