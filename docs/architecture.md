@@ -780,6 +780,17 @@ Existing actor and requester ids are coordination facts, not proof of a
 delegated permission. New adapters must not infer authority from body text or
 silently substitute the local operator's privileges.
 
+Attribution V1 adds `metadata.attribution` to those coordination records. The
+runtime, not the payload, resolves the acting `actorId`, original `rootActorId`,
+verification `source`, and any rejected `claimedActorId`. Local-admin and scoped
+proofs are verified at ingress. Direct local unverified person claims become
+`local-unverified`; agent claims remain agents. Mesh routes preserve origin actor
+ids but always mark them unverified, including on loopback forwards. Parent links
+propagate the root as provenance only. The optional `OPENSCOUT_ATTRIBUTION_KEY_FILE` lets a local
+runtime and CLI prove the operator with the same HMAC used for local
+administration, without enabling protected-ingress mode. This identity metadata
+must not be confused with a permission grant.
+
 ## Addressing And Session Lifecycle
 
 ![Agent lifecycle](arc:agent-lifecycle)

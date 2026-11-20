@@ -1,6 +1,7 @@
 import { INTEGRATION_SLACK_EVENTS_SCHEMA } from "./integration-slack-events.js";
 import { INTEGRATION_SLACK_DELIVERY_SCHEMA } from "./integration-slack-delivery.js";
 import { INTEGRATION_WORKER_SQLITE_SCHEMA } from "./integration-worker-leases.js";
+import { VERCEL_BOARD_SQLITE_SCHEMA } from "./vercel-board/schema.js";
 import { INTEGRATION_SETUP_SQLITE_SCHEMA } from "./integration-setup-schema.js";
 export * from "./drizzle-schema.js";
 export { CONTROL_PLANE_SCHEMA_VERSION } from "./schema-version.js";
@@ -280,6 +281,7 @@ export const CONTROL_PLANE_SQLITE_SCHEMA = `
 ${CONTROL_PLANE_HISTORY_ANCHORS_SQLITE_SCHEMA}
 ${INTEGRATION_SETUP_SQLITE_SCHEMA}
 ${INTEGRATION_WORKER_SQLITE_SCHEMA}
+${VERCEL_BOARD_SQLITE_SCHEMA}
 ${INTEGRATION_SLACK_DELIVERY_SCHEMA}
 ${INTEGRATION_SLACK_EVENTS_SCHEMA}
 PRAGMA journal_mode = WAL;

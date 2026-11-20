@@ -49,6 +49,7 @@ export type ScoutTaskReply = {
   failed?: boolean;
   /** The work is blocked: the task stays open and its flight waits on this. */
   waitingOn?: import("./invocations.js").ReplyWaitingOn;
+  metadata?: import("./common.js").MetadataMap;
   attachments?: import("./messages.js").MessageAttachment[];
   image?: import("./attachments.js").AttachmentUpload;
 };

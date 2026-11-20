@@ -236,7 +236,9 @@ function workRecordHash(record: CollaborationRecord): string {
 
 function workItemProtected(record: CollaborationRecord): boolean {
   return record.kind !== "work_item" || record.state === "done" || record.state === "cancelled"
-    || record.acceptanceState === "accepted";
+    || record.acceptanceState === "accepted"
+    // Board owns a Board item's state: its custodian settles the task, and the result returns as an event.
+    || record.externalContext?.source.adapterId === "vercel-board";
 }
 
 export class BrokerWorkItemStore {

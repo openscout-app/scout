@@ -5,6 +5,7 @@ export type PermissionDecision = "once" | "project" | "deny";
 export type ManagedPermissionPrompt = {
   sessionId: string;
   projectRoot: string;
+  cwd?: string;
   text: string;
   version: string;
   decisions: PermissionDecision[];
