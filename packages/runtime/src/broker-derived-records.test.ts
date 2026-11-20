@@ -40,7 +40,7 @@ function workItem(input: Partial<WorkItemRecord> = {}): WorkItemRecord {
   };
 }
 
-async function setup(records: CollaborationRecord[] = [workItem()], options: { maxDispatchesPerDay?: number; deliver?: boolean } = {}) {
+async function setup(records: CollaborationRecord[] = [workItem()], options: { maxDispatchesPerDay?: number; deliver?: boolean; recordAsks?: boolean } = {}) {
   const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
   for (const record of records) await runtime.upsertCollaboration(record);
   const journal: BrokerJournalEntry[] = [];
@@ -52,18 +52,39 @@ async function setup(records: CollaborationRecord[] = [workItem()], options: { m
   const machine = compileWorkLifecycle(lifecycle);
   const asks: ScoutDeliverRequest[] = [];
   let clock = 1_000;
+  // With recordAsks, an accepted ask leaves its work item, as delivery does.
+  const deliver = async (request: ScoutDeliverRequest) => {
+    asks.push(request);
+    if (!options.recordAsks || !request.workItem) return;
+    await runtime.upsertCollaboration({
+      id: `work-ask-${asks.length}`, kind: "work_item", title: request.workItem.title, createdById: "scout.deriver",
+      ownerId: "agent-9", nextMoveOwnerId: "agent-9", state: "done", acceptanceState: "none", labels: request.workItem.labels,
+      createdAt: clock, updatedAt: clock, metadata: { source: "scout-derived", ...request.workItem.metadata, deliveryRequestId: request.requestId },
+    } as WorkItemRecord);
+  };
+  const serviceOptions = () => ({
+    registry: { forRecord: () => machine },
+    durableStore,
+    runtime,
+    listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((r): r is WorkItemRecord => r.kind === "work_item"),
+    producerActorId: "scout.deriver",
+    maxDispatchesPerDay: options.maxDispatchesPerDay,
+    now: () => clock,
+  });
   const service = new BrokerDerivedRecordService({
     registry: { forRecord: () => machine },
     durableStore,
     runtime,
     listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((r): r is WorkItemRecord => r.kind === "work_item"),
-    ...(options.deliver === false ? {} : { deliver: async (request: ScoutDeliverRequest) => { asks.push(request); } }),
+    ...(options.deliver === false ? {} : { deliver }),
     producerActorId: "scout.deriver",
     maxDispatchesPerDay: options.maxDispatchesPerDay,
     now: () => clock,
   });
   const item = (id = "work-1") => runtime.collaborationRecord(id) as WorkItemRecord;
-  return { runtime, service, journal, asks, item, advance: (ms: number) => { clock += ms; } };
+  // A new service on the same records, as after a runtime restart.
+  const restart = () => new BrokerDerivedRecordService({ ...serviceOptions(), deliver });
+  return { runtime, service, journal, asks, item, restart, advance: (ms: number) => { clock += ms; } };
 }
 
 describe("derived records", () => {
@@ -154,6 +175,78 @@ describe("derived records", () => {
     const pull = await setup([workItem()], { deliver: false });
     expect(await pull.service.dispatchPending()).toBe(0);
     expect(pull.service.pending()).toHaveLength(2);
+  });
+
+  test("an ask that ends without a write is not replayed and spends no more budget", async () => {
+    const { service, runtime, item, asks, advance } = await setup([workItem(), workItem({ id: "work-2", createdAt: 50, updatedAt: 50 })], { maxDispatchesPerDay: 3, recordAsks: true });
+    expect(await service.dispatchPending()).toBe(2);
+    // The agents answered without writing: both items stay pending at the same version.
+    for (let pass = 0; pass < 8; pass++) {
+      advance(15 * 60 * 1000);
+      expect(await service.dispatchPending()).toBe(0);
+    }
+    expect(asks).toHaveLength(2);
+    expect(service.pending().filter((p) => p.dispatchable)).toHaveLength(2);
+    // A new version is a new request id, and the budget still has room for it.
+    await runtime.upsertCollaboration({ ...item(), updatedAt: 200 });
+    expect(await service.dispatchPending()).toBe(1);
+    expect(asks.map((a) => a.requestId)).toEqual([
+      "derive.work-1.presentation.r3.u100", "derive.work-2.presentation.r3.u50", "derive.work-1.presentation.r3.u200",
+    ]);
+  });
+
+  test("a restart reads the asked versions and the daily cap from records", async () => {
+    const { runtime, item, asks, restart, advance } = await setup([workItem(), workItem({ id: "work-2", createdAt: 50, updatedAt: 50 }), workItem({ id: "work-3", createdAt: 40, updatedAt: 40 })], { maxDispatchesPerDay: 2, recordAsks: true });
+    expect(await restart().dispatchPending()).toBe(2);
+    expect(asks.map((a) => a.workItem?.metadata?.derivedRequestId)).toEqual(["derive.work-1.presentation.r3.u100", "derive.work-2.presentation.r3.u50"]);
+    // The old instance hit its cap. A new one, a minute later, starts nothing.
+    advance(60 * 1000);
+    await runtime.upsertCollaboration({ ...item(), updatedAt: 300 });
+    expect(await restart().dispatchPending()).toBe(0);
+    expect(asks).toHaveLength(2);
+    // The next UTC day has a fresh budget.
+    advance(24 * 60 * 60 * 1000);
+    expect(await restart().dispatchPending()).toBe(2);
+    expect(asks.slice(2).map((a) => a.requestId)).toEqual(["derive.work-1.presentation.r3.u300", "derive.work-3.presentation.r3.u40"]);
+  });
+
+  test("a restart inside the interval does not ask again for a changed item", async () => {
+    const { runtime, item, asks, restart, advance } = await setup([workItem()], { recordAsks: true });
+    expect(await restart().dispatchPending()).toBe(1);
+    advance(60 * 1000);
+    await runtime.upsertCollaboration({ ...item(), updatedAt: 400 });
+    expect(await restart().dispatchPending()).toBe(0);
+    advance(15 * 60 * 1000);
+    expect(await restart().dispatchPending()).toBe(1);
+    expect(asks).toHaveLength(2);
+  });
+
+  test("a deliver that fails may be tried again after the interval", async () => {
+    const { runtime, item } = await setup();
+    let calls = 0;
+    let clock = 0;
+    const service = new BrokerDerivedRecordService({
+      registry: { forRecord: () => compileWorkLifecycle(lifecycle) },
+      durableStore: { runWrite: (work) => work(), commitEntries: async (entries) => [entries].flat() },
+      runtime,
+      listWorkItems: () => [item()],
+      deliver: async () => { calls += 1; throw new Error("no route"); },
+      producerActorId: "scout.deriver",
+      now: () => clock,
+    });
+    expect(await service.dispatchPending()).toBe(1);
+    expect(await service.dispatchPending()).toBe(0);
+    clock += 15 * 60 * 1000;
+    expect(await service.dispatchPending()).toBe(1);
+    expect(calls).toBe(2);
+  });
+
+  test("a kind named like an Object.prototype key reads as missing", async () => {
+    const { item } = await setup();
+    for (const kind of ["constructor", "tostring", "__proto__", "hasownproperty"]) {
+      expect(readDerived(item(), kind)).toEqual({ status: "missing", currentVersion: "r3.u100" });
+    }
+    expect(readDerived({ ...item(), metadata: {} }, "constructor").status).toBe("missing");
   });
 });
 

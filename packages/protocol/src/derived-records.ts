@@ -83,7 +83,8 @@ export function collaborationRecordVersion(record: { updatedAt: number; metadata
 export function derivedRecordsOf(record: { metadata?: MetadataMap | null }): Record<string, DerivedRecord> {
   const value = record.metadata?.[DERIVED_METADATA_KEY];
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const out: Record<string, DerivedRecord> = {};
+  // No prototype: a kind such as "constructor" must not read Object.prototype.
+  const out: Record<string, DerivedRecord> = Object.create(null);
   for (const [kind, entry] of Object.entries(value as Record<string, unknown>)) {
     if (isDerivedRecord(entry) && entry.kind === kind) out[kind] = entry;
   }
@@ -104,7 +105,8 @@ export function readDerived<Body = unknown>(
   options: { producerVersion?: string } = {},
 ): DerivedRead<Body> {
   const currentVersion = collaborationRecordVersion(record);
-  const found = derivedRecordsOf(record)[kind] as DerivedRecord<Body> | undefined;
+  const records = derivedRecordsOf(record);
+  const found = (Object.hasOwn(records, kind) ? records[kind] : undefined) as DerivedRecord<Body> | undefined;
   if (!found) return { status: "missing", currentVersion };
   const current = found.sourceId === record.id && found.sourceVersion === currentVersion
     && (options.producerVersion === undefined || found.producer.version === options.producerVersion);

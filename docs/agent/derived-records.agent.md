@@ -45,8 +45,18 @@ A lifecycle station names what its items need:
   one-time session in that folder, under the caller `scout.deriver`, labelled
   `scout:derived`. The request id is `derive.<workId>.<kind>.<version>`, so a
   retry is idempotent. The runtime allows one ask per item and kind per
-  15 minutes and at most 50 asks a day. A change to a work item triggers a
-  pass, and so does startup. Bursts coalesce into one pass.
+  15 minutes and at most 50 asks per UTC day. A change to a work item
+  triggers a pass, and so does startup. Bursts coalesce into one pass.
+- **Each version is asked once.** An ask that ends without a write leaves the
+  item pending at the same version. The runtime does not ask again until the
+  item changes, and only a new request id counts against the day's 50. The
+  item stays in `derived_pending` for a pull producer.
+- **The bounds come from records.** Each ask's work item carries
+  `derivedRequestId`, `derivedSourceId` and `derivedKind` in its metadata, and
+  its `createdAt`. The interval, the daily count and the versions already
+  asked are read from those items, so a restart keeps them. An ask whose
+  deliver failed leaves no work item. The interval and the count still apply
+  to it, but a later pass may ask for that version again.
 - Work labelled `scout:derived` is never derived from itself.
 
 ## Invariants

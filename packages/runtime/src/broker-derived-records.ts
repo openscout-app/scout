@@ -13,7 +13,10 @@
  * finds the same set again. When a station also names where an agent runs, the
  * dispatcher starts one ordinary ask for it. The ask's request id is built
  * from item, kind and version, so a retry is idempotent. Dispatch is bounded:
- * one ask per item and kind per interval, and a daily cap.
+ * one ask per item and kind per interval, and a daily cap. A version already
+ * asked about is not asked again, even when its ask ended without a write.
+ * The bounds are read from the asks' own work items (label `scout:derived`,
+ * with the request id and creation time), so a restart keeps them.
  */
 import {
   DERIVED_BODY_MAX_BYTES,
@@ -99,9 +102,10 @@ export function buildDerivedAsk(
     "If the write answers stale, the item changed while you worked. Stop there; a later run covers it.",
     "Do not move, answer or change the work item itself.",
   ].join("\n");
-  const metadata = { source: "scout-derived", derivedKind: deriver.kind, derivedSourceId: record.id, derivedSourceVersion: sourceVersion };
+  const requestId = derivedRequestId({ workId: record.id, kind: deriver.kind, sourceVersion });
+  const metadata = { source: "scout-derived", derivedKind: deriver.kind, derivedSourceId: record.id, derivedSourceVersion: sourceVersion, derivedRequestId: requestId };
   return {
-    requestId: derivedRequestId({ workId: record.id, kind: deriver.kind, sourceVersion }),
+    requestId,
     caller: { actorId: caller.actorId, ...(caller.nodeId ? { nodeId: caller.nodeId } : {}) },
     target: { kind: "project_path", projectPath: deriver.projectPath },
     body,
@@ -113,15 +117,33 @@ export function buildDerivedAsk(
     },
     projectAgent: { persistence: "one_time" },
     labels: [DERIVED_WORK_LABEL],
-    workItem: { title: `Derive ${deriver.kind}: ${record.title}`.slice(0, 200), labels: [DERIVED_WORK_LABEL] },
+    workItem: { title: `Derive ${deriver.kind}: ${record.title}`.slice(0, 200), labels: [DERIVED_WORK_LABEL], metadata },
     messageMetadata: metadata,
     invocationMetadata: metadata,
   };
 }
 
+type DispatchHistory = {
+  /** Request ids already asked. */
+  asked: Set<string>;
+  /** Request ids started since the start of the UTC day. */
+  today: Set<string>;
+  /** Latest start per item and kind. */
+  lastStarted: Map<string, number>;
+};
+
+const dispatchKey = (workId: string, kind: string) => `${workId}\u0000${kind}`;
+const metadataString = (record: WorkItemRecord, key: string): string | undefined => {
+  const value = record.metadata?.[key];
+  return typeof value === "string" && value ? value : undefined;
+};
+
 export class BrokerDerivedRecordService {
-  private readonly lastStarted = new Map<string, number>();
-  private budget = { day: "", count: 0 };
+  /**
+   * Asks started by this process whose work item may not exist: a failed
+   * deliver writes none. The records carry the rest, across restarts.
+   */
+  private readonly started = new Map<string, { key: string; at: number; asked: boolean }>();
   private budgetWarned = "";
   private scheduled: ReturnType<typeof setTimeout> | undefined;
   private running: Promise<void> | undefined;
@@ -220,38 +242,68 @@ export class BrokerDerivedRecordService {
     this.scheduled.unref?.();
   };
 
+  /** Earlier asks, read from their work items and from this process's own starts. */
+  private dispatchHistory(dayStart: number): DispatchHistory {
+    const history: DispatchHistory = { asked: new Set(), today: new Set(), lastStarted: new Map() };
+    const note = (requestId: string, key: string | undefined, at: number, asked: boolean) => {
+      if (asked) history.asked.add(requestId);
+      if (at >= dayStart) history.today.add(requestId);
+      if (key && at > (history.lastStarted.get(key) ?? -Infinity)) history.lastStarted.set(key, at);
+    };
+    for (const record of this.options.listWorkItems()) {
+      if (!(record.labels ?? []).includes(DERIVED_WORK_LABEL)) continue;
+      const requestId = metadataString(record, "derivedRequestId") ?? metadataString(record, "deliveryRequestId");
+      if (!requestId?.startsWith("derive.")) continue;
+      const workId = metadataString(record, "derivedSourceId");
+      const kind = metadataString(record, "derivedKind");
+      note(requestId, workId && kind ? dispatchKey(workId, kind) : undefined, record.createdAt, true);
+    }
+    for (const [requestId, start] of this.started) note(requestId, start.key, start.at, start.asked);
+    return history;
+  }
+
   /** One dispatch pass. Exposed for tests; the daemon calls `kick`. */
   async dispatchPending(): Promise<number> {
     const deliver = this.options.deliver;
     if (!deliver) return 0;
     const minInterval = this.options.minIntervalMs ?? 15 * 60 * 1000;
     const cap = this.options.maxDispatchesPerDay ?? 50;
+    const day = new Date(this.now()).toISOString().slice(0, 10);
+    const dayStart = Date.parse(`${day}T00:00:00.000Z`);
+    for (const [requestId, start] of this.started) if (start.at < dayStart - minInterval) this.started.delete(requestId);
+    const history = this.dispatchHistory(dayStart);
     let started = 0;
     for (const { record, deriver, read } of [...this.pendingEntries()]) {
       const projectPath = deriver.projectPath?.trim();
       if (!projectPath) continue;
-      const key = `${record.id}\u0000${deriver.kind}`;
+      const requestId = derivedRequestId({ workId: record.id, kind: deriver.kind, sourceVersion: read.currentVersion });
+      // This version was asked about already; a replay would spend the budget for nothing.
+      if (history.asked.has(requestId)) continue;
+      const key = dispatchKey(record.id, deriver.kind);
       const now = this.now();
-      const last = this.lastStarted.get(key);
+      const last = history.lastStarted.get(key);
       if (last !== undefined && now - last < minInterval) continue;
-      const day = new Date(now).toISOString().slice(0, 10);
-      if (this.budget.day !== day) this.budget = { day, count: 0 };
-      if (this.budget.count >= cap) {
+      if (history.today.size >= cap) {
         if (this.budgetWarned !== day) {
           this.budgetWarned = day;
           this.options.warn?.(`[openscout-runtime] derived record dispatch reached its daily cap of ${cap}; the rest stay pending.`);
         }
         break;
       }
-      this.lastStarted.set(key, now);
-      this.budget.count += 1;
+      const start = { key, at: now, asked: true };
+      this.started.set(requestId, start);
+      history.asked.add(requestId);
+      history.today.add(requestId);
+      history.lastStarted.set(key, now);
       started += 1;
       try {
         await deliver(buildDerivedAsk(record, { ...deriver, projectPath }, read.currentVersion, {
           actorId: this.options.producerActorId, nodeId: this.options.nodeId,
         }));
       } catch (error) {
-        // The interval still applies, so a failing route is not retried in a hot loop.
+        // Not asked, so a later pass may try this version again; the interval
+        // and the budget still apply, so a failing route is not retried in a hot loop.
+        start.asked = false;
         this.options.warn?.(`[openscout-runtime] derived ${deriver.kind} for ${record.id} could not start:`, error);
       }
     }
