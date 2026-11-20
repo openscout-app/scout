@@ -131,7 +131,7 @@ describe("role slots", () => {
       ({ board: () => ({ lifecycle: { lifecycle: { stations } }, items }) });
 
     const board = [{ workId: "work-a", station: "doing", revision: 3 }, { workId: "work-b", station: "doing", revision: 1 }];
-    expect(brokerReadRoleSlots(db, "pm", roleSlotBoardCards(work(board))).slots).toEqual([{ assignment: pm, slot: null, behind: true }]);
+    expect(brokerReadRoleSlots(db, "pm", roleSlotBoardCards(work(board))).slots).toEqual([{ assignment: pm, slot: null, behind: true, pass: null }]);
 
     writeRoleSlot(db, { assignmentId: pm.id, actorId: "pm-1", expectedVersion: 0, stamp: STAMP, sentences: SENTENCES });
     const read = (items: typeof board) => brokerReadRoleSlots(db, "pm", roleSlotBoardCards(work(items))).slots[0]!.behind;

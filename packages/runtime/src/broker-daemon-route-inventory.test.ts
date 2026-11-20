@@ -242,6 +242,7 @@ const expectedRouteInventory = [
   "POST /v1/roles/assignments",
   "POST /v1/roles/assignments/:id/revoke",
   "POST /v1/roles/slots/:id",
+  "POST /v1/roles/slots/:id/pass",
   "POST /v1/roster/import",
   "POST /v1/roster/projects/code",
   "POST /v1/roster/resolve",

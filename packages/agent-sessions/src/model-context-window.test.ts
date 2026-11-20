@@ -30,6 +30,11 @@ describe("inferModelContextWindowTokens (dispatch)", () => {
     expect(inferModelContextWindowTokens({ model: "gpt-6-astra", adapterType: "codex" })).toBe(1_050_000);
   });
 
+  test("Codex GPT-6.2 uses the context window for the selected model", () => {
+    expect(inferModelContextWindowTokens({ model: "gpt-6.2-sol", adapterType: "codex" })).toBe(500_000);
+    expect(inferModelContextWindowTokens({ model: "gpt-6.2-astra", adapterType: "codex" })).toBe(272_000);
+  });
+
   test("Claude resolves PER VERSION from the catalog", () => {
     expect(inferModelContextWindowTokens({ model: "claude-opus-5" })).toBe(1_000_000);
     expect(inferModelContextWindowTokens({ model: "claude-opus-4-8" })).toBe(1_000_000);

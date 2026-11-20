@@ -304,7 +304,7 @@ describe("providers command", () => {
     expect(map.assignments.find((assignment) => assignment.role === "adversarial_critique"))
       .toMatchObject({ modelLabel: "Grok 4.7" });
     expect(map.assignments.find((assignment) => assignment.role === "implementation"))
-      .toMatchObject({ modelLabel: "GPT-6.1 Sol" });
+      .toMatchObject({ modelLabel: "GPT-6.2 Sol" });
     expect(map.models.find((model) => model.modelLabel === "Kimi Code")).toMatchObject({
       guidance: "use_now",
       quotaRisk: false,
@@ -375,7 +375,7 @@ describe("providers command", () => {
     expect(map.assignments[0]).toMatchObject({
       role: "product_judgment",
       modelLabel: "GPT-6 Astra",
-      route: { providerId: "codex" },
+      route: { providerId: "codex", model: "gpt-6-astra" },
       quotaRisk: false,
       quotaRiskMessage: null,
       alternatives: expect.arrayContaining([
@@ -433,7 +433,7 @@ describe("providers command", () => {
       quotaRisk: false,
     });
     expect(assignment.alternatives[0]).toMatchObject({
-      label: "GPT-6.1 Sol",
+      label: "GPT-6.2 Sol",
       route: { providerId: "codex" },
       quotaRisk: true,
     });
@@ -443,7 +443,7 @@ describe("providers command", () => {
       quotaRisk: false,
       quota: { confidence: "unknown" },
     });
-    expect(map.models.find((model) => model.modelLabel === "GPT-6.1 Sol"))
+    expect(map.models.find((model) => model.modelLabel === "GPT-6.2 Sol"))
       .toMatchObject({ guidance: "conserve", quotaRisk: true });
   });
 
