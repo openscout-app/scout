@@ -361,7 +361,7 @@ export class BrokerDeliveryAcceptanceService {
 
   private async acceptDelivery(
     payload: ScoutDeliverRequest,
-    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean } = {},
+    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean; executionPayload?: ScoutDeliverRequest } = {},
   ): Promise<ScoutDeliverResponse> {
     throwIfAborted(options.signal);
     const execution = options.executionPayload ?? payload;
