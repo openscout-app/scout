@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  DECISION_CARD_LIMITS,
   applyDecisionToTask,
   decisionDraftFromInput,
   findPriorDecision,
+  normalizeDecisionCard,
   renderOperatorCardAnswerText,
   validateDecisionCard,
   validateOperatorCardAnswer,
@@ -110,11 +112,51 @@ describe("card validation", () => {
     expect(validateDecisionCard(card({ door: "one_way", defaultKey: "A" }), agent)).toContain("decision.defaultKey: a default is allowed only on a two-way door");
   });
 
-  test("keeps ids out of the question and callouts inside the picture", () => {
-    expect(validateDecisionCard(card({ question: "Merge PR #260?" }), agent).some((problem) => problem.startsWith("decision.question"))).toBe(true);
+  test("keeps callouts inside the picture", () => {
     const outside = card();
     outside.options[1]!.picture!.callouts![0]!.box = [700, 500, 200, 200];
     expect(validateDecisionCard(outside, agent).some((problem) => problem.includes("falls outside"))).toBe(true);
+  });
+
+  test("length and wording are guidance: a long question, a question naming a file and a long label are accepted", () => {
+    const question = "Should the release notes for the next build include the migration guide in docs/upgrade.md?";
+    expect(question.length).toBeGreaterThan(DECISION_CARD_LIMITS.question);
+    const long = card({ question, options: [{ ...card().options[0]!, label: "All plans, side by side" }, card().options[1]!] });
+    expect(long.options[0]!.label.length).toBeGreaterThan(DECISION_CARD_LIMITS.label);
+    expect(validateDecisionCard(long, agent)).toEqual([]);
+    expect(validateDecisionCard(card({ question: "Merge PR #260?" }), agent)).toEqual([]);
+    expect(validateDecisionCard(normalizeDecisionCard(long), agent)).toEqual([]);
+  });
+
+  test("normalizing clips long fields, keeps the full question in details, and is idempotent", () => {
+    const question = `${"Ship the pricing page ".repeat(5)}now?`;
+    const normalized = normalizeDecisionCard(card({
+      question,
+      details: "Context.",
+      pick: { key: "A", why: "w".repeat(400) },
+      costOfWait: "c".repeat(400),
+      options: [{ ...card().options[0]!, label: "l".repeat(80), result: "r".repeat(200) }, card().options[1]!],
+    }));
+    expect(normalized.question.length).toBe(DECISION_CARD_LIMITS.question);
+    expect(normalized.question.endsWith("…")).toBe(true);
+    expect(normalized.details).toBe(`${question}\n\nContext.`);
+    expect(normalized.pick!.why.length).toBe(DECISION_CARD_LIMITS.why);
+    expect(normalized.costOfWait!.length).toBe(DECISION_CARD_LIMITS.costOfWait);
+    expect(normalized.options[0]!.label.length).toBe(DECISION_CARD_LIMITS.synthesizedLabel);
+    expect(normalized.options[0]!.result.length).toBe(DECISION_CARD_LIMITS.result);
+    expect(normalized.options[1]).toEqual(card().options[1]);
+    expect(normalizeDecisionCard(normalized)).toEqual(normalized);
+  });
+
+  test("a long, file-naming operator ask with a long label is not refused", () => {
+    const question = "Which of the two layouts in pricing/table.tsx should ship with this week's release?";
+    const submission = { ...card(), question, options: [{ ...card().options[0]!, label: "Every plan side by side" }, { ...card().options[1]!, picture: undefined }] };
+    const task: ScoutTaskAsk = { version: 1, operator: true, decision: submission as ScoutTaskAsk["decision"] };
+    expect(() => validateTaskAsk(task, { decisionImages: 0 })).not.toThrow();
+    const decision = normalizeDecisionCard(task.decision!);
+    expect(decision.question.length).toBe(DECISION_CARD_LIMITS.question);
+    expect(decision.details).toContain(question);
+    expect(applyDecisionToTask(task, decision).options).toEqual(["Every plan side by side", "Pro only"]);
   });
 
   test("a task's options and default follow the card", () => {

@@ -1,6 +1,7 @@
 import {
   findPriorDecision,
   renderOperatorCardAnswerText,
+  normalizeDecisionCard,
   validateDecisionCard,
   validateOperatorCardAnswer,
   type DecisionAnswer,
@@ -21,6 +22,7 @@ import {
 } from "@openscout/protocol";
 
 import {
+  costOfWaitFor,
   decisionSourceHash,
   synthesizeDecisionCard,
   type DecisionModel,
@@ -70,6 +72,11 @@ export type BrokerDecisionCardServiceOptions = {
   log?: (message: string, detail?: unknown) => void;
 };
 
+function withoutCostOfWait(card: DecisionCard): DecisionCard {
+  const { costOfWait: _wait, ...rest } = card;
+  return rest;
+}
+
 function metadataOf(record: QuestionRecord): Record<string, unknown> {
   return (record.metadata ?? {}) as Record<string, unknown>;
 }
@@ -110,7 +117,8 @@ export class BrokerDecisionCardService {
       const record = this.options.record(id);
       if (!record || record.state !== "open" || metadataOf(record).operatorCard || metadataOf(record).decisionSynthesis) return;
       const invocation = this.options.invocation(invocationIdForMessage(message.id));
-      const agentCard = message.metadata?.decisionCard as DecisionCard | undefined;
+      const given = message.metadata?.decisionCard as DecisionCard | undefined;
+      const agentCard = given ? normalizeDecisionCard(given) : undefined;
       if (agentCard && !validateDecisionCard(agentCard, { origin: "agent", pictures: "attachment" }).length) {
         await this.storeCard(id, this.withHistory(agentCard, record), "agent");
         return;
@@ -181,7 +189,8 @@ export class BrokerDecisionCardService {
       if (!info?.sourceHash || info.outcome === "failed" || !info.model) continue;
       const card = metadataOf(record).operatorCard as DecisionCard | undefined;
       if (info.outcome === "card" && card?.kind === "decision") {
-        const { alreadyDecided: _prior, ...rest } = card;
+        // Per-ask fields are not part of the cached card: the history check and the cost of waiting.
+        const { alreadyDecided: _prior, costOfWait: _wait, ...rest } = card;
         this.cache.set(info.sourceHash, { outcome: "card", card: rest, model: info.model });
       } else if (info.outcome === "question") {
         this.cache.set(info.sourceHash, { outcome: "question", reason: "cached", model: info.model });
@@ -196,7 +205,7 @@ export class BrokerDecisionCardService {
     const sourceHash = decisionSourceHash(source, model.model);
     const cached = this.cache.get(sourceHash);
     const result = cached ?? { ...await synthesizeDecisionCard(source, model, () => this.now()), model: model.model };
-    if (!cached && result.outcome !== "failed") this.cache.set(sourceHash, result);
+    if (!cached && result.outcome !== "failed") this.cache.set(sourceHash, result.outcome === "card" ? { ...result, card: withoutCostOfWait(result.card) } : result);
     const durationMs = cached ? undefined : result.durationMs;
     const info: DecisionSynthesisInfo = {
       outcome: result.outcome,
@@ -211,7 +220,9 @@ export class BrokerDecisionCardService {
     const record = this.options.record(recordId);
     if (!record || record.state !== "open") return;
     if (result.outcome === "card") {
-      await this.patch(record, { operatorCard: this.withHistory(result.card, record), operatorCardOrigin: "synthesized", decisionSynthesis: info });
+      const costOfWait = costOfWaitFor(source);
+      const card: DecisionCard = { ...withoutCostOfWait(result.card), ...(costOfWait ? { costOfWait } : {}) };
+      await this.patch(record, { operatorCard: this.withHistory(card, record), operatorCardOrigin: "synthesized", decisionSynthesis: info });
     } else {
       await this.patch(record, { decisionSynthesis: info });
     }
@@ -358,6 +369,9 @@ export class BrokerDecisionCardService {
     if (!input.requestId?.trim()) throw new DecisionAnswerError("answer requires a requestId");
     const record = this.resolveRecord(input.id);
     if (!record) throw new DecisionAnswerError(`no operator ask ${input.id}`, 404);
+    // The same requestId again is a retry of an answer already taken: return
+    // the card as it stands now, and send nothing.
+    if (this.answeredBy(record, input.requestId)) return this.viewOf(record);
     const { card } = this.cardFor(record);
     if (!card) throw new DecisionAnswerError("this ask has no card; answer it in its thread", 409);
     const problems = validateOperatorCardAnswer(card, input.answer);
@@ -365,7 +379,7 @@ export class BrokerDecisionCardService {
     if (record.state !== "open") throw new DecisionAnswerError("this ask is already settled", 409);
     const at = this.now();
     const line = renderOperatorCardAnswerText(card, input.answer);
-    const stored: StoredAnswer = { answer: input.answer, text: line, at, by: "operator" };
+    const stored: StoredAnswer = { answer: input.answer, text: line, at, by: "operator", requestId: input.requestId };
 
     if (card.kind === "permission" && metadataOf(record).permissionRequest) {
       const request = metadataOf(record).permissionRequest as { version: string };
@@ -383,13 +397,21 @@ export class BrokerDecisionCardService {
         body: `${line} Send the card again with more material: what each option looks like, what it changes, and what it costs to undo.`, progress: true },
       { metadata: { decisionAnswer: stored } });
       const requests = Array.isArray(metadataOf(record).decisionRequests) ? metadataOf(record).decisionRequests as unknown[] : [];
-      await this.patch(record, { decisionRequests: [...requests, { ...(input.answer.note?.trim() ? { note: input.answer.note.trim() } : {}), at }] });
+      await this.patch(record, { decisionRequests: [...requests, { ...(input.answer.note?.trim() ? { note: input.answer.note.trim() } : {}), at, requestId: input.requestId }] });
       return (await this.view(record.id))!;
     }
     // A final reply. Settling the question record copies decisionAnswer from it.
     await this.options.reply({ requestId: input.requestId, senderId: this.options.operatorActorId, ref: invocation.id, body: line },
       { metadata: { decisionAnswer: stored } });
     return (await this.view(record.id))!;
+  }
+
+  /** Whether the answer or show_more with this requestId is already on the record. */
+  private answeredBy(record: QuestionRecord, requestId: string): boolean {
+    const metadata = metadataOf(record);
+    if ((metadata.decisionAnswer as StoredAnswer | undefined)?.requestId === requestId) return true;
+    const requests = Array.isArray(metadata.decisionRequests) ? metadata.decisionRequests as Array<{ requestId?: string }> : [];
+    return requests.some((entry) => entry?.requestId === requestId);
   }
 
   /**

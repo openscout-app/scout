@@ -1,5 +1,6 @@
 import {
   DecisionCardError,
+  normalizeDecisionCard,
   validateDecisionCard,
   type AttachmentUpload,
   type DecisionCard,
@@ -76,7 +77,7 @@ export function bindDecisionCard(
       ...(picture.callouts?.length ? { callouts: picture.callouts } : {}),
     } };
   });
-  const card: DecisionCard = { ...submission, kind: "decision", options };
+  const card: DecisionCard = normalizeDecisionCard({ ...submission, kind: "decision", options });
   const problems = validateDecisionCard(card, { origin: "agent", pictures: "attachment" });
   if (problems.length) throw new DecisionCardError(problems);
   return card;

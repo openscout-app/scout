@@ -34,7 +34,11 @@ export type DecisionSynthesisSource = {
   answerDeadline?: number;
 };
 
-/** The cache key: the same ask text, fields, prompt and model always reuse one result. */
+/**
+ * The cache key: the same ask text, fields, prompt and model always reuse one
+ * result. The answer deadline is left out, so a cached card never holds
+ * anything derived from it: see {@link costOfWaitFor}.
+ */
 export function decisionSourceHash(source: DecisionSynthesisSource, model: string): string {
   const normalized = {
     v: DECISION_SYNTHESIS_PROMPT_VERSION,
@@ -219,12 +223,21 @@ export function cardFromModelOutput(source: DecisionSynthesisSource, raw: unknow
     options: keyed,
     door,
     ...(defaultKey && door === "two_way" ? { defaultKey } : {}),
-    ...(source.defaultAction && source.answerDeadline ? { costOfWait: shorten(`Unanswered by ${new Date(source.answerDeadline).toISOString().slice(11, 16)} UTC, it goes ahead with "${source.defaultAction}".`, DECISION_CARD_LIMITS.costOfWait) } : {}),
     ...(details ? { details } : {}),
   };
   const problems = validateDecisionCard(card, { origin: "synthesized", pictures: "attachment" });
   if (problems.length) return { outcome: "question", reason: problems.join("; ") };
   return { outcome: "card", card };
+}
+
+/**
+ * What waiting costs on this ask: its own deadline and default. Derived per
+ * ask, never cached, because two asks with the same words can have different
+ * deadlines.
+ */
+export function costOfWaitFor(source: Pick<DecisionSynthesisSource, "defaultAction" | "answerDeadline">): string | undefined {
+  if (!source.defaultAction || !source.answerDeadline) return undefined;
+  return shorten(`Unanswered by ${new Date(source.answerDeadline).toISOString().slice(11, 16)} UTC, it goes ahead with "${source.defaultAction}".`, DECISION_CARD_LIMITS.costOfWait);
 }
 
 /* ------------------------------------------------------------------ */

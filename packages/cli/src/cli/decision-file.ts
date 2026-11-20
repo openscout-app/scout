@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import {
   DecisionCardError,
   decisionDraftFromInput,
+  normalizeDecisionCard,
   validateDecisionCard,
   type AttachmentUpload,
   type DecisionCardSubmission,
@@ -34,7 +35,7 @@ export async function readDecisionFile(spec: string): Promise<{ decision: Decisi
 export async function prepareDecision(parsed: unknown, base: string, select?: string): Promise<{ decision: DecisionCardSubmission; images: AttachmentUpload[] }> {
   let draft;
   try {
-    draft = decisionDraftFromInput(parsed, select);
+    draft = normalizeDecisionCard(decisionDraftFromInput(parsed, select));
   } catch (error) {
     if (error instanceof DecisionCardError) throw new Error(`--decision is not valid:\n- ${error.problems.join("\n- ")}`);
     throw error;

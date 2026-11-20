@@ -27,15 +27,22 @@ shows an empty card.
 
 The file holds our card shape (below), a decision-pack `pack.json` (use
 `file#id` to pick one decision, or leave it out when only one is open), or
-one decision-pack decision. Rules:
+one decision-pack decision.
 
-- 2 or 3 options, keyed `A`, `B`, `C` in order, with different labels of at
-  most 18 characters.
-- Each option has a `result` and an `undo` of `easy` or `hard`.
-- Exactly one `pick` with a line of `why`.
-- `door` is `one_way` or `two_way`. A `defaultKey` is allowed only on
-  `two_way`.
-- The question holds no ids, PR numbers or paths. Put them in `details`.
+Scout refuses a card only for what it would get wrong. These rules refuse the
+ask with `--decision is not valid`:
+
+- 2 or 3 options, keyed `A`, `B`, `C` in order, with different labels.
+- Each option has a label, a `result` and an `undo` of `easy` or `hard`.
+- Exactly one `pick`, naming one of the options, with a line of `why`.
+- `door` is `one_way` or `two_way`. A `defaultKey` names one of the options
+  and is allowed only on `two_way`.
+
+Length and wording are guidance, never a refusal. Aim for a question of at
+most 60 characters, labels of at most 18 and no ids or paths in the question.
+The runtime clips a longer field to the length in the type below and keeps a
+clipped question's full words at the top of `details`. Labels are kept up to
+60 characters.
 - Pictures are local paths, `{ path, callouts? }`, relative to the file. The
   CLI or MCP reads them, sends them as images, and the runtime stores them as
   attachments on the ask's message. A stored card holds only an
@@ -61,10 +68,12 @@ door with `gate: none`.
   as `decisionSynthesis`. A record with a result is not synthesized again. A
   result is cached by `sourceHash`: sha256 of the normalized question, body,
   options, `because` and default, plus the prompt version and the model. The
-  same ask text reuses the cached card without a model call.
+  same ask text reuses the cached card without a model call. The deadline is
+  not in the key, so the cached card holds nothing derived from it.
 - **Fields first:** `--option` labels are the options, verbatim. A default
-  makes the door two-way and sets `defaultKey`. The deadline gives
-  `costOfWait`. The model only describes options.
+  makes the door two-way and sets `defaultKey`. The ask's own deadline gives
+  `costOfWait`, derived for each ask and never taken from the cache. The
+  model only describes options.
 - **Never invents:** every option the model adds, and the pick, must quote the
   ask verbatim. A pick must also quote a stated preference ("I'd go with ...",
   "recommend", "prefer"). Fewer than 2 grounded options, more than 3, or
@@ -132,11 +141,11 @@ these:
 ```ts
 type DecisionCard = {
   kind: "decision"; version: 1;
-  question: string;                       // ≤ 60
+  question: string;                       // clipped to 60
   pick?: { key: "A"|"B"|"C"; why: string };  // required on agent cards
   options: Array<{
-    key: "A"|"B"|"C"; label: string;      // ≤ 18 (≤ 60 synthesized)
-    result: string;                        // ≤ 90
+    key: "A"|"B"|"C"; label: string;      // aim for 18; clipped to 60
+    result: string;                        // clipped to 90
     undo: "easy"|"hard"|"unknown";         // unknown: synthesized only
     picture?: { attachmentId: string; width: number; height: number;
                 callouts?: Array<{ n: number; box: [x,y,w,h]; note: string }> };
@@ -178,8 +187,8 @@ type OperatorCardView = {
   origin?: "agent"|"synthesized"|"permission";
   synthesis?: { outcome: "card"|"question"|"failed"; sourceHash: string; model?: string;
                 via?: string; durationMs?: number; cached?: boolean; error?: string; at: number };
-  answer?: { answer: DecisionAnswer | PermissionAnswer; text: string; at: number; by: "operator"|"default" };
-  requests?: Array<{ note?: string; at: number }>;   // show_more history
+  answer?: { answer: DecisionAnswer | PermissionAnswer; text: string; at: number; by: "operator"|"default"; requestId?: string };
+  requests?: Array<{ note?: string; at: number; requestId?: string }>;   // show_more history, one per requestId
 };
 ```
 
@@ -204,7 +213,12 @@ request's version. It replaces the companion's `permissionPresentation`.
 
 `POST /v1/decisions/answer { id, requestId, answer }` (`scout decision answer`).
 `id` is the record id, the ask's message id or its task id. Reuse `requestId`
-to retry.
+to retry. The record keeps the answering `requestId`; a repeat with the same
+one returns the current view and sends nothing, for every answer kind. A
+different `requestId` on a settled ask is refused with 409.
+
+`metadata.decisionAnswer` on a reply is written only by the runtime. A
+client's reply metadata never carries it: the runtime removes the key.
 
 | Answer | Effect |
 |---|---|

@@ -1,5 +1,5 @@
 import { FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH, parseReplyWaitingOn } from "./invocations.js";
-import { applyDecisionToTask, validateDecisionCard, type DecisionCardSubmission } from "./decision-cards.js";
+import { applyDecisionToTask, normalizeDecisionCard, validateDecisionCard, type DecisionCardSubmission } from "./decision-cards.js";
 /** Versioned ask/reply semantics. Old peers must be refused before dispatch. */
 export const SCOUT_TASKS_CAPABILITY = "ask-reply/1";
 export type ScoutTaskAsk = {
@@ -99,9 +99,11 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
  */
 export function validateTaskDecision(task: ScoutTaskAsk, decisionImages?: number): void {
   if (!task.operator || task.fyi) throw new Error("--decision requires an operator task expecting an answer");
-  const problems = validateDecisionCard(task.decision, { origin: "agent", pictures: "image", imageCount: decisionImages });
+  // Long fields are clipped where the card is stored, never refused: only structure refuses the ask.
+  const decision = normalizeDecisionCard(task.decision);
+  const problems = validateDecisionCard(decision, { origin: "agent", pictures: "image", imageCount: decisionImages });
   if (problems.length) throw new Error(`--decision is not valid:\n- ${problems.join("\n- ")}`);
-  applyDecisionToTask(task, task.decision!);
+  applyDecisionToTask(task, decision!);
 }
 export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed" | "waitingOn">): void {
   if (Number(Boolean(reply.ref)) + Number(Boolean(reply.to)) !== 1) throw new Error("reply requires exactly one of --ref <task> or --to <message>");

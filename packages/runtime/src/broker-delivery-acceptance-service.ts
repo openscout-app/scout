@@ -1,6 +1,6 @@
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
-import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY, applyDecisionToTask } from "@openscout/protocol";
+import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY, applyDecisionToTask, normalizeDecisionCard } from "@openscout/protocol";
 import { bindDecisionCard, decisionPictureAttachmentId } from "./decision-card-binding.js";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { acceptSessionInput, recoverSessionInputDelivery, validateSessionInputRequest, type SessionInputDeliveryOptions } from "./broker-session-input-delivery.js";
@@ -455,7 +455,11 @@ export class BrokerDeliveryAcceptanceService {
       if (special) return special;
       // A card's labels are the task's options and its default is the task's
       // default action, so every older reader of those fields agrees with it.
-      if (payload.task.decision) payload = { ...payload, task: applyDecisionToTask(payload.task, payload.task.decision) };
+      // Long fields are clipped here, once, so the stored card and the task agree.
+      if (payload.task.decision) {
+        const decision = normalizeDecisionCard(payload.task.decision);
+        payload = { ...payload, task: applyDecisionToTask({ ...payload.task, decision }, decision) };
+      }
       const task = payload.task!;
       const policy = task.operator ? taskNotificationPolicy(task) : undefined;
       payload = { ...payload, intent: task.fyi ? "tell" : "consult", ensureAwake: task.fyi ? false : payload.ensureAwake,

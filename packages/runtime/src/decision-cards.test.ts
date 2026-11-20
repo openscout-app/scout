@@ -15,6 +15,7 @@ import { bindDecisionCard, decisionPictureAttachmentId, imagePixelSize } from ".
 import { DECISION_SYNTHESIS_MODEL, createDecisionModel, decisionSynthesisConfigured, parseHarnessJson } from "./decision-synthesis-model.js";
 import {
   cardFromModelOutput,
+  costOfWaitFor,
   decisionModelOutputProblems,
   decisionSourceHash,
   synthesizeDecisionCard,
@@ -23,13 +24,13 @@ import {
 } from "./decision-synthesis.js";
 import { permissionCardFromAsk, permissionCardFromRequest } from "./permission-card.js";
 
-/* Real ask shapes, from this week's operator asks. */
+/* Made-up asks, shaped like real operator asks: a long one with a default, a choice and a plain question. */
 const KEY_ASK: DecisionSynthesisSource = {
-  question: "For the For you digest work: may I have an Anthropic API key for real Sonnet/Haiku runs? Store it with 'secret set ANTHROPIC_API_KEY' (I will read it only through 'secret run'), or tell me to go ahead without it.",
-  body: "For the For you digest work: may I have an Anthropic API key for real Sonnet/Haiku runs? Store it with 'secret set ANTHROPIC_API_KEY' (I will read it only through 'secret run'), or tell me to go ahead without it.",
+  question: "For the weather widget work: may I have a token for the forecast service so I can run against live data? Put it in the keychain under FORECAST_TOKEN, or tell me to go ahead without it.",
+  body: "For the weather widget work: may I have a token for the forecast service so I can run against live data? Put it in the keychain under FORECAST_TOKEN, or tell me to go ahead without it.",
   options: [],
-  because: "The For you digest calls Sonnet 5.5 and Haiku 5.5, and this host has no Anthropic key.",
-  defaultAction: "Build and test it against a stubbed model, take screenshots with rules-only cards (which cover permission, review, push and blocked), and report real per-digest cost as not measured.",
+  because: "The widget calls the forecast service, and this machine has no token for it.",
+  defaultAction: "Build and test it against recorded forecasts and report live latency as not measured.",
   answerDeadline: Date.parse("2026-11-16T18:17:00Z"),
 };
 const MERGE_ASK: DecisionSynthesisSource = {
@@ -106,19 +107,21 @@ describe("synthesis never invents", () => {
 
   test("the key ask: two choices quoted from its words, two-way because it has a default", () => {
     const result = cardFromModelOutput(KEY_ASK, {
-      isChoice: true, question: "Give me an API key, or go without?",
+      isChoice: true, question: "Give me a token, or go without?",
       options: [
-        { label: "Store a key", quote: "Store it with 'secret set ANTHROPIC_API_KEY'", result: "Real Sonnet/Haiku runs and a measured cost.", undo: "easy" },
-        { label: "Go without", quote: "tell me to go ahead without it", result: "Stubbed model; cost reported as not measured.", undo: "easy" },
+        { label: "Store a token", quote: "Put it in the keychain under FORECAST_TOKEN", result: "Live forecasts and a measured latency.", undo: "easy" },
+        { label: "Go without", quote: "tell me to go ahead without it", result: "Recorded forecasts; latency reported as not measured.", undo: "easy" },
       ],
       pick: null, door: "two_way",
     });
     expect(result.outcome).toBe("card");
     if (result.outcome !== "card") return;
-    expect(result.card.options.map((option) => option.label)).toEqual(["Store a key", "Go without"]);
+    expect(result.card.options.map((option) => option.label)).toEqual(["Store a token", "Go without"]);
     expect(result.card.pick).toBeUndefined();
     expect(result.card.door).toBe("two_way");
-    expect(result.card.costOfWait).toContain("Unanswered by 18:17 UTC");
+    // The cost of waiting depends on this ask's deadline, so it is derived per ask, not cached with the card.
+    expect(result.card.costOfWait).toBeUndefined();
+    expect(costOfWaitFor(KEY_ASK)).toContain("Unanswered by 18:17 UTC");
   });
 
   test("more than three --option values stay a question", () => {
@@ -333,7 +336,7 @@ function harness(input: { model?: DecisionModel; signal?: ScoutOperatorSignal; i
     ...(input.model ? { model: input.model } : {}),
     now: () => 20,
   });
-  return { service, records, replies, flights, message, signal, questionId };
+  return { service, records, replies, flights, message, signal, questionId, invocation };
 }
 
 const MERGE_OUTPUT = {
@@ -437,7 +440,86 @@ describe("decision card service", () => {
     expect(h.replies[0]!.input.progress).toBe(true);
     expect(h.replies[0]!.input.body).toStartWith("Show me more before I decide: the app diff.");
     expect(view.state).toBe("needs_material");
-    expect(view.requests).toEqual([{ note: "the app diff", at: 20 }]);
+    expect(view.requests).toEqual([{ note: "the app diff", at: 20, requestId: "r1" }]);
+  });
+
+  test("a cached card shows each ask's own deadline", async () => {
+    const consult: ScoutOperatorSignal = { kind: "consult", blocking: false, replyExpectation: "optional", defaultAction: "Wait for the app" };
+    const at1010 = Date.parse("2026-11-20T10:10:00Z");
+    const at1510 = Date.parse("2026-11-20T15:10:00Z");
+    const model = fakeModel(MERGE_OUTPUT);
+    const h = harness({ model, signal: consult, invocationMeta: { defaultAction: "Wait for the app", operatorAnswerDeadline: at1010 } });
+    await h.service.register(h.message, h.signal);
+    await h.service.idle();
+    const first = (await h.service.view(h.questionId))!;
+    expect(first.card?.kind === "decision" && first.card.costOfWait).toContain("Unanswered by 10:10 UTC");
+
+    // The same words again, asked later with a later deadline: the cache answers, the deadline is this ask's.
+    const record = h.records.get(h.questionId)!;
+    const { operatorCard: _card, decisionSynthesis: _info, ...rest } = record.metadata as Record<string, unknown>;
+    h.records.set(h.questionId, { ...record, metadata: rest } as QuestionRecord);
+    (h.invocation.metadata as Record<string, unknown>).operatorAnswerDeadline = at1510;
+    await h.service.register(h.message, h.signal);
+    await h.service.idle();
+    const second = (await h.service.view(h.questionId))!;
+    expect(second.synthesis?.cached).toBe(true);
+    expect(model.calls).toBe(1);
+    expect(second.card?.kind === "decision" && second.card.costOfWait).toContain("Unanswered by 15:10 UTC");
+
+    // A card cached on disk before this fix still holds its old deadline; it is never reused.
+    const sourceHash = decisionSourceHash({ question: MERGE_ASK.body, body: MERGE_ASK.body, options: MERGE_ASK.options, defaultAction: "Wait for the app" }, "haiku");
+    const stored = {
+      id: "operator-question:msg-request-old", kind: "question", state: "closed", acceptanceState: "none", title: "Operator question", summary: "x",
+      createdById: "agent-1", ownerId: "operator", createdAt: 1, updatedAt: 2,
+      metadata: { operatorCard: { ...first.card, costOfWait: "Unanswered by 10:10 UTC, it goes ahead." }, decisionSynthesis: { outcome: "card", sourceHash, model: "haiku" } },
+    } as unknown as QuestionRecord;
+    const later = harness({ model: fakeModel(MERGE_OUTPUT), prior: [stored], signal: consult, invocationMeta: { defaultAction: "Wait for the app", operatorAnswerDeadline: at1510 } });
+    await later.service.register(later.message, later.signal);
+    await later.service.idle();
+    const reused = (await later.service.view(later.questionId))!;
+    expect(reused.synthesis?.cached).toBe(true);
+    expect(reused.card?.kind === "decision" && reused.card.costOfWait).toContain("Unanswered by 15:10 UTC");
+  });
+
+  test("a retried answer with the same requestId is a no-op that returns the current card", async () => {
+    const card: DecisionCard = {
+      kind: "decision", version: 1, question: "Merge now or wait for the app?", pick: { key: "A", why: "Safe." }, door: "two_way",
+      options: [{ key: "A", label: "Merge now", result: "Lands today.", undo: "easy" }, { key: "B", label: "Wait for the app", result: "Lands later.", undo: "easy" }],
+    };
+    const pick = harness({ card });
+    await pick.service.register(pick.message, pick.signal);
+    const answered = await pick.service.answer({ id: pick.questionId, answer: { kind: "pick", key: "B" }, requestId: "r1" });
+    const again = await pick.service.answer({ id: pick.questionId, answer: { kind: "pick", key: "B" }, requestId: "r1" });
+    expect(again).toEqual(answered);
+    expect(again.answer?.requestId).toBe("r1");
+    expect(pick.replies).toHaveLength(1);
+    await expect(pick.service.answer({ id: pick.questionId, answer: { kind: "pick", key: "A" }, requestId: "r2" })).rejects.toThrow(/already settled/);
+
+    const more = harness({ card });
+    await more.service.register(more.message, more.signal);
+    await more.service.answer({ id: more.questionId, answer: { kind: "show_more", note: "the app diff" }, requestId: "m1" });
+    const repeated = await more.service.answer({ id: more.questionId, answer: { kind: "show_more", note: "the app diff" }, requestId: "m1" });
+    expect(repeated.requests).toEqual([{ note: "the app diff", at: 20, requestId: "m1" }]);
+    expect(more.replies).toHaveLength(1);
+    // A new request is a new ask for material.
+    await more.service.answer({ id: more.questionId, answer: { kind: "show_more" }, requestId: "m2" });
+    expect((await more.service.view(more.questionId))!.requests).toHaveLength(2);
+    expect(more.replies).toHaveLength(2);
+  });
+
+  test("an agent card with a long question, a file name and a long label is stored, clipped", async () => {
+    const question = "Should the release notes link the migration guide in docs/upgrade.md before Friday?";
+    const card = {
+      kind: "decision", version: 1, question, pick: { key: "A", why: "Readers ask for it." }, door: "two_way",
+      options: [{ key: "A", label: "Link the guide now", result: "Notes point at the guide.", undo: "easy" }, { key: "B", label: "Wait for review", result: "Notes ship without it.", undo: "easy" }],
+    } as DecisionCard;
+    const h = harness({ card });
+    await h.service.register(h.message, h.signal);
+    const view = (await h.service.view(h.questionId))!;
+    expect(view.origin).toBe("agent");
+    expect(view.card?.kind === "decision" && view.card.question.length).toBeLessThanOrEqual(60);
+    expect(view.card?.kind === "decision" && view.card.details).toContain(question);
+    expect(view.card?.kind === "decision" && view.card.options[0]!.label).toBe("Link the guide now");
   });
 
   test("a two-way default settles the card at the deadline; a one-way card never defaults", async () => {

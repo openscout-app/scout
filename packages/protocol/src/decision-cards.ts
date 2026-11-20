@@ -18,6 +18,11 @@ export const DECISION_CARD_VERSION = 1 as const;
 export const DECISION_KEYS = ["A", "B", "C"] as const;
 export type DecisionKey = (typeof DECISION_KEYS)[number];
 
+/**
+ * Lengths a surface shows. They are guidance for authors, never a refusal:
+ * {@link normalizeDecisionCard} clips a longer field to its limit. Labels are
+ * guided to `label` and kept up to `synthesizedLabel`.
+ */
 export const DECISION_CARD_LIMITS = Object.freeze({
   question: 60,
   label: 18,
@@ -163,8 +168,6 @@ export type DecisionCardDraft = Omit<DecisionCard, "options"> & {
   }>;
 };
 
-const ID_IN_TEXT = /(?:^|\s)#\d+\b|\b(?:PR|MR|issue)\s*#?\d+\b|\b[A-Z]{2,10}-\d+\b|(?:^|\s)(?:\.{0,2}\/|~\/)\S+|\b\S+\.(?:ts|tsx|js|mjs|json|md|rs|py|swift|go|yml|yaml|toml)\b/u;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -177,14 +180,18 @@ function isKey(value: unknown): value is DecisionKey {
   return typeof value === "string" && (DECISION_KEYS as readonly string[]).includes(value);
 }
 
-function maxLength(errors: string[], where: string, value: string | undefined, max: number): void {
-  if (value !== undefined && value.length > max) errors.push(`${where}: ${value.length} characters, max ${max}`);
+function clip(value: string, max: number): string {
+  const trimmed = value.trim();
+  return trimmed.length > max ? `${trimmed.slice(0, max - 1).trimEnd()}…` : trimmed;
+}
+
+function clipped(value: unknown, max: number): unknown {
+  return typeof value === "string" ? clip(value, max) : value;
 }
 
 function validCallouts(errors: string[], where: string, callouts: unknown, size?: { width?: number; height?: number }): void {
   if (callouts === undefined) return;
   if (!Array.isArray(callouts)) { errors.push(`${where}: must be a list`); return; }
-  if (callouts.length > DECISION_CARD_LIMITS.callouts) errors.push(`${where}: at most ${DECISION_CARD_LIMITS.callouts} callouts`);
   const seen = new Set<number>();
   callouts.forEach((callout, index) => {
     const at = `${where}[${index}]`;
@@ -200,7 +207,6 @@ function validCallouts(errors: string[], where: string, callouts: unknown, size?
       errors.push(`${at}.box: falls outside the ${size.width}x${size.height} image`);
     }
     if (!str(callout.note)) errors.push(`${at}.note: missing`);
-    maxLength(errors, `${at}.note`, str(callout.note), DECISION_CARD_LIMITS.calloutNote);
   });
 }
 
@@ -214,9 +220,47 @@ export type DecisionValidationMode = {
 };
 
 /**
- * Field rules for a decision card. Returns `path: problem` strings, empty when
- * the card is valid. The rules: 2–3 options keyed A, B, C in order; exactly
- * one pick (agent cards); a default only on a two-way door.
+ * Clip each text field of a card, draft or submission to the length a surface
+ * shows. A clipped question keeps its full words at the top of `details`.
+ * Callouts past the limit are dropped. Structure is left as given for
+ * {@link validateDecisionCard} to judge. Idempotent.
+ */
+export function normalizeDecisionCard<T>(card: T): T {
+  if (!isRecord(card)) return card;
+  const out: Record<string, unknown> = { ...card };
+  let details = str(card.details);
+  const question = str(card.question);
+  if (question && question.length > DECISION_CARD_LIMITS.question) {
+    out.question = clip(question, DECISION_CARD_LIMITS.question);
+    if (!details?.includes(question)) details = details ? `${question}\n\n${details}` : question;
+  }
+  if (details !== undefined) out.details = clip(details, DECISION_CARD_LIMITS.details);
+  if (Array.isArray(card.options)) {
+    out.options = card.options.map((option) => {
+      if (!isRecord(option)) return option;
+      const next: Record<string, unknown> = { ...option, label: clipped(option.label, DECISION_CARD_LIMITS.synthesizedLabel), result: clipped(option.result, DECISION_CARD_LIMITS.result) };
+      if (option.label === undefined) delete next.label;
+      if (option.result === undefined) delete next.result;
+      const picture = option.picture;
+      if (isRecord(picture) && Array.isArray(picture.callouts)) {
+        next.picture = { ...picture, callouts: picture.callouts.slice(0, DECISION_CARD_LIMITS.callouts)
+          .map((callout) => (isRecord(callout) ? { ...callout, note: clipped(callout.note, DECISION_CARD_LIMITS.calloutNote) } : callout)) };
+      }
+      return next;
+    });
+  }
+  if (isRecord(card.pick) && card.pick.why !== undefined) out.pick = { ...card.pick, why: clipped(card.pick.why, DECISION_CARD_LIMITS.why) };
+  if (card.costOfWait !== undefined) out.costOfWait = clipped(card.costOfWait, DECISION_CARD_LIMITS.costOfWait);
+  return out as T;
+}
+
+/**
+ * Structural rules for a decision card: the ones Scout would get wrong if it
+ * accepted the card. Returns `path: problem` strings, empty when the card is
+ * valid. The rules: 2–3 options keyed A, B, C in order, each with a distinct
+ * label; exactly one pick naming an option (agent cards); a default naming an
+ * option, and only on a two-way door. Length and wording are guidance, never a
+ * refusal: run {@link normalizeDecisionCard} first to clip long fields.
  */
 export function validateDecisionCard(card: unknown, mode: DecisionValidationMode): string[] {
   const errors: string[] = [];
@@ -224,10 +268,6 @@ export function validateDecisionCard(card: unknown, mode: DecisionValidationMode
   if (card.kind !== undefined && card.kind !== "decision") errors.push("decision.kind: must be decision");
   const question = str(card.question);
   if (!question) errors.push("decision.question: missing");
-  maxLength(errors, "decision.question", question, DECISION_CARD_LIMITS.question);
-  if (question && mode.origin === "agent" && ID_IN_TEXT.test(question)) {
-    errors.push("decision.question: keep ids, PR numbers and paths out of the question; put them in details");
-  }
   const options = card.options;
   const keys: DecisionKey[] = [];
   if (!Array.isArray(options) || options.length < 2 || options.length > 3) {
@@ -240,11 +280,7 @@ export function validateDecisionCard(card: unknown, mode: DecisionValidationMode
       else keys.push(DECISION_KEYS[index]!);
       const label = str(option.label);
       if (!label) errors.push(`${at}.label: missing`);
-      // A synthesized card keeps an asker's `--option` label verbatim, so it may be longer.
-      maxLength(errors, `${at}.label`, label, mode.origin === "synthesized" ? DECISION_CARD_LIMITS.synthesizedLabel : DECISION_CARD_LIMITS.label);
-      const result = str(option.result);
-      if (!result) errors.push(`${at}.result: missing`);
-      maxLength(errors, `${at}.result`, result, DECISION_CARD_LIMITS.result);
+      if (!str(option.result)) errors.push(`${at}.result: missing`);
       const undo = option.undo;
       if (!(undo === "easy" || undo === "hard" || (mode.origin === "synthesized" && undo === "unknown"))) {
         errors.push(`${at}.undo: must be easy or hard`);
@@ -279,7 +315,6 @@ export function validateDecisionCard(card: unknown, mode: DecisionValidationMode
     errors.push("decision.pick.key: must name one of the options");
   } else {
     if (!str(pick.why)) errors.push("decision.pick.why: missing");
-    maxLength(errors, "decision.pick.why", str(pick.why), DECISION_CARD_LIMITS.why);
   }
   const door = card.door;
   if (!(door === "one_way" || door === "two_way" || (mode.origin === "synthesized" && door === "unknown"))) {
@@ -289,8 +324,6 @@ export function validateDecisionCard(card: unknown, mode: DecisionValidationMode
     if (!isKey(card.defaultKey) || !keys.includes(card.defaultKey as DecisionKey)) errors.push("decision.defaultKey: must name one of the options");
     if (door !== "two_way") errors.push("decision.defaultKey: a default is allowed only on a two-way door");
   }
-  maxLength(errors, "decision.costOfWait", str(card.costOfWait), DECISION_CARD_LIMITS.costOfWait);
-  maxLength(errors, "decision.details", str(card.details), DECISION_CARD_LIMITS.details);
   if (card.alreadyDecided !== undefined) {
     const prior = card.alreadyDecided;
     if (!isRecord(prior) || !str(prior.quote) || !str(prior.at)) errors.push("decision.alreadyDecided: needs the operator's quote and the date");
@@ -665,7 +698,8 @@ export type OperatorCardView = {
   card?: OperatorCard;
   origin?: OperatorCardOrigin;
   synthesis?: DecisionSynthesisInfo;
-  answer?: { answer: OperatorCardAnswer; text: string; at: number; by: "operator" | "default" };
-  /** show_more answers, oldest first, while the task stays open. */
-  requests?: Array<{ note?: string; at: number }>;
+  /** `requestId` is the operator's answer request; repeating it returns this view and sends nothing. */
+  answer?: { answer: OperatorCardAnswer; text: string; at: number; by: "operator" | "default"; requestId?: string };
+  /** show_more answers, oldest first, while the task stays open. One per requestId. */
+  requests?: Array<{ note?: string; at: number; requestId?: string }>;
 };
