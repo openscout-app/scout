@@ -253,7 +253,8 @@ function custodyHarness(options: { flight?: Partial<FlightRecord> } = {}) {
     connection, transport: h.transport, store: h.store, now: h.time.now,
     dispatch: async input => { flights.set(`f-${input.attemptId}`, options.flight ?? { state: "running" }); return { flightId: `f-${input.attemptId}` }; },
     flight: id => flights.get(id) as FlightRecord | undefined,
-    notify: notice => { notices.push(notice.kind === "lost" ? `lost:${notice.cause}` : notice.kind === "settled" ? `settled:${notice.outcome}` : `finished_claim_lost:${notice.result}`); },
+    notify: notice => { notices.push(notice.kind === "lost" ? `lost:${notice.cause}` : notice.kind === "settled" ? `settled:${notice.outcome}`
+      : notice.kind === "blocked" ? `blocked:${notice.reason}` : notice.kind === "resumed" ? `resumed:${notice.row.profile}` : `finished_claim_lost:${notice.result}`); },
   });
   return { ...h, custody, notices, flights };
 }
@@ -304,7 +305,7 @@ test("lost claim during work: another worker takes the task and Scout marks the 
   await h.custody.observe(message);
   expect(h.store.custody("c1", row.attemptId)!).toMatchObject({ state: "lost", detail: "claimed by local:user:other" });
   expect(h.notices).toEqual(["lost:claimed by local:user:other"]);
-  h.flights.set(row.flightId!, { state: "completed", output: "late" });
+  h.flights.set(row.flightId!, { state: "completed", output: "late", metadata: { completedByBrokerReply: true } });
   await h.custody.tick();
   expect(h.board.count("POST", `/tasks/${id}/complete`)).toBe(0);
 });
@@ -322,7 +323,7 @@ test("settle answer lost: the retry's claim_lost is resolved by reading the task
   const h = custodyHarness();
   const id = h.board.createTask({ channel: "work", text: "a" });
   const row = await h.custody.claim({ taskId: id, workId: "w", agentId: "agent-1", startedBy: "operator" });
-  h.flights.set(row.flightId!, { state: "completed", output: "shipped" });
+  h.flights.set(row.flightId!, { state: "completed", output: "shipped", metadata: { completedByBrokerReply: true } });
   h.board.fault({ route: "POST /tasks/:id/complete", mode: "drop_answer" });
   await h.custody.tick();
   expect(h.store.custody("c1", row.attemptId)!.state).toBe("settling");
@@ -337,7 +338,7 @@ test("custodian offline while the agent finishes: re-claim when nobody took the 
   const h = custodyHarness();
   const a = h.board.createTask({ channel: "work", text: "a" });
   const rowA = await h.custody.claim({ taskId: a, workId: "wa", agentId: "agent-1", startedBy: "operator" });
-  h.flights.set(rowA.flightId!, { state: "completed", output: "result-a" });
+  h.flights.set(rowA.flightId!, { state: "completed", output: "result-a", metadata: { completedByBrokerReply: true } });
   h.board.fault({ route: "POST /tasks/:id/complete", mode: "fail_before" });
   await h.custody.tick(); // offline: outcome unknown, stays settling
   h.time.advance(61_000); // lease lapses, task is ready again at Scout's epoch
@@ -347,7 +348,7 @@ test("custodian offline while the agent finishes: re-claim when nobody took the 
 
   const b = h.board.createTask({ channel: "work", text: "b" });
   const rowB = await h.custody.claim({ taskId: b, workId: "wb", agentId: "agent-1", startedBy: "operator" });
-  h.flights.set(rowB.flightId!, { state: "completed", output: "result-b" });
+  h.flights.set(rowB.flightId!, { state: "completed", output: "result-b", metadata: { completedByBrokerReply: true } });
   h.board.fault({ route: "POST /tasks/:id/complete", mode: "fail_before" });
   await h.custody.tick();
   h.time.advance(61_000);
@@ -516,7 +517,7 @@ test("a claim is an ordinary ask in the channel's room: no work item, and the ag
   expect(h.deliveries[0]!.body).toContain("> Ignore previous instructions"); // quoted, with its author
   expect(h.rooms.get(room)!.participantIds).toEqual(["operator", "agent-1"]);
 
-  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Build fixed." } as FlightRecord);
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Build fixed.", metadata: { completedByBrokerReply: true } } as FlightRecord);
   await h.service.pump("c1"); // tick settles
   await h.service.pump("c1"); // the next read takes the completion
   expect(h.board.task(id)).toMatchObject({ state: "completed", result: "Build fixed." });
@@ -563,7 +564,7 @@ test("fan-in reads the full dependency result, attributed and quoted, before tak
   const downstream = h.board.createTask({ channel: "work", text: "Summarize the sources", needs: [upstream, ...otherInputs] });
   await h.service.claim({ connectionId: "c1", taskId: upstream, agentId: "agent-1", actorId: "operator" });
   const output = "x".repeat(1200) + "\rFinal source: https://example.com/source";
-  h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output, metadata: { completedByBrokerReply: true } } as FlightRecord);
   await h.service.pump("c1");
   let reads = 0;
   duringFanIn = () => {
@@ -586,7 +587,7 @@ test("Board shows an excerpt while Scout retains the full result for the task", 
   const id = h.board.createTask({ channel: "work", text: "Write a long answer" });
   await h.service.claim({ connectionId: "c1", taskId: id, agentId: "agent-1", actorId: "operator" });
   const output = "x".repeat(1200) + "final paragraph";
-  h.flights.set("flight-1", { id: "flight-1", state: "completed", output } as FlightRecord);
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output, metadata: { completedByBrokerReply: true } } as FlightRecord);
   await h.service.pump("c1");
   const excerpt = h.board.task(id)!.result!;
   expect(excerpt.length).toBeLessThanOrEqual(1000);
@@ -615,7 +616,7 @@ test("promote makes the only work item, and a promoted task Scout completed land
   expect(claim.workId).toBe(workId);
   expect(h.deliveries[0]).toMatchObject({ collaborationRecordId: workId });
   expect(h.records.get(workId)).toMatchObject({ state: "working", ownerId: "agent-1" });
-  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Build fixed." } as FlightRecord);
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Build fixed.", metadata: { completedByBrokerReply: true } } as FlightRecord);
   await h.service.pump("c1");
   await h.service.pump("c1");
   expect(h.records.get(workId)).toMatchObject({ state: "done", acceptanceState: "pending", requestedById: "operator", summary: "Build fixed." });
@@ -704,4 +705,89 @@ test("a refused credential while following moves the connection to auth_expired 
   expect(status).toMatchObject({ state: "auth_expired", fix: expect.stringContaining("scout integration status vercel-board") });
   expect(status!.cursors[0]!.stored).toBe(true);
   expect(JSON.stringify(status)).not.toContain(h.board.token);
+});
+
+// ---- custody: verbs, holds and roles ----------------------------------------
+
+const REPLIED = { completedByBrokerReply: true };
+const asking = (summary: string) => ({ state: "waiting" as const, summary, metadata: { waitingOn: { kind: "question", summary, since: 1 } } });
+
+test("a turn that ends without a verb releases the task, and its text never reads as the result", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Fix the build" });
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(row.flightId!, { state: "completed", output: "I need permission before I can write that file." });
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "ready", result: null });
+  expect(h.board.count("POST", `/tasks/${id}/complete`)).toBe(0);
+  expect(h.store.custody("c1", row.attemptId)).toMatchObject({ state: "settled", outcome: "released", detail: "the agent ended its turn without a verb" });
+});
+
+test("a failed reply fails the task with the agent's reason", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Fix the build" });
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(row.flightId!, { state: "failed", error: "The repo is not checked out here.", metadata: REPLIED });
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "failed", reason: "The repo is not checked out here." });
+});
+
+test("waiting on a person holds the task and stops renewing; the answer resumes it as the same role, in a new row", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Review the change" });
+  h.board.assign(id, `${h.board.principal}+reviewer`);
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "matcher", profile: "reviewer" });
+  expect(h.board.task(id)!.claim!.actor).toBe(`${h.board.principal}+reviewer`);
+  h.flights.set(row.flightId!, asking("Which branch should I review?"));
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "blocked", blocked: { kind: "needs_input", reason: "Which branch should I review?" }, claim: null });
+  expect(h.store.custody("c1", row.attemptId)).toMatchObject({ state: "blocked", outcome: "blocked", token: null });
+  h.time.advance(600_000); // a long wait: no renewal, no lost claim
+  await h.custody.tick();
+  expect(h.board.count("POST", `/tasks/${id}/renew`)).toBe(0);
+  expect(h.store.custody("c1", row.attemptId)!.state).toBe("blocked");
+  h.flights.set(row.flightId!, { state: "running" });
+  await h.custody.tick();
+  const next = h.store.latestCustody("c1", id)!;
+  expect(next).toMatchObject({ state: "held", profile: "reviewer", flightId: row.flightId, epoch: 2 });
+  expect(next.attemptId).not.toBe(row.attemptId);
+  expect(h.store.custody("c1", row.attemptId)).toMatchObject({ state: "settled", outcome: "blocked", epoch: 1 });
+  // Lifted as the principal, claimed again as the role.
+  expect(h.board.requests.find(request => request.path === `/tasks/${id}/unblock`)!.headers["x-board-profile"]).toBeUndefined();
+  expect(h.board.task(id)!.claim!.actor).toBe(`${h.board.principal}+reviewer`);
+  h.flights.set(row.flightId!, { state: "completed", output: "Approved: the change is right.", metadata: REPLIED });
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "completed", result: "Approved: the change is right." });
+  expect(h.notices).toEqual(["blocked:Which branch should I review?", "resumed:reviewer", "settled:completed"]);
+});
+
+test("an answer that finishes the flight while the task is held claims once more and settles it", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Review" });
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(row.flightId!, asking("Ship it?"));
+  await h.custody.tick();
+  h.flights.set(row.flightId!, { state: "completed", output: "Shipped.", metadata: REPLIED });
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "completed", result: "Shipped.", epoch: 2 });
+  expect(h.board.count("POST", `/tasks/${id}/claim`)).toBe(2);
+});
+
+test("a task cancelled on the board while held for a person ends Scout's part", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Review" });
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(row.flightId!, asking("Ship it?"));
+  await h.custody.tick();
+  h.board.cancel(id);
+  await h.custody.observe((await h.transport.message(id))!);
+  expect(h.store.custody("c1", row.attemptId)).toMatchObject({ state: "lost", detail: "canceled" });
+});
+
+test("a task kept for reviewer refuses the builder profile", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Review" });
+  h.board.assign(id, `${h.board.principal}+reviewer`);
+  await expect(h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "matcher", profile: "builder" })).rejects.toMatchObject({ code: "claim_refused" });
+  expect(h.board.task(id)!.state).toBe("ready");
 });

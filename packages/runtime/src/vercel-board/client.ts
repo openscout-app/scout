@@ -27,6 +27,8 @@ export interface VercelBoardMe { actor: string; principal: string; profile: stri
  * it holds no claim token, cursor or retry policy of its own. A second
  * transport (the Vercel API worker) implements the same interface.
  */
+export type VercelBoardBlockKind = "needs_input" | "awaiting_approval";
+
 export interface VercelBoardTransport {
   me(signal?: AbortSignal): Promise<VercelBoardMe>;
   ensureChannel(channel: string): Promise<void>;
@@ -46,6 +48,15 @@ export interface VercelBoardTransport {
   complete(taskId: string, grant: { epoch: number; token: string }, result?: string): Promise<VercelBoardWireMessage>;
   fail(taskId: string, grant: { epoch: number; token: string }, reason: string): Promise<VercelBoardWireMessage>;
   release(taskId: string, grant: { epoch: number; token: string }): Promise<VercelBoardWireMessage>;
+  /** Holds a claimed task for a person, which ends the claim. `kind`: `needs_input` or `awaiting_approval`. */
+  block(taskId: string, grant: { epoch: number; token: string }, reason: string, kind: VercelBoardBlockKind): Promise<VercelBoardWireMessage>;
+  /** Lifts a hold. Board allows it to the task's owner, so the custodian sends it as the principal (`as(null)`). */
+  unblock(taskId: string): Promise<VercelBoardWireMessage>;
+  /**
+   * The same transport writing as another profile from the connection's role
+   * list, or as the principal itself with null. Narrowing (`x-board-can`) is unchanged.
+   */
+  as(profile: string | null): VercelBoardTransport;
   labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }): Promise<void>;
 }
 
@@ -76,6 +87,8 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     private readonly connection: Pick<VercelBoardConnectionConfig, "url" | "profile" | "channels" | "probeChannel">,
     private readonly token: () => Promise<string>,
     private readonly fetchImpl: VercelBoardFetch = (input, init) => fetch(input, init),
+    /** The profile this transport writes as: the connection's own unless `as()` chose another. Null is the principal. */
+    private readonly profile: string | null = connection.profile,
   ) {
     this.base = connection.url.replace(/\/+$/, "");
     this.can = vercelBoardCanHeader(connection);
@@ -88,7 +101,7 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
     const headers: Record<string, string> = {
       authorization: `Bearer ${await this.token()}`,
-      "x-board-profile": this.connection.profile,
+      ...(this.profile !== null ? { "x-board-profile": this.profile } : {}),
       "x-board-can": this.can,
       accept: "application/json",
     };
@@ -231,6 +244,17 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
   }
   release(taskId: string, grant: { epoch: number; token: string }) {
     return this.settle(taskId, "release", { epoch: grant.epoch, token: grant.token });
+  }
+  async block(taskId: string, grant: { epoch: number; token: string }, reason: string, kind: VercelBoardBlockKind) {
+    const answer = await this.request<Record<string, any>>("POST", `/tasks/${encodeURIComponent(taskId)}/block`, { body: { epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason), kind }, operation: "block" });
+    return parseVercelBoardMessage(answer.task);
+  }
+  async unblock(taskId: string) {
+    const answer = await this.request<Record<string, any>>("POST", `/tasks/${encodeURIComponent(taskId)}/unblock`, { body: {}, operation: "unblock" });
+    return parseVercelBoardMessage(answer.task);
+  }
+  as(profile: string | null): VercelBoardTransport {
+    return new VercelBoardHttpTransport(this.connection, this.token, this.fetchImpl, profile);
   }
 
   async labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }) {
