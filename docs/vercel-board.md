@@ -51,7 +51,12 @@ Two existing parts of core set the pattern:
 | Only planned work goes on Board. Tasks between agents stay in Scout. | Writing every Scout task to a rate-limited external API would flood the board and make Scout depend on Vercel to run. |
 | Scout creates Board tasks, for planned work only. | This reverses an earlier cut. Planning needs a write path, and outside workers can only claim what is on the board. |
 | No standing lead agent. | Planning is an ordinary Scout task. Claim, renew, settle and retry are runtime code. |
-| The operator starts each claim in v1. | Board text can come from teammates and from systems that sync into the board. No agent with a shell starts on that text without an operator act. |
+| Runtime code claims; agents only declare a role. | Claim tokens stay with the custodian. An agent never calls claim, so it cannot pick its own work off a board that teammates and synced platforms write to. |
+| Only a role-kept task the operator or Scout wrote starts on its own, and only in a self-serve channel. | Board text can come from teammates and from systems that sync into the board. Elsewhere, and for any other task, the operator starts the claim. The runtime matches each task once; after a release, a failure or a lost lease, the operator decides. |
+| Roles are a closed list in the connection: `scout`, `builder`, `reviewer`. | Each is a Board profile of the operator's principal. `scout` plans; the others work. A task kept for a role (`for`) can be claimed only as that role. |
+| A task settles only on a verb. | A final `reply --ref` completes it and `--failed` fails it. A turn that ends without a verb releases it, so a refusal never reads as completed. `--waiting-on` holds it on the board as `blocked` and stops renewing; the answer lifts the hold and Scout claims again as the same role. |
+| Scout's writes are `noSync`. | One path per Slack channel: Board's sync does not copy Scout's posts and tasks out, until the operator chooses otherwise. |
+| Promote is frozen. | The code stays; nothing new builds on it. |
 | A `failed` task shows as waiting, labeled failed. | Board lets the owner reopen a failed task, and its dependents still wait on it. Someone owes a move. Scout does not add a failed state. |
 | Board owns `state`. Scout owns acceptance. | One writer per field. A move from Scout is a command to Board; the result returns as an event. |
 | Scout writes as the operator's principal with the `scout` profile. The acting agent is in a label. | Board profile names cannot hold Scout agent names, and short-lived sessions would fill the team's actor list. Labels stay on the board and do not sync out to other platforms. |
@@ -65,8 +70,26 @@ Two existing parts of core set the pattern:
 | --- | --- | --- |
 | Owner | The operator | Puts work on the board through Scout, answers what is waiting, and reviews finished work. |
 | Planner | Any session that receives an ordinary Scout task | Breaks work down and writes Board tasks with `needs` through a Scout MCP tool. |
-| Mechanics | Runtime code on the custodian | Follows the feed, claims, renews, settles and retries. |
-| Workers | Scout agents on any host, and any other client that speaks Board | Do the tasks. Board's lease keeps two workers off one task. |
+| Mechanics | Runtime code on the custodian | Follows the feed, matches role-kept tasks to declared agents, claims, renews, blocks, settles and retries. |
+| Workers | Scout agents on any host, and any other client that speaks Board | Do the tasks. A Scout agent declares a role (`scout integration role vercel-board --role reviewer`) and ends each task with a verb. Board's lease keeps two workers off one task. |
+
+### Who starts a claim
+
+1. The operator, with `scout integration claim vercel-board`. The claim goes
+   as the role the task is kept for, or as `scout` for an open task. It checks
+   the root's author as well as the task's owner against the allowlist.
+2. The matcher, on each custody tick. It reads demand from the mirror, with no
+   Board call, and claims a task when all of these hold:
+   - the channel is in the connection's `selfServe` list;
+   - the task is `ready` and kept for a role other than `scout`;
+   - the operator made it, and wrote it as themselves or as `scout`;
+   - Scout has never claimed it;
+   - an agent that declared the role holds no other Board task.
+   It reads the task from the board again before it claims.
+
+A dependency's result reaches the next agent only when Scout wrote it, or the
+mirror's event chain shows an allowlisted principal completed the task.
+Otherwise the prompt says the result is withheld, and who finished it.
 
 The planning tool is the only path that creates a Board task from Scout.
 `scout ask` must not write to Board. This makes "planned work" a mechanical

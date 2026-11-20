@@ -75,6 +75,8 @@ export class VercelBoardCursorConflictError extends Error {
 
 const ACTIVE_CUSTODY: VercelBoardCustodyState[] = ["claiming", "claim_unknown", "held", "blocked", "settling"];
 
+export type VercelBoardDeclaredRole = { agentId: string; role: string; declaredBy: string; declaredAt: number };
+
 export class VercelBoardStore {
   /*
    * Connections known to have no active custody or no queued writes. The
@@ -160,10 +162,28 @@ export class VercelBoardStore {
     return rows;
   }
 
-  custodyCounts(connectionId: string): { held: number; settling: number; settled: number; lost: number } {
+  /** Record that an agent takes a role on a connection. Declaring twice keeps the first time. */
+  declareRole(connectionId: string, agentId: string, role: string, declaredBy: string): void {
+    this.database.query(`INSERT INTO vercel_board_roles (connection_id, agent_id, role, declared_by, declared_at) VALUES (?1, ?2, ?3, ?4, ?5)
+      ON CONFLICT (connection_id, agent_id, role) DO NOTHING`).run(connectionId, agentId, role, declaredBy, this.now());
+  }
+
+  removeRole(connectionId: string, agentId: string, role: string): void {
+    this.database.query("DELETE FROM vercel_board_roles WHERE connection_id = ?1 AND agent_id = ?2 AND role = ?3").run(connectionId, agentId, role);
+  }
+
+  /** The declared roles on a connection, oldest first: the matcher's order. */
+  declaredRoles(connectionId: string, role?: string): VercelBoardDeclaredRole[] {
+    return this.database.query<{ agent_id: string; role: string; declared_by: string; declared_at: number }>(
+      `SELECT agent_id, role, declared_by, declared_at FROM vercel_board_roles WHERE connection_id = ?1 ${role ? "AND role = ?2" : ""} ORDER BY declared_at, rowid`)
+      .all(...(role ? [connectionId, role] : [connectionId]))
+      .map(row => ({ agentId: row.agent_id, role: row.role, declaredBy: row.declared_by, declaredAt: row.declared_at }));
+  }
+
+  custodyCounts(connectionId: string): { held: number; blocked: number; settling: number; settled: number; lost: number } {
     const rows = this.database.query<{ state: VercelBoardCustodyState; n: number }>("SELECT state, COUNT(*) AS n FROM vercel_board_custody WHERE connection_id = ?1 GROUP BY state").all(connectionId);
     const count = (...states: VercelBoardCustodyState[]) => rows.filter(row => states.includes(row.state)).reduce((sum, row) => sum + row.n, 0);
-    return { held: count("claiming", "held"), settling: count("settling", "claim_unknown"), settled: count("settled"), lost: count("lost") };
+    return { held: count("claiming", "held"), blocked: count("blocked"), settling: count("settling", "claim_unknown"), settled: count("settled"), lost: count("lost") };
   }
 
   enqueue(row: { connectionId: string; clientId: string; lane: string; kind: "post" | "plan"; request: unknown }): VercelBoardOutboxRow {

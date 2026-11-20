@@ -6,7 +6,7 @@ import {
   type VercelBoardConnectionConfig, type VercelBoardConnectionState, type VercelBoardConnectionStatus, type VercelBoardPlanRequest, type VercelBoardPlanResponse,
   type CollaborationEvent, type CollaborationRecord, type FlightRecord, type ScoutDeliverRequest, type ScoutDeliverResponse, type WorkItemRecord,
   type ConversationDefinition, type VercelBoardChannelMirrorStatus, type VercelBoardHandoff, type VercelBoardHandoffEvent, type VercelBoardHandoffsResponse,
-  type VercelBoardMessagesResponse, type VercelBoardMirrorState, type VercelBoardMirroredMessage, type VercelBoardPromoteRequest, type VercelBoardPromoteResponse,
+  type VercelBoardMessagesResponse, type VercelBoardMirrorState, type VercelBoardMirroredMessage, type VercelBoardPromoteRequest, type VercelBoardPromoteResponse, type VercelBoardRoleRequest, type VercelBoardRoleResponse,
   stableChannelId,
 } from "@openscout/protocol";
 import type { ControlPlaneSqliteTransactionalDatabase } from "../sqlite-adapter.js";
@@ -85,6 +85,8 @@ interface LiveConnection {
   readsBlockedUntil: number;
   abort: AbortController;
   timers: ReturnType<typeof setTimeout>[];
+  /** A matcher pass is running: the timer and a pump never match at once. */
+  matching?: boolean;
 }
 
 /** Board holds a feed read open up to 300 seconds; an event answers it at once. */
@@ -225,7 +227,7 @@ export class BrokerVercelBoardService {
 
   private run(live: LiveConnection): void {
     this.every(live, LEASE_RENEW_MS, async () => this.renewLease(live));
-    this.every(live, TICK_MS, () => live.custody.tick());
+    this.every(live, TICK_MS, async () => { await live.custody.tick(); await this.match(live); });
     this.every(live, OUTBOX_MS, () => live.outbox.drainAll());
     this.every(live, RECONCILE_MS, () => this.reconcileAll(live));
     // A channel outside the mirror is not followed: its views read the board.
@@ -345,6 +347,7 @@ export class BrokerVercelBoardService {
       for (const channel of vercelBoardMirroredChannels(live.config)) await live.follower.step(channel, { wait: 0 });
       this.markGood(live);
       await live.custody.tick();
+      await this.match(live);
       await live.outbox.drainAll();
     } catch (error) {
       this.classify(live, error);
@@ -618,6 +621,68 @@ export class BrokerVercelBoardService {
       if (claimed?.task) await this.projectRoot(live, claimed);
     }
     return { row, workId };
+  }
+
+  // ---- roles and the matcher ---------------------------------------------
+
+  /** An agent takes a role, or drops it. Only the agent itself or the operator says so. */
+  async declareRole(request: VercelBoardRoleRequest): Promise<VercelBoardRoleResponse> {
+    const live = this.requireLive(request.connectionId);
+    if (typeof request.agentId !== "string" || !request.agentId.trim() || request.agentId.length > 256 || /[\u0000-\u001f\u007f]/.test(request.agentId)) {
+      throw new VercelBoardServiceError(400, "invalid_request", "agentId must be one Scout agent ID.");
+    }
+    if (request.actorId !== this.options.operatorId && request.actorId !== request.agentId) {
+      throw new VercelBoardServiceError(403, "not_your_role", "An agent declares only its own role; the operator may declare any agent's.");
+    }
+    const roles = vercelBoardRoles(live.config).filter(role => role !== live.config.profile);
+    if (!roles.includes(request.role)) {
+      throw new VercelBoardServiceError(400, "invalid_role", `role must be one of: ${roles.join(", ")}. ${live.config.profile} plans and is not declared.`);
+    }
+    if (request.remove) live.store.removeRole(live.config.id, request.agentId, request.role);
+    else live.store.declareRole(live.config.id, request.agentId, request.role, request.actorId);
+    return { connectionId: live.config.id, declared: live.store.declaredRoles(live.config.id).map(({ agentId, role, declaredAt }) => ({ agentId, role, declaredAt })) };
+  }
+
+  /** Written by the operator, as themselves or as Scout's planning profile, and owned by them. */
+  private writtenByOperator(config: VercelBoardConnectionConfig, by: { principal: string; profile: string | null } | null | undefined, owner: string): boolean {
+    return vercelBoardPrincipalOf(owner) === config.principal && by?.principal === config.principal && (by.profile === null || by.profile === config.profile);
+  }
+
+  /**
+   * The runtime's claim. In a self-serve channel, a ready task kept for a
+   * declared role, made and written by the operator or Scout, goes to the
+   * longest-declared idle agent with that role. Demand comes from the mirror;
+   * the board's own copy is checked again before the claim. Scout matches a
+   * task once: after any claim of it, a release, a failure or a lost lease,
+   * it waits for the operator.
+   */
+  async match(live: LiveConnection): Promise<void> {
+    const { config, store, mirror } = live;
+    const channels = (config.selfServe ?? []).filter(channel => vercelBoardMirroredChannels(config).includes(channel));
+    if (!channels.length || live.matching || live.state !== "following") return;
+    const declared = store.declaredRoles(config.id);
+    if (!declared.length) return;
+    live.matching = true;
+    try {
+      const busy = new Set(store.activeCustody(config.id).map(row => row.agentId));
+      for (const channel of channels) for (const id of mirror.openTasks(config.id, channel)) {
+        const copy = mirror.message(config.id, id);
+        if (!copy?.task || copy.re !== null || copy.task.state !== "ready") continue;
+        const role = vercelBoardRoleOf(config, copy.task.for);
+        if (!role || role === config.profile || !this.writtenByOperator(config, copy.by, copy.task.owner)) continue;
+        if (store.latestCustody(config.id, id)) continue;
+        const agent = declared.find(entry => entry.role === role && !busy.has(entry.agentId));
+        if (!agent) continue;
+        const root = await live.transport.message(id).catch(() => null);
+        if (!root?.task || root.re !== null || root.deleted || root.task.state !== "ready" || vercelBoardRoleOf(config, root.task.for) !== role
+          || !this.writtenByOperator(config, root.by, root.task.owner)) continue;
+        busy.add(agent.agentId);
+        // A refusal or a failed dispatch leaves a custody row, so the task is not matched again.
+        await this.startClaim(live, root, { agentId: agent.agentId, startedBy: VERCEL_BOARD_MATCHER_ID, profile: role }).catch(() => undefined);
+      }
+    } finally {
+      live.matching = false;
+    }
   }
 
   /** A read straight from the board, of a mirrored channel: newer than the copy means the copy takes it. */
@@ -908,6 +973,8 @@ export class BrokerVercelBoardService {
       cursors: config.channels.map(channel => { const cursor = store.cursor(config.id, channel); return { channel, stored: Boolean(cursor), ...(cursor ? { updatedAt: cursor.updatedAt } : {}) }; }),
       mirror: this.mirrorStatus(live),
       custody: store.custodyCounts(config.id), outbox: store.outboxCounts(config.id),
+      roles: vercelBoardRoles(config), selfServe: config.selfServe ?? [],
+      declared: store.declaredRoles(config.id).map(({ agentId, role }) => ({ agentId, role })),
       ...(observed ? { localLease: observed } : {}),
     };
   }

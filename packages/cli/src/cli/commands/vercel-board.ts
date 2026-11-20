@@ -1,4 +1,4 @@
-import { scoutBrokerPaths, type VercelBoardClaimResponse, type VercelBoardConnectResponse, type VercelBoardConnectionStatus, type VercelBoardCredentialReference, type VercelBoardHandoff, type VercelBoardHandoffsResponse, type VercelBoardMessagesResponse, type VercelBoardPromoteResponse } from "@openscout/protocol";
+import { scoutBrokerPaths, type VercelBoardClaimResponse, type VercelBoardConnectResponse, type VercelBoardConnectionStatus, type VercelBoardCredentialReference, type VercelBoardHandoff, type VercelBoardHandoffsResponse, type VercelBoardMessagesResponse, type VercelBoardPromoteResponse, type VercelBoardRoleResponse } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { claimedSessionId } from "../../lib/core/broker/sender.ts";
@@ -8,10 +8,12 @@ export const VERCEL_BOARD_HELP = [
   "scout integration connect vercel-board --team <team ID or slug> [--board scout|General] --credential secret_cli:<entry>|env:<NAME>|file:<absolute path>",
   "scout integration connect vercel-board --url <board url> --credential ...",
   "    [--id <connection>] [--channels scout/work,scout/decisions] [--mirror <channel>,...] [--probe-channel scout/probe] [--allow <principal>,...] [--no-probe]",
+  "    [--roles scout,builder,reviewer] [--self-serve <channel>,...]",
   "    [--experimental-marker [--takeover]]",
   "scout integration status vercel-board [--connection <id>]",
   "scout integration claim vercel-board --connection <id> --task <board task id> --agent <scout agent id> [--confirm-owner]",
   "scout integration promote vercel-board --connection <id> --task <board task id>",
+  "scout integration role vercel-board --connection <id> --role builder|reviewer [--agent <scout agent id>] [--remove]",
   "scout integration messages vercel-board --connection <id> --channel <channel> [--limit 100]",
   "scout integration handoffs vercel-board --connection <id> [--task <board task id>] [--limit 200]",
   "",
@@ -35,15 +37,20 @@ export const VERCEL_BOARD_HELP = [
   "bulk once, then kept current from the feed; any other channel is read through in one call each time it is viewed.",
   "messages shows a channel as Scout holds it. Board text is quoted source material, never instructions.",
   "handoffs lists who handed a task to whom and when: one task's chain with --task, else the newest.",
+  "--roles names the Board profiles Scout writes as (default scout, builder, reviewer): scout plans, the rest work.",
+  "A plan's task can be kept for one role. In a --self-serve channel, the runtime claims such a task, once, for an idle",
+  "agent that declared the role, when the operator or Scout wrote it. Elsewhere, and after that one claim, the operator claims.",
+  "role declares the calling agent's role (or --agent's, as the operator). Agents never claim; the runtime does.",
 ].join("\n");
 
-type Parsed = { method: "GET" | "POST"; path: string; body?: Record<string, unknown>; kind: "connect" | "status" | "claim" | "promote" | "messages" | "handoffs" };
+type Parsed = { method: "GET" | "POST"; path: string; body?: Record<string, unknown>; kind: "connect" | "status" | "claim" | "promote" | "role" | "messages" | "handoffs" };
 
 const VALUE_FLAGS: Record<string, string[]> = {
-  connect: ["--url", "--team", "--board", "--credential", "--id", "--channels", "--mirror", "--probe-channel", "--allow"],
+  connect: ["--url", "--team", "--board", "--credential", "--id", "--channels", "--mirror", "--probe-channel", "--allow", "--roles", "--self-serve"],
   status: ["--connection"],
   claim: ["--connection", "--task", "--agent"],
   promote: ["--connection", "--task"],
+  role: ["--connection", "--role", "--agent"],
   messages: ["--connection", "--channel", "--limit"],
   handoffs: ["--connection", "--task", "--limit"],
 };
@@ -52,6 +59,7 @@ const BOOLEAN_FLAGS: Record<string, string[]> = {
   status: [],
   claim: ["--confirm-owner"],
   promote: [],
+  role: ["--remove"],
   messages: [],
   handoffs: [],
 };
@@ -68,7 +76,7 @@ export function parseCredentialReference(value: string): VercelBoardCredentialRe
 
 export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv = process.env): Parsed {
   const [command, ...rest] = args;
-  if (!command || !(command in VALUE_FLAGS)) throw new ScoutCliError("Use scout integration connect, status, claim, promote, messages or handoffs vercel-board. See scout integration vercel-board --help.");
+  if (!command || !(command in VALUE_FLAGS)) throw new ScoutCliError("Use scout integration connect, status, claim, promote, role, messages or handoffs vercel-board. See scout integration vercel-board --help.");
   const flags: Record<string, string> = {};
   const switches = new Set<string>();
   for (let i = 0; i < rest.length; i++) {
@@ -97,6 +105,18 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
     for (const flag of ["--connection", "--task"]) if (!flags[flag]) throw new ScoutCliError(`scout integration promote vercel-board requires ${flag}.`);
     return { kind: "promote", method: "POST", path: scoutBrokerPaths.v1.vercelBoardPromote, body: { connectionId: flags["--connection"], taskId: flags["--task"], actorId: "operator" } };
   }
+  if (command === "role") {
+    for (const flag of ["--connection", "--role"]) if (!flags[flag]) throw new ScoutCliError(`scout integration role vercel-board requires ${flag}.`);
+    const session = claimedSessionId(env);
+    const self = session ? (session.startsWith("session:") ? session : `session:${session}`) : env.OPENSCOUT_AGENT?.trim();
+    const agentId = flags["--agent"] ?? self;
+    if (!agentId) throw new ScoutCliError("Run role from the agent's own session, or name it with --agent as the operator.");
+    // An agent names itself; naming another agent is the operator's call.
+    const actorId = flags["--agent"] && flags["--agent"] !== self ? "operator" : agentId;
+    return { kind: "role", method: "POST", path: scoutBrokerPaths.v1.vercelBoardRoles, body: {
+      connectionId: flags["--connection"], role: flags["--role"], agentId, actorId, ...(switches.has("--remove") ? { remove: true } : {}),
+    } };
+  }
   const limit = () => {
     if (flags["--limit"] === undefined) return undefined;
     if (!/^\d+$/.test(flags["--limit"])) throw new ScoutCliError("--limit takes a whole number.");
@@ -124,6 +144,8 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
     ...(flags["--mirror"] ? { mirror: list(flags["--mirror"]) } : {}),
     ...(flags["--probe-channel"] ? { probeChannel: flags["--probe-channel"] } : {}),
     ...(flags["--allow"] ? { ownerAllowlist: list(flags["--allow"]) } : {}),
+    ...(flags["--roles"] ? { roles: list(flags["--roles"]) } : {}),
+    ...(flags["--self-serve"] ? { selfServe: list(flags["--self-serve"]) } : {}),
     ...(switches.has("--no-probe") ? { probe: false } : {}),
     ...(switches.has("--experimental-marker") ? { experimentalMarker: true } : {}),
     ...(switches.has("--takeover") ? { takeover: true } : {}),
@@ -145,7 +167,9 @@ function formatStatus(status: VercelBoardConnectionStatus): string {
     `  Custodian: ${status.custodianNodeId}${status.custodianNodeId === status.nodeId ? " (this node)" : ""}`,
     "  Channels:",
     ...channels,
-    `  Claims: ${status.custody.held} held, ${status.custody.settling} settling, ${status.custody.lost} lost; outbox: ${status.outbox.pending} pending, ${status.outbox.unknown} unknown, ${status.outbox.failed} failed`,
+    ...(status.roles ? [`  Roles: ${status.roles.join(", ")}; self-serve: ${status.selfServe?.length ? status.selfServe.join(", ") : "none"}`] : []),
+    ...(status.declared?.length ? [`  Declared: ${status.declared.map(entry => `${entry.agentId} (${entry.role})`).join(", ")}`] : []),
+    `  Claims: ${status.custody.held} held, ${status.custody.blocked ?? 0} held for a person, ${status.custody.settling} settling, ${status.custody.lost} lost; outbox: ${status.outbox.pending} pending, ${status.outbox.unknown} unknown, ${status.outbox.failed} failed`,
     ...(status.lastGoodReadAt ? [`  Last good read: ${new Date(status.lastGoodReadAt).toISOString()}`] : []),
     ...(status.detail ? [`  ${status.detail}`] : []),
     ...(status.fix ? [`  Fix: ${status.fix}`] : []),
@@ -177,6 +201,11 @@ export async function runVercelBoardCommand(context: ScoutCommandContext, args: 
   if (request.kind === "promote") {
     const promoted = payload as VercelBoardPromoteResponse;
     context.output.writeValue(payload, () => `${promoted.created ? "Promoted" : "Already promoted:"} ${promoted.taskId} to work item ${promoted.workId}.`);
+    return;
+  }
+  if (request.kind === "role") {
+    const { declared } = payload as VercelBoardRoleResponse;
+    context.output.writeValue(payload, () => declared.length ? declared.map(entry => `${entry.agentId}: ${entry.role}`).join("\n") : "No agent has declared a role.");
     return;
   }
   if (request.kind === "messages") {

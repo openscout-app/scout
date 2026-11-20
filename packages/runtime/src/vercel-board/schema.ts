@@ -10,6 +10,18 @@
  * task's hand-off chain is one query. vercel_board_promotions records the
  * tasks the operator made into Scout work items.
  */
+/** The roles Scout agents declared, per connection: what the matcher may hand them. */
+export const VERCEL_BOARD_ROLES_SQL = `
+CREATE TABLE IF NOT EXISTS vercel_board_roles (
+  connection_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  declared_by TEXT NOT NULL,
+  declared_at INTEGER NOT NULL,
+  PRIMARY KEY (connection_id, agent_id, role)
+);
+`;
+
 export const VERCEL_BOARD_SQLITE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS vercel_board_cursors (
   connection_id TEXT NOT NULL,
@@ -116,7 +128,7 @@ CREATE TABLE IF NOT EXISTS vercel_board_custodian_leases (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (connection_id, principal)
 );
-`;
+${VERCEL_BOARD_ROLES_SQL}`;
 
 /**
  * Custody gained the claim's profile and a blocked state (a flight waiting on

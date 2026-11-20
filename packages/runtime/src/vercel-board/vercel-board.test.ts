@@ -841,3 +841,96 @@ test("a plan keeps a task for a role by name, as the owner's role actor, and ref
   await expect(h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r2", actorId: "operator", tasks: [{ text: "x", for: "deployer" }] }))
     .rejects.toMatchObject({ status: 400, message: expect.stringContaining("scout, builder, reviewer") });
 });
+
+// ---- the matcher -----------------------------------------------------------
+
+async function matcherHarness(extra: Record<string, unknown> = { selfServe: ["work"] }) {
+  const h = serviceHarness();
+  await h.connect(extra);
+  await h.service.pump("c1");
+  const reviewer = `${h.board.principal}+reviewer`;
+  return { ...h, reviewer };
+}
+
+test("in a self-serve channel the runtime hands a review task to the idle reviewer once its build lands, with no claim from the operator", async () => {
+  const h = await matcherHarness();
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "agent-review" });
+  const plan = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r", actorId: "operator",
+    tasks: [{ key: "build", text: "Build it", for: "builder" }, { text: "Review it", needs: [{ key: "build" }], for: "reviewer" }] });
+  const [build, review] = plan.tasks.map(task => task.taskId) as [string, string];
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.state).toBe("waiting");
+  expect(h.board.task(build)!.state).toBe("ready"); // nobody declared builder
+  await h.service.claim({ connectionId: "c1", taskId: build, agentId: "agent-build", actorId: "operator" });
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Built.", metadata: { completedByBrokerReply: true } } as FlightRecord);
+  await h.service.pump("c1"); // settles the build; the board readies the review
+  await h.service.pump("c1"); // the mirror sees it ready; the matcher claims
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.message(review)!.labels["scout.agent"]).toBe("agent-review");
+  const delivery = h.deliveries.at(-1)!;
+  expect(delivery.body).toContain(`Scout's runtime matched you to Board task ${review} as reviewer`);
+  expect(delivery.body).toContain(`Dependency ${build} (completed; channel work):\n> Built.`);
+  expect(h.board.count("POST", `/tasks/${review}/claim`)).toBe(1);
+});
+
+test("the matcher leaves tasks outside self-serve channels, written by others, or kept for nobody", async () => {
+  const outside = await matcherHarness({});
+  await outside.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const id = outside.board.createTask({ channel: "work", text: "Review", for: outside.reviewer, as: null });
+  await outside.service.pump("c1");
+  await outside.service.pump("c1");
+  expect(outside.board.task(id)!.state).toBe("ready");
+
+  const h = await matcherHarness();
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const stranger = h.board.createTask({ channel: "work", text: "Review mine", for: h.reviewer });
+  h.board.message(stranger)!.by = { actor: "local:user:stranger+bot", principal: "local:user:stranger", profile: "bot" };
+  const asOtherProfile = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: "builder" });
+  const open = h.board.createTask({ channel: "work", text: "Anyone" });
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  for (const task of [stranger, asOtherProfile, open]) expect(h.board.task(task)!.state).toBe("ready");
+  expect(h.deliveries).toEqual([]);
+});
+
+test("the matcher gives one task at a time to an agent, and never matches a task twice", async () => {
+  const h = await matcherHarness();
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const first = h.board.createTask({ channel: "work", text: "Review A", for: h.reviewer, as: null });
+  const second = h.board.createTask({ channel: "work", text: "Review B", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect([first, second].map(id => h.board.task(id)!.state)).toEqual(["claimed", "ready"]);
+  // The turn ends with no verb: the task goes back, and is not matched again.
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Looked at it." } as FlightRecord);
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(first)!.state).toBe("ready");
+  expect(h.board.task(second)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.count("POST", `/tasks/${first}/claim`)).toBe(1);
+});
+
+test("an agent declares only its own role, never the planning profile", async () => {
+  const h = await matcherHarness();
+  await expect(h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "reviewer", actorId: "agent-b" })).rejects.toMatchObject({ status: 403 });
+  await expect(h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "scout", actorId: "agent-a" })).rejects.toMatchObject({ code: "invalid_role" });
+  await expect(h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "deployer", actorId: "agent-a" })).rejects.toMatchObject({ code: "invalid_role" });
+  const declared = await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "builder", actorId: "agent-a" });
+  expect(declared.declared.map(({ agentId, role }) => ({ agentId, role }))).toEqual([{ agentId: "agent-a", role: "builder" }]);
+  expect((await h.service.status("c1"))[0]).toMatchObject({ roles: ["scout", "builder", "reviewer"], selfServe: ["work"], declared: [{ agentId: "agent-a", role: "builder" }] });
+  expect((await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "builder", actorId: "operator", remove: true })).declared).toEqual([]);
+});
+
+test("every write Scout makes is noSync: posts, the probe and planned tasks", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r", actorId: "operator", tasks: [{ text: "Build it" }] });
+  const writes = h.board.requests.filter(request => request.method === "POST" && ["/messages", "/tasks", "/tasks/batch"].includes(request.path));
+  expect(writes.map(request => request.path)).toEqual(expect.arrayContaining(["/tasks", "/tasks/batch"]));
+  for (const write of writes) {
+    const body = write.body as { noSync?: boolean; tasks?: { noSync?: boolean }[] };
+    if (body.tasks) expect(body.tasks.every(task => task.noSync === true)).toBe(true);
+    else expect(body.noSync).toBe(true);
+  }
+});

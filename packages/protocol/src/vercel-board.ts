@@ -274,7 +274,12 @@ export interface VercelBoardConnectionStatus {
   cursors: { channel: string; stored: boolean; updatedAt?: number }[];
   /** Each channel's mirror: whether Scout keeps a copy, and how far it is. */
   mirror: VercelBoardChannelMirrorStatus[];
-  custody: { held: number; settling: number; settled: number; lost: number };
+  custody: { held: number; blocked: number; settling: number; settled: number; lost: number };
+  /** The profiles Scout writes as, and the channels where role-kept tasks start on their own. */
+  roles?: string[];
+  selfServe?: string[];
+  /** The agents that declared a role, oldest first. */
+  declared?: { agentId: string; role: string }[];
   outbox: { pending: number; unknown: number; failed: number };
   /** The local lease. It fences processes on this node only. */
   localLease?: { generation: number; expiresAt: number; heldHere: boolean };
@@ -306,6 +311,26 @@ export interface VercelBoardConnectResponse {
   connection: VercelBoardConnectionConfig;
   status: VercelBoardConnectionStatus;
   probe?: { taskId: string; state: VercelBoardTaskState };
+}
+
+/**
+ * An agent takes a role on a connection, or drops it. The runtime, not the
+ * agent, claims: in a self-serve channel it hands an idle declared agent a
+ * task kept for that role. The connection's own profile plans and is never
+ * declared.
+ */
+export interface VercelBoardRoleRequest {
+  connectionId: string;
+  agentId: string;
+  role: string;
+  /** The caller: the agent itself, or the operator. */
+  actorId: string;
+  remove?: boolean;
+}
+
+export interface VercelBoardRoleResponse {
+  connectionId: string;
+  declared: { agentId: string; role: string; declaredAt: number }[];
 }
 
 /** One planned task. `needs` takes Board task IDs or `{ key }` for one of the same plan. */

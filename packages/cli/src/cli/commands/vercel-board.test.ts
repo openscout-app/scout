@@ -33,3 +33,13 @@ test("claim reports the calling session separately from the assigned agent", () 
     { CODEX_THREAD_ID: "calling-session", OPENSCOUT_AGENT: "planner" });
   expect(command.body).toMatchObject({ agentId: "worker", reportedCallerId: "session:calling-session" });
 });
+
+test("role declares the calling agent, or another agent as the operator", () => {
+  const own = parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], { OPENSCOUT_AGENT: "agent-r" });
+  expect(own).toMatchObject({ kind: "role", method: "POST", path: "/v1/integrations/vercel-board/roles", body: { connectionId: "c1", role: "reviewer", agentId: "agent-r", actorId: "agent-r" } });
+  const other = parseVercelBoardCommand(["role", "--connection", "c1", "--role", "builder", "--agent", "agent-b", "--remove"], {});
+  expect(other.body).toEqual({ connectionId: "c1", role: "builder", agentId: "agent-b", actorId: "operator", remove: true });
+  expect(() => parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], {})).toThrow(/--agent/);
+  const connect = parseVercelBoardCommand(["connect", "--team", "t", "--credential", "env:T", "--roles", "scout,reviewer", "--self-serve", "scout/work"], {});
+  expect(connect.body).toMatchObject({ roles: ["scout", "reviewer"], selfServe: ["scout/work"] });
+});

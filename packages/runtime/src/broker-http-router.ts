@@ -927,6 +927,7 @@ export function createBrokerHttpRouter(
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/claim") { json(response, 200, await board.claim(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/plan") { json(response, 200, await board.plan(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/promote") { json(response, 200, await board.promote(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/roles") { json(response, 200, await board.declareRole(input as any)); return; }
       notFound(response);
     } catch (error) {
       // Only service error codes and messages cross this boundary; credentials and tokens never do.

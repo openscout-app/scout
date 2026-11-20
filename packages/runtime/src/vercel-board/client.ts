@@ -180,7 +180,7 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
   }
 
   async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string }) {
-    const answer = await this.request<Record<string, any>>("POST", "/messages", { body: input, operation: "post" });
+    const answer = await this.request<Record<string, any>>("POST", "/messages", { body: { ...input, noSync: VERCEL_BOARD_NO_SYNC }, operation: "post" });
     return parseVercelBoardMessage(answer.message);
   }
 
@@ -195,12 +195,12 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
   }
 
   async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[] }) {
-    const answer = await this.request<Record<string, any>>("POST", "/tasks", { body: input, operation: "task_create" });
+    const answer = await this.request<Record<string, any>>("POST", "/tasks", { body: { ...input, noSync: VERCEL_BOARD_NO_SYNC }, operation: "task_create" });
     return parseVercelBoardMessage(answer.task);
   }
 
   async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string }) {
-    const answer = await this.request<Record<string, any>>("POST", "/tasks/batch", { body: input, operation: "task_batch" });
+    const answer = await this.request<Record<string, any>>("POST", "/tasks/batch", { body: { ...input, tasks: input.tasks.map(task => ({ ...task, noSync: VERCEL_BOARD_NO_SYNC })) }, operation: "task_batch" });
     if (!Array.isArray(answer.tasks)) throw new VercelBoardHttpError(502, "remote_error", "POST /tasks/batch answered no tasks.");
     return answer.tasks.map(parseVercelBoardMessage);
   }
@@ -263,6 +263,13 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
 }
 
 /** The agent label every outbound write carries, cut to Board's label value limit. */
+/**
+ * Scout's writes stay on the board: Board's own sync does not carry them to
+ * Slack or another platform, so each Slack channel has one path in. Until the
+ * operator chooses otherwise, every post, reply and task Scout writes is noSync.
+ */
+export const VERCEL_BOARD_NO_SYNC = true;
+
 export function agentLabel(agentId: string): Record<string, string> {
   return { [VERCEL_BOARD_LABELS.agent]: agentId.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 256) };
 }
