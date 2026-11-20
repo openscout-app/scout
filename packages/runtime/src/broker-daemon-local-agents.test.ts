@@ -155,10 +155,45 @@ describe("broker daemon local agent routing", () => {
     const messages = await broker.getJson<Array<{ id: string; metadata: Record<string, unknown> }>>(
       harness.baseUrl, `/v1/messages?conversationId=${posted.conversation.id}`,
     );
-    expect(messages.find(message => message.id === posted.message.id)?.metadata.senderContext).toEqual({
+    const stamped = {
       agentId: actorId, displayName: cards[0]?.displayName, cwd: projectRoot, worktree: "unknown",
       harness: "claude", model: "claude-fable-5.2",
+    };
+    expect(messages.find(message => message.id === posted.message.id)?.metadata.senderContext).toEqual(stamped);
+
+    // A reply by message ref and a channel post that names an agent take other
+    // admission paths. Both must stamp the observed runtime, not the client's model.
+    const otherRoot = mkdtempSync(join(tmpdir(), "scout-joiner-other-"));
+    broker.temporaryDirectories.add(otherRoot);
+    const other = await broker.postJson<{ targetAgentId: string }>(harness.baseUrl, "/v1/deliver", {
+      requestId: "launch-other", target: { kind: "project_path", projectPath: otherRoot },
+      execution: { harness: "claude", session: "new" }, intent: "consult", ensureAwake: false, body: "Wait.",
     });
+    const otherSnapshot = await broker.getJson<{ endpoints: Record<string, { agentId: string; sessionId?: string }> }>(
+      harness.baseUrl, "/v1/snapshot",
+    );
+    const otherSessionId = Object.values(otherSnapshot.endpoints)
+      .find(endpoint => endpoint.agentId === other.targetAgentId)?.sessionId;
+    expect(otherSessionId).toEqual(expect.any(String));
+    const clientContext = { senderContext: { agentId: actorId, cwd: projectRoot, worktree: "unknown", model: "client-model" } };
+    const refReply = await broker.postJson<{ message: { id: string; conversationId: string } }>(harness.baseUrl, "/v1/deliver", {
+      requestId: "reply-by-ref", caller: { actorId, nodeId: harness.nodeId },
+      target: { kind: "binding_ref", ref: `ref:${posted.message.id}` },
+      intent: "tell", body: "Following up.", messageMetadata: clientContext,
+    });
+    const mention = await broker.postJson<{ message: { id: string; conversationId: string } }>(harness.baseUrl, "/v1/deliver", {
+      requestId: "mention-in-channel", caller: { actorId, nodeId: harness.nodeId },
+      target: { kind: "session_id", sessionId: otherSessionId, value: `session:${otherSessionId}` }, channel: "questions",
+      intent: "tell", ensureAwake: false, body: "Can you check this?", messageMetadata: clientContext,
+    });
+    expect(refReply.message.conversationId).toBe(posted.conversation.id);
+    expect(mention.message.conversationId).toBe(posted.conversation.id);
+    const after = await broker.getJson<Array<{ id: string; metadata: Record<string, unknown> }>>(
+      harness.baseUrl, `/v1/messages?conversationId=${posted.conversation.id}`,
+    );
+    for (const id of [refReply.message.id, mention.message.id]) {
+      expect(after.find(message => message.id === id)?.metadata.senderContext).toEqual(stamped);
+    }
   }, 15_000);
 
   test("keeps a fresh Claude ask and its work durable when the work page is unavailable", async () => {

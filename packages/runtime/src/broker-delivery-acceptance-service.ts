@@ -692,7 +692,9 @@ export class BrokerDeliveryAcceptanceService {
           policy: "durable",
           createdAt,
           metadata: {
-            ...(payload.messageMetadata ?? {}),
+            ...(conversation.kind === "channel"
+              ? sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata)
+              : payload.messageMetadata),
           ...(payload.task && payload.requestId ? { requestId: payload.requestId, requestIntent: payload.task.fyi ? "tell" : "consult" } : {}),
             ...(labels.length ? { labels } : {}),
             relayChannel: conversation.kind === "direct" ? "dm" : conversation.id.replace(/^channel\./, ""),
@@ -1241,7 +1243,9 @@ export class BrokerDeliveryAcceptanceService {
       createdAt: reusableMessage?.createdAt ?? createdAt,
       metadata: {
         ...(reusableMessage?.metadata ?? {}),
-        ...(payload.messageMetadata ?? {}),
+        ...(conversation.kind === "channel"
+          ? sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata)
+          : payload.messageMetadata),
         deliveryRequestId: requestId,
         ...(payload.requestId ? { requestId: payload.requestId, requestIntent: payload.intent } : {}),
         ...(labels.length ? { labels } : {}),
