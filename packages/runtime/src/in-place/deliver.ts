@@ -30,7 +30,7 @@ import { callLattices, submitLatticesComposer, type LatticesCall } from "./latti
 // When none finds the session live, the caller decides what happens next:
 // the phone resumes the exact session, the CLI and MCP say so and stop.
 
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -86,6 +86,11 @@ export type DeliverInPlaceDeps = {
   /** Opt-in for direct sends, not for reply routing or resume probes. */
   managedTmuxContext?: () => Promise<{ nodeId: string; snapshot: Pick<RuntimeRegistrySnapshot, "endpoints" | "flights"> } | null>;
   ownSessionIds?: readonly string[];
+  /**
+   * The caller's own tmux pane, from the caller's TMUX and TMUX_PANE. A pane
+   * ID is unique only within one tmux server, so the socket is part of it.
+   */
+  ownTmuxPane?: { target: string; socketPath: string | null } | null;
   managedTmuxPane?: (session: string, pane?: string) => Promise<{ target: string; socketPath: string } | null>;
   readTmuxTail?: (target: string, socketPath: string) => Promise<string>;
 
@@ -478,6 +483,17 @@ async function findMarkedTmuxPane(session: string, pane?: string): Promise<{ tar
   return match ? { target: match[2]!, socketPath: match[4]! } : null;
 }
 
+/** Without the caller's socket, a matching pane ID is treated as its own. */
+async function isOwnTmuxPane(
+  pane: { target: string; socketPath: string },
+  own: DeliverInPlaceDeps["ownTmuxPane"],
+): Promise<boolean> {
+  if (!own || own.target !== pane.target) return false;
+  if (!own.socketPath) return true;
+  const canonical = (path: string) => realpath(path).catch(() => path);
+  return (await canonical(own.socketPath)) === (await canonical(pane.socketPath));
+}
+
 async function deliverToManagedTmux(
   input: { sessionId: string; harness: string | null; body: string },
   deps: DeliverInPlaceDeps,
@@ -524,7 +540,8 @@ async function deliverToManagedTmux(
   }
   if (panes.size > 1) return { ok: false, code: "session_ambiguous" };
   const pane = [...panes.values()][0];
-  if (!pane || pane.target === process.env.TMUX_PANE) return null;
+  if (!pane) return null;
+  if (await isOwnTmuxPane(pane, deps.ownTmuxPane)) return { ok: false, code: "not_live" };
   const place = { via: "tmux" as const, location: pane.location };
   if (pane.waiting) return { ok: false, code: "session_blocked", ...place };
   const tail = await (deps.readTmuxTail ?? captureTmuxComposerTail)(pane.target, pane.socketPath).catch(() => null);

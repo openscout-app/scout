@@ -24,7 +24,7 @@ import {
   runtimeSessionAddressEntries,
   type RuntimeSessionAddressEntry,
 } from "@openscout/runtime";
-import { deliverInPlace, type InPlaceDelivery } from "@openscout/runtime/in-place";
+import { deliverInPlace, type DeliverInPlaceDeps, type InPlaceDelivery } from "@openscout/runtime/in-place";
 import type {
   TerminalBackend,
   TerminalSessionRecord,
@@ -40,7 +40,7 @@ import type { ObservedSessionMaterials } from "@openscout/protocol";
 import {
   attachScoutManagedLocalSession,
   ensureScoutCodexChatWork,
-  loadScoutBrokerContext,
+  loadScoutLiveSessionContext,
   resolveScoutBrokerUrl,
   readScoutBrokerSnapshotResult,
   resolveScoutSenderId,
@@ -1474,16 +1474,22 @@ export function deliverDirectSessionInput(
   env: NodeJS.ProcessEnv,
   input: Parameters<typeof deliverInPlace>[0],
   brokerUrl = resolveScoutBrokerUrl(),
+  /** Test seam for surface probes; the broker read and own-session checks stay real. */
+  probes: Omit<DeliverInPlaceDeps, "managedTmuxContext" | "ownSessionIds" | "ownTmuxPane"> = {},
 ): Promise<InPlaceDelivery> {
+  // `env` is the caller's: the shared MCP server swaps in each session's own.
+  const ownPane = env.TMUX_PANE?.trim();
   return deliverInPlace(input, {
+    ...probes,
     ownSessionIds: [env.OPENSCOUT_SESSION_ID, env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_SESSION_ID,
       env.CLAUDE_CODE_REMOTE_SESSION_ID, env.CODEX_THREAD_ID, env.OPENSCOUT_CODEX_THREAD_ID]
       .flatMap(id => id?.trim() ? [id.trim()] : []),
+    ownTmuxPane: ownPane ? { target: ownPane, socketPath: env.TMUX?.split(",")[0]?.trim() || null } : null,
     managedTmuxContext: async () => {
       const url = new URL(brokerUrl);
       if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return null;
-      const broker = await loadScoutBrokerContext(brokerUrl);
-      return broker && { nodeId: broker.node.id, snapshot: broker.snapshot };
+      const live = await loadScoutLiveSessionContext(brokerUrl);
+      return live && { nodeId: live.nodeId, snapshot: { endpoints: live.endpoints, flights: live.flights } };
     },
   });
 }

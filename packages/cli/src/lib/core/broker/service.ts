@@ -1903,6 +1903,35 @@ export async function loadScoutBrokerContext(
   return result.ok ? result.context : null;
 }
 
+/**
+ * Node, endpoints and unfinished flights only. Direct session input runs in
+ * the shared MCP process, so it must not read the unscoped snapshot.
+ */
+export async function loadScoutLiveSessionContext(
+  baseUrl = resolveScoutBrokerUrl(),
+): Promise<{ nodeId: string; endpoints: Record<string, AgentEndpoint>; flights: Record<string, FlightRecord> } | null> {
+  try {
+    const [node, endpointList, flightList] = await Promise.all([
+      brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node),
+      brokerReadJson<{ endpoints?: AgentEndpoint[] }>(baseUrl, scoutBrokerPaths.v1.endpoints),
+      // A runtime without the bounded list still matches endpoints by session ID.
+      brokerReadJson<{ flights?: FlightRecord[] }>(baseUrl, `${scoutBrokerPaths.v1.flights}?active=1`)
+        .catch((error: unknown) => {
+          if (error instanceof ScoutBrokerHttpError && (error.status === 404 || error.status === 405)) return { flights: [] };
+          throw error;
+        }),
+    ]);
+    if (!node?.id) return null;
+    return {
+      nodeId: node.id,
+      endpoints: Object.fromEntries((endpointList.endpoints ?? []).map(endpoint => [endpoint.id, endpoint])),
+      flights: Object.fromEntries((flightList.flights ?? []).map(flight => [flight.id, flight])),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function requireScoutBrokerContext(
   baseUrl = resolveScoutBrokerUrl(),
 ): Promise<ScoutBrokerContext> {

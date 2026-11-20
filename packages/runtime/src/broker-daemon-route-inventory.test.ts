@@ -60,6 +60,7 @@ const expectedRouteInventory = [
   "GET /v1/endpoints",
   "GET /v1/events",
   "GET /v1/events/stream",
+  "GET /v1/flights",
   "GET /v1/flights/:id",
   "GET /v1/guest-grants",
   "GET /v1/guest/agents",

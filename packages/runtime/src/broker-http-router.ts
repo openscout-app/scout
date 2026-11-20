@@ -180,6 +180,8 @@ import {
 } from "./mesh-trust-enrollment.js";
 import { normalizeConversationTitle } from "./conversation-title.js";
 
+const ACTIVE_FLIGHT_LIST_STATES = new Set(["queued", "waking", "running", "waiting"]);
+
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
   else if (error instanceof ProvenRequestFailure) json(response, 409, { error: error.code, detail: error.message, evidence: error.evidence });
@@ -189,7 +191,7 @@ function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
 
 export type BrokerHttpRuntime = {
   /** Metadata-only peek: endpoint readers must not detach/message-scan the registry. */
-  peek?: () => { endpoints: Record<string, AgentEndpoint> };
+  peek?: () => { endpoints: Record<string, AgentEndpoint>; flights?: Record<string, FlightRecord> };
   attributionSnapshot?: () => RuntimeSnapshot;
   snapshot: () => { nodes: Record<string, NodeDefinition>; conversations: Record<string, ConversationDefinition>; messages?: Record<string, MessageRecord>; invocations?: Record<string, InvocationRequest> };
   recentEvents: (limit: number) => unknown;
@@ -3433,6 +3435,19 @@ export function createBrokerHttpRouter(
 
   // Local endpoint inventory. Registration already uses POST /v1/endpoints;
   // this read avoids pretending agents-only discovery carries live sessions.
+  // Bounded live read: unfinished flights only, never history. Read one
+  // flight, finished or not, with /v1/flights/<id>.
+  if (method === "GET" && url.pathname === "/v1/flights") {
+    if (url.searchParams.get("active") !== "1") {
+      json(response, 400, { error: "flight_list_requires_active", detail: "Use /v1/flights?active=1, or /v1/flights/<id> for one flight." });
+      return;
+    }
+    const flights = runtime.peek?.().flights;
+    if (!flights) { json(response, 503, { error: "flight_inventory_unavailable" }); return; }
+    json(response, 200, { flights: Object.values(flights).filter(flight => ACTIVE_FLIGHT_LIST_STATES.has(flight.state)) });
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/v1/endpoints") {
     if (!runtime.peek) { json(response, 503, { error: "endpoint_inventory_unavailable" }); return; }
     const agentId = url.searchParams.get("agentId"), endpointId = url.searchParams.get("endpointId");

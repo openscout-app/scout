@@ -305,6 +305,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/guest/sessions/reply": "guest",
 
   // guest grant administration is a local owner act (loopback only)
+  "GET /v1/flights": "local",
   "GET /v1/flights/:id": "local",
   "GET /v1/guest-grants": "local",
   "POST /v1/guest-grants": "local",
