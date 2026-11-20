@@ -3606,7 +3606,7 @@ function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string
   const replyInstruction = context?.completion ? [
     "> This ask requires explicit completion. Use `reply` with ref and progress=true for updates.",
     "> Before your final, call `current_reply_context` for the current flight and revision; wait for all joined work to settle.",
-    "> Submit `reply` with the task ref, and a new stable requestId. Reuse that requestId only for an identical retry.",
+    "> Submit `reply` with the task ref and a new stable requestId, or run `scout reply --ref <invocationId> \"<final result>\"`.",
     "> Your plain final assistant output does not complete this ask. Use `ask` with relation to opt child work into the parent's completion obligations.",
   ] : context?.replyPath === "mcp_reply"
     ? [

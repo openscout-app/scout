@@ -1314,6 +1314,20 @@ export class BrokerDeliveryAcceptanceService {
       };
     }
 
+    // A managed Claude terminal can yield at an interim turn boundary (for
+    // example, while background work is running). Only a task reply may
+    // finish a local structured ask to that session.
+    const managedClaudeEndpoint = target.endpoint;
+    const needsTaskReply = payload.task && payload.intent === "consult"
+      && requesterNodeId === this.options.nodeId && conversation.authorityNodeId === this.options.nodeId
+      && managedClaudeEndpoint?.nodeId === this.options.nodeId
+      && managedClaudeEndpoint.harness === "claude" && managedClaudeEndpoint.transport === "tmux"
+      && managedClaudeEndpoint.metadata?.cardless === true
+      && !isExternalSessionEndpoint(managedClaudeEndpoint) && !sessionFork
+      && execution?.session !== "fork";
+    const completion = payload.completion ?? (needsTaskReply ? { mode: "explicit" as const } : undefined);
+    if (needsTaskReply && !completionEndpointId) completionEndpointId = managedClaudeEndpoint.id;
+
     const invocationMetadata = {
       ...(typeof payload.messageMetadata?.source === "string" && payload.invocationMetadata?.source === undefined
         ? { source: payload.messageMetadata.source }
@@ -1350,7 +1364,7 @@ export class BrokerDeliveryAcceptanceService {
       requesterId,
       requesterNodeId,
       targetAgentId: target.actorId,
-      ...((payload.completion || payload.relation) ? { targetNodeId: this.options.nodeId } : {}),
+      ...((completion || payload.relation) ? { targetNodeId: this.options.nodeId } : {}),
       action: payload.intent === "tell" ? "wake" : "consult",
       task: payload.body.trim(),
       ...(collaborationRecordId ? { collaborationRecordId } : {}),
@@ -1371,9 +1385,9 @@ export class BrokerDeliveryAcceptanceService {
         ...(payload.task?.because ? { because: payload.task.because } : {}),
         ...(payload.task?.callback ? { callback: payload.task.callback } : {}),
         ...(replyToSessionId ? { replyToSessionId } : {}),
-        completion: payload.completion,
+        completion,
         completionRelation: payload.relation,
-        completionLocalNodeId: payload.completion || payload.relation ? this.options.nodeId : undefined,
+        completionLocalNodeId: completion || payload.relation ? this.options.nodeId : undefined,
         completionEndpointId,
         ...(labels.length ? { labels } : {}),
         ...(receiptSessionId ? { targetSessionId: receiptSessionId } : {}),
@@ -1412,7 +1426,7 @@ export class BrokerDeliveryAcceptanceService {
     // atomic journal frame, even if the process dies before receipt-file save.
     throwIfAborted(options.signal);
     const flight = await this.acceptInvocation(invocation, message, payload, workResolution.pendingCreation);
-    if (payload.completion) invocation.metadata = { ...invocation.metadata, completionFlightId: flight.id };
+    if (completion) invocation.metadata = { ...invocation.metadata, completionFlightId: flight.id };
     this.options.dispatchAcceptedInvocation(invocation).catch((error) => {
       this.options.warn?.(`[openscout-runtime] background dispatch failed for invocation ${invocation.id}:`, error);
     });
