@@ -169,12 +169,15 @@ export class BrokerTaskService {
     const asker = actor === invocation.requesterId || actor === this.options.operatorActorId;
     const conversation = invocation.conversationId && this.options.snapshot().conversations[invocation.conversationId];
     if (!asker && !requesterSession && (request.cancel || request.continue || !conversation || !conversation.participantIds.includes(actor))) {
+      // Name who may act; never tell the caller to claim another identity.
+      const requester = invocation.requesterId === this.options.operatorActorId
+        ? `the operator (${invocation.requesterId})`
+        : `the original requester (${invocation.requesterId}) or the operator`;
       const eligible = request.cancel || request.continue
-        ? "Only the original requester or operator may cancel or continue it."
-        : "Only the original requester, its originating harness session on the task home, the operator, or a task conversation participant may follow up.";
-      const action = request.continue ? "--continue" : "--ref";
+        ? `Only ${requester} may ${request.cancel ? "cancel" : "continue"} it.`
+        : `Only ${requester}, the harness session that asked it, or a participant in the task conversation may add context to it.`;
       throw new ProvenRequestFailure(
-        `Task ${invocation.id} is not authorized for sender ${actor}. ${eligible} Retry with ${action} ${invocation.id} from the original requester (${invocation.requesterId}); on the CLI use --as ${invocation.requesterId}.`,
+        `Task ${invocation.id} is not authorized for sender ${actor}. ${eligible} Ask one of them to send it.`,
         "task_followup_unauthorized", flight.id,
       );
     }
