@@ -141,6 +141,65 @@ export function isWorkingFlightState(state: FlightRecord["state"]): boolean {
 
 export const STALE_WORKING_FLIGHT_NO_ENDPOINT_GRACE_MS = 2 * 60_000;
 
+/**
+ * The finished flight that took over this open one's invocation. An ask that
+ * starts its target elsewhere (another host, a fresh session) records a
+ * placeholder flight first and then the flight that carries the work. The
+ * placeholder has no dispatch of its own, so nothing closes it when the work
+ * ends. Only a later attempt counts: a late result from an older attempt never
+ * closes a newer one that is still running.
+ */
+export function supersedingTwinFlight(
+  snapshot: Pick<RuntimeSnapshot, "flights">,
+  flight: FlightRecord,
+): FlightRecord | null {
+  if (!isWorkingFlightState(flight.state)) return null;
+  const startedAt = flight.startedAt ?? 0;
+  let twin: FlightRecord | null = null;
+  for (const candidate of Object.values(snapshot.flights)) {
+    if (candidate.id === flight.id
+      || candidate.invocationId !== flight.invocationId
+      || candidate.targetAgentId !== flight.targetAgentId
+      || !isTerminalFlightState(candidate.state)
+      || (candidate.startedAt ?? 0) < startedAt) continue;
+    if (!twin || flightTimestamp(candidate) > flightTimestamp(twin)) twin = candidate;
+  }
+  return twin;
+}
+
+/** The open flight, closed with the outcome its twin already reported. */
+export function closedAsSupersededTwin(flight: FlightRecord, twin: FlightRecord, now: number): FlightRecord {
+  const reason = `superseded by ${twin.state} flight ${twin.id} for the same invocation`;
+  return {
+    ...flight,
+    state: twin.state,
+    summary: twin.summary ?? flight.summary,
+    output: twin.output,
+    error: twin.error,
+    completedAt: twin.completedAt ?? now,
+    metadata: {
+      ...(flight.metadata ?? {}),
+      supersededByFlightId: twin.id,
+      reconciledStaleFlight: true,
+      reconciledReason: reason,
+      reconciledAt: now,
+    },
+  };
+}
+
+/**
+ * A flight closed as its twin's copy. The twin owns the outcome: its report,
+ * work item, callback and forwarding already ran, so the copy runs none again.
+ */
+export function isSupersededTwinCopy(snapshot: Pick<RuntimeSnapshot, "flights">, flight: FlightRecord): boolean {
+  const twinId = flight.metadata?.supersededByFlightId;
+  if (typeof twinId !== "string" || twinId === flight.id) return false;
+  const twin = snapshot.flights[twinId];
+  return Boolean(twin && twin.invocationId === flight.invocationId
+    && twin.targetAgentId === flight.targetAgentId
+    && isTerminalFlightState(twin.state) && twin.state === flight.state);
+}
+
 export function isTerminalFlightState(state: FlightRecord["state"]): boolean {
   return state === "completed" || state === "failed" || state === "cancelled";
 }
