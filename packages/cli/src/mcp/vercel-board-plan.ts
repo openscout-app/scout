@@ -20,7 +20,8 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
       description:
         "Submit planned tasks as the operator to a connected Vercel Board, with needs between them. This is the only way Scout puts work on a Board; use it for planned work only, never for ordinary tasks between agents (use ask for those). "
         + "OUTWARD-FACING: each task is posted on the team's board as the operator, and Board's own sync can carry it to Slack or GitHub. "
-        + "A planned task is open to any worker under the operator's principal from the moment it is written. "
+        + "A planned task is open to any worker under the operator's principal from the moment it is written, unless `for` keeps it for one role (scout, builder or reviewer by default). "
+        + "In a channel the operator made self-serve, Scout's runtime starts a role-kept task for an idle agent that declared the role; elsewhere it waits for the operator's claim. "
         + "The tool creates Board tasks only. They show in the channel's Scout room (conversationId); none becomes a Scout work item unless the operator promotes it. "
         + "Pass the Scout task you are planning for as planningTaskId (it is written on each task as a label) and a stable requestId: the same requestId returns the same tasks.",
       inputSchema: z.object({
@@ -35,6 +36,7 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
           text: z.string().describe("The task as the board shows it. First line is the title."),
           labels: z.record(z.string(), z.string()).optional(),
           needs: z.array(z.union([z.string(), z.object({ key: z.string() })])).optional().describe("Board task IDs, or { key } of an earlier task in this plan."),
+          for: z.string().optional().describe("A role from the connection's role list, such as reviewer. Only that role may claim the task."),
         })).min(1).max(50),
       }),
       outputSchema: z.object({

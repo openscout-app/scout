@@ -1,7 +1,10 @@
 import type { ControlPlaneSqliteTransactionalDatabase } from "../sqlite-adapter.js";
 
-export type VercelBoardCustodyState = "claiming" | "claim_unknown" | "held" | "settling" | "settled" | "lost";
+/** `blocked`: the flight waits on a person, the board holds the task, and the claim has ended. */
+export type VercelBoardCustodyState = "claiming" | "claim_unknown" | "held" | "blocked" | "settling" | "settled" | "lost";
 export type VercelBoardSettleOutcome = "completed" | "failed" | "released";
+/** How a row ended. A blocked claim ends without a settle; the flight carries on in a new row. */
+export type VercelBoardCustodyOutcome = VercelBoardSettleOutcome | "blocked";
 
 export interface VercelBoardCustodyRow {
   connectionId: string;
@@ -15,9 +18,11 @@ export interface VercelBoardCustodyRow {
   agentId: string;
   workId: string;
   startedBy: string;
+  /** The Board profile the claim was made as: a role from the connection's list. Null on rows from before roles. */
+  profile: string | null;
   flightId: string | null;
   state: VercelBoardCustodyState;
-  outcome: VercelBoardSettleOutcome | null;
+  outcome: VercelBoardCustodyOutcome | null;
   /** The agent's result, kept from the first settle attempt so a retry or a re-claim sends the same one. */
   result: string | null;
   detail: string | null;
@@ -41,8 +46,8 @@ export interface VercelBoardOutboxRow {
 
 type CustodySql = {
   connection_id: string; task_id: string; attempt_id: string; epoch: number | null; token: string | null; until: number | null;
-  lease_seconds: number; agent_id: string; work_id: string; started_by: string; flight_id: string | null; state: VercelBoardCustodyState;
-  outcome: VercelBoardSettleOutcome | null; result: string | null; detail: string | null; created_at: number; updated_at: number;
+  lease_seconds: number; agent_id: string; work_id: string; started_by: string; profile: string | null; flight_id: string | null; state: VercelBoardCustodyState;
+  outcome: VercelBoardCustodyOutcome | null; result: string | null; detail: string | null; created_at: number; updated_at: number;
 };
 type OutboxSql = {
   connection_id: string; client_id: string; lane: string; kind: "post" | "plan"; request: string; state: VercelBoardOutboxRow["state"];
@@ -51,7 +56,7 @@ type OutboxSql = {
 
 const custody = (row: CustodySql): VercelBoardCustodyRow => ({
   connectionId: row.connection_id, taskId: row.task_id, attemptId: row.attempt_id, epoch: row.epoch, token: row.token, until: row.until,
-  leaseSeconds: row.lease_seconds, agentId: row.agent_id, workId: row.work_id, startedBy: row.started_by, flightId: row.flight_id,
+  leaseSeconds: row.lease_seconds, agentId: row.agent_id, workId: row.work_id, startedBy: row.started_by, profile: row.profile, flightId: row.flight_id,
   state: row.state, outcome: row.outcome, result: row.result, detail: row.detail, createdAt: row.created_at, updatedAt: row.updated_at,
 });
 const outbox = (row: OutboxSql): VercelBoardOutboxRow => ({
@@ -68,7 +73,9 @@ export class VercelBoardCursorConflictError extends Error {
   }
 }
 
-const ACTIVE_CUSTODY: VercelBoardCustodyState[] = ["claiming", "claim_unknown", "held", "settling"];
+const ACTIVE_CUSTODY: VercelBoardCustodyState[] = ["claiming", "claim_unknown", "held", "blocked", "settling"];
+
+export type VercelBoardDeclaredRole = { agentId: string; role: string; declaredBy: string; declaredAt: number };
 
 export class VercelBoardStore {
   /*
@@ -114,10 +121,10 @@ export class VercelBoardStore {
   insertCustody(row: Omit<VercelBoardCustodyRow, "createdAt" | "updatedAt">): void {
     this.quietCustody.delete(row.connectionId);
     const at = this.now();
-    this.database.query(`INSERT INTO vercel_board_custody (connection_id, task_id, attempt_id, epoch, token, until, lease_seconds, agent_id, work_id, started_by, flight_id, state, outcome, result, detail, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)`).run(
+    this.database.query(`INSERT INTO vercel_board_custody (connection_id, task_id, attempt_id, epoch, token, until, lease_seconds, agent_id, work_id, started_by, profile, flight_id, state, outcome, result, detail, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)`).run(
       row.connectionId, row.taskId, row.attemptId, row.epoch, row.token, row.until, row.leaseSeconds, row.agentId, row.workId,
-      row.startedBy, row.flightId, row.state, row.outcome, row.result, row.detail, at);
+      row.startedBy, row.profile, row.flightId, row.state, row.outcome, row.result, row.detail, at);
   }
 
   updateCustody(connectionId: string, attemptId: string, patch: Partial<Pick<VercelBoardCustodyRow, "epoch" | "token" | "until" | "leaseSeconds" | "flightId" | "state" | "outcome" | "result" | "detail">>): void {
@@ -155,10 +162,28 @@ export class VercelBoardStore {
     return rows;
   }
 
-  custodyCounts(connectionId: string): { held: number; settling: number; settled: number; lost: number } {
+  /** Record that an agent takes a role on a connection. Declaring twice keeps the first time. */
+  declareRole(connectionId: string, agentId: string, role: string, declaredBy: string): void {
+    this.database.query(`INSERT INTO vercel_board_roles (connection_id, agent_id, role, declared_by, declared_at) VALUES (?1, ?2, ?3, ?4, ?5)
+      ON CONFLICT (connection_id, agent_id, role) DO NOTHING`).run(connectionId, agentId, role, declaredBy, this.now());
+  }
+
+  removeRole(connectionId: string, agentId: string, role: string): void {
+    this.database.query("DELETE FROM vercel_board_roles WHERE connection_id = ?1 AND agent_id = ?2 AND role = ?3").run(connectionId, agentId, role);
+  }
+
+  /** The declared roles on a connection, oldest first: the matcher's order. */
+  declaredRoles(connectionId: string, role?: string): VercelBoardDeclaredRole[] {
+    return this.database.query<{ agent_id: string; role: string; declared_by: string; declared_at: number }>(
+      `SELECT agent_id, role, declared_by, declared_at FROM vercel_board_roles WHERE connection_id = ?1 ${role ? "AND role = ?2" : ""} ORDER BY declared_at, rowid`)
+      .all(...(role ? [connectionId, role] : [connectionId]))
+      .map(row => ({ agentId: row.agent_id, role: row.role, declaredBy: row.declared_by, declaredAt: row.declared_at }));
+  }
+
+  custodyCounts(connectionId: string): { held: number; blocked: number; settling: number; settled: number; lost: number } {
     const rows = this.database.query<{ state: VercelBoardCustodyState; n: number }>("SELECT state, COUNT(*) AS n FROM vercel_board_custody WHERE connection_id = ?1 GROUP BY state").all(connectionId);
     const count = (...states: VercelBoardCustodyState[]) => rows.filter(row => states.includes(row.state)).reduce((sum, row) => sum + row.n, 0);
-    return { held: count("claiming", "held"), settling: count("settling", "claim_unknown"), settled: count("settled"), lost: count("lost") };
+    return { held: count("claiming", "held"), blocked: count("blocked"), settling: count("settling", "claim_unknown"), settled: count("settled"), lost: count("lost") };
   }
 
   enqueue(row: { connectionId: string; clientId: string; lane: string; kind: "post" | "plan"; request: unknown }): VercelBoardOutboxRow {

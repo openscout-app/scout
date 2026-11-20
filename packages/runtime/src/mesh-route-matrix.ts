@@ -47,6 +47,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/integrations/vercel-board/connect": "local",
   "POST /v1/integrations/vercel-board/plan": "local",
   "POST /v1/integrations/vercel-board/promote": "local",
+  "POST /v1/integrations/vercel-board/roles": "local",
   "POST /v1/shows": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",

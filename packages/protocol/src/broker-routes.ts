@@ -66,6 +66,7 @@ export const scoutBrokerPaths = {
     vercelBoardPromote: "/v1/integrations/vercel-board/promote",
     vercelBoardMessages: "/v1/integrations/vercel-board/messages",
     vercelBoardHandoffs: "/v1/integrations/vercel-board/handoffs",
+    vercelBoardRoles: "/v1/integrations/vercel-board/roles",
     pairingAttach: "/v1/pairing/attach",
     pairingDetach: "/v1/pairing/detach",
     localSessionsAttach: "/v1/local-sessions/attach",

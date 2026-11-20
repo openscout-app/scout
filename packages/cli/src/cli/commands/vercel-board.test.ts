@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { parseVercelBoardCommand } from "./vercel-board.ts";
+import { VERCEL_BOARD_VERBS } from "./integration.ts";
+import { parseVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
 
 test("connect names a team board by team and board, and the credential by reference", () => {
   const parsed = parseVercelBoardCommand(["connect", "--team", "team_abc", "--board", "scout", "--credential", "secret_cli:scout-vercel"]);
@@ -32,4 +33,20 @@ test("claim reports the calling session separately from the assigned agent", () 
   const command = parseVercelBoardCommand(["claim", "--connection", "c1", "--task", "42", "--agent", "worker"],
     { CODEX_THREAD_ID: "calling-session", OPENSCOUT_AGENT: "planner" });
   expect(command.body).toMatchObject({ agentId: "worker", reportedCallerId: "session:calling-session" });
+});
+
+test("role declares the calling agent, or another agent as the operator", () => {
+  const own = parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], { OPENSCOUT_AGENT: "agent-r" });
+  expect(own).toMatchObject({ kind: "role", method: "POST", path: "/v1/integrations/vercel-board/roles", body: { connectionId: "c1", role: "reviewer", agentId: "agent-r", actorId: "agent-r" } });
+  const other = parseVercelBoardCommand(["role", "--connection", "c1", "--role", "builder", "--agent", "agent-b", "--remove"], {});
+  expect(other.body).toEqual({ connectionId: "c1", role: "builder", agentId: "agent-b", actorId: "operator", remove: true });
+  expect(() => parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], {})).toThrow(/--agent/);
+  const connect = parseVercelBoardCommand(["connect", "--team", "t", "--credential", "env:T", "--roles", "scout,reviewer", "--self-serve", "scout/work"], {});
+  expect(connect.body).toMatchObject({ roles: ["scout", "reviewer"], selfServe: ["scout/work"] });
+});
+
+test("the integration command dispatches every verb the Board help names", () => {
+  const named = [...VERCEL_BOARD_HELP.matchAll(/^scout integration (\w+) vercel-board/gm)].map(match => match[1]);
+  expect(named).toContain("role");
+  expect(named.filter(verb => !VERCEL_BOARD_VERBS.has(verb))).toEqual([]);
 });

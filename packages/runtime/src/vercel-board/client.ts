@@ -27,6 +27,8 @@ export interface VercelBoardMe { actor: string; principal: string; profile: stri
  * it holds no claim token, cursor or retry policy of its own. A second
  * transport (the Vercel API worker) implements the same interface.
  */
+export type VercelBoardBlockKind = "needs_input" | "awaiting_approval";
+
 export interface VercelBoardTransport {
   me(signal?: AbortSignal): Promise<VercelBoardMe>;
   ensureChannel(channel: string): Promise<void>;
@@ -46,6 +48,15 @@ export interface VercelBoardTransport {
   complete(taskId: string, grant: { epoch: number; token: string }, result?: string): Promise<VercelBoardWireMessage>;
   fail(taskId: string, grant: { epoch: number; token: string }, reason: string): Promise<VercelBoardWireMessage>;
   release(taskId: string, grant: { epoch: number; token: string }): Promise<VercelBoardWireMessage>;
+  /** Holds a claimed task for a person, which ends the claim. `kind`: `needs_input` or `awaiting_approval`. */
+  block(taskId: string, grant: { epoch: number; token: string }, reason: string, kind: VercelBoardBlockKind): Promise<VercelBoardWireMessage>;
+  /** Lifts a hold. Board allows it to the task's owner, so the custodian sends it as the principal (`as(null)`). */
+  unblock(taskId: string): Promise<VercelBoardWireMessage>;
+  /**
+   * The same transport writing as another profile from the connection's role
+   * list, or as the principal itself with null. Narrowing (`x-board-can`) is unchanged.
+   */
+  as(profile: string | null): VercelBoardTransport;
   labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }): Promise<void>;
 }
 
@@ -76,6 +87,8 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     private readonly connection: Pick<VercelBoardConnectionConfig, "url" | "profile" | "channels" | "probeChannel">,
     private readonly token: () => Promise<string>,
     private readonly fetchImpl: VercelBoardFetch = (input, init) => fetch(input, init),
+    /** The profile this transport writes as: the connection's own unless `as()` chose another. Null is the principal. */
+    private readonly profile: string | null = connection.profile,
   ) {
     this.base = connection.url.replace(/\/+$/, "");
     this.can = vercelBoardCanHeader(connection);
@@ -88,7 +101,7 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
     const headers: Record<string, string> = {
       authorization: `Bearer ${await this.token()}`,
-      "x-board-profile": this.connection.profile,
+      ...(this.profile !== null ? { "x-board-profile": this.profile } : {}),
       "x-board-can": this.can,
       accept: "application/json",
     };
@@ -167,7 +180,7 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
   }
 
   async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string }) {
-    const answer = await this.request<Record<string, any>>("POST", "/messages", { body: input, operation: "post" });
+    const answer = await this.request<Record<string, any>>("POST", "/messages", { body: { ...input, noSync: VERCEL_BOARD_NO_SYNC }, operation: "post" });
     return parseVercelBoardMessage(answer.message);
   }
 
@@ -182,12 +195,12 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
   }
 
   async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[] }) {
-    const answer = await this.request<Record<string, any>>("POST", "/tasks", { body: input, operation: "task_create" });
+    const answer = await this.request<Record<string, any>>("POST", "/tasks", { body: { ...input, noSync: VERCEL_BOARD_NO_SYNC }, operation: "task_create" });
     return parseVercelBoardMessage(answer.task);
   }
 
   async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string }) {
-    const answer = await this.request<Record<string, any>>("POST", "/tasks/batch", { body: input, operation: "task_batch" });
+    const answer = await this.request<Record<string, any>>("POST", "/tasks/batch", { body: { ...input, tasks: input.tasks.map(task => ({ ...task, noSync: VERCEL_BOARD_NO_SYNC })) }, operation: "task_batch" });
     if (!Array.isArray(answer.tasks)) throw new VercelBoardHttpError(502, "remote_error", "POST /tasks/batch answered no tasks.");
     return answer.tasks.map(parseVercelBoardMessage);
   }
@@ -232,6 +245,17 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
   release(taskId: string, grant: { epoch: number; token: string }) {
     return this.settle(taskId, "release", { epoch: grant.epoch, token: grant.token });
   }
+  async block(taskId: string, grant: { epoch: number; token: string }, reason: string, kind: VercelBoardBlockKind) {
+    const answer = await this.request<Record<string, any>>("POST", `/tasks/${encodeURIComponent(taskId)}/block`, { body: { epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason), kind }, operation: "block" });
+    return parseVercelBoardMessage(answer.task);
+  }
+  async unblock(taskId: string) {
+    const answer = await this.request<Record<string, any>>("POST", `/tasks/${encodeURIComponent(taskId)}/unblock`, { body: {}, operation: "unblock" });
+    return parseVercelBoardMessage(answer.task);
+  }
+  as(profile: string | null): VercelBoardTransport {
+    return new VercelBoardHttpTransport(this.connection, this.token, this.fetchImpl, profile);
+  }
 
   async labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }) {
     await this.request("POST", `/messages/${encodeURIComponent(messageId)}/labels`, { body: change, operation: "labels" });
@@ -239,6 +263,13 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
 }
 
 /** The agent label every outbound write carries, cut to Board's label value limit. */
+/**
+ * Scout's writes stay on the board: Board's own sync does not carry them to
+ * Slack or another platform, so each Slack channel has one path in. Until the
+ * operator chooses otherwise, every post, reply and task Scout writes is noSync.
+ */
+export const VERCEL_BOARD_NO_SYNC = true;
+
 export function agentLabel(agentId: string): Record<string, string> {
   return { [VERCEL_BOARD_LABELS.agent]: agentId.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 256) };
 }

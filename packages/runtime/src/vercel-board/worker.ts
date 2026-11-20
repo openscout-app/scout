@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { VercelBoardCredentialReference, VercelBoardPlanTask } from "@openscout/protocol";
-import { VercelBoardHttpError, VercelBoardUnknownOutcomeError, type VercelBoardClaimGrant, type VercelBoardMe, type VercelBoardTransport } from "./client.js";
+import { VercelBoardHttpError, VercelBoardUnknownOutcomeError, type VercelBoardBlockKind, type VercelBoardClaimGrant, type VercelBoardMe, type VercelBoardTransport } from "./client.js";
 import { boardResultExcerpt, parseVercelBoardEvent, parseVercelBoardMessage, parseVercelBoardMessagesPage, parseVercelBoardTaskSummary, type VercelBoardWireMessage } from "./wire.js";
 
 /**
@@ -120,6 +120,8 @@ interface Running { child: ChildProcess; generation: number; pending: Map<number
 export interface VercelBoardWorkerInput {
   target: VercelBoardWorkerTarget;
   profile: string;
+  /** Every profile a call may name: the connection's role list. `profile` is always one of them. */
+  profiles?: string[];
   /** The `x-board-can` text. The worker applies it to every call. */
   can: string;
   /** Null only for the in-memory test board. */
@@ -272,7 +274,7 @@ export class VercelBoardWorkerSupervisor {
       this.end(running, reason);
       if (!this.stopped) this.failed(reason);
     });
-    child.stdin!.write(`${JSON.stringify({ protocol: WORKER_PROTOCOL, generation, profile: this.input.profile, can: this.input.can, target: this.input.target })}\n`);
+    child.stdin!.write(`${JSON.stringify({ protocol: WORKER_PROTOCOL, generation, profile: this.input.profile, profiles: [...new Set([this.input.profile, ...(this.input.profiles ?? [])])], can: this.input.can, target: this.input.target })}\n`);
 
     await ready;
     if (this.stopped) { this.end(running, "The Board worker was stopped."); throw new VercelBoardHttpError(503, "worker_stopped", "The Board worker is stopped."); }
@@ -296,7 +298,7 @@ export class VercelBoardWorkerSupervisor {
    * sent. A write the worker took and did not answer is outcome unknown, and
    * is never sent again from here.
    */
-  async call<T = any>(op: string, args: Record<string, unknown>, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
+  async call<T = any>(op: string, args: Record<string, unknown>, options: { signal?: AbortSignal; timeoutMs?: number; as?: string | null } = {}): Promise<T> {
     if (options.signal?.aborted) throw options.signal.reason ?? new DOMException("The call was cancelled.", "AbortError");
     const running = await this.ensure();
     const id = this.nextId++;
@@ -317,7 +319,7 @@ export class VercelBoardWorkerSupervisor {
       running.pending.set(id, { op, resolve, reject, timer, cleanup });
       options.signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        running.child.stdin!.write(`${JSON.stringify({ id, gen: running.generation, op, args })}\n`);
+        running.child.stdin!.write(`${JSON.stringify({ id, gen: running.generation, op, args, ...(options.as !== undefined ? { as: options.as } : {}) })}\n`);
       } catch {
         running.pending.delete(id);
         clearTimeout(timer);
@@ -341,22 +343,31 @@ const time = (value: unknown, what: string): number => {
 
 /** `VercelBoardTransport` over the worker. Answers are checked here as they would be from HTTP. */
 export class VercelBoardWorkerTransport implements VercelBoardTransport {
-  constructor(readonly worker: VercelBoardWorkerSupervisor) {}
+  /** `profile` undefined writes as the worker's bootstrap profile; null as the principal. */
+  constructor(readonly worker: VercelBoardWorkerSupervisor, private readonly profile?: string | null) {}
+
+  private call<T = any>(op: string, args: Record<string, unknown>, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
+    return this.worker.call<T>(op, args, { ...options, ...(this.profile !== undefined ? { as: this.profile } : {}) });
+  }
+
+  as(profile: string | null): VercelBoardTransport {
+    return new VercelBoardWorkerTransport(this.worker, profile);
+  }
 
   async me(signal?: AbortSignal): Promise<VercelBoardMe> {
-    const me = record(await this.worker.call("me", {}, { signal }), "identity");
+    const me = record(await this.call("me", {}, { signal }), "identity");
     if (typeof me.principal !== "string" || typeof me.actor !== "string") throw invalid("principal");
     const expires = me.expiresAt === null || me.expiresAt === undefined ? null : time(me.expiresAt, "expiry");
     return { actor: me.actor, principal: me.principal, profile: typeof me.profile === "string" ? me.profile : null, expiresAt: expires };
   }
 
   async ensureChannel(channel: string): Promise<void> {
-    await this.worker.call("ensureChannel", { channel });
+    await this.call("ensureChannel", { channel });
   }
 
   async events(query: { channel: string; after?: string; wait?: number; signal?: AbortSignal }) {
     const wait = query.wait === undefined ? undefined : Math.max(0, Math.min(Math.floor(query.wait), 300));
-    const answer = record(await this.worker.call("events", { channel: query.channel, ...(query.after ? { after: query.after } : {}), ...(wait !== undefined ? { wait } : {}) }, {
+    const answer = record(await this.call("events", { channel: query.channel, ...(query.after ? { after: query.after } : {}), ...(wait !== undefined ? { wait } : {}) }, {
       signal: query.signal, timeoutMs: (wait ?? 0) * 1000 + READ_TIMEOUT_MS,
     }), "event page");
     if (!Array.isArray(answer.events) || answer.events.length > 1000) throw invalid("event list");
@@ -365,71 +376,79 @@ export class VercelBoardWorkerTransport implements VercelBoardTransport {
   }
 
   async tasks(query: { channel: string; state?: string; after?: string; limit?: number }) {
-    const answer = record(await this.worker.call("tasks", { ...query }), "task page");
+    const answer = record(await this.call("tasks", { ...query }), "task page");
     if (!Array.isArray(answer.tasks)) throw invalid("task list");
     return { tasks: answer.tasks.map(parseVercelBoardTaskSummary), cursor: answer.cursor === null || answer.cursor === undefined ? null : String(answer.cursor) };
   }
 
   async channelMessages(query: { channel: string; after?: string; limit?: number }) {
     const limit = Math.max(1, Math.min(Math.floor(query.limit ?? 500), 500));
-    const answer = record(await this.worker.call("messages", { channel: query.channel, ...(query.after ? { after: query.after } : {}), limit }), "messages page");
+    const answer = record(await this.call("messages", { channel: query.channel, ...(query.after ? { after: query.after } : {}), limit }), "messages page");
     try { return parseVercelBoardMessagesPage(answer); } catch { throw invalid("message list"); }
   }
 
   async message(id: string): Promise<VercelBoardWireMessage | null> {
-    const answer = record(await this.worker.call("message", { id }), "message");
+    const answer = record(await this.call("message", { id }), "message");
     return answer.message ? parseVercelBoardMessage(answer.message) : null;
   }
 
   async post(input: { channel?: string; re?: string; text: string; labels?: Record<string, string>; id: string }) {
-    return parseVercelBoardMessage(record(await this.worker.call("post", { ...input }), "post").message);
+    return parseVercelBoardMessage(record(await this.call("post", { ...input }), "post").message);
   }
 
   async postById(id: string): Promise<VercelBoardWireMessage | null> {
-    const answer = record(await this.worker.call("postById", { id }), "post");
+    const answer = record(await this.call("postById", { id }), "post");
     return answer.message ? parseVercelBoardMessage(answer.message) : null;
   }
 
   async createTask(input: { channel: string; text: string; labels?: Record<string, string>; id: string; needs?: string[] }) {
-    return parseVercelBoardMessage(record(await this.worker.call("createTask", { ...input }), "task").task);
+    return parseVercelBoardMessage(record(await this.call("createTask", { ...input }), "task").task);
   }
 
   async createBatch(input: { channel: string; tasks: VercelBoardPlanTask[]; id: string }) {
-    const answer = record(await this.worker.call("createBatch", { ...input }), "batch");
+    const answer = record(await this.call("createBatch", { ...input }), "batch");
     if (!Array.isArray(answer.tasks)) throw invalid("tasks");
     return answer.tasks.map(parseVercelBoardMessage);
   }
 
   async batch(id: string): Promise<VercelBoardWireMessage[] | null> {
-    const answer = record(await this.worker.call("batch", { id }), "batch");
+    const answer = record(await this.call("batch", { id }), "batch");
     return Array.isArray(answer.tasks) ? answer.tasks.map(parseVercelBoardMessage) : null;
   }
 
   async claim(taskId: string, leaseSeconds: number): Promise<{ task: VercelBoardWireMessage; claim: VercelBoardClaimGrant }> {
-    const answer = record(await this.worker.call("claim", { taskId, lease: leaseSeconds }), "claim");
+    const answer = record(await this.call("claim", { taskId, lease: leaseSeconds }), "claim");
     const claim = record(answer.claim, "claim");
     if (!Number.isSafeInteger(claim.epoch) || typeof claim.token !== "string" || !claim.token) throw invalid("claim");
     return { task: parseVercelBoardMessage(answer.task), claim: { epoch: claim.epoch, token: claim.token, until: time(claim.until, "claim expiry") } };
   }
 
   async renew(taskId: string, grant: { epoch: number; token: string }, leaseSeconds: number) {
-    const answer = record(await this.worker.call("renew", { taskId, epoch: grant.epoch, token: grant.token, lease: leaseSeconds }), "renewal");
+    const answer = record(await this.call("renew", { taskId, epoch: grant.epoch, token: grant.token, lease: leaseSeconds }), "renewal");
     return { task: parseVercelBoardMessage(answer.task), until: time(answer.until, "renewal expiry") };
   }
 
   async complete(taskId: string, grant: { epoch: number; token: string }, result?: string) {
-    return parseVercelBoardMessage(record(await this.worker.call("complete", { taskId, epoch: grant.epoch, token: grant.token, ...(result !== undefined ? { result: boardResultExcerpt(result) } : {}) }), "task").task);
+    return parseVercelBoardMessage(record(await this.call("complete", { taskId, epoch: grant.epoch, token: grant.token, ...(result !== undefined ? { result: boardResultExcerpt(result) } : {}) }), "task").task);
   }
 
   async fail(taskId: string, grant: { epoch: number; token: string }, reason: string) {
-    return parseVercelBoardMessage(record(await this.worker.call("fail", { taskId, epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason) }), "task").task);
+    return parseVercelBoardMessage(record(await this.call("fail", { taskId, epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason) }), "task").task);
   }
 
   async release(taskId: string, grant: { epoch: number; token: string }) {
-    return parseVercelBoardMessage(record(await this.worker.call("release", { taskId, epoch: grant.epoch, token: grant.token }), "task").task);
+    return parseVercelBoardMessage(record(await this.call("release", { taskId, epoch: grant.epoch, token: grant.token }), "task").task);
+  }
+
+  async block(taskId: string, grant: { epoch: number; token: string }, reason: string, kind: VercelBoardBlockKind) {
+    return parseVercelBoardMessage(record(await this.call("block", { taskId, epoch: grant.epoch, token: grant.token, reason: boardResultExcerpt(reason), kind }), "task").task);
+  }
+
+  async unblock(taskId: string) {
+    return parseVercelBoardMessage(record(await this.call("unblock", { taskId }), "task").task);
   }
 
   async labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }) {
-    await this.worker.call("labels", { id: messageId, change });
+    await this.call("labels", { id: messageId, change });
   }
 }

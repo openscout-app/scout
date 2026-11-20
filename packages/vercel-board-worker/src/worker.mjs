@@ -26,9 +26,10 @@ export const VERCEL_API = "https://api.vercel.com";
 /** The closed set. Anything else is refused. */
 export const OPERATIONS = Object.freeze([
   "me", "ensureChannel", "events", "tasks", "messages", "message", "post", "postById", "createTask", "createBatch", "batch",
-  "claim", "renew", "complete", "fail", "release", "labels",
+  "claim", "renew", "complete", "fail", "release", "block", "unblock", "labels",
 ]);
-const WRITES = new Set(["ensureChannel", "post", "createTask", "createBatch", "claim", "renew", "complete", "fail", "release", "labels"]);
+const WRITES = new Set(["ensureChannel", "post", "createTask", "createBatch", "claim", "renew", "complete", "fail", "release", "block", "unblock", "labels"]);
+const BLOCK_KINDS = new Set(["needs_input", "awaiting_approval"]);
 const SECRET_ENV = ["VERCEL_BOARD_TOKEN", "BOARD_TOKEN", "BOARD_URL", "VERCEL_OIDC_TOKEN", "VERCEL_AUTH_TOKEN", "VERCEL_TOKEN"];
 const CLAIM_PATH = /\/messageboard\/.*\/claim\/?$/;
 const TEAM = /^[^\s/]{1,128}$/;
@@ -162,7 +163,8 @@ export const operations = {
     catch (error) { if (notFound(error)) return { message: null }; throw error; }
   },
   async post(client, args) {
-    const input = { text: typeof args.text === "string" ? args.text : "", ...(args.labels ? { labels: args.labels } : {}), id: text(args.id, "id") };
+    // Scout's writes stay on the board, off every synced platform.
+    const input = { text: typeof args.text === "string" ? args.text : "", ...(args.labels ? { labels: args.labels } : {}), id: text(args.id, "id"), noSync: true };
     const message = args.re ? await client.reply(String(args.re), input) : await client.post(text(args.channel, "channel"), input);
     return { message: withoutMentions(message) };
   },
@@ -172,14 +174,14 @@ export const operations = {
   },
   async createTask(client, args) {
     const answer = await client.tasks.create(text(args.channel, "channel"), {
-      text: text(args.text, "text"), id: text(args.id, "id"),
+      text: text(args.text, "text"), id: text(args.id, "id"), noSync: true,
       ...(args.labels ? { labels: args.labels } : {}), ...(args.needs?.length ? { needs: args.needs } : {}),
     });
     return { task: answer.task };
   },
   async createBatch(client, args) {
     if (!Array.isArray(args.tasks)) throw Object.assign(new Error("tasks is required"), { status: 400, code: "invalid_request" });
-    return { tasks: await client.tasks.createMany(text(args.channel, "channel"), args.tasks, { id: text(args.id, "id") }) };
+    return { tasks: await client.tasks.createMany(text(args.channel, "channel"), args.tasks.map(task => ({ ...task, noSync: true })), { id: text(args.id, "id") }) };
   },
   // Vercel's API has no batch lookup by client ID. A batch sent again with the same ID is the same batch.
   async batch() {
@@ -202,6 +204,13 @@ export const operations = {
   },
   async release(client, args) {
     return { task: await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).release() };
+  },
+  async block(client, args) {
+    const kind = BLOCK_KINDS.has(args.kind) ? args.kind : "needs_input";
+    return { task: await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).block(text(args.reason, "reason"), { kind }) };
+  },
+  async unblock(client, args) {
+    return { task: await client.tasks.unblock(text(args.taskId, "taskId")) };
   },
   async labels(client, args) {
     const change = args.change && typeof args.change === "object" ? args.change : {};
@@ -238,7 +247,11 @@ export function parseBootstrap(line) {
   } else if (target?.kind !== "memory") {
     throw new Error("The bootstrap target must be vercel or memory.");
   }
-  return { generation: value.generation, profile: value.profile, can: value.can, target };
+  const profiles = value.profiles === undefined ? [value.profile] : value.profiles;
+  if (!Array.isArray(profiles) || profiles.length > 16 || !profiles.every((name) => PROFILE.test(name ?? "")) || !profiles.includes(value.profile)) {
+    throw new Error("The bootstrap's profiles must be Board profile names, and include its profile.");
+  }
+  return { generation: value.generation, profile: value.profile, profiles, can: value.can, target };
 }
 
 /**
@@ -260,8 +273,29 @@ export function sqliteBindsNumberedParameters() {
   }
 }
 
-/** Make the narrowed client. Only `scout`'s profile and `can` from the bootstrap; callers cannot change them. */
-export async function openClient(bootstrap, { token, upstream } = {}) {
+/** Make the narrowed client for the bootstrap's own profile. */
+export async function openClient(bootstrap, options = {}) {
+  const handle = await openBoard(bootstrap, options);
+  return handle.as(bootstrap.profile, { can: bootstrap.can });
+}
+
+/**
+ * The clients a call may use: one per profile in the bootstrap's list, and
+ * the principal itself for null. Each is narrowed by the bootstrap's `can`;
+ * a call cannot name a profile outside the list or widen the narrowing.
+ */
+export function clientsFor(handle, bootstrap) {
+  const clients = new Map();
+  return (as) => {
+    const profile = as === undefined ? bootstrap.profile : as;
+    if (profile !== null && !bootstrap.profiles.includes(profile)) return undefined;
+    if (!clients.has(profile)) clients.set(profile, handle.as(profile, { can: bootstrap.can }));
+    return clients.get(profile);
+  };
+}
+
+/** Open the board, before narrowing. Only `clientsFor` and `openClient` hand out a handle to calls. */
+export async function openBoard(bootstrap, { token, upstream } = {}) {
   const { board } = await import("@vercel/board");
   let handle;
   if (bootstrap.target.kind === "memory") {
@@ -283,7 +317,7 @@ export async function openClient(bootstrap, { token, upstream } = {}) {
       throw new Error(`The board ${name} was not found or made (${why.slice(0, 300)}). If your plan allows one board, connect to it by its name, for example --board General.`);
     }
   }
-  return handle.as(bootstrap.profile, { can: bootstrap.can });
+  return handle;
 }
 
 async function main() {
@@ -312,8 +346,8 @@ async function main() {
   if (bootstrap.target.kind === "vercel" && !token) {
     fatal("VERCEL_BOARD_TOKEN is not set. The worker starts only under: secret run --map <entry>=VERCEL_BOARD_TOKEN -- <node> <worker>");
   }
-  let client;
-  try { client = await openClient(bootstrap, { token }); }
+  let clientFor;
+  try { clientFor = clientsFor(await openBoard(bootstrap, { token }), bootstrap); }
   catch (error) { fatal(`The board client did not open: ${error?.message ?? error}`); }
   write({ ready: true, protocol: WORKER_PROTOCOL, generation: bootstrap.generation });
 
@@ -326,6 +360,11 @@ async function main() {
     if (!Number.isSafeInteger(id)) fatal("A call has no id.");
     if (message.gen !== bootstrap.generation) {
       write({ id, ok: false, error: { kind: "protocol", code: "stale_generation", message: `This worker is generation ${bootstrap.generation}.` } });
+      continue;
+    }
+    const client = clientFor(message.as);
+    if (!client) {
+      write({ id, ok: false, error: { kind: "protocol", code: "unknown_profile", message: `${String(message.as).slice(0, 64)} is not one of this worker's profiles.` } });
       continue;
     }
     const controller = new AbortController();

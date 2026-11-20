@@ -193,6 +193,7 @@ const expectedRouteInventory = [
   "POST /v1/integrations/vercel-board/connect",
   "POST /v1/integrations/vercel-board/plan",
   "POST /v1/integrations/vercel-board/promote",
+  "POST /v1/integrations/vercel-board/roles",
   "POST /v1/invocations",
   "POST /v1/local-sessions/attach",
   "POST /v1/local-sessions/detach",

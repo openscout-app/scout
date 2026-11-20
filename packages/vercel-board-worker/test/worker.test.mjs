@@ -2,7 +2,7 @@
 // place of Vercel's API. No network: the stub answers every request.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { failureOf, openClient, parseBootstrap, runOperation, scoutFetch } from "../src/worker.mjs";
+import { clientsFor, failureOf, openClient, parseBootstrap, runOperation, scoutFetch } from "../src/worker.mjs";
 
 const TASK = "msg_00000000-0000-4000-8000-000000000001_1";
 const bootstrap = { generation: 1, profile: "scout", can: "work=read,post,react,label;scout-probe=read,post,react,label", target: { kind: "vercel", team: "team_test", board: "scout" } };
@@ -123,4 +123,21 @@ test("the bootstrap names a board and a narrowing, never a credential", () => {
   assert.throws(() => parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 1, profile: "not a profile" })), /profile/);
   const parsed = parseBootstrap(JSON.stringify({ ...bootstrap, protocol: 1, token: "ignored" }));
   assert.equal("token" in parsed, false);
+});
+
+test("a call writes only as a profile from the bootstrap's list, or as the principal", () => {
+  const line = { protocol: 1, generation: 1, profile: "scout", can: "work=read,post", target: { kind: "memory" } };
+  assert.deepEqual(parseBootstrap(JSON.stringify(line)).profiles, ["scout"]);
+  assert.throws(() => parseBootstrap(JSON.stringify({ ...line, profiles: ["reviewer"] })), /include its profile/);
+  assert.throws(() => parseBootstrap(JSON.stringify({ ...line, profiles: ["scout", "no spaces"] })), /profile names/);
+  const asked = [];
+  const handle = { as: (profile, options) => { asked.push([profile, options.can]); return { profile }; } };
+  const clientFor = clientsFor(handle, parseBootstrap(JSON.stringify({ ...line, profiles: ["scout", "reviewer"] })));
+  assert.equal(clientFor(undefined).profile, "scout");
+  assert.equal(clientFor("reviewer").profile, "reviewer");
+  assert.equal(clientFor(null).profile, null);
+  assert.equal(clientFor("builder"), undefined);
+  assert.equal(clientFor("reviewer").profile, "reviewer");
+  // Each is narrowed by the bootstrap's can, and made once.
+  assert.deepEqual(asked, [["scout", "work=read,post"], ["reviewer", "work=read,post"], [null, "work=read,post"]]);
 });

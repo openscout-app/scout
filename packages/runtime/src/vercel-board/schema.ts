@@ -10,6 +10,18 @@
  * task's hand-off chain is one query. vercel_board_promotions records the
  * tasks the operator made into Scout work items.
  */
+/** The roles Scout agents declared, per connection: what the matcher may hand them. */
+export const VERCEL_BOARD_ROLES_SQL = `
+CREATE TABLE IF NOT EXISTS vercel_board_roles (
+  connection_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  declared_by TEXT NOT NULL,
+  declared_at INTEGER NOT NULL,
+  PRIMARY KEY (connection_id, agent_id, role)
+);
+`;
+
 export const VERCEL_BOARD_SQLITE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS vercel_board_cursors (
   connection_id TEXT NOT NULL,
@@ -30,9 +42,10 @@ CREATE TABLE IF NOT EXISTS vercel_board_custody (
   agent_id TEXT NOT NULL,
   work_id TEXT NOT NULL,
   started_by TEXT NOT NULL,
+  profile TEXT,
   flight_id TEXT,
-  state TEXT NOT NULL CHECK (state IN ('claiming', 'claim_unknown', 'held', 'settling', 'settled', 'lost')),
-  outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'released')),
+  state TEXT NOT NULL CHECK (state IN ('claiming', 'claim_unknown', 'held', 'blocked', 'settling', 'settled', 'lost')),
+  outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'released', 'blocked')),
   result TEXT,
   detail TEXT,
   created_at INTEGER NOT NULL,
@@ -115,4 +128,38 @@ CREATE TABLE IF NOT EXISTS vercel_board_custodian_leases (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (connection_id, principal)
 );
+${VERCEL_BOARD_ROLES_SQL}`;
+
+/**
+ * Custody gained the claim's profile and a blocked state (a flight waiting on
+ * a person holds the task on the board and ends the claim). SQLite cannot
+ * change a CHECK in place, so an older table is copied into the new shape.
+ */
+export const VERCEL_BOARD_CUSTODY_ROLES_SQL = `
+CREATE TABLE vercel_board_custody_next (
+  connection_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  epoch INTEGER,
+  token TEXT,
+  until INTEGER,
+  lease_seconds INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,
+  work_id TEXT NOT NULL,
+  started_by TEXT NOT NULL,
+  profile TEXT,
+  flight_id TEXT,
+  state TEXT NOT NULL CHECK (state IN ('claiming', 'claim_unknown', 'held', 'blocked', 'settling', 'settled', 'lost')),
+  outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'released', 'blocked')),
+  result TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (connection_id, attempt_id)
+);
+INSERT INTO vercel_board_custody_next (connection_id, task_id, attempt_id, epoch, token, until, lease_seconds, agent_id, work_id, started_by, flight_id, state, outcome, result, detail, created_at, updated_at)
+  SELECT connection_id, task_id, attempt_id, epoch, token, until, lease_seconds, agent_id, work_id, started_by, flight_id, state, outcome, result, detail, created_at, updated_at FROM vercel_board_custody;
+DROP TABLE vercel_board_custody;
+ALTER TABLE vercel_board_custody_next RENAME TO vercel_board_custody;
+CREATE INDEX IF NOT EXISTS idx_vercel_board_custody_task ON vercel_board_custody (connection_id, task_id, state);
 `;

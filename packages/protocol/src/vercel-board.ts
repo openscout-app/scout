@@ -80,12 +80,37 @@ export interface VercelBoardConnectionConfig {
   probeChannel: string;
   /** Principal IDs whose tasks may be dispatched to Scout agents. Never handles. */
   ownerAllowlist: string[];
+  /**
+   * The closed list of Board profiles Scout writes as: `scout` plans, the rest
+   * work. Includes `profile`. Absent means `VERCEL_BOARD_DEFAULT_ROLES`.
+   */
+  roles?: string[];
+  /**
+   * Channels where a task kept for a role (`for`) and written by the operator
+   * or `scout` starts on its own, claimed by the runtime for an idle agent that
+   * declared the role. Elsewhere every task waits for the operator's claim.
+   * Absent means none.
+   */
+  selfServe?: string[];
   /** The node recorded as custodian. A record, not a cross-host fence. */
   custodianNodeId: string;
   credential: VercelBoardCredentialReference;
   connectedAt: number;
   /** Set once the setup probe created, claimed and completed a task. */
   verifiedAt?: number;
+}
+
+/** The roles a connection writes as when it names none. */
+export const VERCEL_BOARD_DEFAULT_ROLES = ["scout", "builder", "reviewer"] as const;
+
+/** A connection's role list, defaulted, always holding its own profile first. */
+export function vercelBoardRoles(connection: Pick<VercelBoardConnectionConfig, "profile" | "roles">): string[] {
+  return [...new Set([connection.profile, ...(connection.roles ?? VERCEL_BOARD_DEFAULT_ROLES)])];
+}
+
+/** The actor a task kept for `role` names: the owner's principal plus the role. */
+export function vercelBoardRoleActor(connection: Pick<VercelBoardConnectionConfig, "principal">, role: string): string {
+  return `${connection.principal}+${role}`;
 }
 
 const CONNECTION_ID = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -199,6 +224,10 @@ export function validateVercelBoardConnectionConfig(value: unknown): string[] {
   if (!Array.isArray(c.ownerAllowlist) || c.ownerAllowlist.length > 32 || !c.ownerAllowlist.every(isVercelBoardPrincipal)) {
     errors.push("ownerAllowlist must hold principal IDs, never handles");
   }
+  if (c.roles !== undefined && (!Array.isArray(c.roles) || c.roles.length < 1 || c.roles.length > 16 || !c.roles.every(isVercelBoardProfileName)
+    || new Set(c.roles).size !== c.roles.length || !c.roles.includes(c.profile as string))) errors.push("roles must be 1-16 distinct profile names that include profile");
+  if (c.selfServe !== undefined && (!Array.isArray(c.selfServe) || !c.selfServe.every(channel => Array.isArray(c.channels) && c.channels.includes(channel))
+    || new Set(c.selfServe).size !== c.selfServe.length)) errors.push("selfServe must list distinct channels from channels");
   if (typeof c.custodianNodeId !== "string" || !c.custodianNodeId.trim()) errors.push("custodianNodeId is required");
   errors.push(...validateVercelBoardCredentialReference(c.credential));
   if (typeof c.connectedAt !== "number" || !Number.isFinite(c.connectedAt)) errors.push("connectedAt must be a timestamp");
@@ -245,7 +274,12 @@ export interface VercelBoardConnectionStatus {
   cursors: { channel: string; stored: boolean; updatedAt?: number }[];
   /** Each channel's mirror: whether Scout keeps a copy, and how far it is. */
   mirror: VercelBoardChannelMirrorStatus[];
-  custody: { held: number; settling: number; settled: number; lost: number };
+  custody: { held: number; blocked: number; settling: number; settled: number; lost: number };
+  /** The profiles Scout writes as, and the channels where role-kept tasks start on their own. */
+  roles?: string[];
+  selfServe?: string[];
+  /** The agents that declared a role, oldest first. */
+  declared?: { agentId: string; role: string }[];
   outbox: { pending: number; unknown: number; failed: number };
   /** The local lease. It fences processes on this node only. */
   localLease?: { generation: number; expiresAt: number; heldHere: boolean };
@@ -265,6 +299,10 @@ export interface VercelBoardConnectRequest {
   ownerAllowlist?: string[];
   /** The channels to keep a local copy of. Default: all of `channels`. `[]` mirrors none. */
   mirror?: string[];
+  /** The profiles Scout writes as. Default: scout, builder, reviewer. */
+  roles?: string[];
+  /** Channels where role-kept tasks start without the operator. Default: none. */
+  selfServe?: string[];
   /** Run the setup probe: create, claim and complete one task. Default true. */
   probe?: boolean;
 }
@@ -273,6 +311,26 @@ export interface VercelBoardConnectResponse {
   connection: VercelBoardConnectionConfig;
   status: VercelBoardConnectionStatus;
   probe?: { taskId: string; state: VercelBoardTaskState };
+}
+
+/**
+ * An agent takes a role on a connection, or drops it. The runtime, not the
+ * agent, claims: in a self-serve channel it hands an idle declared agent a
+ * task kept for that role. The connection's own profile plans and is never
+ * declared.
+ */
+export interface VercelBoardRoleRequest {
+  connectionId: string;
+  agentId: string;
+  role: string;
+  /** The caller: the agent itself, or the operator. */
+  actorId: string;
+  remove?: boolean;
+}
+
+export interface VercelBoardRoleResponse {
+  connectionId: string;
+  declared: { agentId: string; role: string; declaredAt: number }[];
 }
 
 /** One planned task. `needs` takes Board task IDs or `{ key }` for one of the same plan. */

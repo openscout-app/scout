@@ -29,6 +29,10 @@ export class FakeVercelBoard {
   private readonly batches = new Map<string, string[]>();
   private readonly channels = new Set<string>();
   private faults: FakeVercelBoardFault[] = [];
+  /** The profile the request being served writes as; null is the principal itself. */
+  private profile: string | null = "scout";
+  /** The profiles a request may name, as the connection's role list does. */
+  readonly profiles = new Set(["scout", "builder", "reviewer"]);
   now: () => number;
 
   constructor(options: { principal?: string; token?: string; now?: () => number } = {}) {
@@ -40,8 +44,12 @@ export class FakeVercelBoard {
   fault(fault: FakeVercelBoardFault): void { this.faults.push(fault); }
 
   /** Write as someone else, outside Scout. */
-  createTask(input: { channel: string; text: string; owner?: string; needs?: string[] }): string {
-    return this.makeTask(input.channel, input.text, {}, input.needs ?? [], input.owner ?? this.principal, null).id;
+  createTask(input: { channel: string; text: string; owner?: string; needs?: string[]; for?: string; as?: string | null }): string {
+    const previous = this.profile;
+    this.profile = input.as === undefined ? "scout" : input.as;
+    try {
+      return this.makeTask(input.channel, input.text, {}, input.needs ?? [], input.owner ?? this.principal, null, input.for ?? null).id;
+    } finally { this.profile = previous; }
   }
   /** Another worker claims a task. */
   claimAs(id: string, actor: string, leaseSeconds = 300): { epoch: number; token: string } {
@@ -105,7 +113,28 @@ export class FakeVercelBoard {
   count(method: string, pathPrefix: string): number { return this.requests.filter(request => request.method === method && request.path.startsWith(pathPrefix)).length; }
 
   private nextId(): string { return String(++this.seq); }
-  private actor(): { actor: string; principal: string; profile: string | null } { return { actor: `${this.principal}+scout`, principal: this.principal, profile: "scout" }; }
+  private actor(): { actor: string; principal: string; profile: string | null } {
+    return this.profile === null ? { actor: this.principal, principal: this.principal, profile: null } : { actor: `${this.principal}+${this.profile}`, principal: this.principal, profile: this.profile };
+  }
+  /** Another worker claims and completes a task with its own result. */
+  completeAs(id: string, actor: string, result: string): void {
+    const grant = this.claimAs(id, actor);
+    const message = this.messages.get(id)!;
+    const task = message.task!;
+    if (task.epoch !== grant.epoch) throw new Error("fake: claim moved");
+    task.claim = null; task.state = "completed"; task.result = result;
+    this.bump(message, "task.completed", { id, epoch: task.epoch, result, by: this.author(actor) });
+    this.readyDependents(id);
+  }
+  /** Cancel a task outside Scout, ending any claim. */
+  cancel(id: string, reason?: string): void {
+    const message = this.messages.get(id)!;
+    const task = message.task!;
+    task.state = "canceled"; task.claim = null; task.reason = reason ?? null;
+    this.bump(message, "task.canceled", { id, epoch: task.epoch, ...(reason ? { reason } : {}) });
+  }
+  /** Reserve a task for one of its owner's actors, as `assign` does. */
+  assign(id: string, actor: string | null): void { this.messages.get(id)!.task!.for = actor; }
   private author(actor: string): { actor: string; principal: string; profile: string | null } {
     const [principal, profile] = actor.split("+");
     return { actor, principal: principal!, profile: profile ?? null };
@@ -117,17 +146,17 @@ export class FakeVercelBoard {
     this.events.push({ seq: message.version, type, channel: message.channel, payload, messageId: message.id, snapshot: this.view(message) });
   }
 
-  private makeTask(channel: string, text: string, labels: Record<string, string>, needs: string[], owner: string, clientId: string | null): Message {
+  private makeTask(channel: string, text: string, labels: Record<string, string>, needs: string[], owner: string, clientId: string | null, forActor: string | null = null): Message {
     this.channels.add(channel);
     const id = this.nextId();
     const open = needs.filter(need => this.messages.get(need)?.task?.state !== "completed");
     const message: Message = {
       id, channel, text, re: null, labels, deleted: false, createdAt: new Date(this.now()).toISOString(), version: Number(id), revision: 1,
       by: owner === this.principal ? this.actor() : { actor: owner, principal: owner, profile: null },
-      task: { state: open.length ? "waiting" : "ready", owner, by: owner, for: null, needs, epoch: 0, claim: null, blocked: null, result: null, reason: null },
+      task: { state: open.length ? "waiting" : "ready", owner, by: owner, for: forActor, needs, epoch: 0, claim: null, blocked: null, result: null, reason: null },
     };
     this.messages.set(id, message);
-    this.events.push({ seq: Number(id), type: "task.created", channel, payload: { id, needs, for: null, by: message.by }, messageId: id, snapshot: this.view(message) });
+    this.events.push({ seq: Number(id), type: "task.created", channel, payload: { id, needs, for: forActor, by: message.by }, messageId: id, snapshot: this.view(message) });
     if (clientId) this.posts.set(clientId, id);
     return message;
   }
@@ -180,9 +209,11 @@ export class FakeVercelBoard {
       new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...extra } });
     const error = (status: number, code: string, message = code, extra: Record<string, string> = {}) => json(status, { error: { code, message } }, extra);
     if (headers.authorization !== `Bearer ${this.token}`) return error(401, "unauthorized");
-    if (headers["x-board-profile"] !== "scout") return error(400, "invalid_profile");
+    const profile = headers["x-board-profile"] ?? null;
+    if (profile !== null && !this.profiles.has(profile)) return error(400, "invalid_profile");
+    this.profile = profile;
     if (!headers["x-board-can"]) return error(400, "invalid_scope", "Scout always narrows");
-    const route = `${method} ${path.replace(/\/[^/]+\/(claim|renew|complete|fail|release|labels)$/, "/:id/$1").replace(/^\/(messages|posts|tasks\/batch)\/[^/]+$/, "/$1/:id")}`;
+    const route = `${method} ${path.replace(/\/[^/]+\/(claim|renew|complete|fail|release|block|unblock|labels)$/, "/:id/$1").replace(/^\/(messages|posts|tasks\/batch)\/[^/]+$/, "/$1/:id")}`;
     const fault = this.takeFault(route);
     if (fault?.mode === "status") return error(fault.status, fault.code, fault.code, fault.retryAfter ? { "retry-after": fault.retryAfter } : {});
     if (fault?.mode === "fail_before") throw new TypeError("fetch failed");
@@ -269,9 +300,10 @@ export class FakeVercelBoard {
       if (existing) return json(200, { tasks: existing.map(id => this.view(this.messages.get(id)!)) });
       const byKey = new Map<string, string>();
       const ids: string[] = [];
-      for (const task of body.tasks as { key?: string; text: string; labels?: Record<string, string>; needs?: (string | { key: string })[] }[]) {
+      for (const task of body.tasks as { key?: string; text: string; labels?: Record<string, string>; needs?: (string | { key: string })[]; for?: string }[]) {
+        if (task.for !== undefined && !task.for.startsWith(`${this.principal}+`)) return error(400, "invalid_request", `for: a task is assigned to one of its owner's profiles, ${this.principal}+<profile>, got ${task.for}`);
         const needs = (task.needs ?? []).map(need => typeof need === "string" ? need : byKey.get(need.key)!);
-        const message = this.makeTask(body.channel, task.text, task.labels ?? {}, needs, this.principal, null);
+        const message = this.makeTask(body.channel, task.text, task.labels ?? {}, needs, this.principal, null, task.for ?? null);
         if (task.key) byKey.set(task.key, message.id);
         ids.push(message.id);
       }
@@ -283,7 +315,20 @@ export class FakeVercelBoard {
       const ids = this.batches.get(decodeURIComponent(match[1]!));
       return ids ? json(200, { tasks: ids.map(id => this.view(this.messages.get(id)!)) }) : error(404, "batch_not_found");
     }
-    match = path.match(/^\/tasks\/([^/]+)\/(claim|renew|complete|fail|release)$/);
+    match = path.match(/^\/tasks\/([^/]+)\/unblock$/);
+    if (method === "POST" && match) {
+      const message = this.messages.get(decodeURIComponent(match[1]!));
+      const task = message?.task;
+      if (!message || !task) return error(404, "not_found");
+      // The owner is the principal; a profile owns only what it made itself.
+      if (this.profile !== null) return error(403, "forbidden", "Only the task's owner, or manage, lifts a hold.");
+      if (task.state !== "blocked") return error(409, "task_not_blocked");
+      const open = task.needs.filter(need => this.messages.get(need)?.task?.state !== "completed");
+      task.state = open.length ? "waiting" : "ready"; task.blocked = null;
+      this.bump(message, "task.unblocked", { id: message.id, epoch: task.epoch, by: this.actor() });
+      return json(200, { task: this.view(message) });
+    }
+    match = path.match(/^\/tasks\/([^/]+)\/(claim|renew|complete|fail|release|block)$/);
     if (method === "POST" && match) {
       const message = this.messages.get(decodeURIComponent(match[1]!));
       const task = message?.task;
@@ -291,11 +336,12 @@ export class FakeVercelBoard {
       const verb = match[2]!;
       if (verb === "claim") {
         if (task.state === "claimed") return error(409, "task_claimed");
+        if (task.for && task.for !== this.actor().actor) return error(409, "task_assigned", `#${message.id} is assigned to ${task.for}`);
         if (task.state !== "ready") return error(409, task.state === "completed" || task.state === "failed" || task.state === "canceled" ? "task_finished" : "task_not_ready");
         const lease = Math.min(Number(body?.lease ?? 900), 3600);
         task.epoch += 1;
         const token = `tok-${message.id}-${task.epoch}-${Math.random().toString(36).slice(2)}`;
-        task.claim = { actor: `${this.principal}+scout`, until: this.now() + lease * 1000, token };
+        task.claim = { actor: this.actor().actor, until: this.now() + lease * 1000, token };
         task.state = "claimed";
         this.bump(message, "task.claimed", { id: message.id, epoch: task.epoch, by: this.actor() });
         return json(200, { task: this.view(message), claim: { epoch: task.epoch, token, until: new Date(task.claim.until).toISOString() } });
@@ -309,6 +355,10 @@ export class FakeVercelBoard {
       task.claim = null;
       if (verb === "complete") { task.state = "completed"; task.result = body.result ?? null; this.bump(message, "task.completed", { id: message.id, epoch: task.epoch, result: task.result, by: this.actor() }); this.readyDependents(message.id); }
       else if (verb === "fail") { task.state = "failed"; task.reason = body.reason; this.bump(message, "task.failed", { id: message.id, epoch: task.epoch, reason: body.reason, by: this.actor() }); }
+      else if (verb === "block") {
+        task.state = "blocked"; task.blocked = { kind: body.kind ?? "needs_input", reason: body.reason };
+        this.bump(message, "task.blocked", { id: message.id, epoch: task.epoch, kind: body.kind, reason: body.reason, by: this.actor() });
+      }
       else { task.state = "ready"; this.bump(message, "task.released", { id: message.id, epoch: task.epoch, by: this.actor() }); }
       return json(200, { task: this.view(message) });
     }
