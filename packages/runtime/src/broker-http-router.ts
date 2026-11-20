@@ -1,3 +1,4 @@
+import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { RoleSlotError } from "./role-slots-store.js";
 import { RolePassError } from "./role-pass-scheduler.js";
@@ -15,7 +16,7 @@ import { MeshFeedback, MeshFeedbackError } from "./mesh-feedback.js";
 import { MeshBridgeManagement, MeshBridgeManagementError } from "./mesh-bridge-management.js";
 import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
-import { TaskClosedError, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
+import { TaskClosedError, isTaskReadyDecision, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
 import { SessionNameTargetError, type SessionNameService } from "./session-names.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
@@ -257,6 +258,8 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Ready: set notify on a running task, and the operator's Continue or Hold. */
+  taskReady?: Pick<BrokerTaskReadyService, "setNotify" | "decide">;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
   /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
@@ -740,6 +743,33 @@ export function createBrokerHttpRouter(
       json(response, error instanceof HarnessHooksError ? 409 : 500, {
         error: message, ...(error instanceof HarnessHooksError ? { code: error.code } : {}),
       });
+    }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/tasks/notify") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    try {
+      const body = await readRequestBody<{ ref?: unknown; notify?: unknown; actorId?: unknown }>(request);
+      if (typeof body.ref !== "string" || !body.ref.trim() || typeof body.notify !== "boolean") throw new TaskReadyError(400, "ref and notify (boolean) are required");
+      if (!deps.taskReady) throw new TaskReadyError(503, "Ready is unavailable");
+      const actorId = attributedActorId(typeof body.actorId === "string" ? body.actorId : undefined);
+      json(response, 200, await deps.taskReady.setNotify({ ref: body.ref.trim(), notify: body.notify, actorId }));
+    } catch (error) {
+      json(response, error instanceof TaskReadyError ? error.status : 404, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/tasks/ready/decide") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
+    try {
+      const body = await readRequestBody<{ ref?: unknown; decision?: unknown; requestId?: unknown }>(request);
+      if (typeof body.ref !== "string" || !body.ref.trim() || !isTaskReadyDecision(body.decision)) throw new TaskReadyError(400, "ref and decision (continue/hold) are required");
+      if (!deps.taskReady) throw new TaskReadyError(503, "Ready is unavailable");
+      json(response, 200, await deps.taskReady.decide({ ref: body.ref.trim(), decision: body.decision, actorId: "operator",
+        ...(typeof body.requestId === "string" && body.requestId.trim() ? { requestId: body.requestId.trim() } : {}) }));
+    } catch (error) {
+      json(response, error instanceof TaskReadyError ? error.status : 409, { error: error instanceof Error ? error.message : String(error) });
     }
     return;
   }

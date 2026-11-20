@@ -69,6 +69,10 @@ export type BrokerFlightLifecycleServiceOptions = {
     input: Parameters<BrokerFlightLifecycleServiceOptions["updateDeliveryStatus"]>[0],
     eligible: (current: DeliveryIntent) => boolean | Promise<boolean>,
   ) => Promise<boolean>;
+  /** Pure Ready preparation inside the flight writer (see broker-task-ready). */
+  prepareTaskReady?: (previous: FlightRecord | undefined, flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
+  /** After a committed flight write: rings and lands the work item when it entered Ready. */
+  onFlightRecorded?: (previous: FlightRecord | undefined, flight: FlightRecord, invocation: InvocationRequest | undefined) => Promise<void>;
   /** Pure preparation inside the terminal-flight writer; application runs after commit. */
   prepareWorkPromotion?: (flight: FlightRecord, invocation: InvocationRequest | undefined, previous?: FlightRecord) => FlightRecord;
   promoteInvocationFlightToWork: (
@@ -345,6 +349,7 @@ export class BrokerFlightLifecycleService {
       if (!previous?.metadata?.terminalReport) {
         flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
       }
+      flightToRecord = this.options.prepareTaskReady?.(previous, flightToRecord, invocation) ?? flightToRecord;
       flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       if (previous && isDuplicateFlightUpdate(previous, flightToRecord)) {
         return;
@@ -376,6 +381,16 @@ export class BrokerFlightLifecycleService {
       });
     }
     await this.reconcileMessageDeliveriesForFlight(flightToRecord, invocation);
+    if (this.options.onFlightRecorded) {
+      try {
+        await this.options.onFlightRecorded(previousFlight, flightToRecord, invocation);
+      } catch (error) {
+        this.options.warn?.(
+          `[openscout-runtime] Ready follow-up failed for flight ${flightToRecord.id}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     if (invocation && isTerminalFlightState(flightToRecord.state)) {
       try {
         await this.options.promoteInvocationFlightToWork(

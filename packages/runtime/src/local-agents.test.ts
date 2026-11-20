@@ -657,7 +657,7 @@ describe("local agent prompts", () => {
     expect(prompt).toContain("Treat known offline / on-demand agents as wakeable");
     expect(prompt).toContain("Use ask --fyi only for news where no reply or task is expected");
     expect(prompt).toContain("If the meaning is 'do this and get back to me,' or you are unsure, use ask");
-    expect(prompt).toContain(`${scoutCli} ask --notify`);
+    expect(prompt).toContain(`${scoutCli} ask (it returns on acceptance)`);
     expect(prompt).toContain("For substantial reports, specs, code, diffs, logs, or research bundles, create or update a durable file when you have write access");
     expect(prompt).toContain("If you do not have write access, keep the reply useful inline");
     expect(prompt).toContain(scoutSkillPath);
@@ -796,7 +796,7 @@ describe("local agent prompts", () => {
     expect(prompt).toContain("Treat known offline / on-demand agents as wakeable");
     expect(prompt).toContain("Use ask --fyi only for news where no reply or task is expected");
     expect(prompt).toContain("If the meaning is 'do this and get back to me,' or you are unsure, use ask");
-    expect(prompt).toContain("bun relay ask --notify");
+    expect(prompt).toContain("bun relay ask (it returns on acceptance)");
     expect(prompt).toContain(scoutSkillPath);
     expect(prompt).toContain("Flag: broker-ready");
   });
