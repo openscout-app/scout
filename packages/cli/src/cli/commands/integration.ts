@@ -3,6 +3,7 @@ import type { SlackSetupReceipt } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
+import { VERCEL_BOARD_HELP, runVercelBoardCommand } from "./vercel-board.ts";
 
 export const INTEGRATION_HELP = [
   "scout integration t3 inspect --connection <id>",
@@ -19,6 +20,7 @@ export const INTEGRATION_HELP = [
   "scout integration resume <operation> --if-revision <n> --workspace <team-id>",
   "scout integration resume <operation> --if-revision <n> --confirm-workspace-authority",
   "scout integration resume <operation> --if-revision <n> --app <app-id>",
+  "scout integration connect|status|claim|promote|role|messages|handoffs vercel-board ...   (see scout integration vercel-board --help)",
   "",
   "Local pilot setup. Uses an existing registered project agent; does not create or install a Slack app.",
   "Authority confirmation records the human operator's confirmation; agents must not infer it.",
@@ -123,7 +125,14 @@ export function parseIntegrationCommand(args: string[], cwd: string): { path: st
   throw new ScoutCliError("Unknown integration command. Use scout integration --help.");
 }
 
+export const VERCEL_BOARD_VERBS = new Set(["connect", "status", "claim", "promote", "role", "messages", "handoffs"]);
+
 export async function runIntegrationCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
+  if (args[0] === "vercel-board") { context.output.writeText(VERCEL_BOARD_HELP); return; }
+  if (args[1] === "vercel-board" && VERCEL_BOARD_VERBS.has(args[0] ?? "")) {
+    await runVercelBoardCommand(context, [args[0]!, ...args.slice(2)]);
+    return;
+  }
   if (!args.length || args.some((arg) => ["--help", "-h", "help"].includes(arg))) { context.output.writeText(INTEGRATION_HELP); return; }
   const request = parseIntegrationCommand(args, context.cwd);
   const response = await fetch(new URL(request.path, resolveScoutBrokerUrl()), {

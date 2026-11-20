@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 
 import {
+  CONTROL_PLANE_SCHEMA_MIGRATIONS,
   applyControlPlaneSchemaMigrations,
   assertControlPlaneSchemaNotNewer,
   migrateControlPlaneDatabaseSchema,
@@ -448,5 +449,26 @@ describe("control-plane managed migrations", () => {
     const db = new Database(":memory:");
     migrateControlPlaneDatabaseSchema(db);
     expect(() => migrateControlPlaneDatabaseSchema(db)).not.toThrow();
+  });
+});
+
+describe("vercel board custody roles migration", () => {
+  test("an older custody table keeps its rows and then takes a profile and a blocked state", () => {
+    const db = new Database(":memory:");
+    db.exec(`CREATE TABLE vercel_board_custody (
+      connection_id TEXT NOT NULL, task_id TEXT NOT NULL, attempt_id TEXT NOT NULL, epoch INTEGER, token TEXT, until INTEGER,
+      lease_seconds INTEGER NOT NULL, agent_id TEXT NOT NULL, work_id TEXT NOT NULL, started_by TEXT NOT NULL, flight_id TEXT,
+      state TEXT NOT NULL CHECK (state IN ('claiming', 'claim_unknown', 'held', 'settling', 'settled', 'lost')),
+      outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'released')),
+      result TEXT, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (connection_id, attempt_id))`);
+    db.exec("INSERT INTO vercel_board_custody VALUES ('c1', 't1', 'a1', 1, 'tok', 5, 60, 'agent', '', 'operator', 'f1', 'held', NULL, NULL, NULL, 1, 1)");
+    const migration = CONTROL_PLANE_SCHEMA_MIGRATIONS.find((entry) => entry.id === "vercel-board-custody-roles")!;
+    migration.apply(db as never);
+    expect(db.query("SELECT task_id, token, state, profile FROM vercel_board_custody").all()).toEqual([{ task_id: "t1", token: "tok", state: "held", profile: null }]);
+    db.exec("UPDATE vercel_board_custody SET state = 'blocked', outcome = 'blocked', profile = 'reviewer'");
+    expect(db.query("SELECT state, outcome, profile FROM vercel_board_custody").get()).toEqual({ state: "blocked", outcome: "blocked", profile: "reviewer" });
+    // A second run leaves the new shape alone.
+    migration.apply(db as never);
+    expect(db.query("SELECT count(*) AS c FROM vercel_board_custody").get()).toEqual({ c: 1 });
   });
 });

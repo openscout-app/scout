@@ -10,6 +10,7 @@ import type { CollaborationEvent, CollaborationRecord } from "./collaboration.js
 import type { ScoutDispatchRecord } from "./scout-dispatch.js";
 import type { PresenceBeat } from "./presence.js";
 import type { ObservedActivity } from "./observed-status.js";
+import type { VercelBoardHandoff } from "./vercel-board.js";
 
 export const OPENSCOUT_CONTROL_EVENT_VERSION = 1 as const;
 
@@ -121,8 +122,17 @@ export type MeshBridgeLifecycleEvent = ControlEventBase<"mesh.bridge.lifecycle",
   phase: "requested" | "failed";
 }>;
 
+/**
+ * A hand-off on a Vercel Board, live. Ephemeral: the custodian's mirror of
+ * the board's task events is its record, and a replay derives from it.
+ */
+export type VercelBoardHandoffEvent = ControlEventBase<"vercel_board.handoff", {
+  handoff: VercelBoardHandoff;
+}>;
+
 export type ControlEvent =
   | MeshBridgeLifecycleEvent
+  | VercelBoardHandoffEvent
   | NodeUpsertedEvent
   | ActorRegisteredEvent
   | AgentRegisteredEvent
@@ -154,6 +164,7 @@ export type ControlEvent =
  */
 export const EPHEMERAL_CONTROL_EVENT_KINDS: ReadonlySet<ControlEvent["kind"]> = new Set<ControlEvent["kind"]>([
   "presence.updated",
+  "vercel_board.handoff",
 ]);
 
 /** True when the event must never be persisted or backlogged. */
