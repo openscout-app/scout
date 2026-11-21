@@ -251,7 +251,7 @@ export async function invokeSessionInPlace(
         throw blocked(
           "in_place_unreachable",
           "it is open where Scout cannot type.",
-          `Claude session ${sessionId} is running, but not in Herdr, Orca, tmux or a terminal Scout can address. Nothing was typed and no copy was started. Close it so Scout can resume it, or open it in one of those.`,
+          `Claude session ${sessionId} is running, but not in Herdr, Orca, tmux, a terminal Scout can address, or with the Scout channel. Nothing was typed and no copy was started. Close it so Scout can resume it, open it in one of those, or start Claude with the channel (claude --dangerously-load-development-channels plugin:scout@openscout).`,
         );
       }
       notOpenReadings += 1;
@@ -269,7 +269,11 @@ export async function invokeSessionInPlace(
 
     if (probe.activity === "idle") {
       unknownSince = null;
-      reader = input.wake ? null : await deps.openReplyReader({ sessionId, harness, marker: input.marker, cwds: input.cwds });
+      // A channel notification is not a typed user turn, so the transcript
+      // reader's marker match is not evidence for it: the session is asked to
+      // answer through Scout instead.
+      const viaChannel = probe.via === "claude-channel";
+      reader = input.wake || viaChannel ? null : await deps.openReplyReader({ sessionId, harness, marker: input.marker, cwds: input.cwds });
       const words = input.wake || reader ? input.prompt : input.explicitReplyPrompt;
       // A plain terminal is typed key by key, where a newline submits.
       const body = probe.via === "lattices" ? words.split(/\s+/u).filter(Boolean).join(" ") : words;

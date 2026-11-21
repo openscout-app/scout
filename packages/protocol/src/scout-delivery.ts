@@ -106,7 +106,7 @@ export interface ScoutSessionInputReceipt {
   state: "submitted";
   sessionId: ScoutId;
   harness: "claude" | "codex";
-  via: "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
+  via: "herdr" | "orca" | "tmux" | "claude-channel" | "lattices" | "scout-app";
   location: string;
 }
 

@@ -268,7 +268,7 @@ describe("wakeLocalHarnessSession", () => {
     deps.probeInPlace = async () => ({ live: false });
     const result = await wakeLocalHarnessSession(deps, { nativeSessionId: NATIVE_SESSION_ID });
     expect(result).toMatchObject({ ok: false, reason: "session_live_unbound" });
-    if (!result.ok) expect(result.detail).toContain("not in Herdr, Orca, tmux or a terminal Scout can type into");
+    if (!result.ok) expect(result.detail).toContain("not in Herdr, Orca, tmux, a terminal Scout can type into, or with the Scout channel");
     expect(upsertedEndpoints).toHaveLength(0);
   });
 

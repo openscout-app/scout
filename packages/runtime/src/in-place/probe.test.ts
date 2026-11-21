@@ -46,6 +46,7 @@ function noHosts(overrides: Partial<DeliverInPlaceDeps> = {}): DeliverInPlaceDep
     draftCodexApp: never,
     codexHeldByApp: async () => false,
     codexActivity: async () => "unknown",
+    askClaudeChannel: async () => ({ ok: false, code: "channel_unavailable", message: "no channel" }),
     order: ["herdr", "orca", "tmux", "terminal"],
     ...overrides,
   };

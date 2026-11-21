@@ -1450,7 +1450,7 @@ function renderSessionTransfer(payload: SessionTransferPayload): string {
 
 const IN_PLACE_REFUSALS: Record<string, string> = {
   session_ambiguous: "matches more than one live pane; specify the harness or exact Scout session id; nothing was sent",
-  not_live: "isn't open in Herdr, Orca, tmux, or a terminal tab on this machine; nothing was sent",
+  not_live: "isn't open in Herdr, Orca, tmux, a terminal tab, or a Claude session with the Scout channel on this machine; nothing was sent",
   busy: "is mid-run; use --harness codex --draft, or queue with ask and wait for app release",
   activity_unknown: "has unverified activity; use --harness codex --draft instead of submitting",
   draft_unsupported: "does not support draft mode",

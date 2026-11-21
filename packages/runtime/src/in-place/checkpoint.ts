@@ -30,7 +30,7 @@ export type InPlaceCheckpoint =
     transcriptOffset: number | null;
   };
 
-const VIAS: readonly string[] = ["herdr", "orca", "tmux", "lattices", "scout-app"];
+const VIAS: readonly string[] = ["herdr", "orca", "tmux", "claude-channel", "lattices", "scout-app"];
 
 function time(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;

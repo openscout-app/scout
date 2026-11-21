@@ -528,12 +528,26 @@ describe("broker session input receipts", () => {
       const harness = createHarness({ requestReceipts: ledger, submitSessionInput: async () => { submits++; return { ok: false, code: "not_live" }; } });
       for (const change of [{ requestId: undefined }, { body: " " }, { intent: "tell" }, { attachments: [{ id: "a", mediaType: "text/plain", url: "file:///a" }] },
         { workItem: { title: "work" } }, { execution: { session: "fork" } }, { execution: { model: "x" } },
+        { invocationMetadata: { source: "scout-web", askWorkspace: "new_worktree" } },
         { target: { kind: "session_id", sessionId: "native-1" } }, { target: { kind: "session_id", sessionId: "native-1", harness: "claude", host: "remote" } }]) {
         await expect(harness.service.accept({ ...payload, ...change } as ScoutDeliverRequest)).rejects.toThrow();
       }
       expect(submits).toBe(0);
       expect(await ledger.get("operator", payload.requestId!, "deliver")).toBeNull();
       await expect(createHarness({ submitSessionInput: async () => ({ ok: false, code: "not_live" }) }).service.accept(payload)).rejects.toThrow("session_input_unsupported");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("accepts the attribution and request id the broker router stamps on a reply", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-attribution-"));
+    try {
+      const submitted: string[] = [];
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory),
+        submitSessionInput: async input => { submitted.push(input.body); return { ok: true, via: "tmux", location: "pane1" }; } });
+      const stamped = { ...payload, invocationMetadata: { source: "scout-web", requestId: payload.requestId, attribution: { actorId: "operator" } } } as ScoutDeliverRequest;
+      const response = await harness.service.accept(stamped);
+      expect(response).toMatchObject({ receipt: { inputSubmitted: { state: "submitted", via: "tmux" } } });
+      expect(submitted).toEqual([payload.body]);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
