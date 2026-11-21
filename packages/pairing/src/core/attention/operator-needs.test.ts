@@ -45,6 +45,28 @@ describe("pendingOperatorNeeds", () => {
     expect(pendingOperatorNeeds({ messages, operatorIds: ["arach", "operator"], now: NOW })).toEqual([]);
   });
 
+  test("an unverified local reply that claims the operator answers the need", () => {
+    const messages = [
+      need("m1", "c1", NOW - 500),
+      {
+        ...reply("c1", NOW - 100, "local-unverified"),
+        metadata: { source: "scout-mobile", attribution: { actorId: "local-unverified", rootActorId: "local-unverified", source: "unverified", claimedActorId: "operator" } },
+      },
+    ];
+    expect(pendingOperatorNeeds({ messages, operatorIds: ["arach", "operator"], now: NOW })).toEqual([]);
+  });
+
+  test("a claim of the operator does not answer the need from a sender with its own identity", () => {
+    const claim = (actorId: string, claimedActorId?: string): OperatorNeedMessage => ({
+      ...reply("c1", NOW - 100, actorId),
+      metadata: { attribution: { actorId, rootActorId: actorId, source: "scoped", ...(claimedActorId ? { claimedActorId } : {}) } },
+    });
+    for (const later of [claim("session-b", "operator"), claim("local-unverified"), claim("local-unverified", "session-b")]) {
+      expect(pendingOperatorNeeds({ messages: [need("m1", "c1", NOW - 500), later], operatorIds: ["operator"], now: NOW })
+        .map((n) => n.messageId)).toEqual(["m1"]);
+    }
+  });
+
   test("notify, consult, stale, blank and operator-authored signals are not needs", () => {
     const messages: OperatorNeedMessage[] = [
       need("notify", "c1", NOW, { kind: "notify" }),
