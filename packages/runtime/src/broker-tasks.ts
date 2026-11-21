@@ -15,7 +15,18 @@ export function finishedTaskError(id: string): Error {
   return new Error(`task ${id} is finished; to start follow-up work use --continue ${id}`);
 }
 
-type Task = { invocation: InvocationRequest; flight: FlightRecord };
+/** `named` is the flight the ref spelled out, when it named one; `flight` is always current. */
+type Task = { invocation: InvocationRequest; flight: FlightRecord; named?: FlightRecord };
+
+/**
+ * A flight the ref named that is no longer its invocation's current flight:
+ * the local placeholder a peer handoff leaves behind. It lives on this node,
+ * so a cancel of it is answered here and never touches the current flight.
+ */
+function supersededPlaceholder(task: Task): FlightRecord | undefined {
+  const named = task.named;
+  return named && named.id !== task.flight.id && named.invocationId === task.invocation.id ? named : undefined;
+}
 
 export type FollowupSession = { id: string; harness: "claude" | "codex" };
 
@@ -70,6 +81,20 @@ export function followupAudience(invocation: InvocationRequest, flight: FlightRe
   );
 }
 
+/**
+ * The task home resolves the same invocation by its id; a local flight or
+ * binding ref may be unknown there. The ref target is the whole route, so the
+ * locally rendered `ref:` label is dropped: a home that predates label
+ * matching reads any label as a second recipient.
+ */
+export function taskHomeAskPayload(payload: ScoutDeliverRequest, invocationId: string): ScoutDeliverRequest {
+  const task = payload.task;
+  if (!task || (!task.ref && !task.continue)) return payload;
+  const { targetLabel: _label, ...rest } = payload;
+  return { ...rest, target: { kind: "binding_ref", ref: invocationId },
+    task: { ...task, ...(task.ref ? { ref: invocationId } : {}), ...(task.continue ? { continue: invocationId } : {}) } };
+}
+
 export type BrokerTaskServiceOptions = {
   nodeId: string;
   operatorActorId: string;
@@ -84,6 +109,8 @@ export type BrokerTaskServiceOptions = {
   accept: (request: ScoutDeliverRequest) => Promise<ScoutDeliverResponse>;
   interrupt?: (invocation: InvocationRequest, flight: FlightRecord) => Promise<boolean>;
   forward?: (nodeId: string, kind: "ask" | "reply", payload: unknown) => Promise<unknown>;
+  /** Cancel a superseded flight without moving the invocation's current flight. */
+  cancelSupersededFlight?: (flight: FlightRecord, summary: string) => Promise<FlightRecord | null>;
   now?: () => number;
 };
 
@@ -102,7 +129,10 @@ export class BrokerTaskService {
     }
     let invocation = this.options.invocation(ref) ?? (ref.startsWith("msg-request-") ? this.options.invocation(ref.replace(/^msg-request-/, "inv-request-")) : undefined);
     const directFlight = this.options.flight(ref);
-    if (!invocation && directFlight) invocation = this.options.invocation(directFlight.invocationId);
+    if (!invocation && directFlight) {
+      const named = this.options.invocation(directFlight.invocationId);
+      if (named) return { ...this.taskForInvocation(raw, named), named: directFlight };
+    }
     const binding = Object.values(snapshot.bindings).find(item => item.externalThreadId === ref || item.id === ref);
     const candidates = Object.values(snapshot.flights).filter(item => item.id === ref || (ref.length >= 8 && item.id.endsWith(ref)) || item.invocationId === ref
       || item.metadata?.bindingRef === ref || (binding && item.invocationId === binding.metadata?.invocationId));
@@ -167,7 +197,7 @@ export class BrokerTaskService {
     const node = this.options.snapshot().nodes[home];
     if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`task home ${home} does not advertise ${SCOUT_TASKS_CAPABILITY}; upgrade that runtime before dispatch`);
     if (!this.options.forward) throw new Error(`task ${task.invocation.id} is remote; home node ${home} is unavailable`);
-    return this.options.forward(home, kind, payload);
+    return this.options.forward(home, kind, kind === "ask" ? taskHomeAskPayload(payload as ScoutDeliverRequest, task.invocation.id) : payload);
   }
   /**
    * Ready's Continue: "Continue" goes into the task's own session. An open
@@ -191,7 +221,8 @@ export class BrokerTaskService {
     const request = payload.task;
     if (!request?.ref && !request?.continue) return null;
     const task = await this.resolve(request.ref ?? request.continue!);
-    if (this.home(task) !== this.options.nodeId) return await this.forward(task, "ask", payload) as ScoutDeliverResponse;
+    const placeholder = request.cancel ? supersededPlaceholder(task) : undefined;
+    if (!placeholder && this.home(task) !== this.options.nodeId) return await this.forward(task, "ask", payload) as ScoutDeliverResponse;
     const { invocation, flight } = task;
     const { requesterId: actor, requesterNodeId } = callerContextForDelivery(payload, this.options);
     const claimedSession = claimedFollowupSession(payload);
@@ -243,12 +274,14 @@ export class BrokerTaskService {
     // A follow-up's reason travels in the text the worker reads.
     const body = request.because ? `${payload.body}\n\nBecause: ${request.because}` : payload.body;
     const existing = await readMessageRecord(this.options.snapshot().messages, messageId);
-    const retry = existing?.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean } | undefined;
+    const retry = existing?.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean; flightId?: string } | undefined;
     if (existing) {
       if (retry?.invocationId !== invocation.id || Boolean(retry.cancel) !== Boolean(request.cancel)
         || existing.body !== body) throw new Error("request ID conflicts with an earlier task follow-up");
-      return this.followupReceipt(existing, task);
+      const named = retry?.flightId ? this.options.flight(retry.flightId) : undefined;
+      return this.followupReceipt(existing, named ? { ...task, flight: named } : task);
     }
+    if (placeholder) return this.cancelPlaceholder(task, placeholder, payload, actor, messageId, body, conversation || undefined);
     const cancelledByRequest = request.cancel && flight.state === "cancelled"
       && flight.metadata?.taskCancellationRequestId === payload.requestId;
     if (taskTerminal(flight) && !cancelledByRequest) throw finishedTaskError(invocation.id);
@@ -276,6 +309,32 @@ export class BrokerTaskService {
     };
     await this.postMessage(message, payload.image);
     return this.followupReceipt(message, task);
+  }
+  /** The named placeholder is cancelled here; the invocation's current flight is left alone. */
+  private async cancelPlaceholder(task: Task, placeholder: FlightRecord, payload: ScoutDeliverRequest, actor: string,
+    messageId: string, body: string, conversation: import("@openscout/protocol").ConversationDefinition | undefined): Promise<ScoutDeliverResponse> {
+    const { invocation, flight } = task;
+    if (taskTerminal(placeholder)) throw new Error(`flight ${placeholder.id} is already ${placeholder.state}; invocation ${invocation.id} continues on ${flight.id}`);
+    if (placeholder.state !== "queued" && placeholder.state !== "waking") {
+      throw new Error(`flight ${placeholder.id} is superseded by ${flight.id} but is ${placeholder.state}; read scout flight get ${placeholder.id}`);
+    }
+    if (!this.options.cancelSupersededFlight) throw new Error(`flight ${placeholder.id} is superseded by ${flight.id}; cancel it with scout flight cancel ${placeholder.id}`);
+    if (!conversation || !invocation.messageId) throw new Error("task has no replyable conversation");
+    const cancelled = await this.options.cancelSupersededFlight(placeholder,
+      `Cancelled by its asker. This flight was superseded by ${flight.id} and never ran.`);
+    const latest = cancelled ?? this.options.flight(placeholder.id) ?? placeholder;
+    if (!taskTerminal(latest)) throw new Error(`flight ${placeholder.id} could not be cancelled; read scout flight get ${placeholder.id}`);
+    const message: MessageRecord = {
+      id: messageId, requestId: payload.requestId,
+      conversationId: conversation.id, replyToMessageId: invocation.messageId, actorId: actor, originNodeId: this.options.nodeId,
+      class: "status", body, attachments: payload.attachments, audience: { delivery: "none" },
+      visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
+      metadata: { ...(payload.invocationMetadata?.attribution ? { attribution: payload.invocationMetadata.attribution } : {}),
+        source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: true, flightId: placeholder.id },
+        workerInterrupted: false, clientMessageId: messageId },
+    };
+    await this.postMessage(message, payload.image);
+    return this.followupReceipt(message, { ...task, flight: latest });
   }
   private followupReceipt(message: MessageRecord, { invocation, flight }: Task): ScoutDeliverResponse {
     const conversation = this.options.snapshot().conversations[message.conversationId]!;

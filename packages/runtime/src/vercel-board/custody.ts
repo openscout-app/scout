@@ -166,9 +166,12 @@ export class VercelBoardCustody {
     if (row.state === "settling") return this.resumeSettle(row);
     if (row.state === "blocked") return this.tickBlocked(row);
     // held
-    if (row.until !== null && now >= row.until) return this.lost(row, "lease expired");
     const flight = row.flightId ? this.deps.flight(row.flightId) : undefined;
+    // A finished flight settles even when the lease lapsed while this host was
+    // away: the settle fails with claim_lost, and resolveAmbiguousSettle claims
+    // again and completes with the result when nobody took the task since.
     if (flight && terminal(flight.state)) return this.settleFinished(row, flight);
+    if (row.until !== null && now >= row.until) return this.lost(row, "lease expired");
     // A flight that waits on a person holds the task on the board instead of renewing a claim nobody works.
     if (flight?.state === "waiting") return this.block(row, flight);
     // Renew only while the Scout flight is alive. A dead agent stops renewals, and Board hands the task on.

@@ -8,8 +8,10 @@ import type {
 import type { BrokerInvocationDispatchJob } from "./broker-dispatch-job.js";
 import {
   BrokerDispatchRecoveryService,
+  DEFERRED_DISPATCH_MAX_AGE_MS,
   ENDPOINT_WAIT_INITIAL_MS,
   ENDPOINT_WAIT_MAX_MS,
+  type BrokerDispatchRecoveryServiceDeps,
 } from "./broker-dispatch-recovery-service.js";
 
 function invocation(input: Partial<InvocationRequest> = {}): InvocationRequest {
@@ -62,10 +64,11 @@ function createService(input: {
   activeInvocationIds?: Set<string>;
   allDispatchJobs?: BrokerInvocationDispatchJob[];
   onRunJob?: (job: BrokerInvocationDispatchJob) => void | Promise<void>;
-  onRequeueJob?: (job: BrokerInvocationDispatchJob) => void | Promise<void>;
+  onRequeueJob?: (job: BrokerInvocationDispatchJob) => boolean | void | Promise<boolean | void>;
   onDispatch?: (invocation: InvocationRequest) => void | Promise<void>;
   endpointWakeKey?: (agentId: string) => string;
   now?: () => number;
+  deps?: Partial<BrokerDispatchRecoveryServiceDeps>;
 }): {
   dispatched: InvocationRequest[];
   logs: string[];
@@ -84,6 +87,7 @@ function createService(input: {
   const logs: string[] = [];
   const warnings: string[] = [];
   const service = new BrokerDispatchRecoveryService({
+    random: () => 0,
     runtimeSnapshot: () => ({ flights: input.flights }),
     dispatchJobs: () => input.dispatchJobs ?? [],
     dispatchJobForInvocation: (invocationId) => (input.allDispatchJobs ?? input.dispatchJobs ?? [])
@@ -96,7 +100,7 @@ function createService(input: {
     },
     async requeueDispatchJob(job, nextInvocation, nextFlight) {
       requeuedJobs.push({ job, invocation: nextInvocation, flight: nextFlight });
-      await input.onRequeueJob?.(job);
+      return await input.onRequeueJob?.(job);
     },
     async dispatchAcceptedInvocation(nextInvocation) {
       dispatched.push(nextInvocation);
@@ -106,6 +110,7 @@ function createService(input: {
     log: (message) => logs.push(message),
     warn: (message) => warnings.push(message),
     now: input.now ?? (() => 10_000),
+    ...input.deps,
   });
   return { dispatched, logs, runJobs, requeuedJobs, service, warnings };
 }
@@ -223,6 +228,7 @@ describe("BrokerDispatchRecoveryService", () => {
       failed: 0,
       skippedActive: 0,
       skippedMissingInvocation: 0,
+      settled: 0,
     });
     expect(harness.runJobs.map((item) => item.invocation?.id)).toEqual([
       "invocation-old",
@@ -580,6 +586,7 @@ describe("BrokerDispatchRecoveryService", () => {
       failed: 0,
       skippedActive: 1,
       skippedMissingInvocation: 1,
+      settled: 0,
     });
     expect(harness.dispatched).toEqual([]);
     expect(harness.warnings).toHaveLength(1);
@@ -746,6 +753,113 @@ describe("BrokerDispatchRecoveryService", () => {
       });
       await harness.service.recoverQueuedFlights({ reason: "endpoint_online", agentId: "agent-2" });
       expect(harness.dispatched.map((entry) => entry.id)).toEqual(["invocation-2"]);
+    });
+  });
+
+  describe("deferred jobs that can never run", () => {
+    // The live failure: a peer handoff recorded the authority's flight under the
+    // same invocation, so the local waking placeholder stopped being current and
+    // every requeue was refused. Each sweep logged a requeue and changed nothing.
+    const placeholder = () => flight({ state: "waking", metadata: { dispatchOutcome: { status: "not_submitted", checkedAt: 1_000 } } });
+    const peerFlight = (state: FlightRecord["state"] = "completed") => flight({ id: "peer-flight", state, startedAt: 1_100 });
+
+    test("closes a superseded placeholder instead of requeuing it", async () => {
+      const flights: Record<string, FlightRecord> = { "flight-1": placeholder(), "peer-flight": peerFlight() };
+      const settled: Array<{ flight: string; current: string }> = [];
+      const harness = createService({
+        dispatchJobs: [dispatchJob({ state: "completed", attempts: 1 })],
+        flights,
+        deps: {
+          currentFlightForInvocation: () => flights["peer-flight"],
+          async settleSupersededFlight(next, current) {
+            settled.push({ flight: next.id, current: current.id });
+            flights[next.id] = { ...next, state: "cancelled" };
+            return true;
+          },
+        },
+      });
+
+      const result = await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(result).toMatchObject({ dispatched: 0, settled: 1 });
+      expect(settled).toEqual([{ flight: "flight-1", current: "peer-flight" }]);
+      expect(harness.requeuedJobs).toEqual([]);
+      // The flight is terminal now, so the next pass does not consider it.
+      expect((await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" })).considered).toBe(0);
+    });
+
+    test("still requeues a placeholder that is the current flight", async () => {
+      const flights: Record<string, FlightRecord> = { "flight-1": placeholder() };
+      let settleCalls = 0;
+      const harness = createService({
+        dispatchJobs: [dispatchJob({ state: "completed", attempts: 1 })],
+        flights,
+        deps: {
+          currentFlightForInvocation: () => flights["flight-1"],
+          async settleSupersededFlight() { settleCalls += 1; return true; },
+        },
+      });
+      expect((await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" })).dispatched).toBe(1);
+      expect(harness.requeuedJobs).toHaveLength(1);
+      expect(settleCalls).toBe(0);
+    });
+
+    test("backs off a refused requeue instead of repeating it every pass", async () => {
+      let now = 10_000;
+      const harness = createService({
+        dispatchJobs: [dispatchJob({ state: "completed", attempts: 1 })],
+        flights: { "flight-1": placeholder() },
+        onRequeueJob: () => false,
+        now: () => now,
+      });
+      const first = await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(first.dispatched).toBe(0);
+      expect(harness.requeuedJobs).toHaveLength(1);
+      expect(harness.warnings.at(-1)).toContain("was not requeued");
+
+      now += ENDPOINT_WAIT_INITIAL_MS - 1;
+      await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(harness.requeuedJobs).toHaveLength(1);
+
+      now += 1;
+      await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(harness.requeuedJobs).toHaveLength(2);
+      // The second refusal doubles the wait.
+      now += ENDPOINT_WAIT_INITIAL_MS;
+      await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(harness.requeuedJobs).toHaveLength(2);
+      now += ENDPOINT_WAIT_INITIAL_MS;
+      await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(harness.requeuedJobs).toHaveLength(3);
+    });
+
+    test("fails a park older than the age limit with a stated reason", async () => {
+      const now = 1_000 + DEFERRED_DISPATCH_MAX_AGE_MS;
+      const expired: Array<{ flight: string; detail: string }> = [];
+      const harness = createService({
+        dispatchJobs: [dispatchJob({ state: "completed", attempts: 1 })],
+        flights: { "flight-1": deferredFlight("no_runnable_endpoint", { metadata: { dispatchOutcome: { status: "queued_until_online", reason: "no_runnable_endpoint", checkedAt: 2_000 } } }) },
+        now: () => now,
+        deps: {
+          async expireDeferredDispatch(_invocation, next, detail) { expired.push({ flight: next.id, detail }); return true; },
+        },
+      });
+      const result = await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" });
+      expect(result).toMatchObject({ dispatched: 0, settled: 1 });
+      expect(harness.requeuedJobs).toEqual([]);
+      expect(expired).toHaveLength(1);
+      expect(expired[0]!.detail).toContain("stopped retrying");
+    });
+
+    test("keeps retrying a park younger than the age limit", async () => {
+      let expiredCalls = 0;
+      const harness = createService({
+        dispatchJobs: [dispatchJob({ state: "completed", attempts: 1 })],
+        flights: { "flight-1": deferredFlight() },
+        now: () => DEFERRED_DISPATCH_MAX_AGE_MS,
+        deps: { async expireDeferredDispatch() { expiredCalls += 1; return true; } },
+      });
+      expect((await harness.service.recoverQueuedFlights({ reason: "queued_retry_sweep" })).dispatched).toBe(1);
+      expect(expiredCalls).toBe(0);
     });
   });
 });

@@ -355,7 +355,7 @@ export class BrokerInvocationDispatchService {
     job: BrokerInvocationDispatchJob,
     invocation: InvocationRequest,
     flight: FlightRecord,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const pending: BrokerInvocationDispatchJob = {
       ...job, state: "pending", updatedAt: currentTime(this.deps),
       completedAt: undefined, leaseOwner: undefined, leaseExpiresAt: undefined,
@@ -368,6 +368,7 @@ export class BrokerInvocationDispatchService {
         && deferredDispatchCheckedAt(latestFlight) === pending.lastDeferredAt;
     });
     if (requeued) await this.runDispatchJob(pending, invocation);
+    return requeued;
   };
 
   readonly dispatchAcceptedInvocation = async (invocation: InvocationRequest): Promise<void> => {

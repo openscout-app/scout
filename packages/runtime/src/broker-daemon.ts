@@ -210,6 +210,7 @@ import {
   subscribeObservedSessionReducer,
 } from "./observed-session-reducer.js";
 import { replacePersistedActiveObservedSessionSeeds, tailMemoryStats } from "./tail/service.js";
+import { macHostLaunchAdmission } from "./host-launch-admission.js";
 import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
@@ -327,7 +328,7 @@ import { BrokerReplyCompletionRecovery } from "./broker-reply-completion-recover
 import { BrokerInvocationDispatchService } from "./broker-invocation-dispatch-service.js";
 import { BrokerCommandService } from "./broker-command-service.js";
 import { BrokerChannelInviteService } from "./broker-channel-invite-service.js";
-import { BrokerDispatchRecoveryService } from "./broker-dispatch-recovery-service.js";
+import { BrokerDispatchRecoveryService, deferredDispatchCheckedAt, supersedingFlight } from "./broker-dispatch-recovery-service.js";
 import { registrySubstanceKey } from "./registry-liveness.js";
 import {
   brokerActorDisplayName as resolveBrokerActorDisplayName,
@@ -1265,11 +1266,14 @@ const a2aService = new BrokerA2AService({
   brokerUrl,
   runtime,
   knownInvocations,
-  activeInvocationTasks,
+  activeInvocationTasks: { has: id => localInvocationService.hasExecutingInvocation(id) },
   createId: createRuntimeId,
   acceptInvocation: acceptInvocationDurably,
   dispatchInvocation: dispatchAcceptedInvocation,
   recordFlight: recordFlightDurably,
+  currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+  isInvocationActive: id => isInvocationDispatchActive(id, false),
+  cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   loadRegisteredLocalAgentBindings,
   sleep,
   error: (message, detail) => {
@@ -1754,6 +1758,7 @@ async function persistFlight(flight: FlightRecord, eligible?: () => boolean): Pr
 async function transitionInvocation(
   invocationId: string,
   patch: InvocationStatusPatch,
+  eligible?: () => boolean,
 ): Promise<FlightRecord> {
   const current = runtime.flightForInvocation(invocationId);
   if (!current) {
@@ -1762,10 +1767,56 @@ async function transitionInvocation(
     throw new Error(`cannot transition invocation ${invocationId}: no flight recorded`);
   }
   const next = applyInvocationStatusPatch(current, patch);
-  await recordFlightDurably(next);
+  await recordFlightDurably(next, eligible);
   // Recording can reject a stale patch after another writer completes/cancels
   // the invocation. Never return the uncommitted proposal to a side-effect caller.
   return runtime.flightForInvocation(invocationId)!;
+}
+
+/**
+ * Close a flight that is no longer its invocation's current flight: the
+ * placeholder a peer handoff leaves behind, for example. The write keeps the
+ * invocation's current flight and runs no lifecycle hooks. The placeholder did
+ * no work, and the current flight owns the requester's result.
+ */
+async function cancelSupersededFlight(flightId: string, summary: string): Promise<FlightRecord | null> {
+  return durableStore.runWrite(async () => {
+    const flight = journal.getFlight(flightId) ?? runtime.peek().flights[flightId];
+    const current = flight ? runtime.flightForInvocation(flight.invocationId) : undefined;
+    const superseding = supersedingFlight(flight, current);
+    if (!flight || !superseding) return null;
+    const completedAt = Date.now();
+    const cancelled: FlightRecord = { ...flight, state: "cancelled", summary, completedAt,
+      metadata: { ...flight.metadata, supersededByFlightId: superseding.id, supersededSettledAt: completedAt } };
+    await durableStore.commitEntries({ kind: "flight.record", flight: cancelled, preserveCurrent: true }, async () => {
+      await runtime.upsertFlight(cancelled, { preserveCurrent: true });
+    });
+    return cancelled;
+  });
+}
+
+/** Fail a delivery that stayed parked before submission too long, if it is still that park. */
+async function expireDeferredDispatch(invocation: InvocationRequest, flight: FlightRecord, detail: string): Promise<boolean> {
+  const parkedAt = deferredDispatchCheckedAt(flight);
+  if (parkedAt === null) return false;
+  const failed: FlightRecord = { ...flight, state: "failed", summary: detail, error: detail, completedAt: Date.now(),
+    metadata: { ...flight.metadata, failureStage: "deferred_dispatch_expired" } };
+  await recordFlightDurably(failed, () => {
+    const current = runtime.flightForInvocation(invocation.id);
+    return current?.id === flight.id && deferredDispatchCheckedAt(current) === parkedAt;
+  });
+  const recorded = runtime.flightForInvocation(invocation.id);
+  if (recorded?.id !== flight.id || recorded.state !== "failed" || recorded.metadata?.failureStage !== "deferred_dispatch_expired") return false;
+  await postInvocationStatusMessage(invocation, recorded);
+  return true;
+}
+
+/** Any executor holds this invocation: a local launch, an external session, T3, or reply recovery. */
+function isInvocationDispatchActive(invocationId: string, includeQueuedLaunch = true): boolean {
+  return flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
+    || replyCompletionRecovery.isPending(invocationId)
+    || (includeQueuedLaunch ? localInvocationService.hasActiveInvocation(invocationId) : localInvocationService.hasExecutingInvocation(invocationId))
+    || externalSessionService.hasPendingInvocation(invocationId) || t3Service.hasPendingInvocation(invocationId);
 }
 
 /**
@@ -2227,7 +2278,10 @@ const managedSessionHttpService = new BrokerManagedSessionHttpService({
   detachManagedPairingSession: (input) => managedSessionService.detachManagedPairingSession(input),
   attachManagedLocalSession: (input) => managedSessionService.attachManagedLocalSession(input),
   detachManagedLocalSession: (input) => managedSessionService.detachManagedLocalSession(input),
-  ensureLocalSessionEndpointOnline,
+  ensureLocalSessionEndpointOnline: async endpoint => {
+    if (!isLocalAgentEndpointAlive(endpoint)) await macHostLaunchAdmission?.reserve();
+    return ensureLocalSessionEndpointOnline(endpoint);
+  },
   persistEndpoint,
 });
 
@@ -2524,6 +2578,7 @@ function recoverInvocationResultReplies(): void {
 }
 
 const localInvocationService = new BrokerLocalInvocationService({
+  launchAdmission: macHostLaunchAdmission,
   pendingTaskFollowups: id => journal.pendingTaskFollowups(id),
   nodeId,
   isLocalAgentEndpointAlive,
@@ -3248,13 +3303,14 @@ const dispatchRecoveryService = new BrokerDispatchRecoveryService({
   dispatchJobs: () => journal.listRecoverableInvocationDispatchJobs({ limit: 5000 }),
   dispatchJobForInvocation: (invocationId) => journal.getInvocationDispatchJobForInvocation(invocationId),
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
-  isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
-    || replyCompletionRecovery.isPending(invocationId)
-    || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
-    || t3Service.hasPendingInvocation(invocationId),
+  isInvocationActive: isInvocationDispatchActive,
   runDispatchJob: (job, invocation) => invocationDispatchService.runDispatchJob(job, invocation),
   requeueDispatchJob: (job, invocation, flight) => invocationDispatchService.requeueDispatchJob(job, invocation, flight),
   dispatchAcceptedInvocation: (invocation) => invocationDispatchService.dispatchAcceptedInvocation(invocation),
+  currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+  settleSupersededFlight: async (flight, current) => Boolean(await cancelSupersededFlight(flight.id,
+    `Superseded by flight ${current.id}; this placeholder never ran and will not run.`)),
+  expireDeferredDispatch,
   endpointWakeKey: (agentId) => {
     const view = runtime.peek();
     const endpoints = Object.values(view.endpoints).filter((endpoint) => endpoint.agentId === agentId)
@@ -3426,6 +3482,7 @@ const taskService = new BrokerTaskService({
   },
   accept: payload => deliveryAcceptanceService.accept(payload, { receiptReserved: true, admissionReserved: true }),
   interrupt: interruptFlightSession,
+  cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   forward: async (home, kind, payload) => {
     const node = runtime.snapshot().nodes[home];
     if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY) || !node.brokerUrl) throw new Error(`task home ${home} requires ${SCOUT_TASKS_CAPABILITY} and a reachable broker`);

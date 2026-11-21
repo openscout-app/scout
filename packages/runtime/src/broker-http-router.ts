@@ -1,3 +1,4 @@
+import { HostLaunchDeferred } from "./host-launch-admission.js";
 import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
 import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
@@ -190,6 +191,7 @@ const ACTIVE_FLIGHT_LIST_STATES = new Set(["queued", "waking", "running", "waiti
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
   else if (error instanceof ProvenRequestFailure) json(response, 409, { error: error.code, detail: error.message, evidence: error.evidence });
+  else if (error instanceof HostLaunchDeferred) json(response, 503, { error: error.code, retryable: true, retryAt: error.retryAt, detail: error.message });
   else if (error instanceof BrokerBusyError) json(response, 503, { error: error.code, retryable: true, detail: error.message });
   else writeBadRequest(response, error);
 }
