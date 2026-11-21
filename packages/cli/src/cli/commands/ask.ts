@@ -48,6 +48,9 @@ export function renderAskCommandHelp(): string {
     "                        (Ready, with Continue or Hold). Use it only for work the operator",
     "                        is waiting on, not to make an ask asynchronous",
     "  --image <path>        attach PNG, JPEG, GIF, or WebP evidence",
+    "  --decision <file>     operator decision card: our JSON shape or one decision-pack",
+    "                        pack.json decision (<file>#<id> picks one). Pictures upload as",
+    "                        attachments; labels become --option. See docs/agent/decision-cards.agent.md",
     "  --prompt-file <path>  read the message from a UTF-8 file (--body-file also accepted)",
     "  --label <label>      attach a searchable task label; repeatable",
     "  --reply-mode <notify|inline|none>  notify means acceptance, NOT operator push",
@@ -73,6 +76,7 @@ export function renderAskCommandHelp(): string {
     '  scout ask --continue inv-123 "port the fix"',
     '  scout ask --operator --option yes --option no "Ship to production?"',
     '  scout ask --operator --fyi --notify "Production is down" --image ./graph.png',
+    '  scout ask --operator --decision ./card.json "Which pricing table ships?"',
     '  scout ask --channel shared --fyi "Deploy done"',
     '  scout reply --ref inv-123 "Two findings, one blocking"',
   ].join("\n");
@@ -372,6 +376,7 @@ export async function runAskWithOptions(
   );
   const body = await resolvePromptBody(options);
   const callback = options.callbackFile ? await readTaskCallbackFile(options.callbackFile) : undefined;
+  const decision = options.decisionFile ? await (await import("../decision-file.ts")).readDecisionFile(options.decisionFile) : undefined;
   const to = options.targetLabel;
   const target:
     | { to: string; projectPath?: never; runtimeProfile?: never; existingHandle?: never }
@@ -394,7 +399,8 @@ export async function runAskWithOptions(
   const callerSessionId = claimedSessionId(context.env);
   const receipt = await scoutAskHandler({
     requestId,
-    task: callback ? { ...(options.task ?? { version: 1 }), callback } : options.task ?? { version: 1 },
+    task: { ...(options.task ?? { version: 1 }), ...(callback ? { callback } : {}), ...(decision ? { decision: decision.decision } : {}) },
+    ...(decision?.images.length ? { decisionImages: decision.images } : {}),
     ...(options.image ? { image: await (await import("../task-image.ts")).readTaskImage(options.image) } : {}),
     completion: options.completion,
     relation: options.relation,

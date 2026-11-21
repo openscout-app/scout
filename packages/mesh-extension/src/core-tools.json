@@ -642,6 +642,13 @@
           "description": "Local image path.",
           "type": "string"
         },
+        "decision": {
+          "description": "Operator tasks only: a decision card, as a local JSON file path or the card itself. Decision cards are host-local; send them through a local Scout client.",
+          "anyOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "object", "propertyNames": { "type": "string" }, "additionalProperties": {} }
+          ]
+        },
         "completion": {
           "description": "Require an explicit final reply; exact local id or session targets only, with a stable requestId.",
           "type": "object",

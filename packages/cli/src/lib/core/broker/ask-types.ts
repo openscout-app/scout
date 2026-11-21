@@ -15,6 +15,8 @@ export type ScoutAskSenderContext = {
 type ScoutAskCommandBase = {
   task?: import("@openscout/protocol").ScoutTaskAsk;
   image?: import("@openscout/protocol").AttachmentUpload;
+  /** Pictures for task.decision, in the order its options index them. */
+  decisionImages?: import("@openscout/protocol").AttachmentUpload[];
   attachments?: import("./service.ts").OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;

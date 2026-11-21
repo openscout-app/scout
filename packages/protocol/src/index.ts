@@ -96,6 +96,7 @@ export * from "./session-names.js";
 
 export * from "./host-attention.js";
 export * from "./tasks.js";
+export * from "./decision-cards.js";
 export * from "./failed-runs.js";
 export * from "./task-ready.js";
 

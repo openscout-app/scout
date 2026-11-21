@@ -2,6 +2,8 @@ import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/send
 import { createHash, randomUUID } from "node:crypto";
 import { parseRosterAddress, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
+import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
+import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
@@ -654,6 +656,7 @@ type ScoutMcpDependencies = {
     options?: { since?: number | null; limit?: number | null },
   ) => Promise<ScoutLabelFeed | null>;
   loadMeshOverview?: (machine?: string) => Promise<ScoutMeshOverview>;
+  readDecisions?: typeof readBrokerDecisions;
 };
 
 const flightSchema = z.object({
@@ -3733,6 +3736,29 @@ export function createScoutMcpServer(options: {
   );
 
   server.registerTool(
+    "decision_read",
+    {
+      title: "Operator Decision Cards",
+      description:
+        "Read operator asks as decision cards: the card (agent, synthesized or permission), the plain ask it came from, and its answer state (open, needs_material, answered, defaulted). Pass id for one ask (question record, message id or task id); omit it for the open asks. An ask with no card has none: show its plain question. Read-only; the operator answers through Scout's surfaces.",
+      inputSchema: z.object({
+        id: z.string().min(1).optional().describe("One ask; omit for the open asks."),
+        all: z.boolean().optional().describe("Include settled asks when listing."),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ id, all }) => {
+      const read = deps.readDecisions ?? readBrokerDecisions;
+      const result = await read({ ...(id ? { id } : {}), ...(all ? { all } : {}) });
+      const views = "decision" in result ? [result.decision] : result.decisions;
+      return {
+        content: [{ type: "text" as const, text: views.length ? views.map(renderDecisionView).join("\n\n") : "No open operator asks." }],
+        structuredContent: result as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
     "feedback_send",
     {
       title: "Send Scout Feedback",
@@ -4536,6 +4562,7 @@ export function createScoutMcpServer(options: {
         permission: z.boolean().optional(), because: z.string().min(1).optional(), window: z.number().positive().optional(),
         callback: z.string().min(1).optional().describe("Local path of a JavaScript module file, e.g. open-page.js holding: export default ({ result, scout }) => scout.open(result.files[0]); The file is read here and sent with the task. The runtime on the worker's host runs it when the task ends, in a sandbox with no file, process or network access and no imports. Its default export gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only."),
         image: z.string().optional().describe("Local image path."),
+        decision: z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional().describe("Operator tasks only: a decision card, as a local JSON file path (our shape or a decision-pack pack.json, path#id picks one decision) or the card itself. Exactly one pick, 2-3 options keyed A, B, C with label, result and undo (easy or hard), door one_way or two_way, a defaultKey only on a two-way door. Option pictures are local paths ({ path, callouts }); they upload as attachments. Labels become options. See docs/agent/decision-cards.agent.md."),
         completion: completionRequestSchema.optional().describe("Require an explicit final reply; exact local id or session targets only, with a stable requestId."),
         relation: completionRelationSchema.optional().describe("Join child work or continue a parent flight; requires a stable requestId."),
         requestId: z.string().min(1).max(256).optional().describe("Requester-scoped idempotency key; reuse on retries."),
@@ -4624,7 +4651,7 @@ export function createScoutMcpServer(options: {
     },
     async ({
       requestId,
-      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image,
+      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image, decision,
       completion,
       relation,
       to,
@@ -4702,9 +4729,15 @@ export function createScoutMcpServer(options: {
         : undefined;
       // The callback file is read on this side: the task may run on another host.
       const taskCallback = callback ? await readTaskCallbackFile(resolve(resolvedCurrentDirectory, callback)) : undefined;
-      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, ...(taskCallback ? { callback: taskCallback } : {}) };
+      // Decision pictures are read on this side, like the callback, and sent as images.
+      const taskDecision = decision === undefined ? undefined : typeof decision === "string"
+        ? await readDecisionFile(resolve(resolvedCurrentDirectory, decision))
+        : await prepareDecision(decision, resolvedCurrentDirectory);
+      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window,
+        ...(taskCallback ? { callback: taskCallback } : {}), ...(taskDecision ? { decision: taskDecision.decision } : {}) };
       validateTaskAsk(task, { to: targetTo, channel, capability: !predecessor && Boolean(targetProjectPath || profile),
-        execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation) });
+        execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation),
+        decisionImages: taskDecision?.images.length ?? 0 });
       const taskImage = image ? await readTaskImage(resolve(resolvedCurrentDirectory, image)) : undefined;
       let structuredContent: ScoutAskReceipt = parsedRuntime && !parsedRuntime.ok
         ? {
@@ -4747,6 +4780,7 @@ export function createScoutMcpServer(options: {
             requestId: requestId ?? `ask-${randomUUID()}`,
             task,
             ...(taskImage ? { image: taskImage } : {}),
+            ...(taskDecision?.images.length ? { decisionImages: taskDecision.images } : {}),
             ...(completion ? { completion } : {}),
             ...(relation ? { relation } : {}),
             senderId: resolvedSenderId,

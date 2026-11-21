@@ -58,6 +58,8 @@ export type ScoutAskCommandOptions = ContextRootOptions & {
   task?: ScoutTaskAsk;
   targets?: string[];
   image?: string;
+  /** `--decision <file>[#id]`: read into `task.decision` and its pictures when the ask is sent. */
+  decisionFile?: string;
   /** `--callback <file>`: read into `task.callback` when the ask is sent. */
   callbackFile?: string;
   agentName: string | null;
@@ -919,6 +921,7 @@ export function parseAskCommandOptions(
   let placement: ScoutAskCommandOptions["placement"];
   let promptFile: string | undefined;
   let callbackFile: string | undefined;
+  let decisionFile: string | undefined;
   let aliasProject: string | undefined;
   let aliasHost: string | undefined;
   const labels: string[] = [];
@@ -930,7 +933,7 @@ export function parseAskCommandOptions(
     if (current === "--") { messageParts.push(...parsed.args.slice(index + 1)); break; }
     const taskBoolean = ({ "--operator": "operator", "--fyi": "fyi", "--notify": "notify", "--cancel": "cancel", "--permission": "permission" } as const)[current as "--operator"];
     if (taskBoolean) { task[taskBoolean] = true; continue; }
-    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--callback", "--image"].find(flag => current === flag || current.startsWith(`${flag}=`));
+    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--callback", "--image", "--decision"].find(flag => current === flag || current.startsWith(`${flag}=`));
     if (taskValue) {
       const value = parseAskFlagValue(parsed.args, index, taskValue);
       if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(taskValue);
@@ -944,6 +947,13 @@ export function parseAskCommandOptions(
         callbackFile = resolveInputFilePath(parsed.currentDirectory, value.value);
       }
       if (taskValue === "--image") image = resolveInputFilePath(parsed.currentDirectory, value.value);
+      if (taskValue === "--decision") {
+        if (decisionFile) throw new ScoutCliError("--decision may appear only once");
+        const hash = value.value.lastIndexOf("#");
+        decisionFile = hash > 0
+          ? `${resolveInputFilePath(parsed.currentDirectory, value.value.slice(0, hash))}${value.value.slice(hash)}`
+          : resolveInputFilePath(parsed.currentDirectory, value.value);
+      }
       index = value.nextIndex; continue;
     }
     if (current === "--completion" || current.startsWith("--completion=")) {
@@ -1186,6 +1196,8 @@ export function parseAskCommandOptions(
       throw new ScoutCliError(`positional recipients were removed; use ${renderScoutCommand("ask", rewritten)}`);
     }
   }
+  if (decisionFile && (!task.operator || task.fyi)) throw new ScoutCliError("--decision requires an operator task expecting an answer");
+  if (decisionFile && task.permission) throw new ScoutCliError("--decision cannot be combined with --permission: a permission request is its own card");
   // A callback file is read when the ask is sent; until then a stand-in checks
   // which flags it can be combined with.
   validateTaskAsk(callbackFile ? { ...task, callback: { code: "export default () => {};" } } : task, {
@@ -1218,6 +1230,7 @@ export function parseAskCommandOptions(
     ...(targets.length ? { targets } : {}),
     ...(image ? { image } : {}),
     ...(callbackFile ? { callbackFile } : {}),
+    ...(decisionFile ? { decisionFile } : {}),
     ...(targetLabel ? { targetLabel } : {}),
     ...(requestId ? { requestId } : {}),
     ...(completion ? { completion } : {}),
