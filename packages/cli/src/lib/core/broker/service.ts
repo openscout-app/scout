@@ -5957,3 +5957,7 @@ export async function replyToScoutTask(input: ScoutTaskReply): Promise<unknown> 
   if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before replying`);
   return brokerPostJson(baseUrl, "/v1/messages/reply", input);
 }
+
+export async function retryScoutWorkItem(input: import("@openscout/protocol").WorkRetryRequest): Promise<import("@openscout/protocol").WorkRetryResponse> {
+  return brokerPostJson(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workRetry, input);
+}

@@ -1,3 +1,4 @@
+import { FailedRunError } from "./failed-run-error.js";
 import { describe, expect, test } from "bun:test";
 import { registerSecretValue } from "@openscout/agent-sessions/secret-redaction";
 import { CodexAppServerControlError } from "@openscout/agent-sessions/local";
@@ -1105,6 +1106,7 @@ describe("BrokerLocalInvocationService", () => {
       }),
     }));
     expect(harness.statusMessages).toHaveLength(1);
+    expect(harness.persistedFlights.at(-1)?.metadata?.failureCause).toBe("harness_start");
   });
 
   test("a logged-out harness fails the ask with the reason and keeps the endpoint routable", async () => {
@@ -1783,4 +1785,28 @@ test("local dispatch reads queued follow-ups by task index without enumerating h
   await h.service.execute(invocation);
   expect(ids).toEqual([invocation.id]);
   expect(observed?.task).toContain("Task follow-ups:\nNarrow scope");
+});
+
+
+describe("failure causes are recorded at the local invocation boundary", () => {
+  test.each([
+    ["harness_start", new FailedRunError("harness_start", "Composer never became ready")],
+    ["endpoint_lost", new FailedRunError("endpoint_lost", "Session exited before reply")],
+    ["disk_full", Object.assign(new Error("reply file write failed"), { code: "ENOSPC" })],
+    ["harness_error", new Error("session/prompt failed (-32603)")],
+    ["harness_error", new Error("Permission keys were not acknowledged")],
+  ] as const)("execution failure %s is structured before flight promotion", async (cause, error) => {
+    const h = createHarness({ endpoint: testEndpoint(), invokeError: error });
+    h.seedFlight(testFlight()); await h.service.execute(testInvocation());
+    expect(h.persistedFlights.at(-1)).toMatchObject({ state: "failed", metadata: { failureCause: cause } });
+  });
+  test.each([
+    ["harness_start", new Error("session_identity_unobserved")],
+    ["harness_start", Object.assign(new Error("cwd does not exist"), { code: "ENOENT" })],
+    ["disk_full", Object.assign(new Error("no space"), { code: "ENOSPC" })],
+  ] as const)("preparation failure %s is structured without classifying its prose", async (cause, error) => {
+    const h = createHarness({ endpoint: testEndpoint(), resolveError: error });
+    h.seedFlight(testFlight()); await h.service.execute(testInvocation());
+    expect(h.persistedFlights.at(-1)).toMatchObject({ state: "failed", metadata: { failureCause: cause } });
+  });
 });

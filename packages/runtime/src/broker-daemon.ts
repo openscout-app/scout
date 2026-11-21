@@ -1,5 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
@@ -1068,6 +1069,8 @@ const workItemStore = new BrokerWorkItemStore({
     : { record: after },
   durableFlight: (flightId) => journal.getFlight(flightId),
   durableWorkItem: (workId) => journal.getCollaborationRecord(workId),
+  newestFlightForWork: workId => journal.newestFlightForWork(workId),
+  durableCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
   createId: createRuntimeId,
   warn: (message, error) => console.warn(message, error),
   operatorActorId,
@@ -1081,6 +1084,17 @@ function recoverTerminalWorkPromotions(): void {
   workPromotionRecovery = workItemStore.recoverTerminalWorkPromotions(journal.listPendingWorkPromotionFlights())
     .catch((error) => console.warn("[openscout-runtime] work promotion recovery failed:", error))
     .finally(() => { workPromotionRecovery = undefined; });
+}
+async function reconcileExistingFailedWork(): Promise<void> {
+  let cursor: { afterCreatedAt: number; afterId: string } | undefined;
+  for (;;) {
+    const page = journal.listCollaborationRecords({ kind: "work_item", state: "waiting", orderByCreatedAt: true, ...cursor, limit: 100 });
+    if (!page.length) return;
+    await workItemStore.reconcileFailedWorkItems(page);
+    const last = page.at(-1)!;
+    cursor = { afterCreatedAt: last.createdAt, afterId: last.id };
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
 }
 const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalSessionWakeResult> =>
   wakeLocalHarnessSession({
@@ -3408,6 +3422,13 @@ const taskService = new BrokerTaskService({
     return response.json();
   },
 });
+const workRetry = new BrokerWorkRetryService({
+  nodeId, snapshot: () => journal.snapshot(), record: id => journal.getCollaborationRecord(id), durableStore,
+  apply: record => runtime.upsertCollaboration(record), appendEvent: event => runtime.appendCollaborationEvent(event),
+  accept: request => deliveryAcceptanceService.accept(request),
+  place: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context),
+});
+
 const taskReadyService = new BrokerTaskReadyService({
   nodeId, operatorActorId,
   resolve: ref => taskService.resolve(ref),
@@ -3647,6 +3668,7 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
+  workRetry,
   derivedRecords,
   tasks: taskService,
   shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
@@ -4308,6 +4330,7 @@ function recoverStartupWork(): void {
   recoverInvocationResultReplies();
   recoverTerminalReports();
   recoverTerminalWorkPromotions();
+  void reconcileExistingFailedWork().catch(error => console.warn("[openscout-runtime] failed-work reconciliation incomplete:", error));
   // Pending derivations are computed from records, so one pass finds what a restart left.
   derivedRecords.kick();
   // Reconcile persisted external attempts without repeating a provider send.

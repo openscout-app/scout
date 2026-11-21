@@ -269,6 +269,7 @@ const expectedRouteInventory = [
   "POST /v1/work/claim",
   "POST /v1/work/lifecycles",
   "POST /v1/work/move",
+  "POST /v1/work/retry",
   "POST /v1/work/review",
 ];
 

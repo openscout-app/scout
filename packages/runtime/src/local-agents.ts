@@ -1,3 +1,4 @@
+import { FailedRunError, failureCauseForError } from "./failed-run-error.js";
 import { receiveTransportLiveness } from "./local-endpoint-liveness.js";
 import { hasExplicitCompletion } from "@openscout/protocol";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
@@ -1171,6 +1172,7 @@ export const DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS = [
   "mcp__scout__invocations_get",
   "mcp__scout__invocations_wait",
   "mcp__scout__work_update",
+  "mcp__scout__work_retry",
   "mcp__scout__work_move",
   "mcp__scout__work_review",
   "mcp__scout__work_lifecycle",
@@ -3936,7 +3938,8 @@ export async function sendTmuxPrompt(
         // Ignore cleanup failures after a tmux delivery error.
       }
     }
-    throw error;
+    if (error instanceof DispatchStalledError || error instanceof DeliveryBlockedError) throw error;
+    throw new FailedRunError(failureCauseForError(error, "harness_start"), error instanceof Error ? error.message : String(error), { cause: error });
   }
 }
 
@@ -4011,7 +4014,7 @@ export async function waitForReadyComposer(options: {
   let previousTail: string | undefined;
   while (now() < deadline) {
     if (!options.isAlive()) {
-      throw new Error(`tmux session ${options.sessionName} exited before ${options.harnessLabel} was ready.`);
+      throw new FailedRunError("harness_start", `tmux session ${options.sessionName} exited before ${options.harnessLabel} was ready.`);
     }
 
     paneTail = await options.captureTail();
@@ -4044,7 +4047,7 @@ export async function waitForReadyComposer(options: {
 
   const elapsed = now() - startedAt;
   const tail = stripTerminalControlSequences(paneTail).trim().split(/\r?\n/).slice(-20).join("\n").trim();
-  throw new Error(
+  throw new FailedRunError("harness_start",
     `tmux session ${options.sessionName} did not show a ready ${options.harnessLabel} composer within ${elapsed}ms.`
       + (tail ? `\nRecent pane tail:\n${tail}` : ""),
   );
@@ -6946,7 +6949,7 @@ export async function waitForLocalAgentReply(input: {
     if (input.exitedError && Date.now() >= nextLivenessCheckAt) {
       nextLivenessCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
       const exited = await input.exitedError();
-      if (exited) throw new Error(exited);
+      if (exited) throw new FailedRunError("endpoint_lost", exited);
     }
     if (input.blockedError && Date.now() >= nextBlockedCheckAt) {
       nextBlockedCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;

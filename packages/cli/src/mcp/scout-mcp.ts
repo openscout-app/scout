@@ -88,6 +88,7 @@ import {
   type ScoutManagedLocalSessionAttachment,
   updateScoutWorkItem,
   moveScoutWorkItem,
+  retryScoutWorkItem,
   planScoutBoardTasks,
   reviewScoutWorkMove,
   readScoutWorkLifecycles,
@@ -618,6 +619,7 @@ type ScoutMcpDependencies = {
     input: ScoutWorkItemUpdate,
   ) => Promise<ScoutTrackedWorkItem | null>;
   moveWorkItem?: typeof moveScoutWorkItem;
+  retryWorkItem?: typeof retryScoutWorkItem;
   planBoardTasks?: typeof planScoutBoardTasks;
   reviewWorkMove?: typeof reviewScoutWorkMove;
   readDerivedRecord?: typeof readScoutDerivedRecord;
@@ -5721,6 +5723,17 @@ export function createScoutMcpServer(options: {
       };
     },
   );
+
+  server.registerTool("work_retry", {
+    title: "Retry Failed Scout Work",
+    description: "Send the original ask again to the same target in a fresh session, whatever the failure cause; the item's retryable flag is only a hint. Omit attempt for the next one. Reuse an attempt to recover its receipt after an uncertain result. Never retries automatically.",
+    inputSchema: z.object({ workId: z.string(), attempt: z.number().int().positive().optional() }),
+    outputSchema: z.object({ workId: z.string(), attempt: z.number(), requestId: z.string(), invocationId: z.string(), flightId: z.string() }),
+    annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async input => {
+    const structuredContent = { ...await (deps.retryWorkItem ?? retryScoutWorkItem)(input) };
+    return { content: createTextContent(structuredContent), structuredContent };
+  });
 
   const workMoveResultSchema = z.object({
     senderId: z.string(),

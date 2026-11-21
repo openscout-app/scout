@@ -232,6 +232,7 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 export type BrokerHttpRouterDeps = {
   /** Work lifecycles: stations, moves and reviews. */
   workLifecycles?: BrokerWorkLifecycleService;
+  workRetry?: import("./broker-work-retry.js").BrokerWorkRetryService;
   derivedRecords?: BrokerDerivedRecordService;
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
@@ -2107,6 +2108,15 @@ export function createBrokerHttpRouter(
     }));
     return;
   }
+
+  if (method === "POST" && url.pathname === "/v1/work/retry" && deps.workRetry) {
+    try { json(response, 200, await deps.workRetry.retry(await readRequestBody<import("@openscout/protocol").WorkRetryRequest>(request, { maxBytes: 16 * 1024 }))); }
+    catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
+    }
 
   if (deps.derivedRecords && (url.pathname === "/v1/derived" || url.pathname === "/v1/derived/pending")) {
     const derived = deps.derivedRecords;

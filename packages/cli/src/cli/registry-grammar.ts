@@ -43,6 +43,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "alias": node("--expires-at= --expires-in= --host= --if-revision= --include-inactive --project= --replace --self --self-agent --target= --to=", { "set": node(), "list": node(), "resolve": node(), "repoint": node(), "unset": node() }),
   "wait": node("--timeout="),
   "flight": node("--timeout=", { "get": node(), "wait": node(), "cancel": node() }),
+  "work-retry": node("--attempt="),
   "label": node("--interval= --limit= --once --since=", { "watch": node(), "feed": node(), "brief": node() }),
   "card": node("--all --as= --clear-model --clear-permission-profile --clear-reasoning-effort --context-root= --display-name= --effort= --harness= --model= --name= --no-input --one-time --path= --permission-profile= --provider= --reasoning-effort= --restart", { "create": node(), "update": node(), "cleanup": node(), "retire": node() }),
   "watch": node("--as= --channel= --context-root= --conversation= --limit= --once --since="),
