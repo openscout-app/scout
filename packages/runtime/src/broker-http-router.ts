@@ -1,3 +1,4 @@
+import { HostLaunchDeferred } from "./host-launch-admission.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { RoleSlotError } from "./role-slots-store.js";
 import { RolePassError } from "./role-pass-scheduler.js";
@@ -183,6 +184,7 @@ import { normalizeConversationTitle } from "./conversation-title.js";
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
   else if (error instanceof ProvenRequestFailure) json(response, 409, { error: error.code, detail: error.message, evidence: error.evidence });
+  else if (error instanceof HostLaunchDeferred) json(response, 503, { error: error.code, retryable: true, retryAt: error.retryAt, detail: error.message });
   else if (error instanceof BrokerBusyError) json(response, 503, { error: error.code, retryable: true, detail: error.message });
   else writeBadRequest(response, error);
 }

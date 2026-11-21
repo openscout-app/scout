@@ -87,6 +87,7 @@ function createService(input: {
   const logs: string[] = [];
   const warnings: string[] = [];
   const service = new BrokerDispatchRecoveryService({
+    random: () => 0,
     runtimeSnapshot: () => ({ flights: input.flights }),
     dispatchJobs: () => input.dispatchJobs ?? [],
     dispatchJobForInvocation: (invocationId) => (input.allDispatchJobs ?? input.dispatchJobs ?? [])

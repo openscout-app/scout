@@ -1,3 +1,4 @@
+import { macHostLaunchAdmission } from "./host-launch-admission.js";
 import { receiveTransportLiveness } from "./local-endpoint-liveness.js";
 import { hasExplicitCompletion } from "@openscout/protocol";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
@@ -5049,10 +5050,12 @@ export async function restartLocalAgent(
   agentId: string,
   options: { previousSessionId?: string | null } = {},
 ): Promise<LocalAgentRecord | null> {
-  const registry = await readLocalAgentRegistry();
-  const record = registry[agentId];
-  if (!record) {
-    return null;
+  let record = (await readLocalAgentRegistry())[agentId];
+  if (!record) return null;
+  if (macHostLaunchAdmission) {
+    await macHostLaunchAdmission.wait(() => true, async reason => { console.warn(`Waiting to restart ${agentId}: ${reason}.`); });
+    record = (await readLocalAgentRegistry())[agentId];
+    if (!record) return null;
   }
 
   const normalizedRecord = normalizeLocalAgentRecord(agentId, record);
@@ -5572,6 +5575,7 @@ export async function startLocalAgent(input: StartLocalAgentInput): Promise<Scou
   }
 
   let deferWarmupToInvocation = false;
+  let alreadyOnline = false;
   if (shouldEnsureOnline) {
     const currentOverride = (await readRelayAgentOverrides())[targetAgentId];
     if (currentOverride) {
@@ -5583,10 +5587,14 @@ export async function startLocalAgent(input: StartLocalAgentInput): Promise<Scou
       // not keep a foreground CLI process alive as the session host; let the
       // broker-owned invocation path start the adapter on first work instead.
       deferWarmupToInvocation = currentRecord.transport === "pi_rpc";
+      alreadyOnline = isLocalAgentRecordOnline(targetAgentId, currentRecord);
     }
   }
 
   if (shouldEnsureOnline && !deferWarmupToInvocation) {
+    if (!alreadyOnline && macHostLaunchAdmission) {
+      await macHostLaunchAdmission.wait(() => true, async reason => { console.warn(`Waiting to start ${targetAgentId}: ${reason}.`); });
+    }
     await ensureLocalAgentBindingOnline(targetAgentId, process.env.OPENSCOUT_NODE_ID ?? "local", {
       includeDiscovered: false,
       currentDirectory,

@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HostLaunchAdmission, type HostPressure } from "./host-launch-admission.js";
+import { BrokerA2AService } from "./broker-a2a-service.js";
+import { BrokerDispatchRecoveryService, deferredDispatchCheckedAt } from "./broker-dispatch-recovery-service.js";
 import { registerSecretValue } from "@openscout/agent-sessions/secret-redaction";
 import { CodexAppServerControlError } from "@openscout/agent-sessions/local";
 
@@ -155,6 +161,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 function createHarness(input: {
+  launchAdmission?: HostLaunchAdmission;
   pendingTaskFollowups?: (invocationId: string) => Promise<MessageRecord[]>;
   failOnHistoryScan?: boolean;
   endpoint?: AgentEndpoint;
@@ -248,6 +255,7 @@ function createHarness(input: {
     },
   });
   const service = new BrokerLocalInvocationService({
+    launchAdmission: input.launchAdmission,
     pendingTaskFollowups: input.pendingTaskFollowups,
     nodeId: "node-1",
     runtime: {
@@ -374,6 +382,88 @@ function createHarness(input: {
 }
 
 describe("BrokerLocalInvocationService", () => {
+  test("pressure parks durable work, accepts cancellation, and paces the remaining local launches", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "scout-launch-test-"));
+    let time = 10_000;
+    let level: HostPressure = "critical";
+    let sleepers: Array<() => void> = [];
+    const path = join(dir, "budget.sqlite");
+    const options = { path, now: () => time, pressure: async () => level,
+      sleep: (ms: number) => new Promise<void>(resolve => sleepers.push(() => { time += ms; resolve(); })),
+    };
+    const gate = new HostLaunchAdmission(options);
+    const otherBroker = new HostLaunchAdmission(options);
+    const started: Array<{ id: string; at: number }> = [];
+    const endpoint = testEndpoint({ transport: "claude_stream_json", harness: "claude" });
+    const harness = createHarness({ launchAdmission: gate, endpoint,
+      resolveEndpoint: async request => ({ ...endpoint, id: "endpoint-" + request.id }),
+      invokeEndpoint: async (_endpoint, request) => {
+        started.push({ id: request.id, at: time });
+        return { output: "done" };
+      },
+    });
+    const requests = ["one", "cancel", "two"].map(id => testInvocation({ id }));
+    const flights = () => Object.fromEntries(requests.map(({ id }) => [id, harness.flightForInvocation(id)!]));
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    const a2a = new BrokerA2AService({
+      nodeId: "node-1", brokerUrl: "http://localhost", knownInvocations: new Map(requests.map(r => [r.id, r])),
+      runtime: { agent: id => runtime.agent(id), snapshot: () => ({ ...runtime.snapshot(), flights: flights() }) },
+      activeInvocationTasks: { has: id => harness.service.hasExecutingInvocation(id) },
+      acceptInvocation: async () => { throw new Error("unexpected accept"); },
+      dispatchInvocation: async () => { throw new Error("unexpected dispatch"); },
+      recordFlight: async flight => { harness.seedFlight(flight); },
+      createId: () => "unused", loadRegisteredLocalAgentBindings: async () => [],
+    });
+    try {
+      for (const request of requests) {
+        harness.seedFlight(testFlight({ id: request.id, invocationId: request.id,
+          metadata: { dispatchOutcome: { status: "not_submitted", checkedAt: time } } }));
+      }
+      harness.service.launch(requests[0]!); // A new request arrives beside a restart backlog.
+      const stale = testFlight({ id: "old", invocationId: "past", metadata: {
+        dispatchOutcome: { status: "not_submitted", checkedAt: time },
+      } });
+      const current = testFlight({ id: "finished", invocationId: "past", state: "completed" });
+      const recovery = new BrokerDispatchRecoveryService({
+        runtimeSnapshot: () => ({ flights: { ...flights(), old: stale, finished: current } }),
+        dispatchJobs: () => [{ id: "old-job", invocationId: "past", flightId: "old", targetAgentId: "agent-1",
+          state: "completed", attempts: 1, createdAt: 1, updatedAt: 1 }],
+        invocationFor: id => requests.find(request => request.id === id) ?? testInvocation({ id }),
+        currentFlightForInvocation: id => id === "past" ? current : harness.flightForInvocation(id),
+        isInvocationActive: id => harness.service.hasActiveInvocation(id),
+        settleSupersededFlight: async () => { stale.state = "cancelled"; return true; },
+        requeueDispatchJob: async () => { throw new Error("requeued superseded work"); },
+        runDispatchJob: async () => { throw new Error("launched superseded work"); },
+        dispatchAcceptedInvocation: async request => { harness.service.launch(request); },
+        now: () => time,
+      });
+      expect(await recovery.recoverQueuedFlights({ reason: "startup" })).toMatchObject({ settled: 1, failed: 0 });
+      await waitFor(() => requests.every(({id}) => harness.flightForInvocation(id)?.state === "queued"));
+      expect(started).toEqual([]);
+      expect(harness.persistedEndpoints).toHaveLength(0);
+      expect(deferredDispatchCheckedAt(harness.flightForInvocation("one"))).toBeGreaterThan(time);
+      const reply = await a2a.handleJsonRpc({ jsonrpc: "2.0", id: 1, method: "tasks/cancel", params: { id: "cancel" } }, "http://localhost");
+      expect(reply.error).toBeUndefined();
+      expect(harness.flightForInvocation("cancel")?.state).toBe("cancelled");
+      level = "normal";
+      for (let tickCount = 0; tickCount < 65 && started.length < 2; tickCount++) {
+        await waitFor(() => sleepers.length > 0 || started.length === 2);
+        const pending = sleepers; sleepers = [];
+        pending.forEach(wake => wake());
+        await tick();
+      }
+      await Promise.all(harness.activeInvocationTasks.values());
+      expect(started.map(start => start.id)).toEqual(["one", "two"]);
+      expect(started[0]!.at).toBeGreaterThanOrEqual(40_000);
+      expect(started[1]!.at - started[0]!.at).toBeGreaterThanOrEqual(10_000);
+      await expect(otherBroker.reserve()).rejects.toThrow("another local worker");
+      expect(harness.persistedFlights.filter(f => f.state === "queued")).toHaveLength(3);
+    } finally {
+      gate.close(); otherBroker.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("queues when no runnable endpoint is available", async () => {
     const harness = createHarness({ endpoint: undefined, now: 11_000 });
 

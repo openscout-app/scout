@@ -1,3 +1,5 @@
+import type { HostLaunchAdmission } from "./host-launch-admission.js";
+import { deferredDispatchCheckedAt } from "./broker-dispatch-recovery-service.js";
 import { withManagedPermissionContext } from "./managed-permission.js";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
 import { isCodexAppServerControlError } from "@openscout/agent-sessions/local";
@@ -81,7 +83,7 @@ type LocalInvocationEndpointResolver = {
     harness?: AgentEndpoint["harness"],
     targetSessionId?: string,
   ): AgentEndpoint | undefined;
-  resolveLocalEndpointForInvocation(invocation: InvocationRequest): Promise<AgentEndpoint | undefined>;
+  resolveLocalEndpointForInvocation(invocation: InvocationRequest, admitLaunch?: () => Promise<boolean>): Promise<AgentEndpoint | undefined>;
   prepareLocalEndpointForInvocation(endpoint: AgentEndpoint): Promise<AgentEndpoint>;
 };
 
@@ -183,6 +185,7 @@ export type BrokerLocalInvocationServiceOptions = {
   runtime: LocalInvocationRuntime;
   endpointResolver: LocalInvocationEndpointResolver;
   activeInvocationTasks: Map<string, Promise<void>>;
+  launchAdmission?: Pick<HostLaunchAdmission, "wait">;
   /** Physical transport liveness, independent of the most recent turn result. */
   isLocalAgentEndpointAlive?: (endpoint: AgentEndpoint) => boolean;
   /**
@@ -196,6 +199,7 @@ export type BrokerLocalInvocationServiceOptions = {
   transitionInvocation: (
     invocationId: string,
     patch: InvocationStatusPatch,
+    eligible?: () => boolean,
   ) => Promise<FlightRecord>;
   persistEndpoint: (endpoint: AgentEndpoint) => Promise<void>;
   /** Durable metadata write that must not trigger queued dispatch recovery. */
@@ -236,6 +240,7 @@ export type BrokerLocalInvocationServiceOptions = {
 };
 
 export class BrokerLocalInvocationService {
+  readonly #waitingToLaunch = new Set<string>();
   readonly #activeEndpointTasks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: BrokerLocalInvocationServiceOptions) {}
@@ -256,6 +261,42 @@ export class BrokerLocalInvocationService {
 
   hasActiveInvocation(invocationId: string): boolean {
     return this.options.activeInvocationTasks.has(invocationId);
+  }
+
+  hasExecutingInvocation(invocationId: string): boolean {
+    return this.hasActiveInvocation(invocationId) && !this.#waitingToLaunch.has(invocationId);
+  }
+
+  private waitingFlight(invocationId: string, flightId: string): FlightRecord | undefined {
+    const flight = this.options.runtime.flightForInvocation(invocationId);
+    return flight?.id === flightId && (flight.state === "queued" || flight.state === "waking") ? flight : undefined;
+  }
+
+  private async parkLaunch(invocationId: string, flightId: string, reason: string): Promise<void> {
+    const flight = this.waitingFlight(invocationId, flightId);
+    if (!flight || this.#waitingToLaunch.has(invocationId)) return;
+    this.#waitingToLaunch.add(invocationId);
+    // A retry may already have consumed the prior timestamp. Persist fresh
+    // evidence once for this wait so a broker restart can resume it safely.
+    const checkedAt = Math.max(this.now(), (deferredDispatchCheckedAt(flight) ?? 0) + 1);
+    await this.options.transitionInvocation(invocationId, {
+      state: "queued", summary: `Waiting to start a local worker: ${reason}.`,
+      metadata: { dispatchOutcome: { status: "not_submitted", reason: "host_launch_admission", checkedAt } },
+    }, () => Boolean(this.waitingFlight(invocationId, flightId)));
+  }
+
+  private async admitLaunch(invocationId: string, flightId: string): Promise<boolean> {
+    const flight = this.options.runtime.flightForInvocation(invocationId);
+    if (flight?.id !== flightId || isTerminalFlightState(flight.state)) return false;
+    // An in-place recovery watches for a previous submission's answer.
+    // Preserve its checkpoint and never manufacture new pre-submit evidence.
+    if (!this.options.launchAdmission || !this.waitingFlight(invocationId, flightId)) return true;
+    try {
+      return await this.options.launchAdmission.wait(
+        () => Boolean(this.waitingFlight(invocationId, flightId)),
+        reason => this.parkLaunch(invocationId, flightId, reason),
+      );
+    } finally { this.#waitingToLaunch.delete(invocationId); }
   }
 
   launch(invocation: InvocationRequest): void {
@@ -286,13 +327,23 @@ export class BrokerLocalInvocationService {
       invocationTargetSessionId(invocation),
     );
 
+    const initialFlightId = this.options.runtime.flightForInvocation(invocation.id)?.id;
+    if (!initialFlightId) return;
+    let aborted = false;
+    let admittedAt: number | undefined;
+    const admit = async () => {
+      const admitted = await this.admitLaunch(invocation.id, initialFlightId);
+      if (admitted) admittedAt = this.now();
+      aborted = !admitted;
+      return admitted;
+    };
     try {
-      endpoint = await this.options.endpointResolver.resolveLocalEndpointForInvocation(invocation);
+      endpoint = await this.options.endpointResolver.resolveLocalEndpointForInvocation(invocation, admit);
     } catch (error) {
       await this.handlePreparationError(invocation, target, error);
       return;
     }
-    if (this.currentFlightIsTerminal(invocation.id)) return;
+    if (aborted || this.options.runtime.flightForInvocation(invocation.id)?.id !== initialFlightId || this.currentFlightIsTerminal(invocation.id)) return;
 
     if (!endpoint) {
       await this.executeOnEndpoint(invocation, endpoint, previousEndpoint);
@@ -304,13 +355,24 @@ export class BrokerLocalInvocationService {
     // Fresh isolated endpoints get independent lanes for the same agent.
     const ownerKey = [endpoint.nodeId, endpoint.harness, endpoint.id].join("\u0000");
     const previousTask = this.#activeEndpointTasks.get(ownerKey);
-    const task = (previousTask ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(() => this.executeOnEndpoint(invocation, endpoint, previousEndpoint));
+    const localWorker = endpoint.transport !== "ghostty" && isBrokerRunnableLocalAgentTransport(endpoint.transport);
+    const laneWait = previousTask && localWorker && this.options.launchAdmission
+      ? this.parkLaunch(invocation.id, initialFlightId, "waiting for the preceding turn") : undefined;
+    const task = (laneWait ?? Promise.resolve())
+      .finally(() => previousTask?.catch(() => undefined))
+      .then(async () => {
+        // The resolver may already have reserved a start for a wake. A turn
+        // queued behind another on this endpoint needs a new host decision.
+        if (this.options.runtime.flightForInvocation(invocation.id)?.id !== initialFlightId) return;
+        const freshReservation = admittedAt !== undefined && this.now() - admittedAt < 2_000 && !previousTask;
+        if (!freshReservation && localWorker && !await admit()) return;
+        await this.executeOnEndpoint(invocation, endpoint, previousEndpoint);
+      });
     this.#activeEndpointTasks.set(ownerKey, task);
     try {
       await task;
     } finally {
+      this.#waitingToLaunch.delete(invocation.id);
       if (this.#activeEndpointTasks.get(ownerKey) === task) {
         this.#activeEndpointTasks.delete(ownerKey);
       }
