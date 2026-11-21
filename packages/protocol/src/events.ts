@@ -123,7 +123,7 @@ export type MeshBridgeLifecycleEvent = ControlEventBase<"mesh.bridge.lifecycle",
 }>;
 
 /**
- * A hand-off on a Vercel Board, live. Ephemeral: the custodian's mirror of
+ * A hand-off on a Vercel Board, live. Ephemeral: the connected host's mirror of
  * the board's task events is its record, and a replay derives from it.
  */
 export type VercelBoardHandoffEvent = ControlEventBase<"vercel_board.handoff", {

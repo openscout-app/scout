@@ -66,7 +66,7 @@ function testFlight(input: Partial<FlightRecord> = {}): FlightRecord {
   };
 }
 
-function createStore() {
+function createStore(options: { operatorActorId?: string } = {}) {
   const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
   const appended: BrokerJournalEntry[][] = [];
   const projected: BrokerJournalEntry[][] = [];
@@ -91,6 +91,7 @@ function createStore() {
   const store = new BrokerWorkItemStore({
     runtime,
     durableStore,
+    ...options,
     createId(prefix) {
       id += 1;
       return `${prefix}-${id}`;
@@ -274,6 +275,43 @@ describe("BrokerWorkItemStore", () => {
     }));
     await durableStore.flushProjectedEntries();
     expect(projected[1]).toEqual(appended[1]);
+  });
+
+  test("lands Ready work in review for the operator even when no review was asked for", async () => {
+    const { runtime, appended, store, promote } = createStore({ operatorActorId: "operator" });
+    await store.recordDeliveryWorkItemIfNeeded({
+      payload: testPayload(), requestId: "deliver-1", requesterId: "agent-2",
+      targetAgentId: "agent-1", conversationId: "conversation-1", createdAt: 100,
+    });
+    const ready = { state: "ready", at: 200, summary: "Shipped.", nodeId: "node-1" };
+    await promote(testInvocation({ requesterId: "agent-2" }), testFlight({ requesterId: "agent-2", metadata: { ready } }), "Shipped.");
+
+    expect(runtime.collaborationRecord("work-1")).toEqual(expect.objectContaining({
+      state: "review", acceptanceState: "pending", nextMoveOwnerId: "operator",
+      metadata: expect.objectContaining({ taskReadyPriorAcceptance: "none" }),
+    }));
+    expect(appended[1]?.[1]).toEqual(expect.objectContaining({ event: expect.objectContaining({ kind: "review_requested" }) }));
+  });
+
+  test("lands an open Ready flight's work item in review once", async () => {
+    const { runtime, appended, store } = createStore({ operatorActorId: "operator" });
+    await store.recordDeliveryWorkItemIfNeeded({
+      payload: testPayload(), requestId: "deliver-1", requesterId: "operator",
+      targetAgentId: "agent-1", conversationId: "conversation-1", createdAt: 100,
+    });
+    const flight = testFlight({ state: "waiting", completedAt: undefined, output: undefined,
+      metadata: { ready: { state: "ready", at: 300, summary: "Ready for a look.", nodeId: "node-1" } } });
+    await store.landReadyWorkItem(flight, testInvocation());
+    await store.landReadyWorkItem(flight, testInvocation());
+
+    expect(runtime.collaborationRecord("work-1")).toEqual(expect.objectContaining({
+      state: "review", acceptanceState: "pending", nextMoveOwnerId: "operator", reviewRequestedAt: 300,
+      progress: expect.objectContaining({ summary: "Ready for a look." }),
+    }));
+    expect(appended).toHaveLength(2);
+    expect(appended[1]?.[1]).toEqual(expect.objectContaining({
+      event: expect.objectContaining({ id: "work-ready-flight-1", kind: "review_requested" }),
+    }));
   });
 
   test("completes finished work when no review was asked for", async () => {

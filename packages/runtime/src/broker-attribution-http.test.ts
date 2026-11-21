@@ -119,6 +119,7 @@ test("person registration and operator-only routes require operator proof", asyn
   expect(signed.status).toBe(410);
   expect(signed.body).toMatchObject({ outcome: "ended" });
   expect((await post(h.baseUrl, "/v1/operator-requests/dismiss", { requestId: "missing" })).status).toBe(403);
+  expect((await post(h.baseUrl, "/v1/tasks/ready/decide", { ref: "missing", decision: "hold" })).status).toBe(403);
   expect((await post(h.baseUrl, "/v1/commands", { kind: "message.post", message: {} })).status).toBe(403);
 }, 15_000);
 

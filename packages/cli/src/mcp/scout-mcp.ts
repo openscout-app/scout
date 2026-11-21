@@ -92,6 +92,9 @@ import {
   planScoutBoardTasks,
   reviewScoutWorkMove,
   readScoutWorkLifecycles,
+  readScoutDerivedRecord,
+  writeScoutDerivedRecord,
+  readScoutDerivedPending,
   waitForScoutFlight,
   type ScoutAskByIdResult,
   type ScoutAskResult,
@@ -619,6 +622,9 @@ type ScoutMcpDependencies = {
   retryWorkItem?: typeof retryScoutWorkItem;
   planBoardTasks?: typeof planScoutBoardTasks;
   reviewWorkMove?: typeof reviewScoutWorkMove;
+  readDerivedRecord?: typeof readScoutDerivedRecord;
+  writeDerivedRecord?: typeof writeScoutDerivedRecord;
+  readDerivedPending?: typeof readScoutDerivedPending;
   readWorkLifecycles?: typeof readScoutWorkLifecycles;
   waitForFlight: (
     baseUrl: string,
@@ -3375,6 +3381,7 @@ export const SCOUT_MCP_INSTRUCTIONS = [
   "- Which machines exist, what they hold: `hosts_list` (live; each machine's projects and the exact ask for it). Don't know an agent's name: `agents_search`. Never invent names.",
   "- After an ask: the receipt is proof it was accepted; `invocations_wait` / `invocations_get` follow it, including work running on another machine.",
   "- The operator: `ask` with operator=true for a task, fyi=true for news; notify=true requests a push for news.",
+  "- notify=true on an agent task tells the operator when it is done (Ready). Use it only when the operator is waiting on that work.",
   "- Answer with `reply` by task ref. progress=true updates its work record without closing it; the harness final turn is already an answer.",
   "- When Scout cannot do what you need, say which call failed and how, instead of working around it silently.",
 ].join("\n");
@@ -4521,7 +4528,7 @@ export function createScoutMcpServer(options: {
     "ask",
     {
       title: "Ask",
-      description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
+      description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. On an agent task, notify marks it Ready for the operator when it finishes (they get one ping and Continue or Hold); use it only for work the operator is waiting on. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
       inputSchema: z.object({
         operator: z.boolean().optional(), ref: z.string().min(1).optional(), continue: z.string().min(1).optional(),
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),
@@ -5819,6 +5826,70 @@ export function createScoutMcpServer(options: {
       const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
       const result = await (deps.reviewWorkMove ?? reviewScoutWorkMove)({ workId, moveId, revision, verdict, note, actorId: resolvedSenderId });
       const structuredContent = { senderId: resolvedSenderId, status: result.status, station: result.station ?? null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_read",
+    {
+      title: "Read Scout Derived Record",
+      description:
+        "Read a derived record on a work item: something made from it, such as a presentation. status is current, stale (the item changed since) or missing. currentVersion is the version to pass to derived_write.",
+      inputSchema: z.object({ workId: z.string(), kind: z.string() }),
+      outputSchema: z.object({ status: z.string(), currentVersion: z.string(), record: z.record(z.string(), z.unknown()).nullable() }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workId, kind }) => {
+      const result = await (deps.readDerivedRecord ?? readScoutDerivedRecord)({ workId, kind });
+      const structuredContent = { status: result.status, currentVersion: result.currentVersion, record: (result.record ?? null) as Record<string, unknown> | null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_write",
+    {
+      title: "Write Scout Derived Record",
+      description:
+        "Write a derived record on a work item. Pass the sourceVersion you read; if the item changed since, nothing is written and the answer is stale with the current version. It never changes the item itself.",
+      inputSchema: z.object({
+        currentDirectory: z.string().optional(),
+        senderId: z.string().optional(),
+        workId: z.string(),
+        kind: z.string(),
+        sourceVersion: z.string(),
+        body: z.unknown(),
+        producerVersion: z.string().optional(),
+      }),
+      outputSchema: z.object({ senderId: z.string(), status: z.string(), currentVersion: z.string().nullable() }),
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ currentDirectory, senderId, workId, kind, sourceVersion, body, producerVersion }) => {
+      const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
+      const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const result = await (deps.writeDerivedRecord ?? writeScoutDerivedRecord)({
+        workId, kind, sourceVersion, body, producerId: resolvedSenderId, producerKind: "agent",
+        ...(producerVersion ? { producerVersion } : {}),
+      });
+      const structuredContent = { senderId: resolvedSenderId, status: result.status, currentVersion: result.status === "stale" ? result.currentVersion : null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_pending",
+    {
+      title: "List Pending Scout Derived Records",
+      description:
+        "List open work items whose lifecycle station names a derived record they have no current version of. A producer that pulls work reads this, then calls derived_write.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(1000).optional() }),
+      outputSchema: z.object({ pending: z.array(z.record(z.string(), z.unknown())) }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ limit }) => {
+      const pending = await (deps.readDerivedPending ?? readScoutDerivedPending)(limit);
+      const structuredContent = { pending: pending as unknown as Record<string, unknown>[] };
       return { content: createTextContent(structuredContent), structuredContent };
     },
   );

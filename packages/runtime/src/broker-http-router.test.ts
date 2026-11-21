@@ -2218,3 +2218,44 @@ test("work retry HTTP delegates to the runtime and retains actionable conflict d
   const c = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1" } });
   expect(c.response.status).toBe(200); expect(calls.at(-1)).toEqual({ workId: "work-1" });
 });
+
+describe("derived record routes", () => {
+  test("read, write against a version, refuse a stale write, and list pending", async () => {
+    const { createInMemoryControlRuntime } = await import("./broker.js");
+    const { BrokerDurableStore } = await import("./broker-durable-store.js");
+    const { BrokerDerivedRecordService } = await import("./broker-derived-records.js");
+    const { DEFAULT_WORK_LIFECYCLE, compileWorkLifecycle } = await import("@openscout/protocol");
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    await runtime.upsertCollaboration({
+      id: "work-1", kind: "work_item", title: "Ship", createdById: "operator", ownerId: "agent-1", nextMoveOwnerId: "agent-1", state: "waiting", acceptanceState: "none",
+      createdAt: 1, updatedAt: 5, waitingOn: { kind: "condition", label: "a decision" },
+    } as never);
+    const machine = compileWorkLifecycle({
+      ...DEFAULT_WORK_LIFECYCLE,
+      stations: DEFAULT_WORK_LIFECYCLE.stations.map((s) => s.id === "waiting" ? { ...s, derive: [{ kind: "presentation", instructions: "Pick." }] } : s),
+    });
+    const derivedRecords = new BrokerDerivedRecordService({
+      registry: { forRecord: () => machine },
+      durableStore: new BrokerDurableStore({
+        journal: { async appendEntries(entries) { return entries; } },
+        projection: { async applyEntries() { return []; } },
+        threadEvents: { publish() {} },
+      }),
+      runtime,
+      listWorkItems: () => Object.values(runtime.peek().collaborationRecords) as never,
+      producerActorId: "scout.deriver",
+    });
+    const h = createHarness({ derivedRecords });
+    expect((await requestRouter(h, "GET", "/v1/derived/pending")).body).toEqual({
+      pending: [{ workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r0.u5", status: "missing", dispatchable: false }],
+    });
+    const stale = await requestRouter(h, "POST", "/v1/derived", { body: { workId: "work-1", kind: "presentation", sourceVersion: "r0.u4", body: {} } });
+    expect(stale.body).toEqual({ status: "stale", currentVersion: "r0.u5" });
+    const written = await requestRouter(h, "POST", "/v1/derived", { body: { workId: "work-1", kind: "presentation", sourceVersion: "r0.u5", body: { primary: "a" }, producerId: "agent-1" } });
+    expect(written.body).toMatchObject({ status: "written", record: { body: { primary: "a" } } });
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=presentation")).body).toMatchObject({ status: "current", record: { producer: { id: "agent-1" } } });
+    expect((await requestRouter(h, "GET", "/v1/derived/pending")).body).toEqual({ pending: [] });
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=Bad")).response.status).toBe(400);
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=nope&kind=presentation")).response.status).toBe(404);
+  });
+});

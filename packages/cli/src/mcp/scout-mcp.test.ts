@@ -2848,3 +2848,46 @@ test("work_retry forwards the work id and optional idempotent attempt and return
   await client.callTool({ name: "work_retry", arguments: { workId: "work-1" } });
   expect(calls.at(-1)).toEqual({ workId: "work-1" });
 });
+
+test("derived_read, derived_write and derived_pending go through their broker dependencies", async () => {
+  const calls: Array<[string, unknown]> = [];
+  const { client } = await connectTestServer({
+    resolveSenderId: async () => "agent-curator",
+    readDerivedRecord: async (query) => {
+      calls.push(["read", query]);
+      return { status: "stale", currentVersion: "r3.u200", record: { kind: "presentation", sourceVersion: "r3.u100" } } as never;
+    },
+    writeDerivedRecord: async (request) => {
+      calls.push(["write", request]);
+      return request.sourceVersion === "r3.u200"
+        ? { status: "written", record: { kind: request.kind } } as never
+        : { status: "stale", currentVersion: "r3.u200" };
+    },
+    readDerivedPending: async (limit) => {
+      calls.push(["pending", limit]);
+      return [{ workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r3.u200", status: "stale", dispatchable: true }];
+    },
+  });
+  const names = (await client.listTools()).tools.map((tool) => tool.name);
+  expect(names).toEqual(expect.arrayContaining(["derived_read", "derived_write", "derived_pending"]));
+
+  const read = await client.callTool({ name: "derived_read", arguments: { workId: "work-1", kind: "presentation" } });
+  expect(read.structuredContent).toEqual({ status: "stale", currentVersion: "r3.u200", record: { kind: "presentation", sourceVersion: "r3.u100" } });
+
+  const stale = await client.callTool({ name: "derived_write", arguments: { workId: "work-1", kind: "presentation", sourceVersion: "r3.u100", body: { primary: "shot-1" } } });
+  expect(stale.structuredContent).toEqual({ senderId: "agent-curator", status: "stale", currentVersion: "r3.u200" });
+  const written = await client.callTool({ name: "derived_write", arguments: { workId: "work-1", kind: "presentation", sourceVersion: "r3.u200", body: { primary: "shot-1" }, producerVersion: "curator@2" } });
+  expect(written.structuredContent).toEqual({ senderId: "agent-curator", status: "written", currentVersion: null });
+
+  const pending = await client.callTool({ name: "derived_pending", arguments: { limit: 5 } });
+  expect((pending.structuredContent as { pending: unknown[] }).pending).toEqual([
+    { workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r3.u200", status: "stale", dispatchable: true },
+  ]);
+
+  expect(calls).toEqual([
+    ["read", { workId: "work-1", kind: "presentation" }],
+    ["write", { workId: "work-1", kind: "presentation", sourceVersion: "r3.u100", body: { primary: "shot-1" }, producerId: "agent-curator", producerKind: "agent" }],
+    ["write", { workId: "work-1", kind: "presentation", sourceVersion: "r3.u200", body: { primary: "shot-1" }, producerId: "agent-curator", producerKind: "agent", producerVersion: "curator@2" }],
+    ["pending", 5],
+  ]);
+});

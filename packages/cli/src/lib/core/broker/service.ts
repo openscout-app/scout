@@ -69,6 +69,10 @@ import {
   systemChannelNaturalKey,
 } from "@openscout/protocol";
 import type {
+  DerivedPendingItem,
+  DerivedRead,
+  DerivedWriteRequest,
+  DerivedWriteResponse,
   WorkLifecycleSummary,
   WorkMoveRecord,
   WorkMoveRequest,
@@ -5910,13 +5914,27 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   }
 }
 
-/** The Board planning path: creates Board tasks only. Work items appear when the custodian projects them. */
+/** The Board planning path: creates Board tasks only. Work items appear when the connected runtime projects them. */
 export async function planScoutBoardTasks(input: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
   return brokerPostJson<VercelBoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.vercelBoardPlan, input);
 }
 
 export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {
   return brokerPostJson<WorkReviewResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workReview, input);
+}
+
+export async function readScoutDerivedRecord(input: { workId: string; kind: string }): Promise<DerivedRead> {
+  const query = `?workId=${encodeURIComponent(input.workId)}&kind=${encodeURIComponent(input.kind)}`;
+  return brokerReadJson<DerivedRead>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.derived}${query}`);
+}
+
+export async function writeScoutDerivedRecord(input: DerivedWriteRequest): Promise<DerivedWriteResponse> {
+  return brokerPostJson<DerivedWriteResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.derived, input);
+}
+
+export async function readScoutDerivedPending(limit?: number): Promise<DerivedPendingItem[]> {
+  const query = limit ? `?limit=${limit}` : "";
+  return (await brokerReadJson<{ pending: DerivedPendingItem[] }>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.derivedPending}${query}`)).pending;
 }
 
 export async function readScoutWorkLifecycles(workId?: string): Promise<{
