@@ -2,7 +2,9 @@ import { scoutBrokerPaths, type VercelBoardClaimResponse, type VercelBoardConnec
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { claimedSessionId } from "../../lib/core/broker/sender.ts";
-import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
+import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
+import { resolveBrokerSocketPathForBaseUrl } from "@openscout/runtime/broker-process-manager";
+import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
 
 export const VERCEL_BOARD_HELP = [
   "scout integration connect vercel-board --team <team ID or slug> [--board scout|General] --credential secret_cli:<entry>|env:<NAME>|file:<absolute path>",
@@ -175,18 +177,31 @@ function formatStatus(status: VercelBoardConnectionStatus): string {
   ].join("\n");
 }
 
+/** Reach the runtime through the shared broker transport: the local socket
+ * first, so an https LAN broker URL with a self-signed certificate still works. */
+export async function requestVercelBoard(context: Pick<ScoutCommandContext, "env">, request: Parsed): Promise<Record<string, any>> {
+  const baseUrl = context.env.OPENSCOUT_BROKER_URL?.trim() || resolveBrokerControlUrl();
+  const socketPath = context.env.OPENSCOUT_BROKER_SOCKET_PATH?.trim() || resolveBrokerSocketPathForBaseUrl(baseUrl);
+  try {
+    return await requestScoutBrokerJson<Record<string, any>>(baseUrl, request.path, {
+      method: request.method, socketPath,
+      ...(request.body ? { body: request.body } : {}),
+      signal: AbortSignal.timeout(request.kind === "connect" ? 90_000 : 30_000),
+    }) ?? {};
+  } catch (error) {
+    if (!(error instanceof ScoutBrokerHttpError)) {
+      throw new ScoutCliError(`Could not reach the Scout broker at ${baseUrl}${socketPath ? ` or ${socketPath}` : ""}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let payload: Record<string, any> = {};
+    try { payload = JSON.parse(error.body) ?? {}; } catch {}
+    throw new ScoutCliError([payload.message ?? payload.error ?? `Broker returned HTTP ${error.status}`, ...(payload.fix ? [`Fix: ${payload.fix}`] : [])].join("\n"));
+  }
+}
+
 export async function runVercelBoardCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
   if (!args.length || args.some(arg => ["--help", "-h", "help"].includes(arg))) { context.output.writeText(VERCEL_BOARD_HELP); return; }
   const request = parseVercelBoardCommand(args, context.env);
-  const response = await fetch(new URL(request.path, resolveScoutBrokerUrl()), {
-    method: request.method, headers: { "content-type": "application/json" },
-    ...(request.body ? { body: JSON.stringify(request.body) } : {}),
-    signal: AbortSignal.timeout(request.kind === "connect" ? 90_000 : 30_000),
-  });
-  const payload = await response.json().catch(() => ({})) as Record<string, any>;
-  if (!response.ok) {
-    throw new ScoutCliError([payload.message ?? payload.error ?? `Broker returned HTTP ${response.status}`, ...(payload.fix ? [`Fix: ${payload.fix}`] : [])].join("\n"));
-  }
+  const payload = await requestVercelBoard(context, request);
   if (request.kind === "status") {
     const connections = (payload.connections ?? []) as VercelBoardConnectionStatus[];
     context.output.writeValue(payload, () => connections.length ? connections.map(formatStatus).join("\n\n") : "No Vercel Board connections. Run: scout integration vercel-board --help");

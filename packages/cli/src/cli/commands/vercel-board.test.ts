@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createScoutCommandContext } from "../context.ts";
 import { VERCEL_BOARD_VERBS } from "./integration.ts";
-import { parseVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
+import { parseVercelBoardCommand, runVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
 
 test("connect names a team board by team and board, and the credential by reference", () => {
   const parsed = parseVercelBoardCommand(["connect", "--team", "team_abc", "--board", "scout", "--credential", "secret_cli:scout-vercel"]);
@@ -49,4 +53,37 @@ test("the integration command dispatches every verb the Board help names", () =>
   const named = [...VERCEL_BOARD_HELP.matchAll(/^scout integration (\w+) vercel-board/gm)].map(match => match[1]);
   expect(named).toContain("role");
   expect(named.filter(verb => !VERCEL_BOARD_VERBS.has(verb))).toEqual([]);
+});
+
+async function withBrokerSocket(handler: (request: Request) => Response | Promise<Response>, run: (env: NodeJS.ProcessEnv, output: string[]) => Promise<void>) {
+  const dir = mkdtempSync(join(tmpdir(), "vb-cli-"));
+  const socket = join(dir, "broker.sock");
+  const server = Bun.serve({ unix: socket, fetch: handler });
+  const output: string[] = [];
+  // The https LAN address is unreachable here: only the socket can answer.
+  const env = { OPENSCOUT_BROKER_URL: "https://192.0.2.1:9", OPENSCOUT_BROKER_SOCKET_PATH: socket, OPENSCOUT_AGENT: "agent-b" };
+  try { await run(env, output); } finally { server.stop(true); rmSync(dir, { recursive: true, force: true }); }
+}
+
+test("commands reach the runtime over the broker socket when the broker URL is https", async () => {
+  const seen: unknown[] = [];
+  await withBrokerSocket(async request => {
+    seen.push({ method: request.method, path: new URL(request.url).pathname, body: await request.json() });
+    return Response.json({ declared: [{ agentId: "agent-b", role: "builder" }] });
+  }, async (env, output) => {
+    await runVercelBoardCommand(createScoutCommandContext({ env, outputMode: "plain", stdout: line => output.push(line) }), ["role", "--connection", "c1", "--role", "builder"]);
+    expect(output.join("\n")).toBe("agent-b: builder");
+  });
+  expect(seen).toEqual([{ method: "POST", path: "/v1/integrations/vercel-board/roles", body: { connectionId: "c1", role: "builder", agentId: "agent-b", actorId: "agent-b" } }]);
+});
+
+test("broker errors keep the runtime's message and fix", async () => {
+  await withBrokerSocket(() => Response.json({ error: "unknown_connection", message: "No Vercel Board connection c1.", fix: "Run: scout integration status vercel-board" }, { status: 404 }), async env => {
+    const context = createScoutCommandContext({ env, outputMode: "plain", stdout: () => {} });
+    await expect(runVercelBoardCommand(context, ["status", "--connection", "c1"])).rejects.toThrow("No Vercel Board connection c1.\nFix: Run: scout integration status vercel-board");
+  });
+  await withBrokerSocket(() => new Response("", { status: 502 }), async env => {
+    const context = createScoutCommandContext({ env, outputMode: "plain", stdout: () => {} });
+    await expect(runVercelBoardCommand(context, ["status"])).rejects.toThrow("Broker returned HTTP 502");
+  });
 });
