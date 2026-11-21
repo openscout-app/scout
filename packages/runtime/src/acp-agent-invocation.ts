@@ -1,3 +1,4 @@
+import { warmWorkerContinuation } from "./host-launch-admission.js";
 import {
   createLocalAgentClient,
   type LocalAgentClient,
@@ -89,6 +90,14 @@ export function acpTurnCeilingMs(
 
 const activeAcpSessions = new Map<string, Promise<AcpPoolEntry>>();
 
+/** Only a native idle observation proves this pool entry can accept another turn. */
+export async function hasLiveAcpWorker(poolKey: string): Promise<boolean> {
+  const pending = activeAcpSessions.get(poolKey);
+  if (!pending) return false;
+  const entry = await pending.catch(() => undefined);
+  return activeAcpSessions.get(poolKey) === pending && entry?.client.nativeAttention?.observe().state === "idle";
+}
+
 function harnessForAdapter(adapterType: AcpAgentInvocationOptions["adapterType"]): LocalAgentHarness {
   if (adapterType === "grok-acp") return "grok";
   if (adapterType === "kimi-acp") return "kimi";
@@ -158,6 +167,7 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
   const key = resolvedPoolKey(options);
   const fingerprint = sessionFingerprint(options);
   let detachedNativeSessionId: string | undefined;
+  const continuation = warmWorkerContinuation.getStore();
   const existingPromise = activeAcpSessions.get(key);
   if (existingPromise) {
     const existing = await existingPromise;
@@ -167,14 +177,19 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
       && existing.nativeSessionId
       && requestedNativeId !== existing.nativeSessionId,
     );
-    if (existing.fingerprint === fingerprint && !nativeIdConflict && existing.client.isAlive?.() !== false) {
+    const live = continuation?.endpointId === key
+      ? existing.client.nativeAttention?.observe().state === "idle" : existing.client.isAlive?.() !== false;
+    if (existing.fingerprint === fingerprint && !nativeIdConflict && live) {
       return existing;
     }
+    if (continuation?.endpointId === key) await continuation.reserve();
     detachedNativeSessionId = existing.nativeSessionId;
     if (activeAcpSessions.get(key) === existingPromise) {
       activeAcpSessions.delete(key);
     }
     await closeEntry(existingPromise);
+  } else if (continuation?.endpointId === key) {
+    await continuation.reserve();
   }
 
   const createdPromise = createPoolEntry({

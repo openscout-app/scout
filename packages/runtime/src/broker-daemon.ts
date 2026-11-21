@@ -210,6 +210,7 @@ import {
   subscribeObservedSessionReducer,
 } from "./observed-session-reducer.js";
 import { replacePersistedActiveObservedSessionSeeds, tailMemoryStats } from "./tail/service.js";
+import { macHostLaunchAdmission } from "./host-launch-admission.js";
 import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
@@ -1265,13 +1266,13 @@ const a2aService = new BrokerA2AService({
   brokerUrl,
   runtime,
   knownInvocations,
-  activeInvocationTasks,
+  activeInvocationTasks: { has: id => localInvocationService.hasExecutingInvocation(id) },
   createId: createRuntimeId,
   acceptInvocation: acceptInvocationDurably,
   dispatchInvocation: dispatchAcceptedInvocation,
   recordFlight: recordFlightDurably,
   currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
-  isInvocationActive: isInvocationDispatchActive,
+  isInvocationActive: id => isInvocationDispatchActive(id, false),
   cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   loadRegisteredLocalAgentBindings,
   sleep,
@@ -1757,6 +1758,7 @@ async function persistFlight(flight: FlightRecord, eligible?: () => boolean): Pr
 async function transitionInvocation(
   invocationId: string,
   patch: InvocationStatusPatch,
+  eligible?: () => boolean,
 ): Promise<FlightRecord> {
   const current = runtime.flightForInvocation(invocationId);
   if (!current) {
@@ -1765,7 +1767,7 @@ async function transitionInvocation(
     throw new Error(`cannot transition invocation ${invocationId}: no flight recorded`);
   }
   const next = applyInvocationStatusPatch(current, patch);
-  await recordFlightDurably(next);
+  await recordFlightDurably(next, eligible);
   // Recording can reject a stale patch after another writer completes/cancels
   // the invocation. Never return the uncommitted proposal to a side-effect caller.
   return runtime.flightForInvocation(invocationId)!;
@@ -1810,11 +1812,11 @@ async function expireDeferredDispatch(invocation: InvocationRequest, flight: Fli
 }
 
 /** Any executor holds this invocation: a local launch, an external session, T3, or reply recovery. */
-function isInvocationDispatchActive(invocationId: string): boolean {
+function isInvocationDispatchActive(invocationId: string, includeQueuedLaunch = true): boolean {
   return flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
     || replyCompletionRecovery.isPending(invocationId)
-    || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
-    || t3Service.hasPendingInvocation(invocationId);
+    || (includeQueuedLaunch ? localInvocationService.hasActiveInvocation(invocationId) : localInvocationService.hasExecutingInvocation(invocationId))
+    || externalSessionService.hasPendingInvocation(invocationId) || t3Service.hasPendingInvocation(invocationId);
 }
 
 /**
@@ -2276,7 +2278,10 @@ const managedSessionHttpService = new BrokerManagedSessionHttpService({
   detachManagedPairingSession: (input) => managedSessionService.detachManagedPairingSession(input),
   attachManagedLocalSession: (input) => managedSessionService.attachManagedLocalSession(input),
   detachManagedLocalSession: (input) => managedSessionService.detachManagedLocalSession(input),
-  ensureLocalSessionEndpointOnline,
+  ensureLocalSessionEndpointOnline: async endpoint => {
+    if (!isLocalAgentEndpointAlive(endpoint)) await macHostLaunchAdmission?.reserve();
+    return ensureLocalSessionEndpointOnline(endpoint);
+  },
   persistEndpoint,
 });
 
@@ -2573,6 +2578,7 @@ function recoverInvocationResultReplies(): void {
 }
 
 const localInvocationService = new BrokerLocalInvocationService({
+  launchAdmission: macHostLaunchAdmission,
   pendingTaskFollowups: id => journal.pendingTaskFollowups(id),
   nodeId,
   isLocalAgentEndpointAlive,

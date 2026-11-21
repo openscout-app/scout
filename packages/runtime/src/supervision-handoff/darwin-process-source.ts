@@ -12,8 +12,9 @@ export interface DarwinProcessSource {
 // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h
 export const BSD_INFO_BYTES = 136;
 export const PID_PATH_BYTES = 4096;
-let source: DarwinProcessSource | undefined;
-export function nativeDarwinProcessSource(): DarwinProcessSource {
+type DarwinHostSource = DarwinProcessSource & { memoryPressureLevel(): number };
+let source: DarwinHostSource | undefined;
+export function nativeDarwinProcessSource(): DarwinHostSource {
   if (source) return source;
   // Optional native capability: Node must import the SDK without resolving Bun.
   const { dlopen, ptr, read } = createRequire(import.meta.url)("bun:ffi") as typeof import("bun:ffi");
@@ -27,6 +28,14 @@ export function nativeDarwinProcessSource(): DarwinProcessSource {
   });
   const errno = () => { const pointer = system.symbols.__error(); return pointer === null ? constants.errno.EIO : read.i32(pointer); };
   source = {
+    memoryPressureLevel() {
+      const name = Buffer.from("kern.memorystatus_vm_pressure_level\0");
+      const value = new Int32Array(1), size = new BigUint64Array([4n]);
+      if (system.symbols.sysctlbyname(ptr(name), ptr(value), ptr(size), null, 0) !== 0 || size[0] !== 4n) {
+        throw new Error("macOS memory pressure is unavailable");
+      }
+      return value[0]!;
+    },
     bootSession() {
       const name = Buffer.from("kern.bootsessionuuid\0"), bytes = Buffer.alloc(64), size = new BigUint64Array([64n]);
       if (system.symbols.sysctlbyname(ptr(name), ptr(bytes), ptr(size), null, 0) !== 0) return "";

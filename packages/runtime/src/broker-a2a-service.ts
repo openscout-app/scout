@@ -45,7 +45,7 @@ export type BrokerA2AServiceOptions = {
   createId: (prefix: string) => string;
   acceptInvocation: (invocation: InvocationRequest) => Promise<FlightRecord>;
   dispatchInvocation: (invocation: InvocationRequest) => Promise<void>;
-  recordFlight: (flight: FlightRecord) => Promise<void>;
+  recordFlight: (flight: FlightRecord, eligible?: () => boolean) => Promise<void>;
   /** The invocation's current flight; another non-terminal flight is a superseded placeholder. */
   currentFlightForInvocation?: (invocationId: string) => FlightRecord | undefined;
   /** Every local executor, not only direct launches: external sessions, T3, reply recovery. */
@@ -547,13 +547,13 @@ export class BrokerA2AService {
         data: { taskId, state },
       });
     }
-    const active = this.options.activeInvocationTasks.has(found.flight.invocationId)
+    const active = () => this.options.activeInvocationTasks.has(found.flight.invocationId)
       || this.options.isInvocationActive?.(found.flight.invocationId) === true;
     // A waking flight is cancellable only with explicit evidence that nothing
     // was submitted: a wake with no not_submitted park may already be typing.
     const notStarted = found.flight.state === "queued"
       || (found.flight.state === "waking" && isSafelyDeferredDispatchFlight(found.flight));
-    if (!notStarted || active) {
+    if (!notStarted || active()) {
       throw Object.assign(new Error(`A2A task ${taskId} is already running and cannot be cancelled by the broker yet.`), {
         code: -32004,
         data: { taskId, state },
@@ -571,7 +571,17 @@ export class BrokerA2AService {
         a2aCancelledAt: completedAt,
       },
     };
-    await this.options.recordFlight(cancelled);
-    return a2aTaskForFlight(cancelled, found.invocation);
+    const currentFlight = () => this.options.currentFlightForInvocation
+      ? this.options.currentFlightForInvocation(found.flight.invocationId)
+      : this.taskById(taskId)?.flight;
+    await this.options.recordFlight(cancelled, () => {
+      const latest = currentFlight();
+      return latest?.id === taskId && latest.state === found.flight.state && !active();
+    });
+    const recorded = currentFlight();
+    if (recorded?.id !== taskId || !isA2ATerminalTaskState(a2aTaskStateFromFlightState(recorded.state))) {
+      throw Object.assign(new Error(`A2A task ${taskId} changed before it could be cancelled.`), { code: -32004, data: { taskId } });
+    }
+    return a2aTaskForFlight(recorded, found.invocation);
   }
 }

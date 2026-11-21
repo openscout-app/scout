@@ -180,7 +180,7 @@ export class BrokerLocalEndpointResolver {
     ));
   }
 
-  async resolveLocalEndpointForInvocation(invocation: InvocationRequest): Promise<AgentEndpoint | undefined> {
+  async resolveLocalEndpointForInvocation(invocation: InvocationRequest, admitLaunch?: () => Promise<boolean>): Promise<AgentEndpoint | undefined> {
     const requestedHarness = invocation.execution?.harness;
     const targetSessionId = invocationTargetSessionId(invocation);
     const sessionPreference = invocation.execution?.session ?? "new";
@@ -205,6 +205,7 @@ export class BrokerLocalEndpointResolver {
       && invocation.ensureAwake
       && this.options.createIsolatedAgentEndpoint
     ) {
+      if (admitLaunch && !await admitLaunch()) return undefined;
       const isolatedEndpoint = await this.options.createIsolatedAgentEndpoint(invocation);
       if (isolatedEndpoint) {
         await this.options.persistEndpoint(isolatedEndpoint);
@@ -293,6 +294,7 @@ export class BrokerLocalEndpointResolver {
             await this.options.persistEndpoint(resumable);
             return resumable;
           }
+          if (isDirectLocalAgentTransport(checked.endpoint.transport) && admitLaunch && !await admitLaunch()) return undefined;
           const revived = await this.reviveExactSessionEndpoint(checked.endpoint);
           if (revived) return revived;
         } catch (error) {
@@ -366,6 +368,7 @@ export class BrokerLocalEndpointResolver {
       );
     }
 
+    if (admitLaunch && !await admitLaunch()) return undefined;
     const binding = await this.options.ensureLocalAgentBindingOnline(invocation.targetAgentId, this.options.nodeId, {
       includeDiscovered: true,
       harness: requestedHarness,

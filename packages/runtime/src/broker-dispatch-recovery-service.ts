@@ -61,6 +61,7 @@ export type BrokerDispatchRecoveryServiceDeps = {
    * otherwise only on a widening backoff. Without it, every pass retries.
    */
   endpointWakeKey?: (agentId: string) => string;
+  random?: () => number;
   log?: (message: string) => void;
   warn?: (message: string) => void;
   now?: () => number;
@@ -167,6 +168,14 @@ export class BrokerDispatchRecoveryService {
     return !wait || now >= wait.retryAt || wait.key !== this.deps.endpointWakeKey(agentId);
   }
 
+  /** Keep the exponential ceiling separate from jitter so a series of short
+   * draws cannot collapse the next retry interval. Registry changes still wake immediately. */
+  #nextRetry(previousMs: number | undefined, now: number): { delayMs: number; retryAt: number } {
+    const delayMs = previousMs ? Math.min(previousMs * 2, ENDPOINT_WAIT_MAX_MS) : ENDPOINT_WAIT_INITIAL_MS;
+    const jitter = Math.floor(delayMs * 0.2 * (this.deps.random ?? Math.random)());
+    return { delayMs, retryAt: now + delayMs - jitter };
+  }
+
   #noteEndpointAttempt(invocationId: string, agentId: string, flight: FlightRecord | undefined, now: number): void {
     if (!this.deps.endpointWakeKey || !flight || !isAwaitingRunnableEndpoint(flight)) {
       this.#endpointWaits.delete(invocationId);
@@ -174,10 +183,8 @@ export class BrokerDispatchRecoveryService {
     }
     const key = this.deps.endpointWakeKey(agentId);
     const previous = this.#endpointWaits.get(invocationId);
-    const delayMs = previous && previous.key === key
-      ? Math.min(previous.delayMs * 2, ENDPOINT_WAIT_MAX_MS)
-      : ENDPOINT_WAIT_INITIAL_MS;
-    this.#endpointWaits.set(invocationId, { flightId: flight.id, key, retryAt: now + delayMs, delayMs });
+    const retry = this.#nextRetry(previous?.key === key ? previous.delayMs : undefined, now);
+    this.#endpointWaits.set(invocationId, { flightId: flight.id, key, ...retry });
   }
 
   /**
@@ -217,13 +224,13 @@ export class BrokerDispatchRecoveryService {
   /** A refused requeue changed nothing; retrying it every pass only burns the sweep. */
   #backOffRefusedRequeue(job: BrokerInvocationDispatchJob, now: number): void {
     const previous = this.#refusedRequeueDelays.get(job.invocationId);
-    const delayMs = previous ? Math.min(previous * 2, ENDPOINT_WAIT_MAX_MS) : ENDPOINT_WAIT_INITIAL_MS;
+    const { delayMs, retryAt } = this.#nextRetry(previous, now);
     this.#refusedRequeueDelays.delete(job.invocationId);
     this.#refusedRequeueDelays.set(job.invocationId, delayMs);
     if (this.#refusedRequeueDelays.size > 4096) this.#refusedRequeueDelays.delete(this.#refusedRequeueDelays.keys().next().value!);
-    this.deferInvocation(job.invocationId, now + delayMs);
+    this.deferInvocation(job.invocationId, retryAt);
     this.deps.warn?.(
-      `[openscout-runtime] dispatch job ${job.id} was not requeued (its job or flight changed); next check in ${Math.round(delayMs / 1000)}s`,
+      `[openscout-runtime] dispatch job ${job.id} was not requeued (its job or flight changed); next check in ${Math.round((retryAt - now) / 1000)}s`,
     );
   }
 
