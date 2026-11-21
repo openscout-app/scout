@@ -1,5 +1,6 @@
 // Worker starts share one budget across brokers belonging to this macOS user.
 // Durable work stays in each broker's journal. This file stores only host timing.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -200,3 +201,8 @@ export class HostLaunchAdmission {
 // Direct warmups and durable dispatch use the same user-wide host budget.
 // Direct callers receive a retryable refusal before a restart can stop its worker.
 export const macHostLaunchAdmission = process.platform === "darwin" ? new HostLaunchAdmission() : undefined;
+
+
+// Bind a reservation to the dispatch that was allowed to reuse a live worker.
+// A transport that loses that worker must spend a start slot before replacing it.
+export const warmWorkerContinuation = new AsyncLocalStorage<{ endpointId: string; reserve: () => Promise<void> }>();

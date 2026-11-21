@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+import { warmWorkerContinuation } from "./host-launch-admission.js";
 import {
   createLocalAgentClient,
   type LocalAgentClient,
@@ -90,17 +90,12 @@ export function acpTurnCeilingMs(
 
 const activeAcpSessions = new Map<string, Promise<AcpPoolEntry>>();
 
-// A continuation can reuse the exact live client without taking a start slot.
-// If identity changes or the client dies after this check, the pool owns the
-// final decision and reserves before replacing anything.
-const warmContinuation = new AsyncLocalStorage<{ poolKey: string; reserve: () => Promise<void> }>();
-export async function withLiveAcpWorker(poolKey: string, reserve: () => Promise<void>, run: () => Promise<void>): Promise<boolean> {
+/** Only a native idle observation proves this pool entry can accept another turn. */
+export async function hasLiveAcpWorker(poolKey: string): Promise<boolean> {
   const pending = activeAcpSessions.get(poolKey);
   if (!pending) return false;
   const entry = await pending.catch(() => undefined);
-  if (activeAcpSessions.get(poolKey) !== pending || entry?.client.nativeAttention?.observe().state !== "idle") return false;
-  await warmContinuation.run({ poolKey, reserve }, run);
-  return true;
+  return activeAcpSessions.get(poolKey) === pending && entry?.client.nativeAttention?.observe().state === "idle";
 }
 
 function harnessForAdapter(adapterType: AcpAgentInvocationOptions["adapterType"]): LocalAgentHarness {
@@ -172,7 +167,7 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
   const key = resolvedPoolKey(options);
   const fingerprint = sessionFingerprint(options);
   let detachedNativeSessionId: string | undefined;
-  const continuation = warmContinuation.getStore();
+  const continuation = warmWorkerContinuation.getStore();
   const existingPromise = activeAcpSessions.get(key);
   if (existingPromise) {
     const existing = await existingPromise;
@@ -182,18 +177,18 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
       && existing.nativeSessionId
       && requestedNativeId !== existing.nativeSessionId,
     );
-    const live = continuation?.poolKey === key
+    const live = continuation?.endpointId === key
       ? existing.client.nativeAttention?.observe().state === "idle" : existing.client.isAlive?.() !== false;
     if (existing.fingerprint === fingerprint && !nativeIdConflict && live) {
       return existing;
     }
-    if (continuation?.poolKey === key) await continuation.reserve();
+    if (continuation?.endpointId === key) await continuation.reserve();
     detachedNativeSessionId = existing.nativeSessionId;
     if (activeAcpSessions.get(key) === existingPromise) {
       activeAcpSessions.delete(key);
     }
     await closeEntry(existingPromise);
-  } else if (continuation?.poolKey === key) {
+  } else if (continuation?.endpointId === key) {
     await continuation.reserve();
   }
 

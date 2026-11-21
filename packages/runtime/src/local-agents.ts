@@ -1,4 +1,5 @@
-import { macHostLaunchAdmission } from "./host-launch-admission.js";
+import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
+import { macHostLaunchAdmission, warmWorkerContinuation } from "./host-launch-admission.js";
 import { receiveTransportLiveness } from "./local-endpoint-liveness.js";
 import { hasExplicitCompletion } from "@openscout/protocol";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
@@ -4804,6 +4805,9 @@ async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentR
   await mkdir(agentRuntimeDir, { recursive: true });
   await mkdir(logsDir, { recursive: true });
 
+  if (isDirectLocalAgentTransport(normalizedRecord.transport)) {
+    await warmWorkerContinuation.getStore()?.reserve();
+  }
   if (normalizedRecord.transport === "codex_app_server") {
     await writeFile(join(agentRuntimeDir, "prompt.txt"), systemPrompt);
     await ensureCodexAppServerAgentOnline(buildCodexAgentSessionOptions(agentName, normalizedRecord, systemPrompt));
@@ -4857,6 +4861,10 @@ async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentR
     invalidateTmuxSessions({ reason: "local-agent.online-recheck" });
     return normalizedRecord;
   }
+
+  // A live tmux continuation can lose its session between dispatch and this
+  // authoritative probe. Reserve before resetting files or creating the pane.
+  await warmWorkerContinuation.getStore()?.reserve();
 
   const initialMessage = buildLocalAgentInitialMessage(projectName, agentName);
   const bootstrapPrompt = buildLocalAgentBootstrapPrompt(normalizeLocalAgentHarness(normalizedRecord.harness), systemPrompt, initialMessage);

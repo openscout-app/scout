@@ -5,11 +5,13 @@ import { join } from "node:path";
 
 import {
   acpTurnCeilingMs,
-  withLiveAcpWorker,
+  hasLiveAcpWorker,
   invokeAcpAgent,
   shutdownAcpAgentSession,
   shutdownAllAcpAgentSessions,
 } from "./acp-agent-invocation.js";
+
+import { warmWorkerContinuation } from "./host-launch-admission.js";
 
 const tempPaths = new Set<string>();
 
@@ -138,7 +140,8 @@ for await (const line of rl) {
     // refusal must precede that close, so the original session stays usable.
     let reservations = 0;
     const refuse = async () => { reservations++; throw new Error("pressure hold"); };
-    await expect(withLiveAcpWorker(common.poolKey, refuse, async () => {
+    expect(await hasLiveAcpWorker(common.poolKey)).toBe(true);
+    await expect(warmWorkerContinuation.run({ endpointId: common.poolKey, reserve: refuse }, async () => {
       await invokeAcpAgent({ ...common, adapterOptions: { ...common.adapterOptions, model: "changed" } });
     })).rejects.toThrow("pressure hold");
     expect(reservations).toBe(1);

@@ -1,5 +1,5 @@
-import { withLiveAcpWorker } from "./acp-agent-invocation.js";
-import { HostLaunchDeferred, type HostLaunchAdmission } from "./host-launch-admission.js";
+import { hasLiveAcpWorker } from "./acp-agent-invocation.js";
+import { warmWorkerContinuation, HostLaunchDeferred, type HostLaunchAdmission } from "./host-launch-admission.js";
 import { deferredDispatchCheckedAt } from "./broker-dispatch-recovery-service.js";
 import { withManagedPermissionContext } from "./managed-permission.js";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
@@ -43,7 +43,7 @@ import {
   type InvocationStatusPatch,
 } from "./broker-local-invocation-helpers.js";
 import { isBrokerRunnableLocalAgentTransport, isDirectLocalAgentTransport } from "./local-agent-transports.js";
-import { isLocalAgentEndpointAlive, SCOUT_MESSAGE_ATTACHMENTS_CONTEXT_KEY } from "./local-agents.js";
+import { isLocalAgentEndpointAlive, isLocalAgentEndpointAliveAsync, SCOUT_MESSAGE_ATTACHMENTS_CONTEXT_KEY } from "./local-agents.js";
 import type { PairingInvocationResult } from "./pairing-session-agents.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 import { isRequesterWaitTimeoutError } from "./requester-timeout.js";
@@ -331,7 +331,7 @@ export class BrokerLocalInvocationService {
     const initial = this.options.runtime.flightForInvocation(invocation.id);
     const outcome = initial?.metadata?.dispatchOutcome;
     const needsReplacement = typeof outcome === "object" && outcome !== null && "reason" in outcome
-      && outcome.reason === "acp_worker_replacement";
+      && outcome.reason === "local_worker_replacement";
     const initialFlightId = initial?.id;
     if (!initialFlightId) return;
     let aborted = false;
@@ -371,12 +371,16 @@ export class BrokerLocalInvocationService {
         if (this.options.runtime.flightForInvocation(invocation.id)?.id !== initialFlightId) return;
         const owner = endpoint!;
         const gate = this.options.launchAdmission;
-        if (gate && !needsReplacement && owner.transport.endsWith("_acp") && await withLiveAcpWorker(owner.id, () => gate.reserve(), async () => {
+        const warm = gate && !needsReplacement && (owner.transport === "tmux"
+          ? await isLocalAgentEndpointAliveAsync(owner)
+          : owner.transport.endsWith("_acp") && await hasLiveAcpWorker(owner.id));
+        if (warm && gate) {
           this.#waitingToLaunch.delete(invocation.id);
-          if (this.options.runtime.flightForInvocation(invocation.id)?.id === initialFlightId) {
-            await this.executeOnEndpoint(invocation, owner, previousEndpoint);
-          }
-        })) return;
+          if (this.options.runtime.flightForInvocation(invocation.id)?.id !== initialFlightId) return;
+          await warmWorkerContinuation.run({ endpointId: owner.id, reserve: () => gate.reserve() },
+            () => this.executeOnEndpoint(invocation, owner, previousEndpoint));
+          return;
+        }
         const freshReservation = admittedAt !== undefined && this.now() - admittedAt < 2_000 && !previousTask;
         if (!freshReservation && localWorker && !await admit()) return;
         await this.executeOnEndpoint(invocation, endpoint, previousEndpoint);
@@ -864,8 +868,8 @@ export class BrokerLocalInvocationService {
     } = input;
     const message = error instanceof Error ? error.message : String(error);
     if (error instanceof HostLaunchDeferred) {
-      // The pool refused a replacement before closing the prior client or
-      // submitting a prompt. Only that pre-effect refusal permits replay.
+      // The transport refused a replacement before starting it or submitting
+      // a prompt. Only that pre-effect refusal permits replay.
       const stillCurrent = () => {
         const flight = this.options.runtime.flightForInvocation(invocation.id);
         return flight?.id === runningFlight.id && flight.state === "running";
@@ -875,7 +879,7 @@ export class BrokerLocalInvocationService {
       this.options.deferInvocationRetry?.(invocation.id, error.retryAt);
       await this.options.transitionInvocation(invocation.id, {
         state: "queued", summary: error.message, metadata: {
-          dispatchOutcome: { status: "not_submitted", reason: "acp_worker_replacement", checkedAt },
+          dispatchOutcome: { status: "not_submitted", reason: "local_worker_replacement", checkedAt },
         },
       }, stillCurrent);
       await this.options.persistEndpointWithoutRecovery({ ...runningEndpoint, state: priorEndpointState });
