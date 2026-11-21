@@ -2900,6 +2900,19 @@ function attachedCodexSandbox(endpoint: AgentEndpoint): CodexSandboxMode | undef
     : undefined;
 }
 
+/**
+ * The Codex thread a launch of this endpoint must resume, or undefined when
+ * the launch may start its own thread (Scoutbot owns its threads). With a
+ * thread id the launch uses requireExistingThread, so it never starts a
+ * different thread in its place.
+ */
+export function codexEndpointResumeThreadId(endpoint: AgentEndpoint): string | undefined {
+  if (endpoint.metadata?.source === "scoutbot") return undefined;
+  return endpointMetadataString(endpoint, "threadId")
+    ?? endpointMetadataString(endpoint, "externalSessionId")
+    ?? undefined;
+}
+
 export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): CodexAppServerSessionOptions & {
   agentName: string;
   sessionId: string;
@@ -2914,11 +2927,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
   const agentName = endpointAgentName(endpoint);
   const runtimeDirectory = relayAgentRuntimeDirectory(agentName);
   const ownsSessionThread = endpoint.metadata?.source === "scoutbot";
-  const threadId = ownsSessionThread
-    ? undefined
-    : endpointMetadataString(endpoint, "threadId")
-      ?? endpointMetadataString(endpoint, "externalSessionId")
-      ?? undefined;
+  const threadId = codexEndpointResumeThreadId(endpoint);
 
   return withScoutReplyContextEnvironment({
     agentName,
