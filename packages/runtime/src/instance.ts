@@ -1067,7 +1067,8 @@ export function prodOpenScoutSupportDirectory(home: string, platform: string, en
 /**
  * The defaults an instance would use with no per-path env overrides. Reads
  * only OPENSCOUT_INSTANCE, OPENSCOUT_INSTANCE_ROOT, OPENSCOUT_INSTANCE_PORT_BASE,
- * OPENSCOUT_INSTANCE_MESH, OPENSCOUT_MESH_ID and XDG_DATA_HOME from `env`, plus
+ * OPENSCOUT_INSTANCE_MESH, OPENSCOUT_INSTANCE_HOST_LABEL, OPENSCOUT_MESH_ID and
+ * XDG_DATA_HOME from `env`, plus
  * (read-only, non-prod only) the instance ledger for the port block and a
  * relocated root. Writes nothing. Throws only when a non-prod instance needs
  * the ledger and it is unreadable.
@@ -1080,7 +1081,11 @@ export function deriveOpenScoutInstanceLayout(options: OpenScoutInstanceLayoutOp
     ? normalizeOpenScoutInstanceName(options.name)
     : resolveOpenScoutInstanceName(env);
   const isProd = isProdOpenScoutInstance(name);
-  const hostLabel = normalizeOpenScoutHostLabel(options.hostname ?? osHostname());
+  const osHostLabel = normalizeOpenScoutHostLabel(options.hostname ?? osHostname());
+  // A non-prod instance may stand in for another host name (films, demos, tests):
+  // it renames the node, its agents and its service, and nothing else.
+  const hostLabelOverride = isProd ? "" : env.OPENSCOUT_INSTANCE_HOST_LABEL?.trim() ?? "";
+  const hostLabel = hostLabelOverride ? normalizeOpenScoutHostLabel(hostLabelOverride) : osHostLabel;
   const ledger = isProd ? undefined : registryView(env, home, name);
   const ports = deriveOpenScoutInstancePorts(name, env, ledger);
   const meshId = env.OPENSCOUT_MESH_ID?.trim() || "openscout";
@@ -1345,6 +1350,7 @@ export const OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS: readonly string[] = [
   "OPENSCOUT_INSTANCE_ROOT",
   "OPENSCOUT_INSTANCE_PORT_BASE",
   "OPENSCOUT_INSTANCE_MESH",
+  "OPENSCOUT_INSTANCE_HOST_LABEL",
   "OPENSCOUT_HOME",
   "OPENSCOUT_CONTROL_HOME",
   "OPENSCOUT_SUPPORT_DIRECTORY",
@@ -1408,6 +1414,7 @@ const OPENSCOUT_SPAWN_MARKER_ENV_KEYS = [
   "OPENSCOUT_INSTANCE_ROOT",
   "OPENSCOUT_INSTANCE_PORT_BASE",
   "OPENSCOUT_INSTANCE_MESH",
+  "OPENSCOUT_INSTANCE_HOST_LABEL",
 ] as const;
 
 /** The spawner's instance, or null (with a warning) when its name is invalid. */

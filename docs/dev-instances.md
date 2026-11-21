@@ -29,6 +29,11 @@ installed ("prod") one. One knob, `OPENSCOUT_INSTANCE`, derives everything;
   ambient ports/URLs; customize it with `OPENSCOUT_INSTANCE_ROOT`,
   `OPENSCOUT_INSTANCE_PORT_BASE`, `OPENSCOUT_INSTANCE_MESH` or its own
   `~/.openscout/instances/<name>/config.json` ports.
+- `OPENSCOUT_INSTANCE_HOST_LABEL=<label>` makes a non-prod instance use
+  `<label>` in place of the host name, so its node is `<label>-<name>`, and
+  its agents and sessions carry that name. It changes nothing else, and prod
+  ignores it. Use it for demos, films and tests that must not show the real
+  host name.
 - `scout instance list` shows claimed instances and port blocks;
   `scout instance release <name> [--purge]` frees one.
 - Target an instance from the CLI with `scout --instance dev …` or
