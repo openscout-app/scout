@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createScoutCommandContext } from "../context.ts";
@@ -133,4 +133,27 @@ test("broker errors keep the runtime's message and fix", async () => {
     const context = createScoutCommandContext({ env, outputMode: "plain", stdout: () => {} });
     await expect(runVercelBoardCommand(context, ["status"])).rejects.toThrow("Broker returned HTTP 502");
   });
+});
+
+test("plan without --post never calls the runtime; with --post it goes over the broker socket", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vb-plan-"));
+  const file = join(dir, "plan.json");
+  writeFileSync(file, PLAN_FILE);
+  const seen: { path: string; body: any }[] = [];
+  try {
+    await withBrokerSocket(async request => {
+      seen.push({ path: new URL(request.url).pathname, body: await request.json() });
+      return Response.json({ connectionId: "c1", channel: "scout/work", conversationId: "room-1", tasks: [{ taskId: "t1", key: "build", state: "ready" }, { taskId: "t2", key: "review", state: "waiting" }] });
+    }, async (env, output) => {
+      const args = ["plan", "--connection", "c1", "--channel", "scout/work", "--file", file];
+      await runVercelBoardCommand(createScoutCommandContext({ env, outputMode: "plain", stdout: line => output.push(line) }), args);
+      expect(seen).toEqual([]);
+      expect(output.join("\n")).toContain("Nothing was written.");
+      output.length = 0;
+      await runVercelBoardCommand(createScoutCommandContext({ env, outputMode: "plain", stdout: line => output.push(line) }), [...args, "--post"]);
+      expect(output.join("\n")).toContain("Posted 2 tasks to scout/work on c1. Room: room-1");
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  expect(seen.map(call => call.path)).toEqual(["/v1/integrations/vercel-board/plan"]);
+  expect(seen[0]!.body).toMatchObject({ connectionId: "c1", channel: "scout/work", planningTaskId: "work-1", actorId: "operator", reportedCallerId: "agent-b" });
 });
