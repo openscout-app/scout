@@ -37,7 +37,7 @@ export function registerSessionSendTool(server: McpServer, deps: SessionSendDepe
   server.registerTool("session_send", {
     title: "Send Into a Live Session",
     description: [
-      "Type text into another harness session where it is running — its Herdr pane, Orca terminal, tmux pane, or terminal tab on this machine — and press Enter.",
+      "Type text into another harness session where it is running — its Herdr pane, Orca terminal, tmux pane, or terminal tab on this machine — and press Enter. A Claude Code session started with the Scout channel (plugin:scout@openscout) is reached through that channel instead, in a plain terminal tab or a background job, without keystrokes.",
       "Address it by the Claude Code or Codex session id (herdr_workspaces reports it per pane), or by the Scout session id for a Scout-managed tmux session.",
       "This is the direct path: nothing is recorded in Scout and no reply is tracked. It never resumes, forks, or starts a session; one that isn't open is reported and nothing is sent. For a tracked request or reply, use ask.",
       "A session waiting on a permission prompt or a question is refused as blocked; the operator answers that first.",

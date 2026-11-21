@@ -265,14 +265,17 @@ async function gatherInPlaceCandidates(
   if (!harness || harness === "codex") {
     pids.push(...await (deps.codexThreadPids ?? codexThreadHolderPids)(sessionId).catch(() => []));
   }
-  // The Scout channel answers only for its own session id, so a reply is
-  // proof of this exact session, whatever process records say.
-  if ((!harness || harness === "claude") && isClaudeChannelSessionId(sessionId)
-    && !ownSessionIds(deps).includes(sessionId)) {
+  // A channel's answer counts only beside Claude's own record of the session:
+  // the record must be live, not Scout's copy, and held by the very process
+  // the channel runs in. A channel left naming a session its process has
+  // moved on from (/clear, /resume), or running in Scout's background copy,
+  // is never taken for the operator's session.
+  if (candidates.claude && isClaudeChannelSessionId(sessionId)
+    && !(deps.ownSessionIds ?? []).includes(sessionId)) {
     const ping = await claudeChannel(deps)({ op: "ping", sessionId }).catch(() => null);
-    candidates.channel = ping?.ok === true;
+    candidates.channel = ping?.ok === true && ping.hostPid === candidates.claude.pid;
   }
-  candidates.held = pids.length > 0 || candidates.channel;
+  candidates.held = pids.length > 0;
   for (const pid of pids) {
     const location = await (deps.locateProcess ?? locateProcessHost)(pid).catch(() => null);
     if (location?.host === "herdr" && !candidates.herdr) {
@@ -719,19 +722,6 @@ async function deliverToClaudeChannel(
 
 function claudeChannel(deps: DeliverInPlaceDeps): NonNullable<DeliverInPlaceDeps["askClaudeChannel"]> {
   return deps.askClaudeChannel ?? ((request) => askClaudeChannel(request));
-}
-
-/**
- * Sessions the caller itself runs as. Its own channel is never a target: the
- * words would come back to the sender as a new message.
- */
-function ownSessionIds(deps: DeliverInPlaceDeps): string[] {
-  const env = process.env;
-  return [
-    ...(deps.ownSessionIds ?? []),
-    env.CLAUDE_CODE_SESSION_ID,
-    env.CLAUDE_SESSION_ID,
-  ].map((id) => id?.trim() ?? "").filter(Boolean);
 }
 
 async function promptHerdrCandidate(

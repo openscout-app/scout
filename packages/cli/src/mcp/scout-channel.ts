@@ -25,7 +25,12 @@ import {
   type InboxItem,
   type MessageRecord,
 } from "@openscout/protocol";
-import { serveClaudeChannelSocket, type ClaudeChannelSocketServer } from "@openscout/runtime/in-place";
+import {
+  findClaudeChannelHost,
+  serveClaudeChannelSocket,
+  type ClaudeChannelHost,
+  type ClaudeChannelSocketServer,
+} from "@openscout/runtime/in-place";
 import { waitForStdioServerClosure } from "./stdio-server-lifecycle.ts";
 
 type InboxStreamEvent = {
@@ -213,49 +218,86 @@ async function nackInboxItem(
   await postBrokerJson(broker, "/v1/inbox/nack", input);
 }
 
-/** The Claude Code session this channel runs in, when Claude Code says which. */
-export function scoutChannelSessionId(env: NodeJS.ProcessEnv = process.env): string | null {
-  return env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim() || null;
-}
+const SESSION_SOCKET_RESYNC_MS = 5_000;
 
 /**
  * Words sent to this exact session (`scout session send`, MCP session_send, or
- * an ask routed to the session) arrive on the session's own socket, not the
- * agent inbox that every session in the project shares.
+ * an ask routed to the session) arrive on a socket named by the session, not
+ * the agent inbox that every session in the project shares.
+ *
+ * The socket follows the Claude process this channel runs in: it serves only
+ * while that process was started with a Scout channel loaded (Claude Code
+ * drops channel notifications otherwise and never says so), it moves when the
+ * process's session changes (/clear, /resume), and it is tried again while
+ * another listener holds the path.
  */
-async function startSessionSocket(input: {
-  server: Server;
-  sessionId: string;
+export function startSessionSocketBinding(input: {
+  server: Pick<Server, "notification">;
   env: NodeJS.ProcessEnv;
   signal: AbortSignal;
-}): Promise<void> {
-  let socket: ClaudeChannelSocketServer;
-  try {
-    socket = await serveClaudeChannelSocket({
-      sessionId: input.sessionId,
-      env: input.env,
-      deliver: async (body) => {
-        try {
-          await input.server.notification({
-            method: "notifications/claude/channel",
-            params: { content: body, meta: { delivery: "session", session_id: input.sessionId } },
-          });
-          return true;
-        } catch {
-          return false;
-        }
-      },
-    });
-  } catch (error) {
-    // The inbox path still works; only exact-session delivery is unavailable.
-    process.stderr.write(`scout channel: session socket not started: ${error instanceof Error ? error.message : String(error)}\n`);
-    return;
-  }
-  if (input.signal.aborted) {
-    await socket.close();
-    return;
-  }
-  input.signal.addEventListener("abort", () => void socket.close(), { once: true });
+  findHost?: (env: NodeJS.ProcessEnv) => Promise<ClaudeChannelHost | null>;
+  serve?: typeof serveClaudeChannelSocket;
+  log?: (line: string) => void;
+  intervalMs?: number;
+}): { sync: () => Promise<void>; current: () => ClaudeChannelSocketServer | null } {
+  const findHost = input.findHost ?? ((env) => findClaudeChannelHost(env));
+  const serve = input.serve ?? serveClaudeChannelSocket;
+  const log = input.log ?? ((line: string) => { process.stderr.write(`scout channel: ${line}\n`); });
+  let socket: ClaudeChannelSocketServer | null = null;
+  let lastNote = "";
+  let running: Promise<void> | null = null;
+  const note = (line: string) => {
+    if (line !== lastNote) log(line);
+    lastNote = line;
+  };
+
+  const deliver = (sessionId: string) => async (body: string) => {
+    try {
+      await input.server.notification({
+        method: "notifications/claude/channel",
+        params: { content: body, meta: { delivery: "session", session_id: sessionId } },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const once = async () => {
+    if (input.signal.aborted) return;
+    const host = await findHost(input.env).catch(() => null);
+    const wanted = host?.channelLoaded ? host : null;
+    if (socket && socket.sessionId === wanted?.sessionId) return;
+    if (socket) {
+      await socket.close();
+      socket = null;
+    }
+    // No Claude above, or one started without the channel: the ordinary
+    // case outside a channel session, and nothing to report.
+    if (!wanted) return;
+    try {
+      const opened = await serve({ sessionId: wanted.sessionId, hostPid: wanted.pid, env: input.env, deliver: deliver(wanted.sessionId) });
+      if (input.signal.aborted) return void await opened.close();
+      socket = opened;
+      lastNote = "";
+    } catch (error) {
+      // The inbox path still works; exact-session delivery waits for the next try.
+      note(`session socket not started: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  const sync = () => {
+    running ??= once().finally(() => { running = null; });
+    return running;
+  };
+
+  void sync();
+  const interval = setInterval(() => void sync(), input.intervalMs ?? SESSION_SOCKET_RESYNC_MS);
+  interval.unref?.();
+  input.signal.addEventListener("abort", () => {
+    clearInterval(interval);
+    void (running ?? Promise.resolve()).finally(() => socket?.close());
+  }, { once: true });
+  return { sync, current: () => socket };
 }
 
 function scoutChannelEndpointId(agentId: string): string {
@@ -267,6 +309,7 @@ function buildScoutChannelEndpoint(input: {
   agentId: string;
   currentDirectory: string;
   state: AgentEndpoint["state"];
+  env: NodeJS.ProcessEnv;
 }): AgentEndpoint {
   const now = Date.now();
   return {
@@ -276,7 +319,7 @@ function buildScoutChannelEndpoint(input: {
     harness: "claude",
     transport: "claude_channel",
     state: input.state,
-    sessionId: scoutChannelSessionId() ?? String(process.pid),
+    sessionId: input.env.CLAUDE_SESSION_ID ?? input.env.CLAUDE_CODE_SESSION_ID ?? String(process.pid),
     cwd: input.currentDirectory,
     projectRoot: input.currentDirectory,
     metadata: {
@@ -293,6 +336,7 @@ async function upsertScoutChannelEndpoint(input: {
   agentId: string;
   currentDirectory: string;
   state: AgentEndpoint["state"];
+  env: NodeJS.ProcessEnv;
 }): Promise<void> {
   await postBrokerJson(input.broker, "/v1/endpoints", buildScoutChannelEndpoint(input));
 }
@@ -302,6 +346,7 @@ function startScoutChannelHeartbeat(input: {
   agentId: string;
   currentDirectory: string;
   signal: AbortSignal;
+  env: NodeJS.ProcessEnv;
 }): void {
   const heartbeat = async () => {
     if (input.signal.aborted) return;
@@ -505,12 +550,10 @@ export async function runScoutChannelServer(options: {
     agentId,
     currentDirectory,
     signal: abortController.signal,
+    env,
   });
 
-  const sessionId = scoutChannelSessionId(env);
-  if (sessionId) {
-    void startSessionSocket({ server, sessionId, env, signal: abortController.signal });
-  }
+  startSessionSocketBinding({ server, env, signal: abortController.signal });
 
   startBrokerSubscription(
     broker,

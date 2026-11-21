@@ -224,10 +224,10 @@ export async function wakeLocalHarnessSession(
             ok: false,
             reason: "session_live_unbound",
             detail: deps.probeInPlace
-              ? `session ${session.nativeSessionId} is running, but not in Herdr, Orca, tmux or a terminal Scout can type into`
+              ? `session ${session.nativeSessionId} is running, but not in Herdr, Orca, tmux, a terminal Scout can type into, or with the Scout channel`
               : `session ${session.nativeSessionId} is already running without a verified Scout endpoint`,
             remediation: deps.probeInPlace
-              ? "close it so Scout can resume it, open it in Herdr, Orca or tmux, or attach it from where it runs"
+              ? "close it so Scout can resume it, open it in Herdr, Orca or tmux, start Claude with the Scout channel (claude --dangerously-load-development-channels plugin:scout@openscout), or attach it from where it runs"
               : "attach the existing session before retrying its exact continuation",
           };
         }
