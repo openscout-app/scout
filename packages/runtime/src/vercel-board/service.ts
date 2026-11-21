@@ -30,6 +30,15 @@ export class VercelBoardServiceError extends Error {
   }
 }
 
+/** A caller-reported Scout agent or session, for audit only. It never authorizes anything. */
+function checkReportedCallerId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new VercelBoardServiceError(400, "invalid_request", "reportedCallerId must be a single nonempty identity (up to 256 characters).");
+  }
+  return value;
+}
+
 export interface BrokerVercelBoardServiceOptions {
   nodeId: string;
   /** The Scout operator: requester of every Board item, and the only actor who starts a claim in v1. */
@@ -611,11 +620,7 @@ export class BrokerVercelBoardService {
     if (request.actorId !== this.options.operatorId) {
       throw new VercelBoardServiceError(403, "operator_required", "In v1 only the operator starts a Board claim.");
     }
-    const reportedCallerId = request.reportedCallerId;
-    if (reportedCallerId !== undefined && (typeof reportedCallerId !== "string" || !reportedCallerId.trim()
-      || reportedCallerId.length > 256 || /[\u0000-\u001f\u007f]/.test(reportedCallerId))) {
-      throw new VercelBoardServiceError(400, "invalid_request", "reportedCallerId must be a single nonempty identity (up to 256 characters).");
-    }
+    const reportedCallerId = checkReportedCallerId(request.reportedCallerId);
     const live = this.requireLive(request.connectionId);
     if (typeof request.taskId !== "string" || !request.taskId || typeof request.agentId !== "string" || !request.agentId) {
       throw new VercelBoardServiceError(400, "invalid_request", "taskId and agentId are required.");
@@ -828,6 +833,7 @@ export class BrokerVercelBoardService {
     if (request.actorId !== this.options.operatorId) {
       throw new VercelBoardServiceError(403, "operator_required", "Only the operator submits a plan to Board.");
     }
+    const reportedCallerId = checkReportedCallerId(request.reportedCallerId);
     const live = this.requireLive(request.connectionId);
     if (!live.config.channels.includes(request.channel)) {
       throw new VercelBoardServiceError(400, "channel_not_followed", `Channel ${request.channel} is not followed by connection ${request.connectionId}. Followed: ${live.config.channels.join(", ")}.`);
@@ -855,8 +861,8 @@ export class BrokerVercelBoardService {
       return {
         ...(task.key !== undefined ? { key: task.key } : {}),
         text: task.text,
-        // Each planned task names the Scout task that planned it, and the acting agent.
-        labels: { ...labels, [VERCEL_BOARD_LABELS.plan]: request.planningTaskId.slice(0, 256), ...agentLabel(request.actorId) },
+        // Each planned task names the Scout task that planned it, and the agent that reported submitting it.
+        labels: { ...labels, [VERCEL_BOARD_LABELS.plan]: request.planningTaskId.slice(0, 256), ...agentLabel(reportedCallerId ?? request.actorId) },
         ...(task.needs?.length ? { needs: task.needs } : {}),
         ...(task.for ? { for: this.forActor(live, task.for, index) } : {}),
       };

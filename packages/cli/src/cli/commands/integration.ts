@@ -151,7 +151,7 @@ export function parseIntegrationCommand(args: string[], cwd: string, env = proce
   throw new ScoutCliError("Unknown integration command. Use scout integration --help.");
 }
 
-export const VERCEL_BOARD_VERBS = new Set(["connect", "status", "claim", "promote", "role", "messages", "handoffs"]);
+export const VERCEL_BOARD_VERBS = new Set(["connect", "status", "claim", "promote", "plan", "role", "messages", "handoffs"]);
 
 export async function runIntegrationCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
   if (args[0] === "vercel-board") { context.output.writeText(VERCEL_BOARD_HELP); return; }

@@ -1,4 +1,6 @@
-import { scoutBrokerPaths, type VercelBoardClaimResponse, type VercelBoardConnectResponse, type VercelBoardConnectionStatus, type VercelBoardCredentialReference, type VercelBoardHandoff, type VercelBoardHandoffsResponse, type VercelBoardMessagesResponse, type VercelBoardPromoteResponse, type VercelBoardRoleResponse } from "@openscout/protocol";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { scoutBrokerPaths, type VercelBoardClaimResponse, type VercelBoardConnectResponse, type VercelBoardConnectionStatus, type VercelBoardCredentialReference, type VercelBoardHandoff, type VercelBoardHandoffsResponse, type VercelBoardMessagesResponse, type VercelBoardPlanRequest, type VercelBoardPlanResponse, type VercelBoardPlanTask, type VercelBoardPromoteResponse, type VercelBoardRoleResponse } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { claimedSessionId } from "../../lib/core/broker/sender.ts";
@@ -14,6 +16,7 @@ export const VERCEL_BOARD_HELP = [
   "scout integration status vercel-board [--connection <id>]",
   "scout integration claim vercel-board --connection <id> --task <board task id> --agent <scout agent id> [--confirm-owner]",
   "scout integration promote vercel-board --connection <id> --task <board task id>",
+  "scout integration plan vercel-board --connection <id> --channel <channel> --file <plan.json> [--planning-task <id>] [--request-id <key>] [--post]",
   "scout integration role vercel-board --connection <id> --role builder|reviewer [--agent <scout agent id>] [--remove]",
   "scout integration messages vercel-board --connection <id> --channel <channel> [--limit 100]",
   "scout integration handoffs vercel-board --connection <id> [--task <board task id>] [--limit 200]",
@@ -41,17 +44,23 @@ export const VERCEL_BOARD_HELP = [
   "A plan's task can be kept for one role. In a --self-serve channel, the runtime claims such a task, once, for an idle",
   "agent that declared the role, when the operator or Scout wrote it. Elsewhere, and after that one claim, the operator claims.",
   "role declares the calling agent's role (or --agent's, as the operator). Agents never claim; the runtime does.",
+  "plan prints the tasks a plan file would write and writes nothing. With --post it writes them. OUTWARD-FACING: --post",
+  "puts each task on the team's board as the operator, and Board's own sync can carry it to Slack or GitHub. There is no undo.",
+  "The file holds { planningTaskId, requestId, tasks: [{ key, text, labels, needs, for }] }, or just the tasks array.",
+  "planningTaskId (or --planning-task) names the Scout task the plan serves. requestId (or --request-id) defaults to a hash",
+  "of the plan, so posting the same plan again returns the same tasks. Use plan for planned work only; ask carries ordinary tasks.",
   "--sync-channels opts followed channels into Board's outbound sync. Every other Scout write stays noSync; enable this",
   "only where Board, not Scout's Slack bridge, owns outbound Slack messages. Completed and failed claims post one reply.",
 ].join("\n");
 
-type Parsed = { method: "GET" | "POST"; path: string; body?: Record<string, unknown>; kind: "connect" | "status" | "claim" | "promote" | "role" | "messages" | "handoffs" };
+type Parsed = { method: "GET" | "POST"; path: string; body?: Record<string, unknown>; kind: "connect" | "status" | "claim" | "promote" | "plan" | "role" | "messages" | "handoffs"; post?: boolean };
 
 const VALUE_FLAGS: Record<string, string[]> = {
   connect: ["--url", "--team", "--board", "--credential", "--id", "--channels", "--mirror", "--probe-channel", "--allow", "--roles", "--self-serve", "--sync-channels"],
   status: ["--connection"],
   claim: ["--connection", "--task", "--agent"],
   promote: ["--connection", "--task"],
+  plan: ["--connection", "--channel", "--file", "--planning-task", "--request-id"],
   role: ["--connection", "--role", "--agent"],
   messages: ["--connection", "--channel", "--limit"],
   handoffs: ["--connection", "--task", "--limit"],
@@ -61,6 +70,7 @@ const BOOLEAN_FLAGS: Record<string, string[]> = {
   status: [],
   claim: ["--confirm-owner"],
   promote: [],
+  plan: ["--post"],
   role: ["--remove"],
   messages: [],
   handoffs: [],
@@ -76,9 +86,58 @@ export function parseCredentialReference(value: string): VercelBoardCredentialRe
   return { backend: backend as VercelBoardCredentialReference["backend"], key };
 }
 
-export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv = process.env): Parsed {
+const MAX_PLAN_TASKS = 50;
+
+/** The calling Scout session or agent, as claim and plan report it. For audit, not authorization. */
+function reportedCaller(env: NodeJS.ProcessEnv): string | undefined {
+  const session = claimedSessionId(env);
+  return session ? (session.startsWith("session:") ? session : `session:${session}`) : env.OPENSCOUT_AGENT?.trim() || undefined;
+}
+
+/** Reads a plan file into tasks, checking locally what the runtime would refuse. Roles and channels are checked at --post. */
+export function parseVercelBoardPlanFile(text: string): { tasks: VercelBoardPlanTask[]; planningTaskId?: string; requestId?: string } {
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch (error) { throw new ScoutCliError(`The plan file is not JSON: ${error instanceof Error ? error.message : String(error)}`); }
+  const file = (Array.isArray(raw) ? { tasks: raw } : raw) as Record<string, unknown> | null;
+  if (!file || typeof file !== "object" || !Array.isArray(file.tasks)) throw new ScoutCliError("The plan file holds { tasks: [...] } or a tasks array.");
+  const tasks = file.tasks as unknown[];
+  if (!tasks.length || tasks.length > MAX_PLAN_TASKS) throw new ScoutCliError(`A plan holds 1 to ${MAX_PLAN_TASKS} tasks; this file has ${tasks.length}.`);
+  const keys = new Set<string>();
+  const parsed = tasks.map((entry, index): VercelBoardPlanTask => {
+    const task = entry as Record<string, unknown> | null;
+    if (!task || typeof task !== "object" || typeof task.text !== "string" || !task.text.trim()) throw new ScoutCliError(`tasks[${index}].text is required.`);
+    if (task.key !== undefined && (typeof task.key !== "string" || !task.key || keys.has(task.key))) throw new ScoutCliError(`tasks[${index}].key must be a unique nonempty string.`);
+    if (task.for !== undefined && (typeof task.for !== "string" || !task.for)) throw new ScoutCliError(`tasks[${index}].for names one role, such as reviewer.`);
+    if (task.labels !== undefined && (!task.labels || typeof task.labels !== "object" || Array.isArray(task.labels) || Object.values(task.labels).some(value => typeof value !== "string"))) {
+      throw new ScoutCliError(`tasks[${index}].labels maps names to strings.`);
+    }
+    if (task.needs !== undefined && !Array.isArray(task.needs)) throw new ScoutCliError(`tasks[${index}].needs is a list.`);
+    for (const need of (task.needs ?? []) as unknown[]) {
+      if (typeof need === "string" && need) continue;
+      const key = need && typeof need === "object" ? (need as { key?: unknown }).key : undefined;
+      if (typeof key !== "string" || !keys.has(key)) throw new ScoutCliError(`tasks[${index}].needs holds Board task IDs or { key } of an earlier task in this plan; ${JSON.stringify(need)} is neither.`);
+    }
+    if (typeof task.key === "string") keys.add(task.key);
+    return {
+      ...(task.key !== undefined ? { key: task.key as string } : {}),
+      text: task.text,
+      ...(task.labels !== undefined ? { labels: task.labels as Record<string, string> } : {}),
+      ...((task.needs as unknown[] | undefined)?.length ? { needs: task.needs as VercelBoardPlanTask["needs"] } : {}),
+      ...(task.for !== undefined ? { for: task.for as string } : {}),
+    };
+  });
+  const id = (name: "planningTaskId" | "requestId") => {
+    const value = file[name];
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !value.trim()) throw new ScoutCliError(`${name} in the plan file must be a nonempty string.`);
+    return value;
+  };
+  return { tasks: parsed, ...(id("planningTaskId") ? { planningTaskId: id("planningTaskId") } : {}), ...(id("requestId") ? { requestId: id("requestId") } : {}) };
+}
+
+export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv = process.env, readFile: (path: string) => string = path => readFileSync(path, "utf8")): Parsed {
   const [command, ...rest] = args;
-  if (!command || !(command in VALUE_FLAGS)) throw new ScoutCliError("Use scout integration connect, status, claim, promote, role, messages or handoffs vercel-board. See scout integration vercel-board --help.");
+  if (!command || !(command in VALUE_FLAGS)) throw new ScoutCliError("Use scout integration connect, status, claim, promote, plan, role, messages or handoffs vercel-board. See scout integration vercel-board --help.");
   const flags: Record<string, string> = {};
   const switches = new Set<string>();
   for (let i = 0; i < rest.length; i++) {
@@ -95,8 +154,7 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
   }
   if (command === "claim") {
     for (const flag of ["--connection", "--task", "--agent"]) if (!flags[flag]) throw new ScoutCliError(`scout integration claim vercel-board requires ${flag}.`);
-    const session = claimedSessionId(env);
-    const reportedCallerId = session ? (session.startsWith("session:") ? session : `session:${session}`) : env.OPENSCOUT_AGENT?.trim();
+    const reportedCallerId = reportedCaller(env);
     return { kind: "claim", method: "POST", path: scoutBrokerPaths.v1.vercelBoardClaim, body: {
       connectionId: flags["--connection"], taskId: flags["--task"], agentId: flags["--agent"], actorId: "operator",
       ...(reportedCallerId ? { reportedCallerId } : {}),
@@ -107,10 +165,26 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
     for (const flag of ["--connection", "--task"]) if (!flags[flag]) throw new ScoutCliError(`scout integration promote vercel-board requires ${flag}.`);
     return { kind: "promote", method: "POST", path: scoutBrokerPaths.v1.vercelBoardPromote, body: { connectionId: flags["--connection"], taskId: flags["--task"], actorId: "operator" } };
   }
+  if (command === "plan") {
+    for (const flag of ["--connection", "--channel", "--file"]) if (!flags[flag]) throw new ScoutCliError(`scout integration plan vercel-board requires ${flag}.`);
+    let text: string;
+    try { text = readFile(flags["--file"]!); } catch (error) { throw new ScoutCliError(`Cannot read plan file ${flags["--file"]}: ${error instanceof Error ? error.message : String(error)}`); }
+    const file = parseVercelBoardPlanFile(text);
+    const planningTaskId = flags["--planning-task"] ?? file.planningTaskId;
+    if (!planningTaskId) throw new ScoutCliError("Name the Scout task this plan serves: planningTaskId in the file, or --planning-task.");
+    const connectionId = flags["--connection"]!;
+    const channel = flags["--channel"]!;
+    // The same plan gets the same key, so posting it twice returns the same tasks.
+    const requestId = flags["--request-id"] ?? file.requestId
+      ?? `cli-plan-${createHash("sha256").update(JSON.stringify([connectionId, channel, planningTaskId, file.tasks])).digest("hex").slice(0, 24)}`;
+    const reportedCallerId = reportedCaller(env);
+    // The runtime takes a plan only from the operator; the CLI acts under that authority, as claim does.
+    const body: VercelBoardPlanRequest = { connectionId, channel, planningTaskId, requestId, actorId: "operator", ...(reportedCallerId ? { reportedCallerId } : {}), tasks: file.tasks };
+    return { kind: "plan", method: "POST", path: scoutBrokerPaths.v1.vercelBoardPlan, body: body as unknown as Record<string, unknown>, post: switches.has("--post") };
+  }
   if (command === "role") {
     for (const flag of ["--connection", "--role"]) if (!flags[flag]) throw new ScoutCliError(`scout integration role vercel-board requires ${flag}.`);
-    const session = claimedSessionId(env);
-    const self = session ? (session.startsWith("session:") ? session : `session:${session}`) : env.OPENSCOUT_AGENT?.trim();
+    const self = reportedCaller(env);
     const agentId = flags["--agent"] ?? self;
     if (!agentId) throw new ScoutCliError("Run role from the agent's own session, or name it with --agent as the operator.");
     // An agent names itself; naming another agent is the operator's call.
@@ -201,6 +275,12 @@ export async function requestVercelBoard(context: Pick<ScoutCommandContext, "env
 export async function runVercelBoardCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
   if (!args.length || args.some(arg => ["--help", "-h", "help"].includes(arg))) { context.output.writeText(VERCEL_BOARD_HELP); return; }
   const request = parseVercelBoardCommand(args, context.env);
+  // A plan without --post is a preview: it returns before any call to the runtime.
+  if (request.kind === "plan" && !request.post) {
+    const plan = request.body as unknown as VercelBoardPlanRequest;
+    context.output.writeValue({ posted: false, request: plan }, () => formatPlanPreview(plan));
+    return;
+  }
   const payload = await requestVercelBoard(context, request);
   if (request.kind === "status") {
     const connections = (payload.connections ?? []) as VercelBoardConnectionStatus[];
@@ -215,6 +295,14 @@ export async function runVercelBoardCommand(context: ScoutCommandContext, args: 
   if (request.kind === "promote") {
     const promoted = payload as VercelBoardPromoteResponse;
     context.output.writeValue(payload, () => `${promoted.created ? "Promoted" : "Already promoted:"} ${promoted.taskId} to work item ${promoted.workId}.`);
+    return;
+  }
+  if (request.kind === "plan") {
+    const planned = payload as VercelBoardPlanResponse;
+    context.output.writeValue(payload, () => [
+      `Posted ${planned.tasks.length} task${planned.tasks.length === 1 ? "" : "s"} to ${planned.channel} on ${planned.connectionId}. Room: ${planned.conversationId}`,
+      ...planned.tasks.map(task => `  ${task.taskId}${task.key ? ` (${task.key})` : ""}: ${task.state}`),
+    ].join("\n"));
     return;
   }
   if (request.kind === "role") {
@@ -249,6 +337,24 @@ export async function runVercelBoardCommand(context: ScoutCommandContext, args: 
     connected.probe ? `Probe task ${connected.probe.taskId}: ${connected.probe.state}.` : "Probe skipped: the connection is not verified.",
     formatStatus(connected.status),
   ].join("\n"));
+}
+
+/** What --post would write, with nothing written. */
+export function formatPlanPreview(plan: VercelBoardPlanRequest): string {
+  return [
+    `Plan for ${plan.channel} on ${plan.connectionId}: ${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"}. Nothing was written.`,
+    ...plan.tasks.map((task, index) => {
+      const needs = (task.needs ?? []).map(need => typeof need === "string" ? need : `{${need.key}}`);
+      const details = [
+        task.key ? `key ${task.key}` : undefined,
+        task.for ? `for ${task.for}` : undefined,
+        needs.length ? `needs ${needs.join(", ")}` : undefined,
+      ].filter(Boolean).join("; ");
+      return `  ${index + 1}. ${task.text.split("\n")[0]!.trim()}${details ? ` (${details})` : ""}`;
+    }),
+    `Planning task: ${plan.planningTaskId}; request ID: ${plan.requestId}${plan.reportedCallerId ? `; reported caller: ${plan.reportedCallerId}` : ""}.`,
+    "Run again with --post to write these tasks to the team's board as the operator. Board's sync can carry them to Slack or GitHub.",
+  ].join("\n");
 }
 
 function formatHandoff(handoff: VercelBoardHandoff): string {

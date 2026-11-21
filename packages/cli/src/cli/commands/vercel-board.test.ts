@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createScoutCommandContext } from "../context.ts";
 import { VERCEL_BOARD_VERBS } from "./integration.ts";
-import { parseVercelBoardCommand, runVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
+import { formatPlanPreview, parseVercelBoardCommand, runVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
 
 test("connect names a team board by team and board, and the credential by reference", () => {
   const parsed = parseVercelBoardCommand(["connect", "--team", "team_abc", "--board", "scout", "--credential", "secret_cli:scout-vercel"]);
@@ -39,6 +39,51 @@ test("claim reports the calling session separately from the assigned agent", () 
   expect(command.body).toMatchObject({ agentId: "worker", reportedCallerId: "session:calling-session" });
 });
 
+const PLAN_FILE = JSON.stringify({ planningTaskId: "work-1", tasks: [
+  { key: "build", text: "Build the thing\nWith details", for: "builder" },
+  { key: "review", text: "Review it", for: "reviewer", needs: [{ key: "build" }, "msg_earlier"] },
+] });
+
+test("plan previews by default and posts only with --post, as the operator with the calling session reported", () => {
+  const env = { CODEX_THREAD_ID: "planner-session" };
+  const read = (path: string) => { expect(path).toBe("plan.json"); return PLAN_FILE; };
+  const preview = parseVercelBoardCommand(["plan", "--connection", "c1", "--channel", "scout/work", "--file", "plan.json"], env, read);
+  expect(preview).toMatchObject({ kind: "plan", method: "POST", path: "/v1/integrations/vercel-board/plan", post: false });
+  expect(preview.body).toMatchObject({ connectionId: "c1", channel: "scout/work", planningTaskId: "work-1", actorId: "operator", reportedCallerId: "session:planner-session" });
+  expect((preview.body as any).tasks).toEqual(JSON.parse(PLAN_FILE).tasks);
+  const posted = parseVercelBoardCommand(["plan", "--connection", "c1", "--channel", "scout/work", "--file", "plan.json", "--post"], env, read);
+  expect(posted.post).toBe(true);
+  // The same plan gets the same request ID, so a second --post returns the same tasks.
+  expect(posted.body!.requestId).toBe(preview.body!.requestId);
+  expect(String(preview.body!.requestId)).toMatch(/^cli-plan-[0-9a-f]{24}$/);
+  const overridden = parseVercelBoardCommand(["plan", "--connection", "c1", "--channel", "scout/work", "--file", "plan.json", "--planning-task", "work-2", "--request-id", "req-9"], {}, read);
+  expect(overridden.body).toMatchObject({ planningTaskId: "work-2", requestId: "req-9" });
+  expect(overridden.body).not.toHaveProperty("reportedCallerId");
+});
+
+test("the plan preview shows each task's title, key, role and needs, and says nothing was written", () => {
+  const plan = parseVercelBoardCommand(["plan", "--connection", "c1", "--channel", "scout/work", "--file", "p"], {}, () => PLAN_FILE).body as any;
+  const text = formatPlanPreview(plan);
+  expect(text).toContain("Nothing was written.");
+  expect(text).toContain("  1. Build the thing (key build; for builder)");
+  expect(text).toContain("  2. Review it (key review; for reviewer; needs {build}, msg_earlier)");
+  expect(text).toContain("--post");
+});
+
+test("plan refuses a file the runtime would refuse, before anything is sent", () => {
+  const parse = (file: unknown, extra: string[] = []) => parseVercelBoardCommand(["plan", "--connection", "c1", "--channel", "w", "--file", "p", ...extra], {}, () => typeof file === "string" ? file : JSON.stringify(file));
+  expect(() => parseVercelBoardCommand(["plan", "--connection", "c1", "--channel", "w"], {}, () => "[]")).toThrow(/requires --file/);
+  expect(() => parse("{nope")).toThrow(/not JSON/);
+  expect(() => parse([{ text: "x" }])).toThrow(/--planning-task/);
+  expect(parse([{ text: "x" }], ["--planning-task", "p1"]).body).toMatchObject({ planningTaskId: "p1", tasks: [{ text: "x" }] });
+  expect(() => parse({ planningTaskId: "p", tasks: [] })).toThrow(/1 to 50 tasks/);
+  expect(() => parse({ planningTaskId: "p", tasks: Array.from({ length: 51 }, () => ({ text: "x" })) })).toThrow(/1 to 50 tasks/);
+  expect(() => parse({ planningTaskId: "p", tasks: [{ text: " " }] })).toThrow(/tasks\[0\]\.text/);
+  expect(() => parse({ planningTaskId: "p", tasks: [{ key: "a", text: "x" }, { key: "a", text: "y" }] })).toThrow(/unique/);
+  expect(() => parse({ planningTaskId: "p", tasks: [{ text: "x", needs: [{ key: "later" }] }, { key: "later", text: "y" }] })).toThrow(/earlier task/);
+  expect(() => parse({ planningTaskId: "p", tasks: [{ text: "x", labels: { a: 1 } }] })).toThrow(/labels/);
+});
+
 test("role declares the calling agent, or another agent as the operator", () => {
   const own = parseVercelBoardCommand(["role", "--connection", "c1", "--role", "reviewer"], { OPENSCOUT_AGENT: "agent-r" });
   expect(own).toMatchObject({ kind: "role", method: "POST", path: "/v1/integrations/vercel-board/roles", body: { connectionId: "c1", role: "reviewer", agentId: "agent-r", actorId: "agent-r" } });
@@ -52,6 +97,8 @@ test("role declares the calling agent, or another agent as the operator", () => 
 test("the integration command dispatches every verb the Board help names", () => {
   const named = [...VERCEL_BOARD_HELP.matchAll(/^scout integration (\w+) vercel-board/gm)].map(match => match[1]);
   expect(named).toContain("role");
+  expect(named).toContain("plan");
+  expect(VERCEL_BOARD_HELP).toContain("OUTWARD-FACING");
   expect(named.filter(verb => !VERCEL_BOARD_VERBS.has(verb))).toEqual([]);
 });
 

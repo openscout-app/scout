@@ -365,8 +365,10 @@ export interface VercelBoardPlanRequest {
   planningTaskId: string;
   /** Idempotency key for the whole plan. The same key returns the same tasks. */
   requestId: string;
-  /** The acting Scout agent, written as a label. */
+  /** Whose Board authority the caller is acting under. Must be the operator. */
   actorId: string;
+  /** Caller-reported Scout agent or harness session, written as the agent label. For audit, not authorization. */
+  reportedCallerId?: string;
 }
 
 export interface VercelBoardPlanResponse {

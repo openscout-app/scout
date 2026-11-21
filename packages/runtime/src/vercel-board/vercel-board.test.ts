@@ -688,6 +688,16 @@ test("a named non-operator cannot submit a plan to Board", async () => {
   expect((await h.service.messages({ connectionId: "c1", channel: "work" })).messages).toEqual([]);
 });
 
+test("a plan submitted as the operator labels its tasks with the reported caller, and refuses a malformed one", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  const plan = await h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r", actorId: "operator",
+    reportedCallerId: "session:planner", tasks: [{ text: "Build it" }] });
+  expect(h.board.message(plan.tasks[0]!.taskId)!.labels["scout.agent"]).toBe("session:planner");
+  await expect(h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "p", requestId: "r2", actorId: "operator",
+    reportedCallerId: "two\nlines", tasks: [{ text: "x" }] })).rejects.toMatchObject({ status: 400, code: "invalid_request" });
+});
+
 test("the planning tool writes Board tasks only, labeled with the planning task; they show in the room, not on the kanban", async () => {
   const h = serviceHarness();
   await h.connect();
