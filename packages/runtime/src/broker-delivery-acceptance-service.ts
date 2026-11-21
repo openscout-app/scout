@@ -27,6 +27,7 @@ import {
   type ScoutDispatchUnavailableTarget,
   type ScoutOwnedRuntimeCatalog,
   type ScoutReturnAddress,
+  TASK_READY_NOTIFY_KEY,
 } from "@openscout/protocol";
 
 import {
@@ -1368,6 +1369,9 @@ export class BrokerDeliveryAcceptanceService {
       metadata: {
         ...invocationMetadata,
         ...(payload.task ? { taskVersion: 1, taskHomeNodeId: this.options.nodeId } : {}),
+        // notify on a task ask: the operator wants to hear when it is done (Ready).
+        ...(payload.task?.notify && !payload.task.operator && !payload.task.fyi
+          ? { [TASK_READY_NOTIFY_KEY]: { on: true, byId: requesterId, at: createdAt } } : {}),
         ...(payload.task?.because ? { because: payload.task.because } : {}),
         ...(payload.task?.callback ? { callback: payload.task.callback } : {}),
         ...(replyToSessionId ? { replyToSessionId } : {}),

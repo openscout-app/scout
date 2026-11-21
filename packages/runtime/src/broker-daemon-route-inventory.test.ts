@@ -249,6 +249,8 @@ const expectedRouteInventory = [
   "POST /v1/session-names",
   "POST /v1/shows",
   "POST /v1/surfaces/deck",
+  "POST /v1/tasks/notify",
+  "POST /v1/tasks/ready/decide",
   "POST /v1/thread-watches/close",
   "POST /v1/thread-watches/open",
   "POST /v1/thread-watches/renew",
