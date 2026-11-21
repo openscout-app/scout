@@ -200,7 +200,11 @@ export class HostLaunchAdmission {
 
 // Direct warmups and durable dispatch use the same user-wide host budget.
 // Direct callers receive a retryable refusal before a restart can stop its worker.
-export const macHostLaunchAdmission = process.platform === "darwin" ? new HostLaunchAdmission() : undefined;
+// Broker fixtures read a normal host: a test's outcome must not depend on the
+// memory pressure of the machine that runs it. Admission tests inject their own.
+export const macHostLaunchAdmission = process.platform === "darwin"
+  ? new HostLaunchAdmission(isTestRunnerProcess() ? { pressure: async () => "normal" } : {})
+  : undefined;
 
 
 // Bind a reservation to the dispatch that was allowed to reuse a live worker.
