@@ -134,6 +134,7 @@ export class CoreHttpAdapter {
       return { ...context, usedBroker: true, workItem: updated, workId: updated.id };
     }
     // The runtime decides every move; the relay principal is always the mover or reviewer.
+    if (name === 'work_retry') return request('/v1/work/retry', pick(a, ['workId','attempt']));
     if (name === 'work_move') {
       const result = await request('/v1/work/move', { ...pick(a, ['workId','to','note','waitingOn','evidence','claim','dryRun']), actorId: senderId });
       return { senderId, applied: result.applied, verdict: result.decision.verdict, from: result.decision.from, to: result.decision.to,

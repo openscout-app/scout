@@ -30,6 +30,7 @@ export type ScoutCommandName =
   | "feedback"
   | "env"
   | "flight"
+  | "work-retry"
   | "init"
   | "instance"
   | "inbox"
@@ -128,6 +129,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./instance.ts")).runInstanceCommand;
     case "flight":
       return (await import("./flight.ts")).runFlightCommand;
+    case "work-retry":
+      return (await import("./work-retry.ts")).runWorkRetryCommand;
     case "init":
       return (await import("./init.ts")).runInitCommand;
     case "inbox":

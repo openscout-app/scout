@@ -51,7 +51,7 @@ Two existing parts of core set the pattern:
 | Only planned work goes on Board. Tasks between agents stay in Scout. | Writing every Scout task to a rate-limited external API would flood the board and make Scout depend on Vercel to run. |
 | Scout creates Board tasks, for planned work only. | This reverses an earlier cut. Planning needs a write path, and outside workers can only claim what is on the board. |
 | No standing lead agent. | Planning is an ordinary Scout task. Claim, renew, settle and retry are runtime code. |
-| Runtime code claims; agents only declare a role. | Claim tokens stay with the custodian. An agent never calls claim, so it cannot pick its own work off a board that teammates and synced platforms write to. |
+| Runtime code claims; agents only declare a role. | Claim tokens stay with the runtime that claimed. An agent never calls claim, so it cannot pick its own work off a board that teammates and synced platforms write to. |
 | Only a role-kept task the operator or Scout wrote starts on its own, and only in a self-serve channel. | Board text can come from teammates and from systems that sync into the board. Elsewhere, and for any other task, the operator starts the claim. The runtime matches each task once; after a release, a failure or a lost lease, the operator decides. |
 | Roles are a closed list in the connection: `scout`, `builder`, `reviewer`. | Each is a Board profile of the operator's principal. `scout` plans; the others work. A task kept for a role (`for`) can be claimed only as that role. |
 | A task settles only on a verb. | A final `reply --ref` completes it and `--failed` fails it. A turn that ends without a verb releases it, so a refusal never reads as completed. `--waiting-on` holds it on the board as `blocked` and stops renewing; the answer lifts the hold and Scout claims again as the same role. |
@@ -60,8 +60,8 @@ Two existing parts of core set the pattern:
 | A `failed` task shows as waiting, labeled failed. | Board lets the owner reopen a failed task, and its dependents still wait on it. Someone owes a move. Scout does not add a failed state. |
 | Board owns `state`. Scout owns acceptance. | One writer per field. A move from Scout is a command to Board; the result returns as an event. |
 | Scout writes as the operator's principal with the `scout` profile. The acting agent is in a label. | Board profile names cannot hold Scout agent names, and short-lived sessions would fill the team's actor list. Labels stay on the board and do not sync out to other platforms. |
-| Key actors, the allowlist and the custodian lease on the principal ID. | A second person can be added later without migrating records. See [Multi-user readiness](#multi-user-readiness). |
-| One custodian runtime holds each board connection. | The cursor, the claim tokens and the outbox need a single fenced writer. The mesh gives reachability, not consensus. |
+| Key actors, the allowlist and the host lock on the principal ID. | A second person can be added later without migrating records. See [Multi-user readiness](#multi-user-readiness). |
+| Each host connects to the board on its own. No host holds the board for the others. | Board's claims already decide who does a task: one claim lands, and a claim that is over cannot write ([Board docs](https://vercel.com/docs/board); in the [agent swarm guide](https://vercel.com/docs/board/guides/agent-swarm) every worker talks to the board directly). A host keeps its own cursor, copy, claim tokens and outbox. An earlier design held each board on one custodian host; it rebuilt guarantees the board already gives, and it left the board dark on every other host. |
 | Do not add a shared integration framework. | T3, Slack and Board have different shapes. Two or three providers do not justify one. |
 
 `syncChannels` is empty by default. For a channel the operator explicitly maps
@@ -78,7 +78,7 @@ stays `noSync`.
 | --- | --- | --- |
 | Owner | The operator | Puts work on the board through Scout, answers what is waiting, and reviews finished work. |
 | Planner | Any session that receives an ordinary Scout task | Breaks work down and writes Board tasks with `needs` through a Scout MCP tool. |
-| Mechanics | Runtime code on the custodian | Follows the feed, matches role-kept tasks to declared agents, claims, renews, blocks, settles and retries. |
+| Mechanics | Runtime code on each connected host | Follows the feed, matches role-kept tasks to declared agents, claims, renews, blocks, settles and retries. |
 | Workers | Scout agents on any host, and any other client that speaks Board | Do the tasks. A Scout agent declares a role (`scout integration role vercel-board --role reviewer`) and ends each task with a verb. Board's lease keeps two workers off one task. |
 
 ### Who starts a claim
@@ -126,8 +126,8 @@ promotes it, under a deterministic ID.
    channel `scout/probe`. The prefix keeps them apart from a shared board's own
    channels. `--channels` and `--probe-channel` change them. `--mirror` names
    the channels Scout keeps a copy of; the default is every followed channel.
-5. Scout records the custodian host and makes a Scout room for each followed
-   channel.
+5. Scout records the host that connected and makes a Scout room for each
+   followed channel. Each host that should show the board connects on its own.
 6. Scout creates, claims and completes one probe task in the probe channel.
 7. Scout reports the connection as verified only after the probe task
    completes.
@@ -139,7 +139,7 @@ Vercel Board  (canonical: messages, tasks, claims, labels, grants)
      ^   |
      |   |  HTTPS, operator's credential, profile "scout", x-board-can
      |   v
-Custodian runtime  (one per board and principal)
+Runtime on each connected host  (one per host, board and principal)
   follower   bulk backfill, then long-poll /events per mirrored channel, cursor
   mirror     messages at their latest version, task events (hand-offs)
   projector  promoted task root to work item (ExternalWorkContext)
@@ -151,8 +151,14 @@ Custodian runtime  (one per board and principal)
 Agents on any host
 ```
 
-- Only the custodian runtime talks to Board. Agents on other hosts reach Board
-  through Scout.
+Two hosts connected to one board each run the block above. The board, not
+Scout, decides which host's claim on a task lands.
+
+- Only runtimes talk to Board. Agents reach Board through their host's
+  runtime, or a connected host's runtime over the mesh.
+- One runtime process per host follows a connection. A lock in the host's
+  SQLite keeps a second process off its cursor, tokens and outbox. It is not
+  a lock between hosts.
 - Agents must not hold a Board credential or a claim token.
 - The runtime must send `x-board-can` on every request. The value narrows the
   caller to the followed channels and to `read`, `post`, `react` and `label`.
@@ -176,7 +182,7 @@ Agents on any host
 
 | Board | Scout | Rule |
 | --- | --- | --- |
-| Board (URL and name) | A board connection | Holds the URL, credential reference, followed and mirrored channels, `can`, allowlist and custodian host. |
+| Board (URL and name) | A board connection | Holds the URL, credential reference, followed and mirrored channels, `can`, allowlist and the host that connected. |
 | Channel | A Scout room | One room per followed channel. ID: `stableChannelId("vercel-board:<connection>:<channel>")`. The operator is always in it; each dispatched agent is added. |
 | Message (root or reply) | A row in `vercel_board_messages` | Keyed by (connection, message ID), at its latest `version`. Keeps `by` (actor, principal, profile), `origin`, `noSync`, labels, task state. |
 | Task (root message and `task`) | The same row, with `task_state` | A work item only after promote. |
@@ -350,10 +356,10 @@ completed, failed, blocked or canceled) and marks them `derived`.
 
 ## Where state lives
 
-| State | Store | Leaves the custodian |
+| State | Store | Leaves the host |
 | --- | --- | --- |
 | Messages, tasks, claims, labels | Board | Not Scout's |
-| Connection: URL, channels, mirror, `can`, allowlist, custodian host | Runtime config | No |
+| Connection: URL, channels, mirror, `can`, allowlist, connecting host | Runtime config | No |
 | Board credential | A credential reference, as the Slack integration uses | No. Never in argv, logs, status or records. |
 | Feed cursor and last delta time for each mirrored channel | `vercel_board_cursors`, in the same transaction as the rows it covers | No |
 | Copy of each mirrored channel | `vercel_board_messages` | Views only |
@@ -379,10 +385,10 @@ Losing a claim is a normal event. Each case below has one named outcome.
 | First connect | A bulk backfill: the head, the newest 500 messages, the task list. Older threads arrive when they change. |
 | Claim answer lost | The claim request has no idempotency key, and Board shows the token once. Scout holds a claim it cannot use. Request the shortest lease on a first claim, let it lapse, and claim again. This is a known stall of at most 300 seconds. Do not retry the claim request. |
 | Claim order | The runtime grants the Scout work claim only after the Board claim lands. It stores Scout's lease generation beside Board's `epoch`. |
-| Renew | The custodian renews at a third of the lease, and only while the Scout flight for the work is alive. A dead agent stops renewals, and Board hands the task to another worker. |
+| Renew | The runtime that claimed renews at a third of the lease, and only while the Scout flight for the work is alive. A dead agent stops renewals, and Board hands the task to another worker. |
 | Claim lost during work | Causes: `claim_lost`, an expired lease, or an edited or deleted root. Cancel the Scout work claim, tell the agent that the task moved on, and keep its output as a Scout record. Do not write to the thread as the holder. |
 | Settle answer lost | A retry returns `claim_lost`, which is ambiguous. Read the task. If the task is in the settled state and its `epoch` equals Scout's, the first attempt landed. |
-| Custodian offline while an agent finishes | The result waits in the outbox. If the task is `ready` again and its `epoch` is still Scout's, claim again and complete with the stored result. Otherwise keep the result as a Scout record, show the item as waiting with "finished here, claim lost", and ask the operator. |
+| Claiming host offline while an agent finishes | The result waits in the outbox. If the task is `ready` again and its `epoch` is still Scout's, claim again and complete with the stored result. Otherwise keep the result as a Scout record, show the item as waiting with "finished here, claim lost", and ask the operator. |
 | Post or reply answer lost | The client `id` derives from the Scout message ID. Read the post by that `id` before a retry. |
 | Root deleted upstream | The copy keeps a tombstone with no text. A promoted task's work item loses its title and summary, not only its state. Scout must not keep text that the team deleted. |
 | Credential expired | The connection moves to `auth_expired` and names the fix. Claims lapse. Items show as stale with the time of the last good read. The connection must not hang. |
@@ -420,9 +426,8 @@ V1 is single user. Four rules in v1 keep a second person from being a rewrite:
   person's Scout writes as that person's principal, and Board keeps the two
   apart.
 - Put the acting agent in a label on every outbound write.
-- Key the custodian lease on (board, principal), not on the board. Two
-  people's Scouts can follow one board. The guard against a duplicate
-  custodian applies inside one person's mesh.
+- Key the host lock on (board, principal), not on the board. Two people's
+  Scouts, and two hosts of one person, can follow one board.
 
 ## Phases
 
@@ -500,7 +505,6 @@ pending. A write that starts a claim or queues a post clears the flag.
 - Acting as a Board sync provider. A sync provider would publish Scout
   conversations into the team's log, and it cannot register outside a Vercel
   deployment.
-- Failover between custodians.
 - Serving the Board protocol from Scout. The conformance kit requires message
   versions and revisions, conditional writes, tombstones and a total-order
   cursor, and Board's identity model is verified principals with grants. A
@@ -546,19 +550,10 @@ that were made after the architecture review.
      that is not promoted is an ordinary ask in the channel's room and makes
      no work item. A claim on a promoted task attaches the ask to that work
      item through `collaborationRecordId`, and makes no second item.
-5. **Custodian lease on (board, principal): the key is right, and the store
-   is still open.** A per-board key was wrong for two people, and it was also
-   unenforceable: no lease in one person's runtime can fence another person's
-   runtime. The same limit applies between two hosts in one mesh. A lease in
-   one node's SQLite fences processes on that node only, and the custodian
-   host in the connection config is a record, not a fence. Board is the only
-   ordered store that both hosts can reach. Proposal: keep the custodian
-   marker on the board as a message owned by the principal, with the host and
-   an epoch in labels, and change it with a conditional label write. A second
-   host then refuses to connect unless the operator asks for a takeover, and
-   the previous custodian sees the change in its own feed and stops. This
-   proposal depends on Board's conditional label writes, which have not been
-   tested.
+5. **One holder per board: resolved, removed.** No lock in one host can
+   fence another host, and none is needed: the board's claims decide who does
+   a task. Each host connects on its own. The lock that stays fences runtime
+   processes on one host, which share one SQLite.
 6. **The `decisions` channel.** Setup creates it, and this plan does not yet
    state what Scout posts there or what Scout does with a post in it.
 7. **Reopen after completion.** Scout's reopen verdict moves `state` back to

@@ -151,7 +151,25 @@ export class BrokerTaskService {
     if (!this.options.forward) throw new Error(`task ${task.invocation.id} is remote; home node ${home} is unavailable`);
     return this.options.forward(home, kind, payload);
   }
-  async ask(payload: ScoutDeliverRequest): Promise<ScoutDeliverResponse | null> {
+  /**
+   * Ready's Continue: "Continue" goes into the task's own session. An open
+   * task (waiting on review) gets a follow-up that starts its next turn; a
+   * finished one gets a successor in the same session, bound to the same
+   * work item and still marked notify when it was.
+   */
+  async continueReady(input: { invocationId: string; requestId: string; actorId: string; notify: boolean; workId?: string; body?: string }): Promise<ScoutDeliverResponse> {
+    const task = await this.resolve(input.invocationId);
+    const body = input.body ?? "Continue";
+    const finished = taskTerminal(task.flight);
+    const response = await this.ask({
+      requestId: input.requestId, body, intent: "consult", requesterId: input.actorId, caller: { actorId: input.actorId },
+      task: { version: 1, ...(finished ? { continue: task.invocation.id } : { ref: task.invocation.id }), ...(input.notify ? { notify: true } : {}) },
+      ...(finished && input.workId ? { collaborationRecordId: input.workId, invocationMetadata: { collaborationRecordId: input.workId } } : {}),
+    }, { sameSession: true });
+    if (!response) throw new Error(`task ${task.invocation.id} could not be continued`);
+    return response;
+  }
+  async ask(payload: ScoutDeliverRequest, options: { sameSession?: boolean } = {}): Promise<ScoutDeliverResponse | null> {
     const request = payload.task;
     if (!request?.ref && !request?.continue) return null;
     const task = await this.resolve(request.ref ?? request.continue!);
@@ -171,7 +189,8 @@ export class BrokerTaskService {
       // directly instead of giving the agent resolver the predecessor's ref.
       const trace = flightSessionTrace(flight).at(-1);
       const sessionActor = this.options.snapshot().actors[invocation.targetAgentId]?.kind === "session"
-        || invocation.execution?.targetSessionId === invocation.targetAgentId;
+        || invocation.execution?.targetSessionId === invocation.targetAgentId
+        || Boolean(options.sameSession && (trace?.sessionId ?? invocation.execution?.targetSessionId));
       const sessionId = sessionActor ? trace?.sessionId ?? invocation.execution?.targetSessionId ?? invocation.targetAgentId : undefined;
       const harness = trace?.harness ?? invocation.execution?.harness;
       const target = projectPath
@@ -182,7 +201,7 @@ export class BrokerTaskService {
         ? { ...payload.execution, ...(harness ? { harness } : {}), session: "existing" as const, targetSessionId: target.sessionId }
         : { ...payload.execution, session: "new" as const };
       return this.options.accept({ ...payload, task: { version: 1, ...(request.callback ? { callback: request.callback } : {}),
-        ...(request.because ? { because: request.because } : {}) },
+        ...(request.because ? { because: request.because } : {}), ...(request.notify ? { notify: true } : {}) },
         target, targetLabel: undefined, targetAgentId: target.kind === "agent_id" ? invocation.targetAgentId : undefined,
         body: `${context}\n\nSuccessor task:\n${payload.body}`, execution,
         invocationMetadata: { ...payload.invocationMetadata, predecessorTaskId: invocation.id, predecessorState: flight.state } });

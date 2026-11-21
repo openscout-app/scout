@@ -56,6 +56,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "roster", summary: "Roster codes (OS-003): list, set project codes, import, resolve" },
   { name: "wait", summary: "Wait for a task by invocation, flight, message, or ref" },
   { name: "flight", summary: "Follow an existing task" },
+  { name: "work-retry", summary: "Retry a failed run in a fresh session with an idempotent attempt" },
   { name: "label", summary: "Watch, feed, or brief related work by label" },
   { name: "card", summary: "Create a dedicated reply-ready Scout agent card" },
   { name: "watch", summary: "Stream broker messages" },

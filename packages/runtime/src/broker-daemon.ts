@@ -1,10 +1,12 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
+import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
 import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
@@ -209,6 +211,7 @@ import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
+import { BrokerDerivedRecordService } from "./broker-derived-records.js";
 import { ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths, controlPlaneArchiveDirectory } from "./support-paths.js";
 import { expandHomePath } from "./tool-resolution.js";
 import {
@@ -1049,6 +1052,18 @@ const workLifecycles = new BrokerWorkLifecycleService({
   createId: createRuntimeId,
   operatorActorId,
 });
+// Derived records: written only through this service; asks for pending ones
+// start only when a lifecycle station names where its agent runs.
+const derivedRecords = new BrokerDerivedRecordService({
+  registry: workLifecycleRegistry,
+  durableStore,
+  runtime,
+  listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  deliver: request => deliveryAcceptanceService.accept(request),
+  producerActorId: "scout.deriver",
+  nodeId,
+  warn: (message, error) => console.warn(message, error ?? ""),
+});
 const workItemStore = new BrokerWorkItemStore({
   runtime,
   durableStore,
@@ -1057,8 +1072,11 @@ const workItemStore = new BrokerWorkItemStore({
     : { record: after },
   durableFlight: (flightId) => journal.getFlight(flightId),
   durableWorkItem: (workId) => journal.getCollaborationRecord(workId),
+  newestFlightForWork: workId => journal.newestFlightForWork(workId),
+  durableCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
   createId: createRuntimeId,
   warn: (message, error) => console.warn(message, error),
+  operatorActorId,
 });
 const recordDeliveryWorkItemIfNeeded = workItemStore.recordDeliveryWorkItemIfNeeded;
 const deliveryWorkItemResolutionForTell = workItemStore.deliveryWorkItemResolutionForTell;
@@ -1069,6 +1087,17 @@ function recoverTerminalWorkPromotions(): void {
   workPromotionRecovery = workItemStore.recoverTerminalWorkPromotions(journal.listPendingWorkPromotionFlights())
     .catch((error) => console.warn("[openscout-runtime] work promotion recovery failed:", error))
     .finally(() => { workPromotionRecovery = undefined; });
+}
+async function reconcileExistingFailedWork(): Promise<void> {
+  let cursor: { afterCreatedAt: number; afterId: string } | undefined;
+  for (;;) {
+    const page = journal.listCollaborationRecords({ kind: "work_item", state: "waiting", orderByCreatedAt: true, ...cursor, limit: 100 });
+    if (!page.length) return;
+    await workItemStore.reconcileFailedWorkItems(page);
+    const last = page.at(-1)!;
+    cursor = { afterCreatedAt: last.createdAt, afterId: last.id };
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
 }
 const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalSessionWakeResult> =>
   wakeLocalHarnessSession({
@@ -1340,6 +1369,9 @@ runtime.subscribe((event) => {
   if (event.kind === "agent.registered" || event.kind === "agent.endpoint.upserted") {
     scheduleAgentRosterReconcile();
   }
+  if (event.kind === "collaboration.upserted" && event.payload.record.kind === "work_item") {
+    derivedRecords.kick();
+  }
 });
 
 // Presence: broker-observed, ephemeral, latest-per-agent. Deliberately not on
@@ -1592,6 +1624,27 @@ async function recordScoutDispatchDurably(
   });
 }
 
+// One ring per Ready flight. An open operator question or permission from the
+// same agent owns the ping instead.
+const taskReadyNotifier = new TaskReadyNotifier({
+  nodeId,
+  hasOpenOperatorRequest: (flight) => {
+    const records = runtime.peek().collaborationRecords;
+    const permissionId = flight.metadata?.permissionRequestId;
+    if (typeof permissionId === "string" && records[permissionId]?.state === "open") return true;
+    return Object.values(records).some((record) => record.kind === "question" && record.state === "open"
+      && record.nextMoveOwnerId === operatorActorId && record.askedById === flight.targetAgentId);
+  },
+  notify: (notice) => operatorAttentionService.queueReadyTask({
+    ...notice,
+    projectRoot: (() => {
+      const endpoint = Object.values(runtime.peek().endpoints).find((item) => item.agentId === notice.agentId && (item.projectRoot || item.cwd));
+      return endpoint?.projectRoot ?? endpoint?.cwd;
+    })(),
+    createdAt: Date.now(),
+  }),
+  workIdFor: (invocation) => workItemStore.workIdForInvocation(invocation),
+});
 const flightLifecycleService = new BrokerFlightLifecycleService({
   runtime,
   journal,
@@ -1599,6 +1652,14 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
   updateDeliveryStatus: updateDeliveryStatusDurably,
   updateDeliveryStatusIf: deliveryStore.updateDeliveryStatusIf,
+  prepareTaskReady: (previous, flight, invocation) => prepareTaskReady(previous, flight, invocation, {
+    operatorActorId, nodeId, now: Date.now(),
+  }),
+  onFlightRecorded: async (previous, flight, invocation) => {
+    if (!taskReadyEntered(previous, flight)) return;
+    taskReadyNotifier.noteFlight(previous, flight, invocation);
+    await workItemStore.landReadyWorkItem(flight, invocation);
+  },
   prepareWorkPromotion: workItemStore.prepareTerminalWorkPromotion,
   promoteInvocationFlightToWork,
   prepareTerminalReport: (flight, invocation) => prepareTerminalReport(flight, invocation, {
@@ -2359,8 +2420,8 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
   }
 }
 
-// The Vercel Board adapter. It runs only where this node is the recorded
-// custodian; the credential and claim tokens never leave this node.
+// The Vercel Board adapter. It runs every connection this host made; the
+// credential and claim tokens never leave this host.
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
@@ -3409,6 +3470,35 @@ function decisionCardWhere(actorId: string | undefined, sessionId: string | unde
   };
 }
 
+const workRetry = new BrokerWorkRetryService({
+  nodeId, snapshot: () => journal.snapshot(), record: id => journal.getCollaborationRecord(id), durableStore,
+  apply: record => runtime.upsertCollaboration(record), appendEvent: event => runtime.appendCollaborationEvent(event),
+  accept: request => deliveryAcceptanceService.accept(request),
+  place: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context),
+});
+
+const taskReadyService = new BrokerTaskReadyService({
+  nodeId, operatorActorId,
+  resolve: ref => taskService.resolve(ref),
+  flight: id => journal.getFlight(id) ?? runtime.snapshot().flights[id],
+  recordFlight: flight => persistFlight(flight),
+  workItem: (invocation) => {
+    const workId = workItemStore.workIdForInvocation(invocation);
+    const record = workId ? runtime.collaborationRecord(workId) : undefined;
+    return record?.kind === "work_item" ? record : undefined;
+  },
+  recordWorkItem: async (record) => { await recordCollaborationDurably(record); },
+  appendWorkEvent: async (event) => { await appendCollaborationEventDurably(event); },
+  deliverContinue: async ({ invocation }, input) => {
+    const response = await taskService.continueReady({ invocationId: invocation.id, requestId: input.requestId,
+      actorId: input.actorId, notify: input.notify, workId: workItemStore.workIdForInvocation(invocation) });
+    const flight = "flight" in response ? response.flight : undefined;
+    const message = "message" in response ? response.message : undefined;
+    return { ...(flight ? { invocationId: flight.invocationId, flightId: flight.id } : {}), ...(message ? { messageId: message.id } : {}) };
+  },
+  createId: createRuntimeId,
+});
+
 const operatorTaskExpiryTimer = setInterval(() => {
   void taskService.expireOperatorTasks()
     .then(() => decisionCardService?.settleDefaulted())
@@ -3635,6 +3725,8 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
+  workRetry,
+  derivedRecords,
   tasks: taskService,
   shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
@@ -3686,6 +3778,7 @@ const routeRequest = createBrokerHttpRouter({
   }),
   permissionService,
   decisionCards: decisionCardService,
+  taskReady: taskReadyService,
   nativePermissions,
   harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
@@ -4295,6 +4388,9 @@ function recoverStartupWork(): void {
   recoverInvocationResultReplies();
   recoverTerminalReports();
   recoverTerminalWorkPromotions();
+  void reconcileExistingFailedWork().catch(error => console.warn("[openscout-runtime] failed-work reconciliation incomplete:", error));
+  // Pending derivations are computed from records, so one pass finds what a restart left.
+  derivedRecords.kick();
   // Reconcile persisted external attempts without repeating a provider send.
   void externalSessionService.recover([...knownInvocations.values()])
     .then((failed) => { if (failed.length) console.error("[openscout-runtime] external session recovery incomplete", failed); })
@@ -4456,6 +4552,7 @@ function startBrokerCoordination(): void {
 }
 
 async function shutdownBroker(exitCode = 0): Promise<void> {
+  derivedRecords.stop();
   if (shuttingDown) {
     return;
   }

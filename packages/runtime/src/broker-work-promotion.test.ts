@@ -1,3 +1,4 @@
+import { newestWorkFlight } from "./broker-failed-work.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +24,7 @@ function terminal(patch: Partial<FlightRecord> = {}): FlightRecord {
     state: "completed", startedAt: at, completedAt: at + 100, output: "Verified result", ...patch };
 }
 
-async function fixture() {
+async function fixture(followNewest = false) {
   const directory = mkdtempSync(join(tmpdir(), "scout-work-promotion-"));
   directories.push(directory);
   const path = join(directory, "journal.ndjson");
@@ -54,6 +55,7 @@ async function fixture() {
     });
     work = new BrokerWorkItemStore({ runtime, durableStore: durable, durableFlight: id => journal.getFlight(id),
       durableWorkItem: id => journal.getCollaborationRecord(id),
+      ...(followNewest ? { newestFlightForWork: (id: string) => newestWorkFlight(id, Object.values(runtime.peek().invocations), Object.values(runtime.peek().flights)) } : {}),
       createId: prefix => `${prefix}-created`, warn: (_message, error) => warnings.push(error),
     });
     lifecycle = new BrokerFlightLifecycleService({
@@ -216,6 +218,81 @@ describe("durable terminal work promotion", () => {
       await f.recover();
       const settled = planHistoryRotation(f.journal().snapshot(), at + 1_000_000);
       expect(settled.flightIds.has("flight-1")).toBe(true);
+    } finally { await f.close(); }
+  });
+});
+
+
+describe("failed work follows its newest run", () => {
+  async function seedSuccessor(f: Awaited<ReturnType<typeof fixture>>, state: FlightRecord["state"] = "completed", workId = "work-1") {
+    const successor = { ...invocation, id: "invocation-2", createdAt: at + 50, collaborationRecordId: workId };
+    const flight = terminal({ id: "flight-2", invocationId: successor.id, startedAt: at + 50,
+      completedAt: at + 75, state, ...(state === "failed" ? { output: undefined, error: "New error", metadata: { failureCause: "harness_error" } } : {}) });
+    await f.journal().appendEntries([{ kind: "invocation.record", invocation: successor }, { kind: "flight.record", flight }]);
+    await f.reopen();
+  }
+
+  test.each(["none", "pending"] as const)("an older failure cannot leave completed work waiting (%s acceptance)", async acceptanceState => {
+    const f = await fixture(true);
+    try {
+      await f.editWork({ acceptanceState });
+      await seedSuccessor(f);
+      await f.record(terminal({ state: "failed", output: undefined, error: "Superseded", metadata: { failureCause: "superseded" } }));
+      expect(f.runtime().collaborationRecord("work-1")).toMatchObject({ state: acceptanceState === "none" ? "done" : "review",
+        metadata: { lastFlightId: "flight-2" } });
+      expect((f.runtime().collaborationRecord("work-1") as WorkItemRecord).waitingOn).toBeUndefined();
+    } finally { await f.close(); }
+  });
+
+  test.each(["missing", "actor"] as const)("one startup pass repairs an existing %s blocker and remains idempotent after reopen", async blocker => {
+    const f = await fixture(true);
+    try {
+      await f.record(terminal({ state: "failed", output: undefined, error: "Old untyped failure" }));
+      const legacy = { ...f.journal().getCollaborationRecord("work-1"), waitingOn: blocker === "actor"
+        ? { kind: "actor", label: "Decide whether to retry", metadata: { invocationId: invocation.id, flightId: "flight-1" } }
+        : undefined, acceptanceState: "none" } as WorkItemRecord;
+      if (blocker === "missing") { const { lastFlightState: _legacyMissing, ...metadata } = legacy.metadata ?? {}; legacy.metadata = metadata; }
+      await f.journal().appendEntries({ kind: "collaboration.record", record: legacy });
+      await seedSuccessor(f);
+      await f.reopen();
+      for (let i = 0; i < 2; i++) await f.work().reconcileFailedWorkItems([f.journal().getCollaborationRecord("work-1")!]);
+      await f.reopen();
+      await f.work().reconcileFailedWorkItems([f.journal().getCollaborationRecord("work-1")!]);
+      expect(f.runtime().collaborationRecord("work-1")).toMatchObject({ state: "done", metadata: { lastFlightId: "flight-2" } });
+      expect(f.journal().listCollaborationEvents({ recordId: "work-1" }).filter(item => item.metadata?.source === "failed_run_reconciliation")).toHaveLength(1);
+    } finally { await f.close(); }
+  });
+
+  test("newer failures carry their own cause, not the older failure", async () => {
+    const f = await fixture(true);
+    try {
+      await seedSuccessor(f, "failed");
+      await f.record(terminal({ state: "failed", output: undefined, metadata: { failureCause: "superseded" } }));
+      expect(f.runtime().collaborationRecord("work-1")).toMatchObject({ state: "waiting",
+        waitingOn: { cause: "harness_error", flightId: "flight-2", retryable: false } });
+    } finally { await f.close(); }
+  });
+
+  test("an endpoint's unrelated newer task does not settle this work", async () => {
+    const f = await fixture(true);
+    try {
+      await seedSuccessor(f, "completed", "other-work");
+      await f.record(terminal({ state: "failed", output: undefined, metadata: { failureCause: "superseded" } }));
+      expect(f.runtime().collaborationRecord("work-1")).toMatchObject({ state: "waiting", waitingOn: { cause: "superseded" } });
+    } finally { await f.close(); }
+  });
+
+  test("migration keeps a manual wait and a human terminal decision", async () => {
+    const f = await fixture(true);
+    try {
+      await f.record(terminal({ state: "failed", output: undefined }));
+      await seedSuccessor(f);
+      const manual = await f.editWork({ waitingOn: { kind: "condition", label: "Human review of scope" } });
+      await f.work().reconcileFailedWorkItems([manual]);
+      expect(f.runtime().collaborationRecord("work-1")).toEqual(manual);
+      const done = await f.editWork({ state: "done", acceptanceState: "accepted" });
+      await f.work().reconcileFailedWorkItems([done]);
+      expect(f.runtime().collaborationRecord("work-1")).toEqual(done);
     } finally { await f.close(); }
   });
 });

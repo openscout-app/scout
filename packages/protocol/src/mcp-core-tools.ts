@@ -29,6 +29,7 @@ export const SCOUT_MCP_CORE_TOOL_CATALOG = [
   { name: "labels_brief", title: "Brief Scout Label", access: "read", summary: "Summarize the records that share a label." },
   { name: "labels_feed", title: "Read Scout Label Feed", access: "read", summary: "Read the event backlog for a label." },
   { name: "work_update", title: "Update Scout Work", access: "write", summary: "Move a work item through progress, review, and done." },
+  { name: "work_retry", title: "Retry Failed Scout Work", access: "write", summary: "Retry the original ask in a fresh session with an idempotent attempt." },
   { name: "work_move", title: "Move Scout Work", access: "write", summary: "Move a work item to a lifecycle station; the runtime checks the move." },
   { name: "work_review", title: "Review Scout Work Move", access: "write", summary: "Confirm, reopen, or consult on a move that is pending review." },
   { name: "work_lifecycle", title: "Read Scout Work Lifecycle", access: "read", summary: "Read lifecycle stations, an item's position, and its recent moves." },

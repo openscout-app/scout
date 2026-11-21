@@ -587,7 +587,7 @@
   {
     "name": "ask",
     "title": "Ask",
-    "description": "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
+    "description": "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. On an agent task, notify marks it Ready for the operator when it finishes (they get one ping and Continue or Hold); use it only for work the operator is waiting on. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1236,6 +1236,63 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "work_retry",
+    "title": "Retry Failed Scout Work",
+    "description": "Send the original ask again to the same target in a fresh session, whatever the failure cause; the item's retryable flag is only a hint. Omit attempt for the next one. Reuse an attempt to recover its receipt after an uncertain result. Never retries automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "workId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "invocationId": {
+          "type": "string"
+        },
+        "flightId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workId",
+        "attempt",
+        "requestId",
+        "invocationId",
+        "flightId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
     }
   },
   {
