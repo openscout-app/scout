@@ -18,6 +18,14 @@ export type SessionInputDeliveryOptions = {
   upsertSessionInputActor?: (actor: ActorIdentity) => Promise<void>;
 };
 
+/**
+ * Invocation metadata a session reply may carry: the caller's `source`, plus
+ * what the broker's own router stamps on every delivery before validation
+ * (verified `attribution`, and `requestId` when the router owns receipts).
+ * Anything else could change how the session runs, so it is refused.
+ */
+const SESSION_INPUT_INVOCATION_METADATA_KEYS = new Set(["source", "attribution", "requestId"]);
+
 /** Validate before reservation or any external input; unsupported semantics must not be dropped. */
 export function validateSessionInputRequest(payload: ScoutDeliverRequest): void {
   if (payload.sessionDelivery === undefined) return;
@@ -33,7 +41,7 @@ export function validateSessionInputRequest(payload: ScoutDeliverRequest): void 
     || payload.collaborationRecordId || payload.replyToMessageId || payload.replyToSessionId || payload.speechText
     || payload.executionSource || payload.labels?.length
     || (payload.execution && Object.entries(payload.execution).some(([key, value]) => value !== undefined && (key !== "session" || value !== "existing")))
-    || (payload.invocationMetadata && Object.keys(payload.invocationMetadata).some(key => key !== "source"))) {
+    || (payload.invocationMetadata && Object.keys(payload.invocationMetadata).some(key => !SESSION_INPUT_INVOCATION_METADATA_KEYS.has(key)))) {
     throw new Error("session_input_unsupported: requires an exact local Claude or Codex session without attachments or execution options");
   }
 }
