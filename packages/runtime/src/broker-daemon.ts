@@ -2356,8 +2356,8 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
   }
 }
 
-// The Vercel Board adapter. It runs only where this node is the recorded
-// custodian; the credential and claim tokens never leave this node.
+// The Vercel Board adapter. It runs every connection this host made; the
+// credential and claim tokens never leave this host.
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,

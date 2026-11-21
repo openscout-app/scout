@@ -9,7 +9,6 @@ export const VERCEL_BOARD_HELP = [
   "scout integration connect vercel-board --url <board url> --credential ...",
   "    [--id <connection>] [--channels scout/work,scout/decisions] [--mirror <channel>,...] [--probe-channel scout/probe] [--allow <principal>,...] [--no-probe]",
   "    [--roles scout,builder,reviewer] [--self-serve <channel>,...] [--sync-channels <channel>,...]",
-  "    [--experimental-marker [--takeover]]",
   "scout integration status vercel-board [--connection <id>]",
   "scout integration claim vercel-board --connection <id> --task <board task id> --agent <scout agent id> [--confirm-owner]",
   "scout integration promote vercel-board --connection <id> --task <board task id>",
@@ -17,7 +16,7 @@ export const VERCEL_BOARD_HELP = [
   "scout integration messages vercel-board --connection <id> --channel <channel> [--limit 100]",
   "scout integration handoffs vercel-board --connection <id> [--task <board task id>] [--limit 200]",
   "",
-  "Connects this node as the custodian of one Vercel Board, as the operator's principal with the `scout` profile.",
+  "Connects this host to one Vercel Board, as the operator's principal with the `scout` profile. Each host connects on its own; the board's claims decide which host does a task.",
   "Vercel Board is a team's messaging-speed coordination surface, not Scout's work board. Each followed channel",
   "becomes a Scout chat room, and each Board thread becomes messages in that room. Nothing lands on Scout's work board",
   "until someone promotes a task.",
@@ -30,7 +29,6 @@ export const VERCEL_BOARD_HELP = [
   "For Vercel, create an access token once and store it with: secret set <entry>. Do not reuse the Vercel CLI login.",
   "Connect runs a probe: it creates, claims and completes one task in the probe channel, and saves the connection only if that works.",
   "--allow takes principal IDs (vercel:user:u_...), never handles. The default is your own principal.",
-  "--experimental-marker keeps a custodian marker on the board. It is untested against Vercel's board.",
   "claim starts a claim for the operator and asks the agent in the task's room thread. The result goes back to the board.",
   "Only the operator starts claims. promote makes the task a Scout work item; a claim on it then carries that work item.",
   "--mirror names the channels Scout keeps a copy of (default: all followed channels). A mirrored channel is read in",
@@ -57,7 +55,7 @@ const VALUE_FLAGS: Record<string, string[]> = {
   handoffs: ["--connection", "--task", "--limit"],
 };
 const BOOLEAN_FLAGS: Record<string, string[]> = {
-  connect: ["--no-probe", "--experimental-marker", "--takeover"],
+  connect: ["--no-probe"],
   status: [],
   claim: ["--confirm-owner"],
   promote: [],
@@ -137,7 +135,6 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
   if (flags["--url"] && (flags["--team"] || flags["--board"])) throw new ScoutCliError("Name the board with --team and --board, or with --url, not both.");
   if (flags["--board"] && !flags["--team"]) throw new ScoutCliError("--board needs --team.");
   if ((!flags["--url"] && !flags["--team"]) || !flags["--credential"]) throw new ScoutCliError("scout integration connect vercel-board requires --team (or --url) and --credential.");
-  if (switches.has("--takeover") && !switches.has("--experimental-marker")) throw new ScoutCliError("--takeover applies only with --experimental-marker.");
   return { kind: "connect", method: "POST", path: scoutBrokerPaths.v1.vercelBoardConnect, body: {
     ...(flags["--url"] ? { url: flags["--url"] } : { team: flags["--team"], ...(flags["--board"] ? { board: flags["--board"] } : {}) }),
     credential: parseCredentialReference(flags["--credential"]),
@@ -150,8 +147,6 @@ export function parseVercelBoardCommand(args: string[], env: NodeJS.ProcessEnv =
     ...(flags["--self-serve"] ? { selfServe: list(flags["--self-serve"]) } : {}),
     ...(flags["--sync-channels"] ? { syncChannels: list(flags["--sync-channels"]) } : {}),
     ...(switches.has("--no-probe") ? { probe: false } : {}),
-    ...(switches.has("--experimental-marker") ? { experimentalMarker: true } : {}),
-    ...(switches.has("--takeover") ? { takeover: true } : {}),
   } };
 }
 
@@ -167,7 +162,7 @@ function formatStatus(status: VercelBoardConnectionStatus): string {
   return [
     `${status.id}: ${status.state}${status.verified ? "" : " (not verified)"}`,
     `  Board: ${status.url} as ${status.principal}+${status.profile}`,
-    `  Custodian: ${status.custodianNodeId}${status.custodianNodeId === status.nodeId ? " (this node)" : ""}`,
+    `  Connected on: ${status.custodianNodeId}${status.custodianNodeId === status.nodeId ? " (this host)" : ""}`,
     "  Channels:",
     ...channels,
     ...(status.roles ? [`  Roles: ${status.roles.join(", ")}; self-serve: ${status.selfServe?.length ? status.selfServe.join(", ") : "none"}`] : []),
