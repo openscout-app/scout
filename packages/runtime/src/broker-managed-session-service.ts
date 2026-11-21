@@ -1,3 +1,4 @@
+import { isRexSurface, startRexAgent, type RexStartInput } from "./rex-terminal.js";
 import { resolve } from "node:path";
 
 import type {
@@ -69,7 +70,7 @@ export type ManagedPairingDetachInput = {
 
 export type ManagedLocalSessionAttachInput = {
   externalSessionId: string;
-  transport: ManagedLocalSessionTransport | "tmux" | "ghostty";
+  transport: ManagedLocalSessionTransport | "tmux" | "ghostty" | "rex";
   cwd: string;
   projectRoot?: string;
   agentId?: string;
@@ -314,7 +315,7 @@ export class BrokerManagedSessionService {
   async attachManagedLocalSession(
     input: ManagedLocalSessionAttachInput,
   ): Promise<{ agentId: string; selector: string | null; endpointId: string; sessionId: string }> {
-    if (input.transport === "tmux" || input.transport === "ghostty") {
+    if (input.transport === "tmux" || input.transport === "ghostty" || input.transport === "rex") {
       return this.attachLiveTerminalSession(input);
     }
 
@@ -421,19 +422,29 @@ export class BrokerManagedSessionService {
     };
   }
 
+  async startRexSession(input: RexStartInput) {
+    const agentId = this.options.createId("local-session-agent");
+    return startRexAgent(input, agentId, (liveTerminal, displayName) =>
+      this.attachLiveTerminalSession({
+        externalSessionId: "", transport: "rex", cwd: input.projectPath, liveTerminal, displayName,
+        alias: `${displayName}-${agentId}`,
+      }, agentId));
+  }
+
   /**
    * Bind an agent to a harness the operator is running in their own terminal.
    * Delivery types into that surface; nothing is spawned beside it.
    */
   private async attachLiveTerminalSession(
     input: ManagedLocalSessionAttachInput,
+    freshAgentId?: string,
   ): Promise<{ agentId: string; selector: string | null; endpointId: string; sessionId: string }> {
     const live = input.liveTerminal;
     const surface = live?.surface;
     const surfaceOk = surface?.backend === "tmux"
       ? Boolean(surface.pane?.trim() && surface.session?.trim())
-      : surface?.backend === "ghostty" && Boolean(surface.terminalId?.trim());
-    if (!live || !surfaceOk || surface?.backend !== input.transport || !Number.isInteger(live.pid) || !live.tty?.trim()) {
+      : isRexSurface(surface) || (surface?.backend === "ghostty" && Boolean(surface.terminalId?.trim()));
+    if (!live || !surfaceOk || surface?.backend !== input.transport || !Number.isInteger(live.pid) || (surface.backend !== "rex" && !live.tty?.trim())) {
       throw new Error(`${input.transport} attach needs liveTerminal { harness, pid, tty, surface } for that backend`);
     }
 
@@ -444,7 +455,7 @@ export class BrokerManagedSessionService {
       : undefined;
     const snapshot = this.options.runtime.snapshot();
     const selectorOptions = this.selectorOptions();
-    const existingAgent = resolveManagedSessionAttachTarget(snapshot, {
+    const existingAgent = freshAgentId ? null : resolveManagedSessionAttachTarget(snapshot, {
       agentId: input.agentId,
       selector: requestedSelector,
     }, selectorOptions);
@@ -462,7 +473,7 @@ export class BrokerManagedSessionService {
         projectRoot,
         displayName: input.displayName,
         nodeId: this.options.nodeId,
-        createId: this.options.createId,
+        id: freshAgentId ?? this.options.createId("local-session-agent"),
       });
 
     const existingEndpoint = managedLocalSessionEndpointForAgent(snapshot, agent.id, this.options.nodeId);

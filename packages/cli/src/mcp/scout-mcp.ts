@@ -3457,7 +3457,7 @@ export function createScoutMcpServer(options: {
     return payload;
   };
 
-  registerIntegrationTools(server, aliasBrokerRequest);
+  registerIntegrationTools(server, aliasBrokerRequest, { env, get defaultCurrentDirectory() { return options.defaultCurrentDirectory; } });
   registerDiffTools(server, aliasBrokerRequest);
   registerSessionRenameTools(server, aliasBrokerRequest, env);
 
