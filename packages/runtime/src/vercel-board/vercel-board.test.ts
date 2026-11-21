@@ -11,7 +11,7 @@ import { VercelBoardHttpTransport } from "./client.js";
 import { VercelBoardCustody } from "./custody.js";
 import { VercelBoardFollower } from "./follower.js";
 import { VercelBoardMirror, type VercelBoardTaskEventRow } from "./mirror.js";
-import { VercelBoardCustodianError, VercelBoardCustodianLease, claimBoardCustodianMarker } from "./lease.js";
+import { VercelBoardLockError, VercelBoardRuntimeLock } from "./runtime-lock.js";
 import { VercelBoardOutbox, VercelBoardOutboxError } from "./outbox.js";
 import { vercelBoardActorId, vercelBoardTaskWorkItem, vercelBoardWorkId, mergeBoardProjection } from "./projection.js";
 import { BrokerVercelBoardService, VercelBoardServiceError, vercelBoardRoomId } from "./service.js";
@@ -334,7 +334,7 @@ test("settle answer lost: the retry's claim_lost is resolved by reading the task
   expect(h.store.custodyForEpoch("c1", id, 1)!.state).toBe("settled"); // kept for replayed events
 });
 
-test("custodian offline while the agent finishes: re-claim when nobody took the task, else keep the result in Scout", async () => {
+test("host offline while the agent finishes: re-claim when nobody took the task, else keep the result in Scout", async () => {
   const h = custodyHarness();
   const a = h.board.createTask({ channel: "work", text: "a" });
   const rowA = await h.custody.claim({ taskId: a, workId: "wa", agentId: "agent-1", startedBy: "operator" });
@@ -389,15 +389,15 @@ test("outbox lanes are serial: a write behind an unknown outcome waits for it", 
   expect(order).toEqual(["first", "first", "second"]);
 });
 
-// ---- duplicate custodian ------------------------------------------------------
+// ---- host lock ----------------------------------------------------------------
 
-test("duplicate custodian on one host: the local lease admits one runtime per (board, principal)", () => {
+test("two runtimes on one host: the host lock admits one per (board, principal)", () => {
   const db = database();
   const time = clock();
-  const first = new VercelBoardCustodianLease(db, "first", time.now);
-  const second = new VercelBoardCustodianLease(db, "second", time.now);
+  const first = new VercelBoardRuntimeLock(db, "first", time.now);
+  const second = new VercelBoardRuntimeLock(db, "second", time.now);
   const grant = first.claim("c1", "local:user:operator");
-  expect(() => second.claim("c1", "local:user:operator")).toThrow(VercelBoardCustodianError);
+  expect(() => second.claim("c1", "local:user:operator")).toThrow(VercelBoardLockError);
   // A second person's Scout on the same board is a different key.
   expect(second.claim("c1", "local:user:someone-else").generation).toBe(1);
   time.advance(31_000);
@@ -406,27 +406,16 @@ test("duplicate custodian on one host: the local lease admits one runtime per (b
   expect(() => first.renew("c1", "local:user:operator", grant)).toThrow("no longer holds");
 });
 
-test("a lapsed lease nobody took is still this runtime's: a stall past the TTL renews instead of dropping the connection", () => {
+test("a lapsed lock nobody took is still this runtime's: a stall past the TTL renews instead of dropping the connection", () => {
   const db = database();
   const time = clock();
-  const lease = new VercelBoardCustodianLease(db, "first", time.now);
+  const lease = new VercelBoardRuntimeLock(db, "first", time.now);
   const grant = lease.claim("c1", "local:user:operator");
   time.advance(5 * 60_000); // the host slept
   const renewed = lease.renew("c1", "local:user:operator", grant);
   expect(renewed.generation).toBe(grant.generation);
   expect(renewed.expiresAt).toBe(time.now() + 30_000);
-  expect(() => new VercelBoardCustodianLease(db, "second", time.now).claim("c1", "local:user:operator")).toThrow(VercelBoardCustodianError);
-});
-
-test("experimental board marker: a second node refuses without takeover, and a racing write is a conflict", async () => {
-  const h = harness();
-  const conn = { id: "c1", principal: "local:user:operator", probeChannel: "scout-probe" };
-  expect(await claimBoardCustodianMarker(h.transport, conn, { nodeId: "node-a" })).toMatchObject({ epoch: 1 });
-  expect(await claimBoardCustodianMarker(h.transport, conn, { nodeId: "node-a" })).toMatchObject({ epoch: 1 });
-  await expect(claimBoardCustodianMarker(h.transport, conn, { nodeId: "node-b" })).rejects.toMatchObject({ code: "custodian_held" });
-  h.board.fault({ route: "POST /messages/:id/labels", mode: "status", status: 409, code: "label_conflict" });
-  await expect(claimBoardCustodianMarker(h.transport, conn, { nodeId: "node-b", takeover: true })).rejects.toMatchObject({ code: "marker_conflict" });
-  expect(await claimBoardCustodianMarker(h.transport, conn, { nodeId: "node-b", takeover: true })).toMatchObject({ epoch: 2 });
+  expect(() => new VercelBoardRuntimeLock(db, "second", time.now).claim("c1", "local:user:operator")).toThrow(VercelBoardLockError);
 });
 
 // ---- service ------------------------------------------------------------------
@@ -499,14 +488,14 @@ test("a team board URL goes to the Board worker, never to the HTTP transport", a
   expect(h.board.requests.length).toBe(0);
 });
 
-test("a connection whose local lease was taken comes back once the lease is free, without a restart", async () => {
+test("a connection whose host lock was taken comes back once the lock is free, without a restart", async () => {
   const h = serviceHarness();
   await h.connect();
   const principal = "local:user:operator";
   h.time.advance(31_000);
-  const other = new VercelBoardCustodianLease(h.db, "other-runtime", h.time.now);
+  const other = new VercelBoardRuntimeLock(h.db, "other-runtime", h.time.now);
   const taken = other.claim("c1", principal);
-  await expect(h.service.pump("c1")).rejects.toMatchObject({ code: "custodian_lost" });
+  await expect(h.service.pump("c1")).rejects.toMatchObject({ code: "lock_lost" });
   expect((await h.service.status("c1"))[0]).toMatchObject({ state: "not_custodian" });
   // Still held by the other runtime: the retry leaves it dark.
   expect(await h.service.reclaim("c1")).toBe("not_custodian");
@@ -580,7 +569,7 @@ test("fan-in reads the full dependency result, attributed and quoted, before tak
     if (id && dependencyIds.has(id)) duringFanIn?.();
   });
   await h.connect();
-  await h.service.pump("c1"); // the custodian has read the board before the inputs finish
+  await h.service.pump("c1"); // the runtime has read the board before the inputs finish
   const upstream = h.board.createTask({ channel: "work", text: "Gather sources" });
   dependencyIds.add(upstream);
   const outside = new VercelBoardHttpTransport(connection, async () => h.board.token, h.board.fetch);

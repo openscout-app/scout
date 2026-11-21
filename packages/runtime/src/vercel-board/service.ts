@@ -15,7 +15,7 @@ import { VERCEL_BOARD_DEFAULT_CHANNELS, VERCEL_BOARD_DEFAULT_PROBE_CHANNEL, VERC
 import { VercelBoardCredential, VercelBoardCredentialError } from "./credential.js";
 import { VercelBoardClaimError, VercelBoardCustody, type VercelBoardCustodyNotice } from "./custody.js";
 import { VercelBoardFollower } from "./follower.js";
-import { VercelBoardCustodianError, VercelBoardCustodianLease, claimBoardCustodianMarker, markerNamesOtherNode, type VercelBoardCustodianGrant } from "./lease.js";
+import { VercelBoardLockError, VercelBoardRuntimeLock, type VercelBoardLockGrant } from "./runtime-lock.js";
 import { VercelBoardMirror, vercelBoardHandoffRecord, vercelBoardOriginOf, type VercelBoardTaskEventRow } from "./mirror.js";
 import { VercelBoardOutbox } from "./outbox.js";
 import { vercelBoardActorId, vercelBoardPrincipalOf, vercelBoardScopedId, vercelBoardTaskWorkItem, vercelBoardWorkId, mergeBoardProjection } from "./projection.js";
@@ -75,8 +75,7 @@ interface LiveConnection {
   follower: VercelBoardFollower;
   custody: VercelBoardCustody;
   outbox: VercelBoardOutbox;
-  grant?: VercelBoardCustodianGrant;
-  markerId?: string;
+  grant?: VercelBoardLockGrant;
   state: VercelBoardConnectionState;
   detail?: string;
   fix?: string;
@@ -94,7 +93,7 @@ const FOLLOW_WAIT_SECONDS = 300;
 const TICK_MS = 5_000;
 const OUTBOX_MS = 15_000;
 const RECONCILE_MS = 10 * 60_000;
-/** How often a connection this node holds, but whose local lease another runtime has, tries to take the lease again. */
+/** How often a connection whose host lock another runtime on this host has tries to take the lock again. */
 const RECLAIM_MS = 30_000;
 const LEASE_RENEW_MS = 10_000;
 const MAX_PLAN_TASKS = 50;
@@ -123,13 +122,15 @@ export const vercelBoardMirroredChannels = (config: Pick<VercelBoardConnectionCo
 export const vercelBoardRoomId = (connectionId: string, channel: string): string => stableChannelId(`vercel-board:${connectionId}:${channel}`);
 
 /**
- * The Vercel Board adapter, on the custodian node. Only this service talks to
- * Board; agents reach Board through Scout and never hold a credential or a
- * claim token.
+ * The Vercel Board adapter. Each host that connects runs one: it follows the
+ * board, keeps its own copy, and claims tasks as the operator's profiles. The
+ * board's claims decide which host does a task, so hosts need no lock between
+ * them. Agents reach Board through their host's runtime and never hold a
+ * credential or a claim token.
  */
 export class BrokerVercelBoardService {
   private readonly file: VercelBoardConnectionFile;
-  private readonly lease: VercelBoardCustodianLease;
+  private readonly lock: VercelBoardRuntimeLock;
   private readonly live = new Map<string, LiveConnection>();
   private readonly reclaims = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly actors = new Set<string>();
@@ -137,14 +138,13 @@ export class BrokerVercelBoardService {
 
   constructor(private readonly options: BrokerVercelBoardServiceOptions) {
     this.file = new VercelBoardConnectionFile(options.connectionsDirectory);
-    this.lease = new VercelBoardCustodianLease(options.database, undefined, options.now);
+    this.lock = new VercelBoardRuntimeLock(options.database, undefined, options.now);
     this.now = options.now ?? Date.now;
   }
 
-  /** Start every connection this node is custodian for. A bad connection does not stop the others. */
+  /** Start every connection this host made. A bad connection does not stop the others. */
   async start(): Promise<void> {
     for (const config of await this.file.list().catch(error => { this.options.warn?.("[vercel-board] connection file unreadable", error); return []; })) {
-      if (config.custodianNodeId !== this.options.nodeId) continue;
       try { await this.open(config); }
       catch (error) { this.options.warn?.(`[vercel-board] ${config.id} did not start`, error); }
     }
@@ -202,9 +202,9 @@ export class BrokerVercelBoardService {
     this.clearReclaim(config.id);
     const live = this.build(config, prepared);
     try {
-      live.grant = this.lease.claim(config.id, config.principal);
+      live.grant = this.lock.claim(config.id, config.principal);
     } catch (error) {
-      if (error instanceof VercelBoardCustodianError) { live.state = "not_custodian"; live.detail = error.message; this.live.set(config.id, live); this.reclaimLater(live); return live; }
+      if (error instanceof VercelBoardLockError) { live.state = "not_custodian"; live.detail = error.message; this.live.set(config.id, live); this.reclaimLater(live); return live; }
       throw error;
     }
     this.live.set(config.id, live);
@@ -217,7 +217,7 @@ export class BrokerVercelBoardService {
     live.worker?.stop();
     for (const timer of live.timers) clearTimeout(timer);
     live.timers = [];
-    if (live.grant) this.lease.release(live.config.id, live.config.principal, live.grant);
+    if (live.grant) this.lock.release(live.config.id, live.config.principal, live.grant);
     live.grant = undefined;
     live.state = state;
   }
@@ -271,8 +271,8 @@ export class BrokerVercelBoardService {
   }
 
   private renewLease(live: LiveConnection): void {
-    if (!live.grant) throw new VercelBoardCustodianError("custodian_lost", "This runtime does not hold the connection.");
-    live.grant = this.lease.renew(live.config.id, live.config.principal, live.grant);
+    if (!live.grant) throw new VercelBoardLockError("lock_lost", "This runtime does not hold the connection.");
+    live.grant = this.lock.renew(live.config.id, live.config.principal, live.grant);
   }
 
   private markGood(live: LiveConnection): void {
@@ -284,12 +284,11 @@ export class BrokerVercelBoardService {
 
   /** Name the state for an error. Returns how long to wait, when the error says. */
   private classify(live: LiveConnection, error: unknown): number | undefined {
-    if (error instanceof VercelBoardCustodianError) {
+    if (error instanceof VercelBoardLockError) {
       if (live.state === "not_custodian") return;
       this.close(live, "not_custodian");
       live.detail = error.message;
-      // A marker naming another node is an operator's takeover: not retried.
-      if (error.code !== "marker_moved") this.reclaimLater(live);
+      this.reclaimLater(live);
       return;
     }
     if (error instanceof VercelBoardHttpError) {
@@ -334,12 +333,6 @@ export class BrokerVercelBoardService {
   }
 
   private async reconcileAll(live: LiveConnection): Promise<void> {
-    if (live.markerId) {
-      const marker = await live.transport.message(live.markerId);
-      if (marker && markerNamesOtherNode(marker.labels, this.options.nodeId)) {
-        throw new VercelBoardCustodianError("marker_moved", "The custodian marker on the board names another node. This node stopped following.");
-      }
-    }
     if (live.readsBlockedUntil > this.now()) return;
     for (const channel of vercelBoardMirroredChannels(live.config)) {
       // A channel still in its first read is the follower's.
@@ -349,9 +342,9 @@ export class BrokerVercelBoardService {
   }
 
   /**
-   * A connection this node holds stays this node's. When its local lease is
-   * lost (another runtime on this host took it, or a renew failed), keep
-   * trying to take it back instead of staying dark until a restart.
+   * A connection this host made stays this host's. When its lock is lost
+   * (another runtime on this host took it, or a renew failed), keep trying to
+   * take it back instead of staying dark until a restart.
    */
   private reclaimLater(live: LiveConnection): void {
     if (this.options.autoStart === false) return;
@@ -368,7 +361,7 @@ export class BrokerVercelBoardService {
     this.reclaims.delete(connectionId);
   }
 
-  /** Test and CLI hook: take the local lease again for a connection that lost it. Returns the new state. */
+  /** Test and CLI hook: take the lock again for a connection that lost it. Returns the new state. */
   async reclaim(connectionId: string): Promise<VercelBoardConnectionState | undefined> {
     const live = this.live.get(connectionId);
     if (!live || live.state !== "not_custodian") return live?.state;
@@ -899,7 +892,7 @@ export class BrokerVercelBoardService {
     return { url: request.url.replace(/\/+$/, ""), transport: "protocol" };
   }
 
-  async connect(request: VercelBoardConnectRequest & { experimentalMarker?: boolean; takeover?: boolean }): Promise<VercelBoardConnectResponse> {
+  async connect(request: VercelBoardConnectRequest): Promise<VercelBoardConnectResponse> {
     if (!request || typeof request !== "object") throw new VercelBoardServiceError(400, "invalid_request", "A connect request is required.");
     const target = this.targetOf(request);
     const credentialErrors = validateVercelBoardCredentialReference(request.credential);
@@ -943,7 +936,7 @@ export class BrokerVercelBoardService {
   }
 
   private async connectWith(
-    request: VercelBoardConnectRequest & { experimentalMarker?: boolean; takeover?: boolean },
+    request: VercelBoardConnectRequest,
     draft: VercelBoardConnectionConfig, credential: VercelBoardCredential, worker: VercelBoardWorkerSupervisor | undefined,
   ): Promise<VercelBoardConnectResponse> {
     const transport: VercelBoardTransport = worker ? new VercelBoardWorkerTransport(worker) : new VercelBoardHttpTransport(draft, () => credential.token(), this.options.fetch);
@@ -973,15 +966,6 @@ export class BrokerVercelBoardService {
         throw new VercelBoardServiceError(error instanceof VercelBoardHttpError && error.status === 404 ? 404 : 502, code, `Could not make channel ${channel}: ${error instanceof Error ? error.message : code}`, error instanceof VercelBoardHttpError ? error.hint : undefined);
       });
     }
-    let markerId: string | undefined;
-    if (request.experimentalMarker) {
-      try {
-        markerId = (await claimBoardCustodianMarker(ready, config, { nodeId: this.options.nodeId, takeover: request.takeover })).markerId;
-      } catch (error) {
-        if (error instanceof VercelBoardCustodianError) throw new VercelBoardServiceError(409, error.code, error.message);
-        throw error;
-      }
-    }
     let probe: VercelBoardConnectResponse["probe"];
     if (request.probe !== false) {
       probe = await this.probe(ready, config);
@@ -989,7 +973,6 @@ export class BrokerVercelBoardService {
     }
     await this.file.put(config);
     const live = await this.open(config, worker ? { credential, worker } : undefined);
-    if (markerId) live.markerId = markerId;
     if (live.state === "connecting" && this.options.autoStart === false) live.state = "following";
     for (const channel of config.channels) await this.room(live, channel).catch(error => this.options.warn?.(`[vercel-board] room for ${channel} not made`, error));
     return { connection: config, status: this.statusOf(live), ...(probe ? { probe } : {}) };
@@ -1011,14 +994,14 @@ export class BrokerVercelBoardService {
 
   private requireLive(connectionId: string): LiveConnection {
     const live = this.live.get(connectionId);
-    if (!live) throw new VercelBoardServiceError(409, "not_custodian", `Board connection ${connectionId} is not running on this node.`, "Run the command on the custodian node; scout integration status vercel-board names it.");
-    if (live.state === "not_custodian") throw new VercelBoardServiceError(409, "not_custodian", live.detail ?? "This runtime is not the custodian.");
+    if (!live) throw new VercelBoardServiceError(409, "not_custodian", `This host is not connected to board connection ${connectionId}.`, "Connect this host too: scout integration connect vercel-board --team <team> --board <board> --credential secret_cli:<entry>. Each host connects on its own.");
+    if (live.state === "not_custodian") throw new VercelBoardServiceError(409, "not_custodian", live.detail ?? "Another runtime on this host holds the connection.");
     return live;
   }
 
   private statusOf(live: LiveConnection): VercelBoardConnectionStatus {
     const { config, store } = live;
-    const observed = this.lease.observe(config.id, config.principal);
+    const observed = this.lock.observe(config.id, config.principal);
     return {
       id: config.id, url: config.url, transport: config.transport, principal: config.principal, profile: config.profile, channels: config.channels,
       custodianNodeId: config.custodianNodeId, nodeId: this.options.nodeId, state: live.state,
@@ -1044,8 +1027,7 @@ export class BrokerVercelBoardService {
       out.push({
         id: config.id, url: config.url, transport: config.transport, principal: config.principal, profile: config.profile, channels: config.channels,
         custodianNodeId: config.custodianNodeId, nodeId: this.options.nodeId,
-        state: config.custodianNodeId === this.options.nodeId ? "stopped" : "not_custodian",
-        ...(config.custodianNodeId !== this.options.nodeId ? { detail: `Node ${config.custodianNodeId} is the custodian.` } : {}),
+        state: "stopped",
         verified: config.verifiedAt !== undefined,
         cursors: config.channels.map(channel => ({ channel, stored: Boolean(store.cursor(config.id, channel)) })),
         mirror: config.channels.map(channel => ({ channel, state: vercelBoardMirroredChannels(config).includes(channel) ? "mirrored" as const : "not_mirrored" as const, conversationId: vercelBoardRoomId(config.id, channel) })),

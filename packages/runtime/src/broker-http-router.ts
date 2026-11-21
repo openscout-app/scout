@@ -338,7 +338,7 @@ export type BrokerHttpRouterDeps = {
   rendezvousService: BrokerRendezvousService;
   externalSessionService?: BrokerExternalSessionService;
   t3Service?: BrokerT3Service;
-  /** The Vercel Board adapter; it answers on its custodian node. */
+  /** The Vercel Board adapter; it answers on each host that connected. */
   vercelBoardService?: BrokerVercelBoardService;
   routeAliasService?: BrokerRouteAliasService;
   agentRosterService?: AgentRosterService;
@@ -955,7 +955,7 @@ export function createBrokerHttpRouter(
         return;
       }
       if (method !== "POST") { notFound(response); return; }
-      // Board credentials and claim tokens stay on the custodian: no remote mutation, no forwarding.
+      // Board credentials and claim tokens stay on the host that holds them: no remote mutation, no forwarding.
       if (denyRemoteMutation()) return;
       if (forwardedNodeId) { json(response, 403, { error: "vercel_board_local_only" }); return; }
       const input = await readRequestBody<Record<string, any>>(request, { maxBytes: 256 * 1024 });
