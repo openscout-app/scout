@@ -61,6 +61,8 @@ export const scoutBrokerPaths = {
     workClaim: "/v1/work/claim",
     derived: "/v1/derived",
     derivedPending: "/v1/derived/pending",
+    taskNotify: "/v1/tasks/notify",
+    taskReadyDecide: "/v1/tasks/ready/decide",
     vercelBoardConnect: "/v1/integrations/vercel-board/connect",
     vercelBoardStatus: "/v1/integrations/vercel-board/status",
     vercelBoardClaim: "/v1/integrations/vercel-board/claim",

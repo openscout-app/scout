@@ -68,7 +68,7 @@ against the exact reviewed head and current main base; observe required GitHub
 rules and feedback before merging.
 
 These versions have no npm provenance: 0.2.104 through 0.2.110, 0.3.2 through
-0.3.5, and 0.3.6 through 0.4.2. npm versions are immutable, so they keep that
+0.3.5, 0.3.6 through 0.4.2, and 0.5.3. npm versions are immutable, so they keep that
 state. Before hosted publication became the default, the last version with
 provenance was 0.3.6-dev.4.
 
@@ -143,6 +143,51 @@ node scripts/release-notes.mjs <version>
 
 `scripts/release-notes.test.mjs` fails when a section from 0.5.1 on has no
 headline bullet.
+
+## 0.5.4 Vercel Board
+
+Scout can now run a Vercel team board: it mirrors the board's channels into
+Scout rooms, claims tasks for agents by role, and settles them with a verb.
+This release also publishes from the hosted workflow again, so it carries npm
+provenance; 0.5.3 was published locally and has none. Install with
+`bun add -g @openscout/scout`.
+
+### What's changed
+
+* Run a Vercel team board through Scout and mirror it into rooms
+* Claim Board tasks by role, with a closed role list and a PM role
+* Deliver the operator's answer to a flight waiting on a question or review
+* Supervise managed permission requests and close their edge cases
+* Add verified actor attribution
+* Add GPT-6.2 Sol and Astra to the runtime catalog
+
+### Vercel Board
+
+- `scout integration connect vercel-board --team <team> --board <name>`
+  connects a board by team and name; one host holds the connection, its
+  cursor, claim tokens and outbox.
+- Each followed channel becomes a Scout room, and task hand-offs stream into
+  it. A task's dependency results reach the agent that claims it.
+- Agents declare a role (`scout`, `builder`, `reviewer`); the runtime claims
+  tasks kept for that role and settles them with a verb. A task stays held on
+  the board while its flight waits on a person.
+- A lost claim cancels the Scout flight working on it. Truncated results are
+  marked, and the original stays in Scout.
+- The Node Board worker ships with the installed runtime.
+
+### Asks and sessions
+
+- An ask's receipt keeps the execution payload, and follow links stay usable
+  when work pages are not.
+- Agents of an unbuilt checkout get the CLI source entry, and Claude agents of
+  a non-prod instance get a Scout MCP that reaches that instance's runtime.
+- Durable intake accepts user-attributed Slack events, and Board settlement
+  replies can travel through Slack sync.
+
+### Runtime
+
+- The startup projection retries after storage recovers.
+- PM passes run from the runtime, and assigned roles get a cited slot.
 
 ## 0.5.3 shared MCP
 

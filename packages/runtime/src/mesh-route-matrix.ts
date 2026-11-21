@@ -272,6 +272,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/roles/assignments/:id/revoke": "local",
   "POST /v1/roles/slots/:id": "local",
   "POST /v1/roles/slots/:id/pass": "local",
+  "POST /v1/tasks/notify": "local",
+  "POST /v1/tasks/ready/decide": "local",
   "POST /v1/thread-watches/close": "local",
   "POST /v1/thread-watches/open": "local",
   "POST /v1/thread-watches/renew": "local",

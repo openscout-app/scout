@@ -5914,7 +5914,7 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   }
 }
 
-/** The Board planning path: creates Board tasks only. Work items appear when the custodian projects them. */
+/** The Board planning path: creates Board tasks only. Work items appear when the connected runtime projects them. */
 export async function planScoutBoardTasks(input: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
   return brokerPostJson<VercelBoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.vercelBoardPlan, input);
 }

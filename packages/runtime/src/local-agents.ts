@@ -654,7 +654,7 @@ function buildLocalAgentTmuxProtocolPrompt(context: LocalAgentSystemPromptTempla
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
     "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
-    `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
+    `  - For asynchronous work, use ${context.relayCommand} ask (it returns on acceptance); do not downgrade the work to send merely to avoid blocking. Add --notify only when the operator is waiting on that work: it marks the task Ready for them`,
     "  - When replying to an [ask:<id>] request, include the same [ask:<id>] tag in your reply",
     "  - For prior Codex/Claude/Kimi session work, use scout search (explicit index then query) before grepping ~/.codex, ~/.claude, or ~/.kimi-code",
     "  - Use the CLI commands above when recent context is needed before responding",
@@ -686,7 +686,7 @@ function buildLocalAgentDirectProtocolPrompt(context: LocalAgentSystemPromptTemp
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
     "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
-    `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
+    `  - For asynchronous work, use ${context.relayCommand} ask (it returns on acceptance); do not downgrade the work to send merely to avoid blocking. Add --notify only when the operator is waiting on that work: it marks the task Ready for them`,
     "  - Do not curl broker HTTP endpoints to read messages",
     `  - Follow the scout skill at ${context.scoutSkill} for agent-to-agent communication`,
   ].join("\n");
