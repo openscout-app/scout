@@ -1,3 +1,4 @@
+import { newestWorkFlight } from "./broker-failed-work.js";
 import { projectFlightRecord } from "@openscout/protocol";
 import type { ControlPlaneHistoryReader, HistoricalRecord, HistoricalPublication } from "./control-plane-history-store.js";
 import type { BrokerMessageHistory } from "./broker-message-history.js";
@@ -1198,6 +1199,11 @@ export class FileBackedBrokerJournal {
 
   snapshot(): RuntimeRegistrySnapshot {
     return cloneSnapshot(this.state.snapshot);
+  }
+
+  /** Retained canonical coordination only; never opens harness history. */
+  newestFlightForWork(workId: string): FlightRecord | undefined {
+    return newestWorkFlight(workId, Object.values(this.state.snapshot.invocations), Object.values(this.state.snapshot.flights));
   }
 
   /** The node record this journal last accepted, without copying the snapshot. Read only. */

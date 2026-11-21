@@ -443,6 +443,45 @@ export function agentNotificationForOperatorSignal(input: {
   };
 }
 
+/**
+ * A task the operator asked to hear about is finished and waits on their
+ * Continue or Hold. It is not a question, so it has no options and no reply.
+ * Keyed by the flight, so one flight rings once; a tap opens the conversation.
+ */
+export function agentNotificationForReadyTask(input: {
+  flightId: string;
+  invocationId: string;
+  workId?: string | null;
+  summary: string;
+  conversationId?: string | null;
+  agentName: string;
+  agentId?: string | null;
+  /** Roster number text ("012") when the agent holds one. */
+  agentCode?: string | null;
+  agentHarness?: string | null;
+  project?: string | null;
+  host?: string;
+  createdAt: number;
+}): AgentNotification {
+  return {
+    view: "work.done",
+    summary: input.summary.trim(),
+    ready: true,
+    v: AGENT_NOTIFICATION_VERSION,
+    itemId: input.flightId,
+    sender: notificationSender(input),
+    ...(input.project ? { project: input.project } : {}),
+    host: input.host ?? notificationHostName(),
+    level: "active",
+    createdAt: input.createdAt,
+    // Not a request record: the tap lands on the task's conversation.
+    route: {
+      open: "inbox",
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    },
+  };
+}
+
 function notificationSender(input: {
   agentName: string;
   agentId?: string | null;

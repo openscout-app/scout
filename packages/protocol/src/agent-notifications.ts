@@ -49,7 +49,11 @@ export type AgentNotificationView =
   | { view: "turn.question.choice"; question: string; context?: string; options: string[]; multiSelect?: boolean }
   | { view: "turn.question.open"; question: string; context?: string }
   | { view: "turn.failed"; error: string; excerpt?: string[]; elapsed?: string }
-  | { view: "work.done"; summary: string; artifacts?: AgentNotificationArtifact[] }
+  /**
+   * `ready` marks a task the operator asked to hear about: finished and waiting
+   * on their Continue or Hold (see task-ready). Without it, the work is done.
+   */
+  | { view: "work.done"; summary: string; artifacts?: AgentNotificationArtifact[]; ready?: boolean }
   /**
    * `reply` says whether the agent waits on the answer (`required`) or will
    * go on without one (`optional`). `permission` marks a declared request for
@@ -170,7 +174,7 @@ function wantPhrase(n: AgentNotification): string {
     case "turn.question.choice": return "asks you to choose";
     case "turn.question.open": return "has a question";
     case "turn.failed": return "stopped on an error";
-    case "work.done": return "finished";
+    case "work.done": return n.ready ? "is ready" : "finished";
     case "ask":
       if (n.permission) return "needs your permission";
       return n.reply === "optional" ? "would like your input" : "is waiting on your answer";
@@ -206,7 +210,7 @@ export function agentNotificationPreview(n: AgentNotification): { title: string;
     case "turn.failed":
       return { title: "Run failed", body: notificationPlainLine(n.error) };
     case "work.done":
-      return { title: "Work complete", body: notificationPlainLine(n.summary) };
+      return { title: n.ready ? "Ready" : "Work complete", body: notificationPlainLine(n.summary) };
     case "ask": {
       const title = n.permission ? "Permission requested" : n.reply === "optional" ? "Input welcome" : "Reply needed";
       return { title, body: notificationPlainLine(n.note) };

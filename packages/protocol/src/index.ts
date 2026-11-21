@@ -17,6 +17,7 @@ export * from "./channel-membership.js";
 export * from "./channel-reception.js";
 export * from "./collaboration.js";
 export * from "./work-lifecycle.js";
+export * from "./derived-records.js";
 export * from "./work-claims.js";
 export * from "./assigned-roles.js";
 export * from "./orchestrator-prompt.js";
@@ -95,5 +96,8 @@ export * from "./session-names.js";
 
 export * from "./host-attention.js";
 export * from "./tasks.js";
+export * from "./decision-cards.js";
+export * from "./failed-runs.js";
+export * from "./task-ready.js";
 
 export * from "./shows.js";

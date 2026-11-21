@@ -1,10 +1,12 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
+import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
 import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
@@ -13,7 +15,10 @@ import { BrokerAttachmentService } from "./broker-attachment-service.js";
 import { createOperatorAttachmentNotifier } from "./broker-operator-attachment-notifier.js";
 import { AttachmentError } from "./attachment-contract.js";
 import { markAttachmentReferences } from "./attachment-retention.js";
-import { iterateMessageRecordsAsync } from "./broker-message-records.js";
+import { iterateMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
+import { BrokerDecisionCardService } from "./broker-decision-cards.js";
+import { sessionActorAlias } from "./session-alias.js";
+import { createDecisionModel } from "./decision-synthesis-model.js";
 import { createTailscaleListenerGuard, isRuntimeLoopbackTcpSocket, type LocalListenerKind } from "./mesh-tailscale-listener-guard.js";
 import { MeshFeedback } from "./mesh-feedback.js";
 import { MeshBridgeManagement } from "./mesh-bridge-management.js";
@@ -206,6 +211,7 @@ import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
+import { BrokerDerivedRecordService } from "./broker-derived-records.js";
 import { ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths, controlPlaneArchiveDirectory } from "./support-paths.js";
 import { expandHomePath } from "./tool-resolution.js";
 import {
@@ -1046,6 +1052,18 @@ const workLifecycles = new BrokerWorkLifecycleService({
   createId: createRuntimeId,
   operatorActorId,
 });
+// Derived records: written only through this service; asks for pending ones
+// start only when a lifecycle station names where its agent runs.
+const derivedRecords = new BrokerDerivedRecordService({
+  registry: workLifecycleRegistry,
+  durableStore,
+  runtime,
+  listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  deliver: request => deliveryAcceptanceService.accept(request),
+  producerActorId: "scout.deriver",
+  nodeId,
+  warn: (message, error) => console.warn(message, error ?? ""),
+});
 const workItemStore = new BrokerWorkItemStore({
   runtime,
   durableStore,
@@ -1054,8 +1072,11 @@ const workItemStore = new BrokerWorkItemStore({
     : { record: after },
   durableFlight: (flightId) => journal.getFlight(flightId),
   durableWorkItem: (workId) => journal.getCollaborationRecord(workId),
+  newestFlightForWork: workId => journal.newestFlightForWork(workId),
+  durableCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
   createId: createRuntimeId,
   warn: (message, error) => console.warn(message, error),
+  operatorActorId,
 });
 const recordDeliveryWorkItemIfNeeded = workItemStore.recordDeliveryWorkItemIfNeeded;
 const deliveryWorkItemResolutionForTell = workItemStore.deliveryWorkItemResolutionForTell;
@@ -1066,6 +1087,17 @@ function recoverTerminalWorkPromotions(): void {
   workPromotionRecovery = workItemStore.recoverTerminalWorkPromotions(journal.listPendingWorkPromotionFlights())
     .catch((error) => console.warn("[openscout-runtime] work promotion recovery failed:", error))
     .finally(() => { workPromotionRecovery = undefined; });
+}
+async function reconcileExistingFailedWork(): Promise<void> {
+  let cursor: { afterCreatedAt: number; afterId: string } | undefined;
+  for (;;) {
+    const page = journal.listCollaborationRecords({ kind: "work_item", state: "waiting", orderByCreatedAt: true, ...cursor, limit: 100 });
+    if (!page.length) return;
+    await workItemStore.reconcileFailedWorkItems(page);
+    const last = page.at(-1)!;
+    cursor = { afterCreatedAt: last.createdAt, afterId: last.id };
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
 }
 const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalSessionWakeResult> =>
   wakeLocalHarnessSession({
@@ -1337,6 +1369,9 @@ runtime.subscribe((event) => {
   if (event.kind === "agent.registered" || event.kind === "agent.endpoint.upserted") {
     scheduleAgentRosterReconcile();
   }
+  if (event.kind === "collaboration.upserted" && event.payload.record.kind === "work_item") {
+    derivedRecords.kick();
+  }
 });
 
 // Presence: broker-observed, ephemeral, latest-per-agent. Deliberately not on
@@ -1589,6 +1624,27 @@ async function recordScoutDispatchDurably(
   });
 }
 
+// One ring per Ready flight. An open operator question or permission from the
+// same agent owns the ping instead.
+const taskReadyNotifier = new TaskReadyNotifier({
+  nodeId,
+  hasOpenOperatorRequest: (flight) => {
+    const records = runtime.peek().collaborationRecords;
+    const permissionId = flight.metadata?.permissionRequestId;
+    if (typeof permissionId === "string" && records[permissionId]?.state === "open") return true;
+    return Object.values(records).some((record) => record.kind === "question" && record.state === "open"
+      && record.nextMoveOwnerId === operatorActorId && record.askedById === flight.targetAgentId);
+  },
+  notify: (notice) => operatorAttentionService.queueReadyTask({
+    ...notice,
+    projectRoot: (() => {
+      const endpoint = Object.values(runtime.peek().endpoints).find((item) => item.agentId === notice.agentId && (item.projectRoot || item.cwd));
+      return endpoint?.projectRoot ?? endpoint?.cwd;
+    })(),
+    createdAt: Date.now(),
+  }),
+  workIdFor: (invocation) => workItemStore.workIdForInvocation(invocation),
+});
 const flightLifecycleService = new BrokerFlightLifecycleService({
   runtime,
   journal,
@@ -1596,6 +1652,14 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
   updateDeliveryStatus: updateDeliveryStatusDurably,
   updateDeliveryStatusIf: deliveryStore.updateDeliveryStatusIf,
+  prepareTaskReady: (previous, flight, invocation) => prepareTaskReady(previous, flight, invocation, {
+    operatorActorId, nodeId, now: Date.now(),
+  }),
+  onFlightRecorded: async (previous, flight, invocation) => {
+    if (!taskReadyEntered(previous, flight)) return;
+    taskReadyNotifier.noteFlight(previous, flight, invocation);
+    await workItemStore.landReadyWorkItem(flight, invocation);
+  },
   prepareWorkPromotion: workItemStore.prepareTerminalWorkPromotion,
   promoteInvocationFlightToWork,
   prepareTerminalReport: (flight, invocation) => prepareTerminalReport(flight, invocation, {
@@ -2357,8 +2421,8 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
   }
 }
 
-// The Vercel Board adapter. It runs only where this node is the recorded
-// custodian; the credential and claim tokens never leave this node.
+// The Vercel Board adapter. It runs every connection this host made; the
+// credential and claim tokens never leave this host.
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
@@ -2967,25 +3031,38 @@ async function postConversationMessage(
 // Each host that holds a question to the operator keeps its own record of it,
 // so a question asked on another host can be dismissed here, and an answer
 // given on another host settles it here.
+// Built once the task and permission services exist; asks before then get their card on the startup pass.
+let decisionCardService: BrokerDecisionCardService | undefined;
+
 async function recordOperatorQuestion(message: MessageRecord, signal: ScoutOperatorSignal): Promise<void> {
-  if (signal.kind !== "need" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  // A need and a consult (an ask with a default) both wait on the operator, so
+  // both get a record, which is where their decision card lives. FYIs do not.
+  if (signal.kind === "notify" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  const question = signal.kind === "need" ? signal.question : message.body;
+  const requestKind = signal.kind === "need" ? signal.requestKind ?? "question" : "question";
   await recordCollaborationDurably({
     id: `operator-question:${message.id}`, kind: "question", state: "open", acceptanceState: "none",
-    title: signal.requestKind === "permission" ? "Permission request" : signal.question,
-    summary: signal.question, createdById: message.actorId, askedById: message.actorId,
+    title: requestKind === "permission" ? "Permission request" : question,
+    summary: question, createdById: message.actorId, askedById: message.actorId,
     ownerId: operatorActorId, nextMoveOwnerId: operatorActorId, conversationId: message.conversationId,
     createdAt: message.createdAt, updatedAt: message.createdAt,
-    metadata: { operatorNeedMessageId: message.id, requestKind: signal.requestKind ?? "question" },
+    metadata: { operatorNeedMessageId: message.id, requestKind },
   });
+  await decisionCardService?.register(message, signal);
 }
 
 async function settleOperatorQuestion(message: MessageRecord): Promise<void> {
   if (message.actorId !== operatorActorId || !message.replyToMessageId) return;
+  // A progress or blocked reply keeps the ask open: "show me more" is not an answer.
+  const completion = message.metadata?.completionReply as { kind?: string } | undefined;
+  if (completion?.kind === "progress" || completion?.kind === "blocked") return;
   const record = runtime.collaborationRecord(`operator-question:${message.replyToMessageId}`);
   if (record?.kind === "question" && record.state === "open" && record.conversationId === message.conversationId) {
+    const decisionAnswer = message.metadata?.decisionAnswer;
     await recordCollaborationDurably({ ...record, state: "closed", answer: message.body,
       answeredById: operatorActorId, answeredAt: message.createdAt, closedAt: message.createdAt,
-      nextMoveOwnerId: undefined, updatedAt: message.createdAt });
+      nextMoveOwnerId: undefined, updatedAt: message.createdAt,
+      ...(decisionAnswer ? { metadata: { ...record.metadata, decisionAnswer } } : {}) });
   }
 }
 
@@ -3362,7 +3439,72 @@ const taskService = new BrokerTaskService({
     return response.json();
   },
 });
-const operatorTaskExpiryTimer = setInterval(() => { void taskService.expireOperatorTasks().catch(error => console.warn("operator task expiry failed", error)); }, 1_000);
+decisionCardService = new BrokerDecisionCardService({
+  operatorActorId,
+  record: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
+  questionRecords: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is QuestionRecord => record.kind === "question"),
+  writeRecord: recordCollaborationDurably,
+  message: id => readMessageRecord(runtime.peek().messages, id),
+  invocation: id => knownInvocations.get(id) ?? journal.getInvocation(id),
+  currentFlight: id => journal.getCurrentFlightForInvocation(id),
+  where: ({ actorId, sessionId }) => decisionCardWhere(actorId, sessionId),
+  reply: (input, extra) => taskService.reply(input, extra),
+  decidePermission: (id, version, decision) => permissionService.decide(id, version, decision),
+  model: createDecisionModel(),
+  log: (message, detail) => console.warn(message, detail),
+});
+
+/** Where a session runs, as a card names it: alias or name, harness, project. Never a raw id. */
+function decisionCardWhere(actorId: string | undefined, sessionId: string | undefined): { session?: string; harness?: string; project?: string } {
+  const snapshot = runtime.peek();
+  const endpoint = Object.values(snapshot.endpoints).find(item => (sessionId && item.sessionId === sessionId) || (actorId && item.agentId === actorId));
+  const agentId = endpoint?.agentId ?? actorId;
+  const alias = agentId ? sessionActorAlias(snapshot, agentId) : null;
+  const name = agentId && !alias ? brokerActorDisplayName(snapshot, agentId) : null;
+  const looksRaw = (value: string | null) => !value || value === agentId || value === sessionId || /[:/]|[0-9a-f]{12,}/iu.test(value);
+  const session = alias ?? (looksRaw(name) ? undefined : name!);
+  const root = endpoint?.projectRoot ?? endpoint?.cwd;
+  return {
+    ...(session ? { session } : {}),
+    ...(endpoint?.harness ? { harness: endpoint.harness } : {}),
+    ...(root ? { project: basename(root) } : {}),
+  };
+}
+
+const workRetry = new BrokerWorkRetryService({
+  nodeId, snapshot: () => journal.snapshot(), record: id => journal.getCollaborationRecord(id), durableStore,
+  apply: record => runtime.upsertCollaboration(record), appendEvent: event => runtime.appendCollaborationEvent(event),
+  accept: request => deliveryAcceptanceService.accept(request),
+  place: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context),
+});
+
+const taskReadyService = new BrokerTaskReadyService({
+  nodeId, operatorActorId,
+  resolve: ref => taskService.resolve(ref),
+  flight: id => journal.getFlight(id) ?? runtime.snapshot().flights[id],
+  recordFlight: flight => persistFlight(flight),
+  workItem: (invocation) => {
+    const workId = workItemStore.workIdForInvocation(invocation);
+    const record = workId ? runtime.collaborationRecord(workId) : undefined;
+    return record?.kind === "work_item" ? record : undefined;
+  },
+  recordWorkItem: async (record) => { await recordCollaborationDurably(record); },
+  appendWorkEvent: async (event) => { await appendCollaborationEventDurably(event); },
+  deliverContinue: async ({ invocation }, input) => {
+    const response = await taskService.continueReady({ invocationId: invocation.id, requestId: input.requestId,
+      actorId: input.actorId, notify: input.notify, workId: workItemStore.workIdForInvocation(invocation) });
+    const flight = "flight" in response ? response.flight : undefined;
+    const message = "message" in response ? response.message : undefined;
+    return { ...(flight ? { invocationId: flight.invocationId, flightId: flight.id } : {}), ...(message ? { messageId: message.id } : {}) };
+  },
+  createId: createRuntimeId,
+});
+
+const operatorTaskExpiryTimer = setInterval(() => {
+  void taskService.expireOperatorTasks()
+    .then(() => decisionCardService?.settleDefaulted())
+    .catch(error => console.warn("operator task expiry failed", error));
+}, 1_000);
 operatorTaskExpiryTimer.unref();
 
 const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
@@ -3372,6 +3514,10 @@ const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDel
   withTaskImage: (message, image, commit) => {
     if (!attachmentService) throw new Error("task images unavailable");
     return attachmentService.withTaskImage(message, image, commit);
+  },
+  withTaskImages: (message, uploads, commit) => {
+    if (!attachmentService) throw new Error("task images unavailable");
+    return attachmentService.withTaskImages(message, uploads, commit);
   },
   checkTaskPeer: payload => {
     if (!payload.task) return;
@@ -3580,6 +3726,8 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
 
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
+  workRetry,
+  derivedRecords,
   tasks: taskService,
   shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
   attachments: {
@@ -3630,6 +3778,8 @@ const routeRequest = createBrokerHttpRouter({
     },
   }),
   permissionService,
+  decisionCards: decisionCardService,
+  taskReady: taskReadyService,
   nativePermissions,
   harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
@@ -4239,6 +4389,9 @@ function recoverStartupWork(): void {
   recoverInvocationResultReplies();
   recoverTerminalReports();
   recoverTerminalWorkPromotions();
+  void reconcileExistingFailedWork().catch(error => console.warn("[openscout-runtime] failed-work reconciliation incomplete:", error));
+  // Pending derivations are computed from records, so one pass finds what a restart left.
+  derivedRecords.kick();
   // Reconcile persisted external attempts without repeating a provider send.
   void externalSessionService.recover([...knownInvocations.values()])
     .then((failed) => { if (failed.length) console.error("[openscout-runtime] external session recovery incomplete", failed); })
@@ -4262,6 +4415,9 @@ function recoverStartupWork(): void {
     console.error("[openscout-runtime] initial cardless session sweep failed:", error);
   });
   reconcilePermissionRequests("startup");
+  void decisionCardService?.resume().catch((error) => {
+    console.error("[openscout-runtime] decision card startup pass failed:", error);
+  });
   sweepRegistryRetention()
     .catch((error) => {
       console.error("[openscout-runtime] initial registry retention sweep failed:", error);
@@ -4397,6 +4553,7 @@ function startBrokerCoordination(): void {
 }
 
 async function shutdownBroker(exitCode = 0): Promise<void> {
+  derivedRecords.stop();
   if (shuttingDown) {
     return;
   }
