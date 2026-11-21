@@ -173,6 +173,17 @@ describe("BrokerLocalEndpointResolver", () => {
     expect(harness.resolver.activeLocalEndpointForAgent("agent-1", undefined, "missing")).toBeUndefined();
   });
 
+  test("a request cancelled while waiting for launch admission never warms its configured or isolated worker", async () => {
+    const harness = createResolver({ isolatedEndpoint: testEndpoint() });
+    for (const execution of [undefined, { harness: "codex" as const, model: "test-model" }]) {
+      const request = testInvocation({ ensureAwake: true, execution });
+      expect(await harness.resolver.resolveLocalEndpointForInvocation(request, async () => false)).toBeUndefined();
+    }
+    expect(harness.ensuredBindings).toEqual([]);
+    expect(harness.isolatedInvocations).toEqual([]);
+    expect(harness.persistedEndpoints).toEqual([]);
+  });
+
   test("returns existing pairing endpoints and honors existing-session requests", async () => {
     const harness = createResolver();
     await harness.runtime.upsertEndpoint(testEndpoint({

@@ -121,3 +121,14 @@ test("rebind requires an explicit project and revision", () => {
   expect(parseIntegrationCommand(["rebind", "op", "--project", "../beta", "--if-revision", "6"], "/work/alpha")).toEqual({ path: "/v1/integrations/setup/op/rebind", body: { expectedRevision: 6, projectPath: "/work/beta" } });
   expect(() => parseIntegrationCommand(["rebind", "op", "--if-revision", "6"], "/work/alpha")).toThrow();
 });
+
+test("Rex start uses the caller's session and cwd, while explicit status targets win", () => {
+  expect(parseIntegrationCommand(["rex", "start", "--harness", "claude", "--name", "Worker"], "/project", { REX_SESSION: "parent" })).toEqual({
+    path: "/v1/integrations/rex/start", body: { sessionId: "parent", projectPath: "/project", name: "Worker", harness: "claude" },
+  });
+  expect(parseIntegrationCommand(["rex", "status", "--session", "other", "--block", "target"], "/project", { REX_SESSION: "parent" })).toEqual({
+    path: "/v1/integrations/rex/status", body: { sessionId: "other", blockId: "target" },
+  });
+  expect(() => parseIntegrationCommand(["rex", "start", "--harness", "codex"], "/project", {})).toThrow("Outside Rex");
+  expect(() => parseIntegrationCommand(["rex", "status", "--name", "Worker"], "/project", {})).toThrow();
+});

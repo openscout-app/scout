@@ -22,6 +22,14 @@ async function git(cwd: string, args: string[]): Promise<string> {
   try { return (await execSystemFile("git", args, { cwd, timeoutMs: 2000 })).stdout.trim(); }
   catch { return ""; }
 }
+/** The caller's checkout: linked worktrees join their main project root. */
+export async function resolveShowWorkspace(currentDirectory: string): Promise<{ cwd: string; worktree: string; projectRoot: string; branch?: string }> {
+  const cwd = await realpath(currentDirectory);
+  const worktree = await git(cwd, ["rev-parse", "--show-toplevel"]) || cwd;
+  const common = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const projectRoot = common ? await realpath(dirname(common)) : worktree;
+  return { cwd, worktree, projectRoot, branch: await git(cwd, ["symbolic-ref", "--short", "HEAD"]) || undefined };
+}
 export class BrokerShowStore {
   private busy = false;
   private listeners = new Set<(record: ScoutShow) => void>();
@@ -43,6 +51,10 @@ export class BrokerShowStore {
     const root = await realpath(projectRoot);
     return (await this.records()).filter(r => r.projectRoot === root && r.createdAt > since);
   }
+  /** Every project's shows after `since`, oldest first. */
+  async listAll(since = 0): Promise<ScoutShow[]> {
+    return (await this.records()).filter(r => r.createdAt > since);
+  }
   async get(id: string): Promise<ScoutShow> {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new ShowError("show_not_found", 404);
     try { return JSON.parse(await readFile(join(this.directory, `${id}.json`), "utf8")); }
@@ -60,10 +72,7 @@ export class BrokerShowStore {
     assertShowPath(lexical);
     const sourcePath = await realpath(lexical);
     assertShowPath(sourcePath);
-    const cwd = await realpath(input.currentDirectory);
-    const worktree = await git(cwd, ["rev-parse", "--show-toplevel"]) || cwd;
-    const common = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    const projectRoot = common ? await realpath(dirname(common)) : worktree;
+    const { worktree, projectRoot, branch } = await resolveShowWorkspace(input.currentDirectory);
     // Only files in the caller's workspace; arbitrary host file disclosure is not this verb.
     const rel = relative(worktree, sourcePath);
     if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new ShowError("show_outside_worktree", 403);
@@ -111,7 +120,7 @@ export class BrokerShowStore {
       if (total > this.limits.storeBytes || count > this.limits.records) throw new ShowError("show_store_full_newest_protected", 507);
       const extension = extname(sourcePath).toLowerCase();
       const mediaType = ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown", ".html": "text/html", ".svg": "image/svg+xml", ".csv": "text/csv", ".json": "application/json", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".rtf": "application/rtf", ".odt": "application/vnd.oasis.opendocument.text" } as Record<string, string>)[extension] || "application/octet-stream";
-      const record: ScoutShow = { id, itemId, ...(previous ? { supersedes: previous.id } : {}), agentId: input.agentId, sessionId: input.sessionId, harness: input.harness, nodeId: this.nodeId, projectRoot, worktree, branch: await git(cwd, ["symbolic-ref", "--short", "HEAD"]) || undefined, sourcePath,
+      const record: ScoutShow = { id, itemId, ...(previous ? { supersedes: previous.id } : {}), agentId: input.agentId, sessionId: input.sessionId, harness: input.harness, nodeId: this.nodeId, projectRoot, worktree, branch, sourcePath,
         kind: mediaType.startsWith("image/") ? "image" : mediaType.startsWith("video/") ? "video" : mediaType.startsWith("text/") || mediaType === "application/pdf" || [".json", ".docx", ".xlsx", ".pptx", ".rtf", ".odt"].includes(extension) ? "document" : "other",
         mediaType, byteSize, sha256: hash.digest("hex"), caption: input.caption, createdAt: Math.max(Date.now(), (records.at(-1)?.createdAt ?? 0) + 1) };
       // Admission is complete. Evict only superseded versions; every existing latest survives until commit.

@@ -396,7 +396,7 @@
   {
     "name": "reply",
     "title": "Reply",
-    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -641,6 +641,13 @@
         "image": {
           "description": "Local image path.",
           "type": "string"
+        },
+        "decision": {
+          "description": "Operator tasks only: a decision card, as a local JSON file path or the card itself. Decision cards are host-local; send them through a local Scout client.",
+          "anyOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "object", "propertyNames": { "type": "string" }, "additionalProperties": {} }
+          ]
         },
         "completion": {
           "description": "Require an explicit final reply; exact local id or session targets only, with a stable requestId.",
@@ -1229,6 +1236,63 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "work_retry",
+    "title": "Retry Failed Scout Work",
+    "description": "Send the original ask again to the same target in a fresh session, whatever the failure cause; the item's retryable flag is only a hint. Omit attempt for the next one. Reuse an attempt to recover its receipt after an uncertain result. Never retries automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "workId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "invocationId": {
+          "type": "string"
+        },
+        "flightId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workId",
+        "attempt",
+        "requestId",
+        "invocationId",
+        "flightId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
     }
   },
   {

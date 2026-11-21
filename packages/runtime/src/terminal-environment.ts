@@ -61,6 +61,8 @@ export const INHERITED_MULTIPLEXER_PANE_ENV_KEYS = [
   "ZELLIJ",
   "ZELLIJ_SESSION_NAME",
   "ZELLIJ_PANE_ID",
+  "REX_SESSION",
+  "REX_BLOCK",
 ] as const;
 
 /**

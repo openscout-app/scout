@@ -1,10 +1,10 @@
 import { TaskClosedError } from "@openscout/protocol";
 import { BrokerMeshHttpService } from "./broker-mesh-http-service.js";
 import { forwardMeshMessage } from "./mesh-forwarding.js";
-import { BrokerTaskService, followupAudience } from "./broker-tasks.js";
+import { BrokerTaskService, followupAudience, taskHomeAskPayload, taskMessageId, type BrokerTaskServiceOptions } from "./broker-tasks.js";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
-import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
+import { BrokerDeliveryAcceptanceService, validateTaskDelivery } from "./broker-delivery-acceptance-service.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -87,7 +87,8 @@ async function fixture(options: { nodeId?: string; authorize?: (invocation: Invo
   };
 }
 
-async function taskFixture(state: FlightRecord["state"] = "running", extra: Record<string, unknown> = {}, beforePost?: () => Promise<void>, requestPatch: Partial<InvocationRequest> = {}) {
+async function taskFixture(state: FlightRecord["state"] = "running", extra: Record<string, unknown> = {}, beforePost?: () => Promise<void>, requestPatch: Partial<InvocationRequest> = {},
+  serviceOptions: (h: Awaited<ReturnType<typeof fixture>>) => Partial<BrokerTaskServiceOptions> = () => ({})) {
   const h = await fixture();
   const request = { ...invocation("parent", { completion: undefined, taskVersion: 1, ...extra }), ...requestPatch };
   await h.accept(request);
@@ -100,7 +101,7 @@ async function taskFixture(state: FlightRecord["state"] = "running", extra: Reco
     invocation: id => h.journal.getInvocation(id), flight: id => h.journal.getFlight(id), currentFlight: id => h.journal.getCurrentFlightForInvocation(id),
     postMessage: async message => { await beforePost?.(); return h.messages.postConversationMessage(message); }, recordFlight: (flight, eligible) => h.lifecycle.recordFlight(flight, eligible),
     accept: async input => { successors.push(input); return { accepted: true } as any; },
-    interrupt: async () => { interrupts++; return true; }, now: () => now });
+    interrupt: async () => { interrupts++; return true; }, now: () => now, ...serviceOptions(h) });
   const ask = (patch: any = {}) => tasks.ask({ requestId: "followup", requesterId: "operator", target: { kind: "binding_ref", ref: "parent" },
     intent: "consult", body: "scope change", task: { version: 1, ref: "parent" }, ...patch });
   const answer = (patch: any = {}) => tasks.reply({ ref: "parent", senderId: "worker", requestId: "answer", body: "result", ...patch });
@@ -207,6 +208,62 @@ test("old remote task homes fail locally with a capability diagnostic before for
   const { ask, answer } = await taskFixture("running", { taskHomeNodeId: "old-peer" });
   await expect(ask()).rejects.toThrow("ask-reply/1");
   await expect(answer()).rejects.toThrow("ask-reply/1");
+});
+
+test("cancel by a superseded placeholder's flight id closes only that placeholder", async () => {
+  // A peer handoff leaves the local waking placeholder behind and records the
+  // authority's flight as current. The placeholder never ran.
+  const cancelled: string[] = [];
+  const f = await taskFixture("running", {}, undefined, {}, h => ({
+    async cancelSupersededFlight(placeholder, summary) {
+      cancelled.push(placeholder.id);
+      const closed: FlightRecord = { ...placeholder, state: "cancelled", summary, completedAt: 5 };
+      await h.runWrite(async () => {
+        await h.journal.appendEntries({ kind: "flight.record", flight: closed, preserveCurrent: true });
+        await h.runtime.upsertFlight(closed, { preserveCurrent: true });
+      });
+      return closed;
+    },
+  }));
+  const current = f.h.journal.getCurrentFlightForInvocation("parent")!;
+  const placeholder: FlightRecord = { ...current, id: "flight-placeholder", state: "waking",
+    metadata: { dispatchOutcome: { status: "not_submitted", checkedAt: 1 } } };
+  await f.h.runWrite(async () => {
+    await f.h.journal.appendEntries({ kind: "flight.record", flight: placeholder, preserveCurrent: true });
+    await f.h.runtime.upsertFlight(placeholder, { preserveCurrent: true });
+  });
+
+  // Cancel while the authority's flight still runs: once it finishes, the
+  // placeholder closes as its superseded twin and there is nothing to cancel.
+  const route = { target: { kind: "binding_ref", ref: "flight-placeholder" }, targetLabel: "ref:flight-placeholder" };
+  const payload = { ...route, requestId: "cancel-placeholder", task: { version: 1, ref: "flight-placeholder", cancel: true } };
+  const receipt = await f.ask(payload);
+  expect(receipt).toMatchObject({ accepted: true, receipt: { flightId: "flight-placeholder" },
+    message: { metadata: { workerInterrupted: false, taskFollowup: { cancel: true, flightId: "flight-placeholder" } } } });
+  expect(cancelled).toEqual(["flight-placeholder"]);
+  expect(f.interrupts).toBe(0);
+  expect(f.h.journal.getFlight("flight-placeholder")?.state).toBe("cancelled");
+  expect(f.h.journal.getCurrentFlightForInvocation("parent")).toMatchObject({ id: current.id, state: current.state });
+
+  await f.h.lifecycle.recordFlight({ ...current, state: "completed", output: "done", completedAt: 4 });
+  // Without --cancel the ref still means the task, which is finished.
+  await expect(f.ask({ ...route, task: { version: 1, ref: "flight-placeholder" } })).rejects.toThrow("--continue parent");
+  // A retry with the same request id returns the same receipt and closes nothing again.
+  expect(await f.ask(payload)).toMatchObject({ receipt: { flightId: "flight-placeholder" } });
+  expect(cancelled).toEqual(["flight-placeholder"]);
+});
+
+test("a ref ask forwarded to its task home carries one route: the invocation's ref", () => {
+  const payload = { requestId: "cancel-1", requesterId: "operator", intent: "consult" as const, body: "stop",
+    target: { kind: "binding_ref" as const, ref: "flt-local-placeholder" }, targetLabel: "ref:flt-local-placeholder",
+    task: { version: 1 as const, ref: "flt-local-placeholder", cancel: true } };
+  const forwarded = taskHomeAskPayload(payload, "inv-shared");
+  expect(forwarded).toEqual({ requestId: "cancel-1", requesterId: "operator", intent: "consult", body: "stop",
+    target: { kind: "binding_ref", ref: "inv-shared" }, task: { version: 1, ref: "inv-shared", cancel: true } });
+  expect("targetLabel" in forwarded).toBe(false);
+  expect(() => validateTaskDelivery(forwarded)).not.toThrow();
+  const successor = taskHomeAskPayload({ ...payload, task: { version: 1, continue: "flt-local-placeholder" } }, "inv-shared");
+  expect(successor.task).toEqual({ version: 1, continue: "inv-shared" });
 });
 
 test("successor launch overrides are separate from the predecessor route", async () => {
@@ -626,4 +683,35 @@ test("an answer to a flight waiting on a question or review wakes the worker; a 
   expect(followupAudience(invocation, flight("waiting", "review"))).toEqual({ notify: ["agent.reviewer"], reason: "thread_reply" });
   expect(() => followupAudience(invocation, flight("waiting", "permission"))).toThrow("cannot add context to the active turn");
   expect(() => followupAudience(invocation, flight("running"))).toThrow("cannot add context to the active turn");
+});
+
+test("an interim adapter turn end leaves the explicit task open for a later task reply", async () => {
+  const { h, answer } = await taskFixture("running", { completion: { mode: "explicit" } });
+  await h.lifecycle.recordFlight({
+    ...h.runtime.flightForInvocation("parent")!,
+    state: "completed",
+    output: "Adapter code read, then building the deck in this same task.",
+    completedAt: 4,
+  });
+  expect(h.journal.getFlight("flight-parent")).toMatchObject({
+    state: "waiting", metadata: { completion: { awaitingFinal: true } },
+  });
+  expect(h.journal.getFlight("flight-parent")?.output).toBeUndefined();
+  await answer({ body: "The deck is ready." });
+  expect(h.journal.getFlight("flight-parent")).toMatchObject({
+    state: "completed", output: "The deck is ready.",
+  });
+});
+
+test("a client cannot plant a decision answer through reply metadata; its other metadata still rides", async () => {
+  const planted = { answer: { kind: "pick", key: "A" }, text: "A (Merge now).", at: 1, by: "operator" };
+  const client = await taskFixture();
+  await client.answer({ requestId: "planted", metadata: { decisionAnswer: planted, note: "kept" } });
+  const message = client.h.runtime.peek().messages[taskMessageId("worker", "planted")]!;
+  expect(message.metadata?.decisionAnswer).toBeUndefined();
+  expect(message.metadata?.note).toBe("kept");
+  // The runtime's own answer still rides, through the runtime-only channel.
+  const runtime = await taskFixture();
+  await runtime.tasks.reply({ ref: "parent", senderId: "worker", requestId: "runtime", body: "result" }, { metadata: { decisionAnswer: planted } });
+  expect(runtime.h.runtime.peek().messages[taskMessageId("worker", "runtime")]!.metadata?.decisionAnswer).toEqual(planted);
 });
