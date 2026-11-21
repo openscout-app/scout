@@ -1,3 +1,4 @@
+import { sessionSenderCard } from "./broker-session-sender-profile.js";
 import {
   A2A_JSON_RPC_METHODS,
   A2A_LEGACY_JSON_RPC_METHODS,
@@ -237,6 +238,12 @@ export class BrokerA2AService {
 
   constructor(private readonly options: BrokerA2AServiceOptions) {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));
+  }
+
+  async scoutAgentCardsForActor(actorId: string): Promise<ScoutAgentCard[]> {
+    const session = sessionSenderCard(this.options.runtime.snapshot(), actorId);
+    if (session) return [session];
+    return (await this.listScoutAgentCards()).filter(card => card.agentId === actorId);
   }
 
   async listScoutAgentCards(): Promise<ScoutAgentCard[]> {

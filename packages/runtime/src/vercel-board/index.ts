@@ -3,7 +3,7 @@ export * from "./connection.js";
 export * from "./credential.js";
 export * from "./custody.js";
 export * from "./follower.js";
-export * from "./lease.js";
+export * from "./runtime-lock.js";
 export * from "./outbox.js";
 export * from "./projection.js";
 export * from "./schema.js";

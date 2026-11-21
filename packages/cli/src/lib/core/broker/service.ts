@@ -69,6 +69,10 @@ import {
   systemChannelNaturalKey,
 } from "@openscout/protocol";
 import type {
+  DerivedPendingItem,
+  DerivedRead,
+  DerivedWriteRequest,
+  DerivedWriteResponse,
   WorkLifecycleSummary,
   WorkMoveRecord,
   WorkMoveRequest,
@@ -1901,6 +1905,35 @@ export async function loadScoutBrokerContext(
 ): Promise<ScoutBrokerContext | null> {
   const result = await loadScoutBrokerContextResult(baseUrl);
   return result.ok ? result.context : null;
+}
+
+/**
+ * Node, endpoints and unfinished flights only. Direct session input runs in
+ * the shared MCP process, so it must not read the unscoped snapshot.
+ */
+export async function loadScoutLiveSessionContext(
+  baseUrl = resolveScoutBrokerUrl(),
+): Promise<{ nodeId: string; endpoints: Record<string, AgentEndpoint>; flights: Record<string, FlightRecord> } | null> {
+  try {
+    const [node, endpointList, flightList] = await Promise.all([
+      brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node),
+      brokerReadJson<{ endpoints?: AgentEndpoint[] }>(baseUrl, scoutBrokerPaths.v1.endpoints),
+      // A runtime without the bounded list still matches endpoints by session ID.
+      brokerReadJson<{ flights?: FlightRecord[] }>(baseUrl, `${scoutBrokerPaths.v1.flights}?active=1`)
+        .catch((error: unknown) => {
+          if (error instanceof ScoutBrokerHttpError && (error.status === 404 || error.status === 405)) return { flights: [] };
+          throw error;
+        }),
+    ]);
+    if (!node?.id) return null;
+    return {
+      nodeId: node.id,
+      endpoints: Object.fromEntries((endpointList.endpoints ?? []).map(endpoint => [endpoint.id, endpoint])),
+      flights: Object.fromEntries((flightList.flights ?? []).map(flight => [flight.id, flight])),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function requireScoutBrokerContext(
@@ -4430,6 +4463,7 @@ function defaultAskExecutionSession(
 export async function deliverScoutAsk(input: {
   task?: import("@openscout/protocol").ScoutTaskAsk;
   image?: AttachmentUpload;
+  decisionImages?: AttachmentUpload[];
   attachments?: OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;
@@ -4548,6 +4582,7 @@ export async function deliverScoutAsk(input: {
     intent: input.task ? "task_ask" : input.completion || input.relation ? "explicit_consult" : "consult",
     ...(input.task ? { task: input.task } : {}),
     ...(input.image ? { image: input.image } : {}),
+    ...(input.decisionImages?.length ? { decisionImages: input.decisionImages } : {}),
     ...(input.attachments?.length ? { attachments: normalizeOutgoingAttachments(input.attachments, input.requestId) } : {}),
     ...(input.completion ? { completion: input.completion } : {}),
     ...(input.relation ? { relation: input.relation } : {}),
@@ -5910,13 +5945,27 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   }
 }
 
-/** The Board planning path: creates Board tasks only. Work items appear when the custodian projects them. */
+/** The Board planning path: creates Board tasks only. Work items appear when the connected runtime projects them. */
 export async function planScoutBoardTasks(input: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
   return brokerPostJson<VercelBoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.vercelBoardPlan, input);
 }
 
 export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {
   return brokerPostJson<WorkReviewResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workReview, input);
+}
+
+export async function readScoutDerivedRecord(input: { workId: string; kind: string }): Promise<DerivedRead> {
+  const query = `?workId=${encodeURIComponent(input.workId)}&kind=${encodeURIComponent(input.kind)}`;
+  return brokerReadJson<DerivedRead>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.derived}${query}`);
+}
+
+export async function writeScoutDerivedRecord(input: DerivedWriteRequest): Promise<DerivedWriteResponse> {
+  return brokerPostJson<DerivedWriteResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.derived, input);
+}
+
+export async function readScoutDerivedPending(limit?: number): Promise<DerivedPendingItem[]> {
+  const query = limit ? `?limit=${limit}` : "";
+  return (await brokerReadJson<{ pending: DerivedPendingItem[] }>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.derivedPending}${query}`)).pending;
 }
 
 export async function readScoutWorkLifecycles(workId?: string): Promise<{
@@ -5938,4 +5987,8 @@ export async function replyToScoutTask(input: ScoutTaskReply): Promise<unknown> 
   const node = await brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node);
   if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before replying`);
   return brokerPostJson(baseUrl, "/v1/messages/reply", input);
+}
+
+export async function retryScoutWorkItem(input: import("@openscout/protocol").WorkRetryRequest): Promise<import("@openscout/protocol").WorkRetryResponse> {
+  return brokerPostJson(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workRetry, input);
 }

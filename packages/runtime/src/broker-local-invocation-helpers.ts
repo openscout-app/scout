@@ -1,6 +1,7 @@
 import {
   flightCompletion,
   recordFlightSessionDispatch,
+  type FailedRunCause,
   type AgentDefinition,
   type AgentEndpoint,
   type FlightRecord,
@@ -357,7 +358,7 @@ export function awaitingFinalReplyExitReason(
   return null;
 }
 
-export function staleWorkingFlightReason(
+export function staleWorkingFlightFailure(
   snapshot: RuntimeSnapshot,
   flight: FlightRecord,
   options: {
@@ -369,13 +370,15 @@ export function staleWorkingFlightReason(
      */
     bootedAt?: number;
   },
-): string | null {
+): { cause: FailedRunCause; detail: string; supersededByFlightId?: string } | null {
   if (!isWorkingFlightState(flight.state)) {
     return null;
   }
   const awaitingExit = awaitingFinalReplyExitReason(snapshot, flight, options.now ?? Date.now());
   if (awaitingExit) {
-    return awaitingExit;
+    // The idle window is the one exit where the session itself is still there.
+    const idle = awaitingExit.startsWith("the session ended its turn");
+    return { cause: idle ? "unknown" : "endpoint_lost", detail: awaitingExit };
   }
   if (options.isInvocationActive(flight.invocationId)) {
     return null;
@@ -396,16 +399,16 @@ export function staleWorkingFlightReason(
     ))
     .sort((left, right) => flightTimestamp(right) - flightTimestamp(left))[0] ?? null;
   if (newerTerminalFlight) {
-    return `superseded by newer ${newerTerminalFlight.state} flight ${newerTerminalFlight.id}`;
+    return { cause: "superseded", detail: `superseded by newer ${newerTerminalFlight.state} flight ${newerTerminalFlight.id}`, supersededByFlightId: newerTerminalFlight.id };
   }
 
   const agent = snapshot.agents[flight.targetAgentId];
   if (isRetiredLocalAgent(agent)) {
-    return `target agent ${flight.targetAgentId} was retired from the fleet`;
+    return { cause: "endpoint_lost", detail: `target agent ${flight.targetAgentId} was retired from the fleet` };
   }
   if (agent?.metadata?.staleLocalRegistration === true) {
-    return staleLocalEndpointReason(latestEndpointForAgent(snapshot, flight.targetAgentId))
-      ?? `target agent ${flight.targetAgentId} is a superseded local registration replaced by current setup`;
+    return { cause: "endpoint_lost", detail: staleLocalEndpointReason(latestEndpointForAgent(snapshot, flight.targetAgentId))
+      ?? `target agent ${flight.targetAgentId} is a superseded local registration replaced by current setup` };
   }
 
   // A delivery into a session open in the operator's own place is picked up
@@ -417,7 +420,7 @@ export function staleWorkingFlightReason(
 
   const dispatchEndpointReason = flightDispatchEndpointUnavailableReason(snapshot, flight);
   if (dispatchEndpointReason) {
-    return dispatchEndpointReason;
+    return { cause: "endpoint_lost", detail: dispatchEndpointReason };
   }
 
   const endpoint = endpointForFlight(snapshot, flight);
@@ -429,19 +432,19 @@ export function staleWorkingFlightReason(
     const now = options.now ?? Date.now();
     const ageMs = now - startedAt;
     if (startedAt > 0 && ageMs >= STALE_WORKING_FLIGHT_NO_ENDPOINT_GRACE_MS) {
-      return `target agent ${flight.targetAgentId} has no registered endpoint after ${Math.floor(ageMs / 1000)}s`;
+      return { cause: "endpoint_lost", detail: `target agent ${flight.targetAgentId} has no registered endpoint after ${Math.floor(ageMs / 1000)}s` };
     }
     return null;
   }
 
   const staleEndpointReason = staleLocalEndpointReason(endpoint);
   if (staleEndpointReason) {
-    return staleEndpointReason;
+    return { cause: "endpoint_lost", detail: staleEndpointReason };
   }
 
   const terminalAt = endpointTerminalAt(endpoint);
   if (endpoint.state !== "active" && terminalAt > startedAt) {
-    return `endpoint ${endpoint.id} moved to ${endpoint.state} at ${terminalAt}`;
+    return { cause: "endpoint_lost", detail: `endpoint ${endpoint.id} moved to ${endpoint.state} at ${terminalAt}` };
   }
 
   const startedEndpointAt = endpointStartedAt(endpoint);
@@ -467,7 +470,7 @@ export function staleWorkingFlightReason(
     if (flight.metadata?.requesterTimedOut === true && !turnPredatesBoot) {
       return null;
     }
-    return `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task`;
+    return { cause: "endpoint_lost", detail: `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task` };
   }
   // Positive offline, stale or superseded endpoint evidence still reconciles
   // every transport normally.
@@ -477,8 +480,13 @@ export function staleWorkingFlightReason(
     && endpointInvocationId !== null
     && endpointInvocationId !== flight.invocationId
   ) {
-    return `endpoint ${endpoint.id} started newer work at ${startedEndpointAt}`;
+    return { cause: "endpoint_lost", detail: `endpoint ${endpoint.id} started newer work at ${startedEndpointAt}` };
   }
 
   return null;
+}
+
+/** Compatibility text view; failure writers use the structured decision. */
+export function staleWorkingFlightReason(...args: Parameters<typeof staleWorkingFlightFailure>): string | null {
+  return staleWorkingFlightFailure(...args)?.detail ?? null;
 }

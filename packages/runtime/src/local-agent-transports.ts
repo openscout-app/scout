@@ -21,5 +21,5 @@ export function isBrokerRunnableLocalAgentTransport(
   transport: string | null | undefined,
 ): boolean {
   // "ghostty" is only ever an attached live terminal; its delivery never spawns.
-  return transport === "tmux" || transport === "ghostty" || isDirectLocalAgentTransport(transport);
+  return transport === "tmux" || transport === "ghostty" || transport === "rex" || isDirectLocalAgentTransport(transport);
 }

@@ -17,6 +17,7 @@ const cases: Record<string, Record<string, unknown>> = {
   invocations_wait: { flightId: "f", timeoutSeconds: 1 }, labels_brief: { label: "label" }, labels_feed: { label: "label" },
   work_update: { work: { workId: "w", state: "working" } },
   work_move: { workId: "w", to: "doing" }, work_review: { workId: "w", moveId: "mv", revision: 1, verdict: "confirm" },
+  work_retry: { workId: "w", attempt: 1 },
   work_lifecycle: { workId: "w" },
 };
 const actorTools = new Set(["sessions_attach", "sessions_get", "sessions_poll", "sessions_ack", "whoami",
@@ -49,7 +50,7 @@ async function connect(server: any) {
   return client;
 }
 
-test("all 23 core SDK tools retain authenticated identity across HTTP and relay-configured stdio", async () => {
+test("all core SDK tools retain authenticated identity across HTTP and relay-configured stdio", async () => {
   expect(Object.keys(cases).sort()).toEqual([...SCOUT_MCP_CORE_TOOL_NAMES].sort());
   for (const actor of ["principal-a", "principal-b"]) {
     const principal: McpEventPrincipal = { kind: actor === "principal-a" ? "oauth" : "agent_token", ...(actor === "principal-a" ? { userId: "user-a" } : {}), id: `identity-${actor}`, ownerKey: `owner-${actor}`, node: "fixture-node", agentId: actor };
@@ -79,6 +80,7 @@ test("all 23 core SDK tools retain authenticated identity across HTTP and relay-
         readLabelBrief: record(null), readLabelFeed: record(null),
         moveWorkItem: record({applied:true,decision:{verdict:"allow",from:"todo",to:"doing",toState:"working",review:"none",reasons:[]},move:{id:"mv",revision:1}}),
         reviewWorkMove: record({ status: "confirmed", station: "done" }),
+        retryWorkItem: record({ workId: "w", attempt: 1, requestId: "r", invocationId: "i", flightId: "f" }),
         readWorkLifecycles: record({ lifecycles:[{lifecycle:{id:"default",name:"Default",version:1,stations:[{id:"doing",name:"Doing",state:"working"}]}}],position:{workId:"w",lifecycleId:"default",station:"doing",stationName:"Doing",state:"working",reviewPending:false,revision:1,next:[]}, moves: [] }),
       } as any,
     });
@@ -88,6 +90,7 @@ test("all 23 core SDK tools retain authenticated identity across HTTP and relay-
       const result = url.pathname === "/v1/snapshot" ? snapshot : url.pathname === "/v1/node" ? { nodeId: "fixture-node", capabilities: ["ask-reply/1"] }
         : url.pathname.endsWith("/collect") ? { id: "r", status: "saved" } : url.pathname === "/v1/messages" && !body ? []
         : url.pathname === "/v1/tail/recent" ? { events: [], limit: 80, cursor: null, generatedAt: 1 } : url.pathname === "/v1/deliver" ? { kind: "delivery", message: { id: "m" } }
+        : url.pathname === "/v1/work/retry" ? {workId:"w",attempt:1,requestId:"r",invocationId:"i",flightId:"f"}
         : url.pathname === "/v1/work/move" ? {applied:true,decision:{verdict:"allow",from:"todo",to:"doing",toState:"working",review:"none",reasons:[]},move:{id:"mv",revision:1}} : url.pathname === "/v1/work/review" ? { status: "confirmed", station: "done" }
         : url.pathname === "/v1/work/lifecycles" ? {lifecycles:[{lifecycle:{id:"default",name:"Default",version:1,stations:[{id:"doing",name:"Doing",state:"working"}]}}],position:{workId:"w",lifecycleId:"default",station:"doing",stationName:"Doing",state:"working",reviewPending:false,revision:1,next:[]}} : url.pathname === "/v1/work/moves" ? { moves: [] } : { ok: true };
       return Response.json(result);

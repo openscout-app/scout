@@ -48,6 +48,7 @@ export type AgentEndpointTransport = Extract<
   | "devin_acp"
   | "tmux"
   | "ghostty"
+  | "rex"
   | "cursor_exec"
   | "cursor_cli_text"
   | "cursor_cli_stream_json"

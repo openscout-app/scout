@@ -1,7 +1,7 @@
 import { TaskClosedError } from "@openscout/protocol";
 import { BrokerMeshHttpService } from "./broker-mesh-http-service.js";
 import { forwardMeshMessage } from "./mesh-forwarding.js";
-import { BrokerTaskService, followupAudience } from "./broker-tasks.js";
+import { BrokerTaskService, followupAudience, taskMessageId } from "./broker-tasks.js";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
@@ -644,4 +644,17 @@ test("an interim adapter turn end leaves the explicit task open for a later task
   expect(h.journal.getFlight("flight-parent")).toMatchObject({
     state: "completed", output: "The deck is ready.",
   });
+});
+
+test("a client cannot plant a decision answer through reply metadata; its other metadata still rides", async () => {
+  const planted = { answer: { kind: "pick", key: "A" }, text: "A (Merge now).", at: 1, by: "operator" };
+  const client = await taskFixture();
+  await client.answer({ requestId: "planted", metadata: { decisionAnswer: planted, note: "kept" } });
+  const message = client.h.runtime.peek().messages[taskMessageId("worker", "planted")]!;
+  expect(message.metadata?.decisionAnswer).toBeUndefined();
+  expect(message.metadata?.note).toBe("kept");
+  // The runtime's own answer still rides, through the runtime-only channel.
+  const runtime = await taskFixture();
+  await runtime.tasks.reply({ ref: "parent", senderId: "worker", requestId: "runtime", body: "result" }, { metadata: { decisionAnswer: planted } });
+  expect(runtime.h.runtime.peek().messages[taskMessageId("worker", "runtime")]!.metadata?.decisionAnswer).toEqual(planted);
 });

@@ -25,7 +25,8 @@ async function runningRelay() {
   });
   const caller = { actorId: "operator", nodeId };
   const ask = await broker.postJson<ScoutDeliverAcceptedResponse>(baseUrl, "/v1/deliver", {
-    requestId: "origin", caller, target: { kind: "session_id", sessionId: session, harness: "claude" },
+    requestId: "origin", caller, replyToSessionId: "caller-native-session",
+    invocationMetadata: { replyToSessionHarness: "claude" }, target: { kind: "session_id", sessionId: session, harness: "claude" },
     task: { version: 1 }, intent: "task_ask", body: "Review the original brief.",
   });
   const pasteCount = () => readFileSync(log, "utf8").split("\n").filter(line => line.startsWith("paste-buffer")).length;
@@ -45,9 +46,26 @@ async function runningRelay() {
 test("a tmux turn can finish without reading its inbox; the sender gets a refusal, not acceptance", async () => {
   const relay = await runningRelay();
   const ref = relay.ask.bindingRef!;
-  const request = { caller: relay.caller, requestId: "followup", target: { kind: "binding_ref", ref },
+  const request = { caller: { ...relay.caller, actorId: "project-agent" }, replyToSessionId: "caller-native-session",
+    invocationMetadata: { replyToSessionHarness: "claude" }, requestId: "followup", target: { kind: "binding_ref", ref },
     targetLabel: `ref:${ref}`, task: { version: 1, ref }, intent: "task_ask", body: "Review the additional scope." };
   const send = () => broker.postJsonStatus(relay.baseUrl, "/v1/deliver", request);
+  for (const [suffix, replyToSessionId, replyToSessionHarness] of [
+    ["wrong-session", "another-session", "claude"],
+    ["wrong-harness", "caller-native-session", "codex"],
+    ["reply-address-only", "caller-native-session", undefined],
+  ] as const) {
+    const refused = await broker.postJsonStatus(relay.baseUrl, "/v1/deliver", {
+      ...request, requestId: suffix, replyToSessionId, invocationMetadata: { replyToSessionHarness },
+    });
+    // Read the detail before toMatchObject: Bun writes matched asymmetric matchers back into the received object.
+    const detail = (refused.body as { detail?: unknown } | null)?.detail;
+    expect(refused).toMatchObject({ status: 409, body: { error: "task_followup_unauthorized" } });
+    expect(typeof detail).toBe("string");
+    expect(detail as string).toMatch(/is not authorized for sender project-agent\. Only the .+, the harness session that asked it, or a participant in the task conversation may add context to it\./);
+    // The refusal names who may follow up; it never suggests claiming their identity.
+    expect(detail as string).not.toContain("--as");
+  }
   const response = await send();
   // The relay answers only the original prompt; it never polls Scout's inbox.
   await relay.answerTask();
@@ -55,7 +73,7 @@ test("a tmux turn can finish without reading its inbox; the sender gets a refusa
   expect(response).toMatchObject({ status: 409, body: {
     error: "task_followup_not_sent", detail: expect.stringContaining(`--to session:claude:${relay.session}`),
   } });
-  const receipt = await broker.getJson(relay.baseUrl, "/v1/request-receipts/followup?requesterId=operator");
+  const receipt = await broker.getJson(relay.baseUrl, "/v1/request-receipts/followup?requesterId=project-agent");
   expect(receipt).toMatchObject({ receipt: { state: "failed", failure: { code: "task_followup_not_sent", evidence: relay.ask.flight!.id } } });
   expect(await send()).toEqual(response);
   const messages = await broker.getJson<MessageRecord[]>(relay.baseUrl, `/v1/messages?conversationId=${relay.ask.conversation.id}`);
@@ -96,4 +114,26 @@ test("an ask to a managed tmux Claude session stays open through a turn end unti
   expect(interim.output).toBeUndefined();
   await relay.answerTask();
   expect((await detail()).flight.output).toBe("Finished the original brief.");
+});
+
+test("the requester session can add context to an open operator task with a different CLI actor", async () => {
+  const { baseUrl, nodeId } = await broker.startBroker({ devInstance: true });
+  const identity = { replyToSessionId: "caller-native-session", invocationMetadata: { replyToSessionHarness: "claude" } };
+  const asked = await broker.postJson<ScoutDeliverAcceptedResponse>(baseUrl, "/v1/deliver", {
+    requestId: "operator-task", caller: { actorId: "original-agent", nodeId }, ...identity,
+    target: { kind: "agent_id", agentId: "operator" }, task: { version: 1, operator: true },
+    intent: "task_ask", body: "Review this approach.",
+  });
+  const ref = asked.flight!.invocationId;
+  const followup = { requestId: "context", caller: { actorId: "project-agent", nodeId }, ...identity,
+    target: { kind: "binding_ref", ref }, task: { version: 1, ref }, intent: "task_ask", body: "One more detail." };
+  const denied = await broker.postJsonStatus(baseUrl, "/v1/deliver", {
+    ...followup, requestId: "cancel", task: { ...followup.task, cancel: true },
+  });
+  const deniedDetail = (denied.body as { detail?: unknown } | null)?.detail;
+  expect(denied).toMatchObject({ status: 409, body: { error: "task_followup_unauthorized" } });
+  expect(deniedDetail).toBe(`Task ${ref} is not authorized for sender project-agent. Only the original requester (original-agent) or the operator may cancel it. Ask one of them to send it.`);
+  const receipt = await broker.postJson<ScoutDeliverAcceptedResponse>(baseUrl, "/v1/deliver", followup);
+  expect(receipt).toMatchObject({ accepted: true, message: { actorId: "project-agent", body: followup.body } });
+  expect(await broker.postJson(baseUrl, "/v1/deliver", followup)).toEqual(receipt);
 }, 30_000);
