@@ -1,3 +1,4 @@
+import { FAILED_RUN_CAUSES, failedRunRetryable } from "./failed-runs.js";
 import type { MetadataMap, ScoutId } from "./common.js";
 
 export type CollaborationKind = "work_item" | "question";
@@ -38,8 +39,12 @@ export interface CollaborationRelation {
 }
 
 export interface CollaborationWaitingOn {
-  kind: "actor" | "work_item" | "approval" | "artifact" | "condition";
+  kind: "actor" | "work_item" | "approval" | "artifact" | "condition" | "failed_run";
   label: string;
+  /** Present on runtime-authored failed_run reasons. Legacy failures read as unknown. */
+  cause?: import("./failed-runs.js").FailedRunCause;
+  flightId?: ScoutId;
+  retryable?: boolean;
   targetId?: ScoutId;
   metadata?: MetadataMap;
 }
@@ -395,6 +400,13 @@ export function validateCollaborationRecord(record: CollaborationRecord): string
     && record.waitingOn.targetId === record.id
   ) {
     errors.push("waitingOn.targetId cannot reference the work item itself");
+  }
+
+  if (record.kind === "work_item" && record.waitingOn?.kind === "failed_run") {
+    const waiting = record.waitingOn;
+    if (!waiting.cause || !FAILED_RUN_CAUSES.includes(waiting.cause)) errors.push("failed_run requires a closed cause");
+    if (!waiting.flightId?.trim()) errors.push("failed_run requires flightId");
+    if (waiting.retryable !== failedRunRetryable(waiting.cause ?? "unknown")) errors.push("failed_run retryable must match the cause policy");
   }
 
   if (record.kind === "question" && record.state === "answered" && !record.answer?.trim()) {

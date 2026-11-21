@@ -32,7 +32,7 @@ import { findLoopbackPeerPid, isProcessAlive, resolvePeerIdentity, type PeerIden
 import { createSharedScoutTools, type ScoutSessionContext, type SharedToolRequest } from "./shared-tools.ts";
 
 /** Keys that name one session. The shared process's own values never leak into a connection. */
-const SESSION_KEYS = /^(CLAUDE_|CODEX_|OPENSCOUT_AGENT$|OPENSCOUT_SESSION_ID$|OPENSCOUT_REPLY_CONTEXT|OPENSCOUT_MCP_ENABLE_NOTIFICATIONS$|TMUX|TERM_PROGRAM|GHOSTTY_|HERDR_|PWD$)/;
+const SESSION_KEYS = /^(CLAUDE_|CODEX_|OPENSCOUT_AGENT$|OPENSCOUT_SESSION_ID$|OPENSCOUT_REPLY_CONTEXT|OPENSCOUT_MCP_ENABLE_NOTIFICATIONS$|TMUX|TERM_PROGRAM|GHOSTTY_|HERDR_|REX_|PWD$)/;
 
 /**
  * Keys that choose the runtime. A shared server serves one runtime: its own

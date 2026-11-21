@@ -772,4 +772,47 @@ describe("broker daemon reconciliation", () => {
     const detail = await broker.getJson<{ flight: { id: string } }>(secondHarness.baseUrl, `/v1/invocations/${invocationId}`);
     expect(detail.flight.id).toBe("flt-explicit-twin");
   }, 40_000);
+
+  test("a flight awaiting its task reply fails with its turn's output once its session is gone", async () => {
+    const controlHome = mkdtempSync(join(tmpdir(), "openscout-runtime-test-"));
+    const firstHarness = await broker.startBroker({ controlHome });
+    await broker.seedBasicConversation(firstHarness);
+    firstHarness.child.kill();
+    await firstHarness.child.exited.catch(() => {});
+    broker.harnesses.delete(firstHarness);
+
+    const startedAt = Date.now() - 10 * 60_000;
+    const invocationId = "inv-awaiting-final";
+    appendFileSync(
+      join(controlHome, "broker-journal.jsonl"),
+      [
+        { kind: "invocation.record", invocation: {
+          id: invocationId, requesterId: "operator", requesterNodeId: firstHarness.nodeId, targetAgentId: "fabric",
+          action: "consult", task: "build the deck", conversationId: "channel.shared", ensureAwake: true, stream: false,
+          createdAt: startedAt, metadata: { completion: { mode: "explicit" }, completionEndpointId: "endpoint-gone" },
+        } },
+        // The session ended its turn without the task reply, then went away.
+        { kind: "flight.record", flight: {
+          id: "flt-awaiting-final", invocationId, requesterId: "operator", targetAgentId: "fabric", state: "waiting",
+          summary: "Execution ended; awaiting an explicit final reply.", startedAt,
+          metadata: {
+            completion: { version: 1, revision: 0, obligations: [], awaitingFinal: true },
+            awaitingFinalSince: startedAt + 60_000, awaitingFinalOutput: "The deck is half built.",
+            dispatchAck: { endpointId: "endpoint-gone", nodeId: firstHarness.nodeId },
+          },
+        } },
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+    );
+
+    const secondHarness = await broker.startBroker({ controlHome });
+    const snapshot = await broker.waitFor(async () => broker.getJson<{
+      flights: Record<string, { state: string; error?: string; output?: string }>;
+    }>(secondHarness.baseUrl, "/v1/snapshot"), (next) => next.flights["flt-awaiting-final"]?.state === "failed",
+      { attempts: 200 });
+
+    expect(snapshot.flights["flt-awaiting-final"]).toMatchObject({
+      state: "failed", output: "The deck is half built.",
+      error: expect.stringContaining("no task reply can arrive"),
+    });
+  }, 40_000);
 });

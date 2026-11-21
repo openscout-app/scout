@@ -113,6 +113,8 @@ export interface ScoutSessionInputReceipt {
 export interface ScoutDeliverRequest {
   task?: import("./tasks.js").ScoutTaskAsk;
   image?: import("./attachments.js").AttachmentUpload;
+  /** Pictures for `task.decision`, indexed by each option's `picture.image`. */
+  decisionImages?: import("./attachments.js").AttachmentUpload[];
   completion?: ScoutCompletionRequest;
   relation?: ScoutCompletionRelation;
   /** Caller-supplied, requester-scoped idempotency key. */

@@ -1,9 +1,9 @@
 import { currentSessionReturnAddress, stampSessionReturnAddress, type SessionReturnAddress } from "./session-return-address.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { deliverInPlace, type InPlaceDelivery } from "@openscout/runtime/in-place";
+import { type InPlaceDelivery } from "@openscout/runtime/in-place";
 
-import { renderInPlaceDelivery } from "../cli/commands/session.ts";
+import { deliverDirectSessionInput, renderInPlaceDelivery } from "../cli/commands/session.ts";
 
 /**
  * `session_send` — the write side next to `herdr_workspaces`.
@@ -25,9 +25,9 @@ export type SessionSendDependencies = {
   returnAddress?: () => SessionReturnAddress | null;
 };
 
-export function sessionSendDependencies(env: NodeJS.ProcessEnv): SessionSendDependencies {
+export function sessionSendDependencies(env: NodeJS.ProcessEnv, brokerUrl?: string): SessionSendDependencies {
   return {
-    deliver: (input) => deliverInPlace(input),
+    deliver: (input) => deliverDirectSessionInput(env, input, brokerUrl),
     returnAddress: () => currentSessionReturnAddress(env),
     ownSessionId: () => env.CLAUDE_CODE_SESSION_ID?.trim() || env.CODEX_THREAD_ID?.trim() || null,
   };
@@ -38,13 +38,13 @@ export function registerSessionSendTool(server: McpServer, deps: SessionSendDepe
     title: "Send Into a Live Session",
     description: [
       "Type text into another harness session where it is running — its Herdr pane, Orca terminal, tmux pane, or terminal tab on this machine — and press Enter.",
-      "Address it by the harness session id (herdr_workspaces reports it per pane; Claude Code and Codex session ids work directly).",
+      "Address it by the Claude Code or Codex session id (herdr_workspaces reports it per pane), or by the Scout session id for a Scout-managed tmux session.",
       "This is the direct path: nothing is recorded in Scout and no reply is tracked. It never resumes, forks, or starts a session; one that isn't open is reported and nothing is sent. For a tracked request or reply, use ask.",
       "A session waiting on a permission prompt or a question is refused as blocked; the operator answers that first.",
     ].join(" "),
     inputSchema: z.object({
       sessionId: z.string().trim().min(8).max(200)
-        .describe("Harness session id of the target (e.g. a Claude Code session UUID or Codex thread id)."),
+        .describe("Harness session id of the target, or its Scout session id (session-…)."),
       harness: z.enum(["claude", "codex"]).optional()
         .describe("The target's harness, when known. Narrows the lookup."),
       requestReply: z.boolean().optional().describe("Opt in to stamping this process’s exact harness return address on a direct typed request. Refuses if sender identity is unavailable; does not create broker tracking."),

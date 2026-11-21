@@ -28,7 +28,7 @@ import {
   isSupersededTwinCopy,
   isTerminalFlightState,
   staleLocalEndpointReason,
-  staleWorkingFlightReason,
+  staleWorkingFlightFailure,
   supersedingTwinFlight,
 } from "./broker-local-invocation-helpers.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
@@ -72,6 +72,10 @@ export type BrokerFlightLifecycleServiceOptions = {
     input: Parameters<BrokerFlightLifecycleServiceOptions["updateDeliveryStatus"]>[0],
     eligible: (current: DeliveryIntent) => boolean | Promise<boolean>,
   ) => Promise<boolean>;
+  /** Pure Ready preparation inside the flight writer (see broker-task-ready). */
+  prepareTaskReady?: (previous: FlightRecord | undefined, flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
+  /** After a committed flight write: rings and lands the work item when it entered Ready. */
+  onFlightRecorded?: (previous: FlightRecord | undefined, flight: FlightRecord, invocation: InvocationRequest | undefined) => Promise<void>;
   /** Pure preparation inside the terminal-flight writer; application runs after commit. */
   prepareWorkPromotion?: (flight: FlightRecord, invocation: InvocationRequest | undefined, previous?: FlightRecord) => FlightRecord;
   promoteInvocationFlightToWork: (
@@ -81,7 +85,7 @@ export type BrokerFlightLifecycleServiceOptions = {
   ) => Promise<void>;
   maybeForwardFlightToAuthority: (flight: FlightRecord) => Promise<void>;
   isInvocationActive: (invocationId: string) => boolean;
-  /** When this runtime process started; see `staleWorkingFlightReason`. */
+  /** When this runtime process started; see `staleWorkingFlightFailure`. */
   bootedAt?: number;
   /** Runs inside the writer; the report intent commits with terminal truth. */
   prepareTerminalReport?: (flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
@@ -275,6 +279,7 @@ function normalizeRecordedFlight(
     metadata: {
       ...(flight.metadata ?? {}),
       failureStage: "empty_completed_output",
+      failureCause: "harness_error",
     },
   };
 }
@@ -322,9 +327,17 @@ export class BrokerFlightLifecycleService {
             || !explicitReplyMatchesFlight(reply, invocation, previous, this.options.runtime.snapshot().flights, this.options.journal.getFlight?.bind(this.options.journal))) {
             if (flightToRecord.metadata?.completedByBrokerReply === true) return;
             const { resultReply: _result, failureStage: _failure, ...metadata } = flightToRecord.metadata ?? {};
+            // Keep the turn's own output: if no task reply ever arrives, the
+            // flight fails with it instead of losing it.
+            const awaitingFinalOutput = flightToRecord.output ?? previous.metadata?.awaitingFinalOutput;
+            // A repeated report of the same turn end keeps the clock it started.
+            const repeatedSince = previous.state === "waiting" && completion.awaitingFinal === true
+              ? previous.metadata?.awaitingFinalSince : undefined;
+            const awaitingFinalSince = typeof repeatedSince === "number" ? repeatedSince : this.now();
             flightToRecord = { ...flightToRecord, state: "waiting", completedAt: undefined, output: undefined, error: undefined,
               summary: "Execution ended; awaiting an explicit final reply.",
-              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true } } };
+              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true }, awaitingFinalSince,
+                ...(awaitingFinalOutput !== undefined ? { awaitingFinalOutput } : {}) } };
           }
         }
       }
@@ -356,6 +369,7 @@ export class BrokerFlightLifecycleService {
         if (!previous?.metadata?.terminalReport) {
           flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
         }
+        flightToRecord = this.options.prepareTaskReady?.(previous, flightToRecord, invocation) ?? flightToRecord;
         flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       }
       if (previous && isDuplicateFlightUpdate(previous, flightToRecord)) {
@@ -391,6 +405,16 @@ export class BrokerFlightLifecycleService {
     }
     await this.reconcileMessageDeliveriesForFlight(flightToRecord, invocation);
     if (twinCopy) return true;
+    if (this.options.onFlightRecorded) {
+      try {
+        await this.options.onFlightRecorded(previousFlight, flightToRecord, invocation);
+      } catch (error) {
+        this.options.warn?.(
+          `[openscout-runtime] Ready follow-up failed for flight ${flightToRecord.id}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     if (invocation && isTerminalFlightState(flightToRecord.state)) {
       try {
         await this.options.promoteInvocationFlightToWork(
@@ -527,31 +551,35 @@ export class BrokerFlightLifecycleService {
         }
         continue;
       }
-      const reason = staleWorkingFlightReason(snapshot, flight, {
+      const failure = staleWorkingFlightFailure(snapshot, flight, {
         isInvocationActive: this.options.isInvocationActive,
         now,
         bootedAt: this.options.bootedAt,
       });
-      if (!reason) {
+      if (!failure) {
         continue;
       }
 
       const agent = snapshot.agents[flight.targetAgentId] as AgentDefinition | undefined;
+      const unrepliedOutput = flight.metadata?.awaitingFinalOutput;
       const reconciledFlight: FlightRecord = {
         ...flight,
+        ...(typeof unrepliedOutput === "string" && unrepliedOutput ? { output: unrepliedOutput } : {}),
         state: "failed",
         summary: `${agent?.displayName ?? flight.targetAgentId} did not finish cleanly.`,
-        error: `Stale running flight reconciled: ${reason}`,
+        error: `Stale running flight reconciled: ${failure.detail}`,
         completedAt: now,
         metadata: {
           ...(flight.metadata ?? {}),
+          failureCause: failure.cause,
+          supersededByFlightId: failure.supersededByFlightId,
           reconciledStaleFlight: true,
-          reconciledReason: reason,
+          reconciledReason: failure.detail,
           reconciledAt: now,
         },
       };
       await this.recordFlight(reconciledFlight);
-      this.options.warn?.(`[openscout-runtime] reconciled stale running flight ${flight.id}: ${reason}`);
+      this.options.warn?.(`[openscout-runtime] reconciled stale running flight ${flight.id}: ${failure.detail}`);
     }
   };
 

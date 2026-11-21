@@ -75,7 +75,8 @@ tasks require `--continue`. Text never cancels. Cancellation receipts report
 whether interruption was confirmed. The asker and operator may cancel or start
 a successor; conversation participants may add context. Only the current
 recipient may answer. The first final wins; progress updates the work record
-without closing it. The harness final is already an answer: never answer twice.
+without closing it. If the ask requires a task reply, only a final reply by ref completes it;
+otherwise the harness final is already the answer: never answer twice.
 
 `--continue-for` and `--join-to` remain active-parent completion obligations.
 Neither combines with successor `--continue`. `work_update` is for work that

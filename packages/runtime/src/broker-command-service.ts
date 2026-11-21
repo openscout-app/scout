@@ -1,4 +1,5 @@
 import {
+  keepDerivedRecords,
   type ActorIdentity,
   type AgentDefinition,
   type AgentEndpoint,
@@ -151,10 +152,10 @@ export class BrokerCommandService {
       }
     }
 
-    // A client write keeps the runtime's claim and cannot hand a claimed item to someone else.
+    // A client write keeps the runtime's claim and derived records, and cannot hand a claimed item to someone else.
     const entries = await this.deps.recordCollaboration(record, {
       enqueueProjection: false,
-      reconcile: (existing, incoming) => reconcileWorkClaimOnWrite(existing, incoming, this.deps.now?.() ?? Date.now()),
+      reconcile: (existing, incoming) => keepDerivedRecords(existing, reconcileWorkClaimOnWrite(existing, incoming, this.deps.now?.() ?? Date.now())),
     });
     const mesh = record.conversationId
       ? { forwarded: [], failed: [] }

@@ -357,7 +357,8 @@ export class BrokerLocalEndpointResolver {
     // there. Never spawn a replacement when that process is gone.
     const attachedLive = this.options.runtime.endpointsForAgent(invocation.targetAgentId, {
       nodeId: this.options.nodeId,
-    }).find(isAttachedLiveTerminalEndpoint);
+      includeOffline: true,
+    }).find(endpoint => (endpoint.state !== "offline" || endpoint.transport === "rex") && isAttachedLiveTerminalEndpoint(endpoint));
     if (attachedLive) {
       throw new Error(
         `live ${attachedLive.harness} session in ${describeAttachedLiveTerminal(attachedLive)} is no longer running; `

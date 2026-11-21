@@ -360,9 +360,9 @@ export function buildLiveTerminalSessionAgent(input: {
   projectRoot?: string;
   displayName?: string;
   nodeId: string;
-  createId: (prefix: string) => string;
+  id: string;
 }): AgentDefinition {
-  const id = input.createId("local-session-agent");
+  const id = input.id;
   return {
     id,
     kind: "agent",
@@ -422,7 +422,7 @@ export function buildLiveTerminalEndpointBinding(input: {
     projectRoot,
     ...(surface.backend === "tmux"
       ? { sessionId: surface.session, pane: surface.pane }
-      : { sessionId: surface.terminalId }),
+      : { sessionId: surface.backend === "rex" ? surface.blockId : surface.terminalId }),
     metadata: {
       source: "local-session",
       managedByScout: true,
@@ -435,7 +435,7 @@ export function buildLiveTerminalEndpointBinding(input: {
       attachedLive: true,
       placement: "attached",
       livePid: live.pid,
-      liveTty: live.tty,
+      ...(live.tty ? { liveTty: live.tty } : {}),
       ...(live.nativeSessionId
         ? { externalSessionId: live.nativeSessionId, nativeSessionId: live.nativeSessionId }
         : {}),
@@ -445,7 +445,7 @@ export function buildLiveTerminalEndpointBinding(input: {
           tmuxPane: surface.pane,
           terminalSurface: { backend: "tmux", sessionName: surface.session, paneId: surface.pane },
         }
-        : {
+        : surface.backend === "rex" ? { terminalSurface: surface } : {
           ghosttyTerminalId: surface.terminalId,
           terminalSurface: { backend: "ghostty", terminalId: surface.terminalId },
         }),
@@ -493,7 +493,7 @@ export function managedLocalSessionEndpointForAgent(
       endpoint.transport === "codex_app_server"
       || endpoint.transport === "claude_stream_json"
       || endpoint.transport === "pairing_bridge"
-      || ((endpoint.transport === "tmux" || endpoint.transport === "ghostty") && endpoint.metadata?.attachedLive === true)
+      || ((endpoint.transport === "tmux" || endpoint.transport === "ghostty" || endpoint.transport === "rex") && endpoint.metadata?.attachedLive === true)
     )
     && isManagedLocalSessionMetadata(endpoint.metadata)
   )) ?? null;

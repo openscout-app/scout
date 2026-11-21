@@ -138,10 +138,10 @@ describe("peer process lookup", () => {
 describe("session environment", () => {
   test("drops the shared process's own session keys and takes the peer's", () => {
     const env = sessionEnvironment(
-      { HOME: "/h", OPENSCOUT_BROKER_URL: "http://runtime", OPENSCOUT_AGENT: "server-agent", CLAUDE_CODE_SESSION_ID: "server-session", TMUX_PANE: "%1" },
-      { CLAUDE_CODE_SESSION_ID: "peer-session", PWD: "/p" },
+      { HOME: "/h", OPENSCOUT_BROKER_URL: "http://runtime", OPENSCOUT_AGENT: "server-agent", CLAUDE_CODE_SESSION_ID: "server-session", TMUX_PANE: "%1", REX_SESSION: "daemon-session", REX_BLOCK: "daemon-block" },
+      { CLAUDE_CODE_SESSION_ID: "peer-session", PWD: "/p", REX_SESSION: "peer-session" },
     );
-    expect(env).toEqual({ HOME: "/h", OPENSCOUT_BROKER_URL: "http://runtime", CLAUDE_CODE_SESSION_ID: "peer-session", PWD: "/p" });
+    expect(env).toEqual({ HOME: "/h", OPENSCOUT_BROKER_URL: "http://runtime", CLAUDE_CODE_SESSION_ID: "peer-session", PWD: "/p", REX_SESSION: "peer-session" });
   });
 
   test("the server's runtime wins over the one a session names", () => {

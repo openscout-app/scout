@@ -1,7 +1,7 @@
 import { TaskClosedError } from "@openscout/protocol";
 import { BrokerMeshHttpService } from "./broker-mesh-http-service.js";
 import { forwardMeshMessage } from "./mesh-forwarding.js";
-import { BrokerTaskService, followupAudience } from "./broker-tasks.js";
+import { BrokerTaskService, followupAudience, taskMessageId } from "./broker-tasks.js";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
@@ -626,4 +626,35 @@ test("an answer to a flight waiting on a question or review wakes the worker; a 
   expect(followupAudience(invocation, flight("waiting", "review"))).toEqual({ notify: ["agent.reviewer"], reason: "thread_reply" });
   expect(() => followupAudience(invocation, flight("waiting", "permission"))).toThrow("cannot add context to the active turn");
   expect(() => followupAudience(invocation, flight("running"))).toThrow("cannot add context to the active turn");
+});
+
+test("an interim adapter turn end leaves the explicit task open for a later task reply", async () => {
+  const { h, answer } = await taskFixture("running", { completion: { mode: "explicit" } });
+  await h.lifecycle.recordFlight({
+    ...h.runtime.flightForInvocation("parent")!,
+    state: "completed",
+    output: "Adapter code read, then building the deck in this same task.",
+    completedAt: 4,
+  });
+  expect(h.journal.getFlight("flight-parent")).toMatchObject({
+    state: "waiting", metadata: { completion: { awaitingFinal: true } },
+  });
+  expect(h.journal.getFlight("flight-parent")?.output).toBeUndefined();
+  await answer({ body: "The deck is ready." });
+  expect(h.journal.getFlight("flight-parent")).toMatchObject({
+    state: "completed", output: "The deck is ready.",
+  });
+});
+
+test("a client cannot plant a decision answer through reply metadata; its other metadata still rides", async () => {
+  const planted = { answer: { kind: "pick", key: "A" }, text: "A (Merge now).", at: 1, by: "operator" };
+  const client = await taskFixture();
+  await client.answer({ requestId: "planted", metadata: { decisionAnswer: planted, note: "kept" } });
+  const message = client.h.runtime.peek().messages[taskMessageId("worker", "planted")]!;
+  expect(message.metadata?.decisionAnswer).toBeUndefined();
+  expect(message.metadata?.note).toBe("kept");
+  // The runtime's own answer still rides, through the runtime-only channel.
+  const runtime = await taskFixture();
+  await runtime.tasks.reply({ ref: "parent", senderId: "worker", requestId: "runtime", body: "result" }, { metadata: { decisionAnswer: planted } });
+  expect(runtime.h.runtime.peek().messages[taskMessageId("worker", "runtime")]!.metadata?.decisionAnswer).toEqual(planted);
 });

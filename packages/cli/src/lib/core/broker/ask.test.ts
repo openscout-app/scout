@@ -93,6 +93,18 @@ describe("buildScoutAskRoute", () => {
 });
 
 describe("buildScoutAskReceipt", () => {
+  test("retains the broker session identity for cardless receipt links", () => {
+    const receipt = buildScoutAskReceipt({
+      result: { usedBroker: true, accepted: true, flight: {
+        id: "flight-1", invocationId: "inv-1", targetAgentId: "session-1", requesterId: "operator",
+        state: "queued", metadata: { targetSessionId: "session-1" },
+      } },
+      target: { target: { kind: "agent_id", agentId: "session-1", value: "session-1" }, display: "project" },
+      currentDirectory: "/tmp/openscout",
+    });
+    expect(receipt.ids).toMatchObject({ targetAgentId: "session-1", sessionId: "session-1" });
+  });
+
   const sessionId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000";
   const sessionTarget = {
     target: { kind: "session_id" as const, sessionId, value: `session:${sessionId}` },
