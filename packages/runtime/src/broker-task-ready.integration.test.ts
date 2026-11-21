@@ -42,14 +42,15 @@ test("a task marked notify becomes Ready for the operator; Hold keeps it; Contin
     requestId, caller: { actorId: "ready-requester", nodeId: runtime.nodeId }, target: { kind: "session_id", sessionId: "ready-worker-session" },
     intent: "task_ask", body, task: { version: 1, ...(notify ? { notify: true } : {}) },
   });
-  const answer = (requestId: string, messageId: string, body: string) => broker.postJson(url, "/v1/deliver", {
-    requestId, caller: { actorId: "ready-worker", nodeId: runtime.nodeId }, target: { kind: "binding_ref", ref: messageId }, intent: "tell", body,
+  // The worker answers its task by ref, as `scout reply` does.
+  const answer = (requestId: string, invocationId: string, body: string) => broker.postJson(url, "/v1/messages/reply", {
+    requestId, senderId: "ready-worker", ref: invocationId, body,
   });
 
   // An unmarked task behaves as before: done, no Ready.
   const plain = await ask("plain-ask", "Count the files.", false);
   await broker.waitFor(async () => pastes(), count => count === 1);
-  await answer("plain-answer", plain.message!.id, "There are 12 files.");
+  await answer("plain-answer", plain.flight!.invocationId, "There are 12 files.");
   const plainDone = await broker.waitFor(() => flightOf(plain.flight!.invocationId), flight => flight.state === "completed");
   expect(plainDone.metadata?.ready).toBeUndefined();
   const plainWorkId = plainDone.metadata?.workPromotion && (plainDone.metadata.workPromotion as { workId: string }).workId;
@@ -58,7 +59,7 @@ test("a task marked notify becomes Ready for the operator; Hold keeps it; Contin
   // A marked task: Ready on the flight, next move on the operator, work item in review.
   const marked = await ask("marked-ask", "Fix the flaky test.", true);
   await broker.waitFor(async () => pastes(), count => count === 2);
-  await answer("marked-answer", marked.message!.id, "## Done\n\nFixed the flaky test in `a.test.ts`.\n\nDetails follow.");
+  await answer("marked-answer", marked.flight!.invocationId, "## Done\n\nFixed the flaky test in `a.test.ts`.\n\nDetails follow.");
   const ready = await broker.waitFor(() => flightOf(marked.flight!.invocationId), flight => Boolean(flight.metadata?.ready));
   expect(ready.state).toBe("completed");
   expect(ready.metadata).toMatchObject({
