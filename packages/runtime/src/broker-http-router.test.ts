@@ -1728,6 +1728,22 @@ test("endpoint inventory uses metadata-only peek, supports exact selection and n
   expect((await requestRouter(h, "GET", "/v1/endpoints")).response.status).toBe(503);
 });
 
+test("the flight list returns unfinished flights from peek and never scans a snapshot", async () => {
+  const flight = (id: string, state: string) => ({ id, invocationId: `inv-${id}`, requesterId: "operator", targetAgentId: "agent", state }) as any;
+  const flights = Object.fromEntries([flight("queued", "queued"), flight("running", "running"), flight("waiting", "waiting"),
+    flight("done", "completed"), flight("failed", "failed")].map(item => [item.id, item]));
+  const h = createHarness();
+  h.deps.runtime.snapshot = () => { throw Error("must not scan message history"); };
+  h.deps.runtime.peek = () => ({ endpoints: {}, flights });
+  const listed = await requestRouter(h, "GET", "/v1/flights?active=1");
+  expect(listed.response.status).toBe(200);
+  expect((listed.body as { flights: Array<{ id: string }> }).flights.map(item => item.id).sort()).toEqual(["queued", "running", "waiting"]);
+  // Only the bounded list is served; history is read one flight at a time.
+  expect((await requestRouter(h, "GET", "/v1/flights")).response.status).toBe(400);
+  h.deps.runtime.peek = () => ({ endpoints: {} });
+  expect((await requestRouter(h, "GET", "/v1/flights?active=1")).response.status).toBe(503);
+});
+
 test("native owner control is local-only, refuses invalid input and never invokes or discovers a replacement", async () => {
   const h = createHarness();
   const endpoint = { id: "owner", agentId: "not-owned", nodeId: "node-1", sessionId: "no-session", state: "idle",
