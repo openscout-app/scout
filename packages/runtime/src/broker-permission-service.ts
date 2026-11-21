@@ -3,7 +3,7 @@ import { brokerAttributionFromMetadata } from "./broker-attribution.js";
 import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-permission.js";
 import { PERMISSION_SUPERVISOR_ACTOR_ID, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
-export class PermissionDeliveryUnconfirmedError extends Error {}
+export class PermissionDeliveryUnconfirmedError extends Error { readonly failureCause = "harness_error" as const; }
 /** Nothing can answer this request any more. Its record is settled. */
 export class PermissionRequestEndedError extends Error {
   constructor(message: string, readonly sessionOpen: boolean) { super(message); }

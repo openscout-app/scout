@@ -712,6 +712,7 @@ describe("broker flight lifecycle helpers", () => {
         error: "Stale running flight reconciled: target agent agent-1 has no registered endpoint after 120s",
         completedAt: 130_000,
         metadata: expect.objectContaining({
+          failureCause: "endpoint_lost",
           reconciledStaleFlight: true,
           reconciledReason: "target agent agent-1 has no registered endpoint after 120s",
           reconciledAt: 130_000,
@@ -761,4 +762,14 @@ test("external provider receipts are not projected to running/completed by local
   await harness.service.recordFlight(testFlight({ state: "completed", output: "done" }));
   expect(harness.updatedDeliveries).toEqual([]);
   expect(staleLocalDeliveryReason(harness.snapshot, delivery, { now: 1_000_000 })).toBeNull();
+});
+
+
+test("stale supersession records a typed cause and the successor without prose matching", async () => {
+  const ack = { endpointId: "endpoint-1", nodeId: "node-1", harness: "codex", sessionId: "one-session" };
+  const older = testFlight({ startedAt: 10, metadata: { dispatchAck: ack } });
+  const newer = testFlight({ id: "newer", invocationId: "newer-ask", startedAt: 20, completedAt: 30, state: "completed", output: "Done", metadata: { dispatchAck: ack } });
+  const h = createHarness({ snapshot: testSnapshot({ flights: { older, newer } }), now: 40 });
+  await h.service.reconcileStaleWorkingFlights();
+  expect(h.committedFlights[0]).toMatchObject({ state: "failed", metadata: { failureCause: "superseded", supersededByFlightId: "newer" } });
 });

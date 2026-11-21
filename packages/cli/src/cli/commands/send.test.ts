@@ -18,7 +18,7 @@ describe("renderSendCommandHelp", () => {
     expect(help).toContain("multiple targets + no channel      -> error");
     expect(help).toContain("Use `scout ask` when the meaning is \"do this and get back to me.\"");
     expect(help).toContain("When in doubt, use ask.");
-    expect(help).toContain("scout ask --notify");
+    expect(help).toContain("`scout ask` returns on acceptance");
     expect(help).toContain("--message-file <path>");
   });
 
@@ -27,7 +27,7 @@ describe("renderSendCommandHelp", () => {
 
     expect(help).toContain("Tracked (opt-in):");
     expect(help).toContain("--tracked");
-    expect(help).toContain("same as `scout ask --notify`");
+    expect(help).toContain("same as `scout ask`");
     expect(help).toContain("--tracked on them fails closed.");
     expect(help).toContain("`scout tell` is the explicit FYI spelling of a plain send");
   });

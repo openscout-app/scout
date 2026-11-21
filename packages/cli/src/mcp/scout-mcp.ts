@@ -2,6 +2,8 @@ import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/send
 import { createHash, randomUUID } from "node:crypto";
 import { parseRosterAddress, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
+import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
+import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
@@ -88,9 +90,13 @@ import {
   type ScoutManagedLocalSessionAttachment,
   updateScoutWorkItem,
   moveScoutWorkItem,
+  retryScoutWorkItem,
   planScoutBoardTasks,
   reviewScoutWorkMove,
   readScoutWorkLifecycles,
+  readScoutDerivedRecord,
+  writeScoutDerivedRecord,
+  readScoutDerivedPending,
   waitForScoutFlight,
   type ScoutAskByIdResult,
   type ScoutAskResult,
@@ -615,8 +621,12 @@ type ScoutMcpDependencies = {
     input: ScoutWorkItemUpdate,
   ) => Promise<ScoutTrackedWorkItem | null>;
   moveWorkItem?: typeof moveScoutWorkItem;
+  retryWorkItem?: typeof retryScoutWorkItem;
   planBoardTasks?: typeof planScoutBoardTasks;
   reviewWorkMove?: typeof reviewScoutWorkMove;
+  readDerivedRecord?: typeof readScoutDerivedRecord;
+  writeDerivedRecord?: typeof writeScoutDerivedRecord;
+  readDerivedPending?: typeof readScoutDerivedPending;
   readWorkLifecycles?: typeof readScoutWorkLifecycles;
   waitForFlight: (
     baseUrl: string,
@@ -646,6 +656,7 @@ type ScoutMcpDependencies = {
     options?: { since?: number | null; limit?: number | null },
   ) => Promise<ScoutLabelFeed | null>;
   loadMeshOverview?: (machine?: string) => Promise<ScoutMeshOverview>;
+  readDecisions?: typeof readBrokerDecisions;
 };
 
 const flightSchema = z.object({
@@ -3373,6 +3384,7 @@ export const SCOUT_MCP_INSTRUCTIONS = [
   "- Which machines exist, what they hold: `hosts_list` (live; each machine's projects and the exact ask for it). Don't know an agent's name: `agents_search`. Never invent names.",
   "- After an ask: the receipt is proof it was accepted; `invocations_wait` / `invocations_get` follow it, including work running on another machine.",
   "- The operator: `ask` with operator=true for a task, fyi=true for news; notify=true requests a push for news.",
+  "- notify=true on an agent task tells the operator when it is done (Ready). Use it only when the operator is waiting on that work.",
   "- Answer with `reply` by task ref. progress=true updates its work record without closing it; the harness final turn is already an answer.",
   "- When Scout cannot do what you need, say which call failed and how, instead of working around it silently.",
 ].join("\n");
@@ -3445,7 +3457,7 @@ export function createScoutMcpServer(options: {
     return payload;
   };
 
-  registerIntegrationTools(server, aliasBrokerRequest);
+  registerIntegrationTools(server, aliasBrokerRequest, { env, get defaultCurrentDirectory() { return options.defaultCurrentDirectory; } });
   registerDiffTools(server, aliasBrokerRequest);
   registerSessionRenameTools(server, aliasBrokerRequest, env);
 
@@ -3745,6 +3757,29 @@ export function createScoutMcpServer(options: {
       return {
         content: [{ type: "text" as const, text: renderScoutMeshOverviewLines(overview, { projectsPerMachine: host ? 64 : 8, roots: true }).join("\n") }],
         structuredContent: overview as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "decision_read",
+    {
+      title: "Operator Decision Cards",
+      description:
+        "Read operator asks as decision cards: the card (agent, synthesized or permission), the plain ask it came from, and its answer state (open, needs_material, answered, defaulted). Pass id for one ask (question record, message id or task id); omit it for the open asks. An ask with no card has none: show its plain question. Read-only; the operator answers through Scout's surfaces.",
+      inputSchema: z.object({
+        id: z.string().min(1).optional().describe("One ask; omit for the open asks."),
+        all: z.boolean().optional().describe("Include settled asks when listing."),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ id, all }) => {
+      const read = deps.readDecisions ?? readBrokerDecisions;
+      const result = await read({ ...(id ? { id } : {}), ...(all ? { all } : {}) });
+      const views = "decision" in result ? [result.decision] : result.decisions;
+      return {
+        content: [{ type: "text" as const, text: views.length ? views.map(renderDecisionView).join("\n\n") : "No open operator asks." }],
+        structuredContent: result as unknown as Record<string, unknown>,
       };
     },
   );
@@ -4545,7 +4580,7 @@ export function createScoutMcpServer(options: {
     "ask",
     {
       title: "Ask",
-      description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
+      description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. On an agent task, notify marks it Ready for the operator when it finishes (they get one ping and Continue or Hold); use it only for work the operator is waiting on. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
       inputSchema: z.object({
         operator: z.boolean().optional(), ref: z.string().min(1).optional(), continue: z.string().min(1).optional(),
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),
@@ -4553,6 +4588,7 @@ export function createScoutMcpServer(options: {
         permission: z.boolean().optional(), because: z.string().min(1).optional(), window: z.number().positive().optional(),
         callback: z.string().min(1).optional().describe("Local path of a JavaScript module file, e.g. open-page.js holding: export default ({ result, scout }) => scout.open(result.files[0]); The file is read here and sent with the task. The runtime on the worker's host runs it when the task ends, in a sandbox with no file, process or network access and no imports. Its default export gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only."),
         image: z.string().optional().describe("Local image path."),
+        decision: z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional().describe("Operator tasks only: a decision card, as a local JSON file path (our shape or a decision-pack pack.json, path#id picks one decision) or the card itself. Exactly one pick, 2-3 options keyed A, B, C with label, result and undo (easy or hard), door one_way or two_way, a defaultKey only on a two-way door. Option pictures are local paths ({ path, callouts }); they upload as attachments. Labels become options. See docs/agent/decision-cards.agent.md."),
         completion: completionRequestSchema.optional().describe("Require an explicit final reply; exact local id or session targets only, with a stable requestId."),
         relation: completionRelationSchema.optional().describe("Join child work or continue a parent flight; requires a stable requestId."),
         requestId: z.string().min(1).max(256).optional().describe("Requester-scoped idempotency key; reuse on retries."),
@@ -4641,7 +4677,7 @@ export function createScoutMcpServer(options: {
     },
     async ({
       requestId,
-      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image,
+      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image, decision,
       completion,
       relation,
       to,
@@ -4719,9 +4755,15 @@ export function createScoutMcpServer(options: {
         : undefined;
       // The callback file is read on this side: the task may run on another host.
       const taskCallback = callback ? await readTaskCallbackFile(resolve(resolvedCurrentDirectory, callback)) : undefined;
-      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, ...(taskCallback ? { callback: taskCallback } : {}) };
+      // Decision pictures are read on this side, like the callback, and sent as images.
+      const taskDecision = decision === undefined ? undefined : typeof decision === "string"
+        ? await readDecisionFile(resolve(resolvedCurrentDirectory, decision))
+        : await prepareDecision(decision, resolvedCurrentDirectory);
+      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window,
+        ...(taskCallback ? { callback: taskCallback } : {}), ...(taskDecision ? { decision: taskDecision.decision } : {}) };
       validateTaskAsk(task, { to: targetTo, channel, capability: !predecessor && Boolean(targetProjectPath || profile),
-        execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation) });
+        execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation),
+        decisionImages: taskDecision?.images.length ?? 0 });
       const taskImage = image ? await readTaskImage(resolve(resolvedCurrentDirectory, image)) : undefined;
       let structuredContent: ScoutAskReceipt = parsedRuntime && !parsedRuntime.ok
         ? {
@@ -4764,6 +4806,7 @@ export function createScoutMcpServer(options: {
             requestId: requestId ?? `ask-${randomUUID()}`,
             task,
             ...(taskImage ? { image: taskImage } : {}),
+            ...(taskDecision?.images.length ? { decisionImages: taskDecision.images } : {}),
             ...(completion ? { completion } : {}),
             ...(relation ? { relation } : {}),
             senderId: resolvedSenderId,
@@ -5741,6 +5784,17 @@ export function createScoutMcpServer(options: {
     },
   );
 
+  server.registerTool("work_retry", {
+    title: "Retry Failed Scout Work",
+    description: "Send the original ask again to the same target in a fresh session, whatever the failure cause; the item's retryable flag is only a hint. Omit attempt for the next one. Reuse an attempt to recover its receipt after an uncertain result. Never retries automatically.",
+    inputSchema: z.object({ workId: z.string(), attempt: z.number().int().positive().optional() }),
+    outputSchema: z.object({ workId: z.string(), attempt: z.number(), requestId: z.string(), invocationId: z.string(), flightId: z.string() }),
+    annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async input => {
+    const structuredContent = { ...await (deps.retryWorkItem ?? retryScoutWorkItem)(input) };
+    return { content: createTextContent(structuredContent), structuredContent };
+  });
+
   const workMoveResultSchema = z.object({
     senderId: z.string(),
     applied: z.boolean(),
@@ -5832,6 +5886,70 @@ export function createScoutMcpServer(options: {
       const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
       const result = await (deps.reviewWorkMove ?? reviewScoutWorkMove)({ workId, moveId, revision, verdict, note, actorId: resolvedSenderId });
       const structuredContent = { senderId: resolvedSenderId, status: result.status, station: result.station ?? null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_read",
+    {
+      title: "Read Scout Derived Record",
+      description:
+        "Read a derived record on a work item: something made from it, such as a presentation. status is current, stale (the item changed since) or missing. currentVersion is the version to pass to derived_write.",
+      inputSchema: z.object({ workId: z.string(), kind: z.string() }),
+      outputSchema: z.object({ status: z.string(), currentVersion: z.string(), record: z.record(z.string(), z.unknown()).nullable() }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workId, kind }) => {
+      const result = await (deps.readDerivedRecord ?? readScoutDerivedRecord)({ workId, kind });
+      const structuredContent = { status: result.status, currentVersion: result.currentVersion, record: (result.record ?? null) as Record<string, unknown> | null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_write",
+    {
+      title: "Write Scout Derived Record",
+      description:
+        "Write a derived record on a work item. Pass the sourceVersion you read; if the item changed since, nothing is written and the answer is stale with the current version. It never changes the item itself.",
+      inputSchema: z.object({
+        currentDirectory: z.string().optional(),
+        senderId: z.string().optional(),
+        workId: z.string(),
+        kind: z.string(),
+        sourceVersion: z.string(),
+        body: z.unknown(),
+        producerVersion: z.string().optional(),
+      }),
+      outputSchema: z.object({ senderId: z.string(), status: z.string(), currentVersion: z.string().nullable() }),
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ currentDirectory, senderId, workId, kind, sourceVersion, body, producerVersion }) => {
+      const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
+      const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const result = await (deps.writeDerivedRecord ?? writeScoutDerivedRecord)({
+        workId, kind, sourceVersion, body, producerId: resolvedSenderId, producerKind: "agent",
+        ...(producerVersion ? { producerVersion } : {}),
+      });
+      const structuredContent = { senderId: resolvedSenderId, status: result.status, currentVersion: result.status === "stale" ? result.currentVersion : null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_pending",
+    {
+      title: "List Pending Scout Derived Records",
+      description:
+        "List open work items whose lifecycle station names a derived record they have no current version of. A producer that pulls work reads this, then calls derived_write.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(1000).optional() }),
+      outputSchema: z.object({ pending: z.array(z.record(z.string(), z.unknown())) }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ limit }) => {
+      const pending = await (deps.readDerivedPending ?? readScoutDerivedPending)(limit);
+      const structuredContent = { pending: pending as unknown as Record<string, unknown>[] };
       return { content: createTextContent(structuredContent), structuredContent };
     },
   );

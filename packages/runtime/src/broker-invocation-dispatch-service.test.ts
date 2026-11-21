@@ -724,7 +724,7 @@ describe("BrokerInvocationDispatchService", () => {
         completedAt: 200,
         summary: "authority unavailable",
         error: "authority unavailable",
-        metadata: { source: "test" },
+        metadata: { source: "test", failureCause: "endpoint_lost" },
       }),
     ]);
     expect(harness.statusMessages).toEqual([

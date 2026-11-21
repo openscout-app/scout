@@ -1,3 +1,5 @@
+import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
+import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { handlePostRoute, type PostHttpDeps } from "./broker-posts-http.js";
 import { RoleSlotError } from "./role-slots-store.js";
@@ -16,9 +18,10 @@ import { MeshFeedback, MeshFeedbackError } from "./mesh-feedback.js";
 import { MeshBridgeManagement, MeshBridgeManagementError } from "./mesh-bridge-management.js";
 import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
-import { TaskClosedError, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
+import { TaskClosedError, isTaskReadyDecision, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
 import { SessionNameTargetError, type SessionNameService } from "./session-names.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
+import { DecisionAnswerError, type BrokerDecisionCardService } from "./broker-decision-cards.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
 import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
@@ -127,7 +130,8 @@ import {
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
 import { WorkClaimConflictError } from "./broker-work-claims.js";
-import type { WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import type { DerivedWriteRequest, WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import { DerivedRecordError, type BrokerDerivedRecordService } from "./broker-derived-records.js";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -231,6 +235,8 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 export type BrokerHttpRouterDeps = {
   /** Work lifecycles: stations, moves and reviews. */
   workLifecycles?: BrokerWorkLifecycleService;
+  workRetry?: import("./broker-work-retry.js").BrokerWorkRetryService;
+  derivedRecords?: BrokerDerivedRecordService;
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
@@ -259,6 +265,10 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Decision cards on operator asks: reads and answers. */
+  decisionCards?: BrokerDecisionCardService;
+  /** Ready: set notify on a running task, and the operator's Continue or Hold. */
+  taskReady?: Pick<BrokerTaskReadyService, "setNotify" | "decide">;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
   /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
@@ -340,7 +350,7 @@ export type BrokerHttpRouterDeps = {
   rendezvousService: BrokerRendezvousService;
   externalSessionService?: BrokerExternalSessionService;
   t3Service?: BrokerT3Service;
-  /** The Vercel Board adapter; it answers on its custodian node. */
+  /** The Vercel Board adapter; it answers on each host that connected. */
   vercelBoardService?: BrokerVercelBoardService;
   routeAliasService?: BrokerRouteAliasService;
   agentRosterService?: AgentRosterService;
@@ -683,6 +693,43 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/mcp-events") {
     await handleBrokerMcpEvents(request, response, deps.mcpEvents); return;
   }
+  const decisionMatch = method === "GET" ? url.pathname.match(/^\/v1\/decisions\/([^/]+)$/) : null;
+  if (url.pathname === "/v1/decisions" || url.pathname.startsWith("/v1/decisions/")) {
+    // Operator asks are this machine's: the same fence as permission decisions.
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    const cards = deps.decisionCards;
+    if (!cards) { json(response, 404, { error: "decision_cards_unavailable" }); return; }
+    try {
+      if (method === "GET" && url.pathname === "/v1/decisions") {
+        const state = url.searchParams.get("state") === "all" ? "all" : "open";
+        const limit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+        json(response, 200, { decisions: await cards.list({ state, ...(Number.isFinite(limit) ? { limit } : {}) }) });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/decisions/answer") {
+        const body = await readRequestBody<{ id?: unknown; answer?: unknown; requestId?: unknown }>(request, { maxBytes: 16 * 1024 });
+        if (typeof body.id !== "string" || typeof body.requestId !== "string" || !body.answer || typeof body.answer !== "object") {
+          throw new DecisionAnswerError("id, requestId and answer are required");
+        }
+        json(response, 200, { ok: true, decision: await cards.answer({ id: body.id, requestId: body.requestId, answer: body.answer as never }) });
+        return;
+      }
+      if (decisionMatch) {
+        const id = decodeURIComponent(decisionMatch[1]!);
+        const view = await cards.view(id);
+        if (!view) { json(response, 404, { error: "not_found", detail: `no operator ask ${id}` }); return; }
+        json(response, 200, { decision: view });
+        return;
+      }
+      json(response, 405, { error: "method_not_allowed" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof DecisionAnswerError) json(response, error.status, { error: message });
+      else if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended", sessionOpen: error.sessionOpen });
+      else json(response, error instanceof PermissionDeliveryUnconfirmedError ? 502 : 409, { error: message });
+    }
+    return;
+  }
   if (method === "POST" && url.pathname === "/v1/permissions/decide") {
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
     if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
@@ -742,6 +789,33 @@ export function createBrokerHttpRouter(
       json(response, error instanceof HarnessHooksError ? 409 : 500, {
         error: message, ...(error instanceof HarnessHooksError ? { code: error.code } : {}),
       });
+    }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/tasks/notify") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    try {
+      const body = await readRequestBody<{ ref?: unknown; notify?: unknown; actorId?: unknown }>(request);
+      if (typeof body.ref !== "string" || !body.ref.trim() || typeof body.notify !== "boolean") throw new TaskReadyError(400, "ref and notify (boolean) are required");
+      if (!deps.taskReady) throw new TaskReadyError(503, "Ready is unavailable");
+      const actorId = attributedActorId(typeof body.actorId === "string" ? body.actorId : undefined);
+      json(response, 200, await deps.taskReady.setNotify({ ref: body.ref.trim(), notify: body.notify, actorId }));
+    } catch (error) {
+      json(response, error instanceof TaskReadyError ? error.status : 404, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/tasks/ready/decide") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
+    try {
+      const body = await readRequestBody<{ ref?: unknown; decision?: unknown; requestId?: unknown }>(request);
+      if (typeof body.ref !== "string" || !body.ref.trim() || !isTaskReadyDecision(body.decision)) throw new TaskReadyError(400, "ref and decision (continue/hold) are required");
+      if (!deps.taskReady) throw new TaskReadyError(503, "Ready is unavailable");
+      json(response, 200, await deps.taskReady.decide({ ref: body.ref.trim(), decision: body.decision, actorId: "operator",
+        ...(typeof body.requestId === "string" && body.requestId.trim() ? { requestId: body.requestId.trim() } : {}) }));
+    } catch (error) {
+      json(response, error instanceof TaskReadyError ? error.status : 409, { error: error instanceof Error ? error.message : String(error) });
     }
     return;
   }
@@ -907,6 +981,26 @@ export function createBrokerHttpRouter(
     } catch (error) { return badRequest(response, error instanceof Error ? error.message : String(error)); }
   }
 
+  if (method === "POST" && url.pathname === "/v1/integrations/rex/start") {
+    if (denyRemoteMutation()) return;
+    try {
+      const input = await readRequestBody<RexStartInput>(request);
+      json(response, 200, await managedSessionHttpService.startRexSession(input));
+    } catch (error) { badRequest(response, error); }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/integrations/rex/status") {
+    if (denyRemoteMutation()) return;
+    try {
+      const input = await readRequestBody<RexStatusInput>(request);
+      const observation = await readRexStatus(input);
+      const endpoints = runtime.peek?.().endpoints;
+      json(response, 200, { ...observation, agents: endpoints ? rexBindings(Object.values(endpoints), nodeId, input) : null });
+    } catch (error) { badRequest(response, error); }
+    return;
+  }
+
   if (method === "POST" && url.pathname.startsWith("/v1/integrations/t3/")) {
     if (denyRemoteMutation()) return;
     if (forwardedNodeId) { json(response, 403, { error: "t3_local_only" }); return; }
@@ -958,7 +1052,7 @@ export function createBrokerHttpRouter(
         return;
       }
       if (method !== "POST") { notFound(response); return; }
-      // Board credentials and claim tokens stay on the custodian: no remote mutation, no forwarding.
+      // Board credentials and claim tokens stay on the host that holds them: no remote mutation, no forwarding.
       if (denyRemoteMutation()) return;
       if (forwardedNodeId) { json(response, 403, { error: "vercel_board_local_only" }); return; }
       const input = await readRequestBody<Record<string, any>>(request, { maxBytes: 256 * 1024 });
@@ -2077,6 +2171,41 @@ export function createBrokerHttpRouter(
       conversationId: url.searchParams.get("conversationId") ?? undefined,
     }));
     return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/work/retry" && deps.workRetry) {
+    try { json(response, 200, await deps.workRetry.retry(await readRequestBody<import("@openscout/protocol").WorkRetryRequest>(request, { maxBytes: 16 * 1024 }))); }
+    catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
+    }
+
+  if (deps.derivedRecords && (url.pathname === "/v1/derived" || url.pathname === "/v1/derived/pending")) {
+    const derived = deps.derivedRecords;
+    try {
+      if (method === "GET" && url.pathname === "/v1/derived/pending") {
+        json(response, 200, { pending: derived.pending({ limit: parseLimit(url) }) });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/derived") {
+        json(response, 200, derived.read({
+          workId: url.searchParams.get("workId") ?? "",
+          kind: url.searchParams.get("kind") ?? "",
+          producerVersion: url.searchParams.get("producerVersion") ?? undefined,
+        }));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/derived") {
+        json(response, 200, await derived.write(await readRequestBody<DerivedWriteRequest>(request, { maxBytes: 64 * 1024 })));
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DerivedRecordError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+      return;
+    }
   }
 
   if (deps.workLifecycles && url.pathname.startsWith("/v1/work/")) {
