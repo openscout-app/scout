@@ -733,10 +733,15 @@ export class BrokerDurableRecordStore {
       assertExplicitReplyAdmission(message, durableReplyFlight ? { ...replySnapshot,
         flights: { ...replySnapshot.flights, [durableReplyFlight.id]: durableReplyFlight } } : replySnapshot, this.options.completionFlight);
       const taskEntries: BrokerJournalEntry[] = [];
-      const followup = message.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean } | undefined;
+      const followup = message.metadata?.taskFollowup as { invocationId?: string; cancel?: boolean; flightId?: string } | undefined;
       if (followup?.invocationId) {
         const task = this.options.completionInvocation?.(followup.invocationId) ?? replySnapshot.invocations[followup.invocationId];
-        const flight = this.options.completionCurrentFlight?.(followup.invocationId) ?? this.options.runtime.flightForInvocation?.(followup.invocationId);
+        const current = this.options.completionCurrentFlight?.(followup.invocationId) ?? this.options.runtime.flightForInvocation?.(followup.invocationId);
+        // A cancel can name a superseded placeholder of this invocation; that
+        // flight, not the current one, is what the cancel closed.
+        const named = followup.cancel && followup.flightId && followup.flightId !== current?.id
+          ? this.options.completionFlight?.(followup.flightId) ?? replySnapshot.flights[followup.flightId] : undefined;
+        const flight = named?.invocationId === followup.invocationId ? named : current;
         const participant = task?.conversationId && replySnapshot.conversations[task.conversationId]?.participantIds.includes(message.actorId);
         if (!task || !flight || (message.actorId !== task.requesterId && message.actorId !== (this.options.operatorActorId ?? "operator") && (!participant || followup.cancel))) throw new Error("task follow-up is not authorized");
         if ((!followup.cancel && (taskTerminal(flight) || flight.metadata?.taskFinalReplyMessageId)) || (followup.cancel && flight.state !== "cancelled")) throw finishedTaskError(task.id);

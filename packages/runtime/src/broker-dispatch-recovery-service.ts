@@ -20,6 +20,8 @@ export type BrokerDispatchRecoveryResult = {
   failed: number;
   skippedActive: number;
   skippedMissingInvocation: number;
+  /** Deferred flights closed instead of requeued: superseded or past the age limit. */
+  settled: number;
 };
 
 export type BrokerDispatchRecoveryServiceDeps = {
@@ -30,13 +32,28 @@ export type BrokerDispatchRecoveryServiceDeps = {
   invocationFor: (invocationId: string) => InvocationRequest | undefined;
   isInvocationActive: (invocationId: string) => boolean;
   runDispatchJob: (job: BrokerInvocationDispatchJob, invocation?: InvocationRequest) => Promise<void>;
-  /** Revalidate and persist the completed-to-pending transition before dispatch. */
+  /**
+   * Revalidate and persist the completed-to-pending transition before dispatch.
+   * Returns false when the guard refused the transition and nothing ran.
+   */
   requeueDispatchJob?: (
     job: BrokerInvocationDispatchJob,
     invocation: InvocationRequest,
     flight: FlightRecord,
-  ) => Promise<void>;
+  ) => Promise<boolean | void>;
   dispatchAcceptedInvocation?: (invocation: InvocationRequest) => Promise<void>;
+  /** The invocation's current flight. A job whose flight is not current is superseded. */
+  currentFlightForInvocation?: (invocationId: string) => FlightRecord | undefined;
+  /**
+   * Close a superseded flight without moving the invocation's current flight.
+   * Returns false when the writer found it terminal or current again.
+   */
+  settleSupersededFlight?: (flight: FlightRecord, current: FlightRecord) => Promise<boolean>;
+  /**
+   * Fail a delivery that stayed parked before submission past
+   * DEFERRED_DISPATCH_MAX_AGE_MS. Returns false when the park changed first.
+   */
+  expireDeferredDispatch?: (invocation: InvocationRequest, flight: FlightRecord, detail: string) => Promise<boolean>;
   /**
    * Fingerprint of the registry inputs that decide whether an agent has a
    * runnable endpoint (agent, actor, endpoints; liveness excluded). A delivery
@@ -83,6 +100,22 @@ export function isAwaitingRunnableEndpoint(flight: FlightRecord | undefined): bo
 
 export const ENDPOINT_WAIT_INITIAL_MS = 60_000;
 export const ENDPOINT_WAIT_MAX_MS = 60 * 60_000;
+/** A delivery parked before submission for longer than this is failed, not retried. */
+export const DEFERRED_DISPATCH_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * A flight that is not its invocation's current flight. A peer handoff, for
+ * example, records the authority's flight under the same invocation and leaves
+ * the local placeholder behind. Work for the invocation follows the current
+ * flight, so the placeholder can never run.
+ */
+export function supersedingFlight(
+  flight: FlightRecord | undefined,
+  current: FlightRecord | undefined,
+): FlightRecord | undefined {
+  if (!flight || !current || current.id === flight.id || current.invocationId !== flight.invocationId) return undefined;
+  return isTerminalFlightState(flight.state) ? undefined : current;
+}
 
 type EndpointWait = { flightId: string; key: string; retryAt: number; delayMs: number };
 
@@ -98,6 +131,8 @@ export class BrokerDispatchRecoveryService {
   readonly #endpointWaits = new Map<string, EndpointWait>();
   /** In memory only: each process picks up an interrupted in-place delivery once. */
   readonly #resumedInPlace = new Set<string>();
+  /** In memory only: backoff for requeues the dispatch guard refused. */
+  readonly #refusedRequeueDelays = new Map<string, number>();
 
   constructor(private readonly deps: BrokerDispatchRecoveryServiceDeps) {}
 
@@ -143,6 +178,53 @@ export class BrokerDispatchRecoveryService {
       ? Math.min(previous.delayMs * 2, ENDPOINT_WAIT_MAX_MS)
       : ENDPOINT_WAIT_INITIAL_MS;
     this.#endpointWaits.set(invocationId, { flightId: flight.id, key, retryAt: now + delayMs, delayMs });
+  }
+
+  /**
+   * A superseded flight cannot run, so requeuing its job only repeats a
+   * refused write. Close it with the reason instead.
+   */
+  #supersedingFlightFor(job: BrokerInvocationDispatchJob, flight: FlightRecord): FlightRecord | undefined {
+    if (!this.deps.currentFlightForInvocation || !this.deps.settleSupersededFlight) return undefined;
+    return supersedingFlight(flight, this.deps.currentFlightForInvocation(job.invocationId));
+  }
+
+  async #settleSuperseded(job: BrokerInvocationDispatchJob, flight: FlightRecord, current: FlightRecord, reason: string): Promise<boolean> {
+    const settled = await this.deps.settleSupersededFlight!(flight, current);
+    if (settled) {
+      this.deps.log?.(
+        `[openscout-runtime] closed superseded flight ${flight.id} for ${job.targetAgentId}; invocation ${job.invocationId} continues on ${current.id} (${reason})`,
+      );
+    }
+    return settled;
+  }
+
+  #parkExpired(job: BrokerInvocationDispatchJob, flight: FlightRecord, now: number): boolean {
+    return Boolean(this.deps.expireDeferredDispatch)
+      && now - (flight.startedAt ?? job.createdAt) >= DEFERRED_DISPATCH_MAX_AGE_MS;
+  }
+
+  async #expire(job: BrokerInvocationDispatchJob, invocation: InvocationRequest, flight: FlightRecord): Promise<boolean> {
+    const days = Math.floor(DEFERRED_DISPATCH_MAX_AGE_MS / 86_400_000);
+    const detail = `Not delivered: ${job.targetAgentId} did not accept this message within ${days} days, so Scout stopped retrying. Send a new ask when the target is available.`;
+    const expired = await this.deps.expireDeferredDispatch!(invocation, flight, detail);
+    if (expired) {
+      this.deps.log?.(`[openscout-runtime] expired deferred dispatch job ${job.id} for ${job.targetAgentId} after ${days} days`);
+    }
+    return expired;
+  }
+
+  /** A refused requeue changed nothing; retrying it every pass only burns the sweep. */
+  #backOffRefusedRequeue(job: BrokerInvocationDispatchJob, now: number): void {
+    const previous = this.#refusedRequeueDelays.get(job.invocationId);
+    const delayMs = previous ? Math.min(previous * 2, ENDPOINT_WAIT_MAX_MS) : ENDPOINT_WAIT_INITIAL_MS;
+    this.#refusedRequeueDelays.delete(job.invocationId);
+    this.#refusedRequeueDelays.set(job.invocationId, delayMs);
+    if (this.#refusedRequeueDelays.size > 4096) this.#refusedRequeueDelays.delete(this.#refusedRequeueDelays.keys().next().value!);
+    this.deferInvocation(job.invocationId, now + delayMs);
+    this.deps.warn?.(
+      `[openscout-runtime] dispatch job ${job.id} was not requeued (its job or flight changed); next check in ${Math.round(delayMs / 1000)}s`,
+    );
   }
 
   /** Test and diagnostics view of the in-memory endpoint waits. */
@@ -203,6 +285,7 @@ export class BrokerDispatchRecoveryService {
       failed: 0,
       skippedActive: 0,
       skippedMissingInvocation: 0,
+      settled: 0,
     };
     const failedRecovery = (recordId: string, invocationId: string, error: unknown): void => {
       result.failed += 1;
@@ -241,11 +324,26 @@ export class BrokerDispatchRecoveryService {
           if (!currentFlight || !hasUnconsumedDeferral(job, currentFlight) || !this.deps.requeueDispatchJob) {
             continue;
           }
+          // Checked synchronously: only a settling write yields to another pass.
+          const superseding = this.#supersedingFlightFor(job, currentFlight);
+          if (superseding && await this.#settleSuperseded(job, currentFlight, superseding, input.reason)) {
+            result.settled += 1;
+            continue;
+          }
+          if (this.#parkExpired(job, currentFlight, now) && await this.#expire(job, invocation, currentFlight)) {
+            result.settled += 1;
+            continue;
+          }
           this.deps.log?.(
             `[openscout-runtime] requeuing deferred dispatch job ${job.id} for ${job.targetAgentId} (${input.reason})`,
           );
           this.#noteEndpointAttempt(invocation.id, job.targetAgentId, currentFlight, now);
-          await this.deps.requeueDispatchJob(job, invocation, currentFlight);
+          const requeued = await this.deps.requeueDispatchJob(job, invocation, currentFlight);
+          if (requeued === false) {
+            this.#backOffRefusedRequeue(job, now);
+            continue;
+          }
+          this.#refusedRequeueDelays.delete(invocation.id);
           result.dispatched += 1;
           continue;
         }
