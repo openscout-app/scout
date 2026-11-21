@@ -318,7 +318,7 @@ import { BrokerReplyCompletionRecovery } from "./broker-reply-completion-recover
 import { BrokerInvocationDispatchService } from "./broker-invocation-dispatch-service.js";
 import { BrokerCommandService } from "./broker-command-service.js";
 import { BrokerChannelInviteService } from "./broker-channel-invite-service.js";
-import { BrokerDispatchRecoveryService } from "./broker-dispatch-recovery-service.js";
+import { BrokerDispatchRecoveryService, deferredDispatchCheckedAt, supersedingFlight } from "./broker-dispatch-recovery-service.js";
 import { registrySubstanceKey } from "./registry-liveness.js";
 import {
   brokerActorDisplayName as resolveBrokerActorDisplayName,
@@ -1235,6 +1235,9 @@ const a2aService = new BrokerA2AService({
   acceptInvocation: acceptInvocationDurably,
   dispatchInvocation: dispatchAcceptedInvocation,
   recordFlight: recordFlightDurably,
+  currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+  isInvocationActive: isInvocationDispatchActive,
+  cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   loadRegisteredLocalAgentBindings,
   sleep,
   error: (message, detail) => {
@@ -1699,6 +1702,52 @@ async function transitionInvocation(
   // Recording can reject a stale patch after another writer completes/cancels
   // the invocation. Never return the uncommitted proposal to a side-effect caller.
   return runtime.flightForInvocation(invocationId)!;
+}
+
+/**
+ * Close a flight that is no longer its invocation's current flight: the
+ * placeholder a peer handoff leaves behind, for example. The write keeps the
+ * invocation's current flight and runs no lifecycle hooks. The placeholder did
+ * no work, and the current flight owns the requester's result.
+ */
+async function cancelSupersededFlight(flightId: string, summary: string): Promise<FlightRecord | null> {
+  return durableStore.runWrite(async () => {
+    const flight = journal.getFlight(flightId) ?? runtime.peek().flights[flightId];
+    const current = flight ? runtime.flightForInvocation(flight.invocationId) : undefined;
+    const superseding = supersedingFlight(flight, current);
+    if (!flight || !superseding) return null;
+    const completedAt = Date.now();
+    const cancelled: FlightRecord = { ...flight, state: "cancelled", summary, completedAt,
+      metadata: { ...flight.metadata, supersededByFlightId: superseding.id, supersededSettledAt: completedAt } };
+    await durableStore.commitEntries({ kind: "flight.record", flight: cancelled, preserveCurrent: true }, async () => {
+      await runtime.upsertFlight(cancelled, { preserveCurrent: true });
+    });
+    return cancelled;
+  });
+}
+
+/** Fail a delivery that stayed parked before submission too long, if it is still that park. */
+async function expireDeferredDispatch(invocation: InvocationRequest, flight: FlightRecord, detail: string): Promise<boolean> {
+  const parkedAt = deferredDispatchCheckedAt(flight);
+  if (parkedAt === null) return false;
+  const failed: FlightRecord = { ...flight, state: "failed", summary: detail, error: detail, completedAt: Date.now(),
+    metadata: { ...flight.metadata, failureStage: "deferred_dispatch_expired" } };
+  await recordFlightDurably(failed, () => {
+    const current = runtime.flightForInvocation(invocation.id);
+    return current?.id === flight.id && deferredDispatchCheckedAt(current) === parkedAt;
+  });
+  const recorded = runtime.flightForInvocation(invocation.id);
+  if (recorded?.id !== flight.id || recorded.state !== "failed" || recorded.metadata?.failureStage !== "deferred_dispatch_expired") return false;
+  await postInvocationStatusMessage(invocation, recorded);
+  return true;
+}
+
+/** Any executor holds this invocation: a local launch, an external session, T3, or reply recovery. */
+function isInvocationDispatchActive(invocationId: string): boolean {
+  return flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
+    || replyCompletionRecovery.isPending(invocationId)
+    || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
+    || t3Service.hasPendingInvocation(invocationId);
 }
 
 /**
@@ -3167,13 +3216,14 @@ const dispatchRecoveryService = new BrokerDispatchRecoveryService({
   dispatchJobs: () => journal.listRecoverableInvocationDispatchJobs({ limit: 5000 }),
   dispatchJobForInvocation: (invocationId) => journal.getInvocationDispatchJobForInvocation(invocationId),
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
-  isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
-    || replyCompletionRecovery.isPending(invocationId)
-    || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
-    || t3Service.hasPendingInvocation(invocationId),
+  isInvocationActive: isInvocationDispatchActive,
   runDispatchJob: (job, invocation) => invocationDispatchService.runDispatchJob(job, invocation),
   requeueDispatchJob: (job, invocation, flight) => invocationDispatchService.requeueDispatchJob(job, invocation, flight),
   dispatchAcceptedInvocation: (invocation) => invocationDispatchService.dispatchAcceptedInvocation(invocation),
+  currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+  settleSupersededFlight: async (flight, current) => Boolean(await cancelSupersededFlight(flight.id,
+    `Superseded by flight ${current.id}; this placeholder never ran and will not run.`)),
+  expireDeferredDispatch,
   endpointWakeKey: (agentId) => {
     const view = runtime.peek();
     const endpoints = Object.values(view.endpoints).filter((endpoint) => endpoint.agentId === agentId)
@@ -3342,6 +3392,7 @@ const taskService = new BrokerTaskService({
   },
   accept: payload => deliveryAcceptanceService.accept(payload, { receiptReserved: true, admissionReserved: true }),
   interrupt: interruptFlightSession,
+  cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   forward: async (home, kind, payload) => {
     const node = runtime.snapshot().nodes[home];
     if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY) || !node.brokerUrl) throw new Error(`task home ${home} requires ${SCOUT_TASKS_CAPABILITY} and a reachable broker`);

@@ -15,6 +15,7 @@ import {
   a2aJsonRpcResult,
   a2aTargetAgentId,
   BrokerA2AService,
+  type BrokerA2AServiceOptions,
 } from "./broker-a2a-service.js";
 import type { LocalAgentBinding } from "./local-agents.js";
 
@@ -81,7 +82,7 @@ function testFlight(input: Partial<FlightRecord> = {}): FlightRecord {
   };
 }
 
-function createService() {
+function createService(extra: (runtime: ReturnType<typeof createInMemoryControlRuntime>) => Partial<BrokerA2AServiceOptions> = () => ({})) {
   const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
   const knownInvocations = new Map<string, InvocationRequest>();
   const activeInvocationTasks = new Map<string, Promise<void>>();
@@ -120,6 +121,7 @@ function createService() {
       recordedFlights.push(flight);
       await runtime.upsertFlight(flight);
     },
+    ...extra(runtime),
     async loadRegisteredLocalAgentBindings() {
       return localBindings;
     },
@@ -302,5 +304,51 @@ describe("BrokerA2AService", () => {
       code: -32601,
       message: "A2A method not found: NoSuchMethod",
     }));
+  });
+
+  describe("cancelling a waking flight", () => {
+    const invocation: InvocationRequest = { id: "invocation-1", requesterId: "operator", requesterNodeId: "node-1", targetAgentId: "agent-1",
+      action: "consult", task: "work", ensureAwake: true, stream: false, createdAt: 100 };
+    const notSubmitted = { dispatchOutcome: { status: "not_submitted", checkedAt: 100 } };
+    const cancel = (service: BrokerA2AService) => service.handleJsonRpc({ jsonrpc: "2.0", id: "cancel", method: "CancelTask", params: { id: "flight-1" } }, "http://broker.test");
+
+    test("cancels a waking flight with not-submitted evidence and no executor", async () => {
+      const { runtime, service, recordedFlights } = createService(() => ({ isInvocationActive: () => false }));
+      await runtime.commitInvocation(invocation, testFlight({ state: "waking", metadata: notSubmitted }));
+      const response = await cancel(service);
+      expect(response.result).toEqual(expect.objectContaining({ id: "flight-1", status: expect.objectContaining({ state: "TASK_STATE_CANCELED" }) }));
+      expect(recordedFlights.map(flight => flight.state)).toEqual(["cancelled"]);
+    });
+
+    test("refuses a waking flight that another executor holds", async () => {
+      const { runtime, service, recordedFlights } = createService(() => ({ isInvocationActive: () => true }));
+      await runtime.commitInvocation(invocation, testFlight({ state: "waking", metadata: notSubmitted }));
+      expect((await cancel(service)).error?.code).toBe(-32004);
+      expect(recordedFlights).toHaveLength(0);
+    });
+
+    test("cancels a superseded placeholder without moving the invocation's current flight", async () => {
+      const cancelledPlaceholders: string[] = [];
+      const { runtime, service, recordedFlights } = createService((runtime) => ({
+        currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+        // The superseding flight's executor is busy; the placeholder has none.
+        isInvocationActive: () => true,
+        async cancelSupersededFlight(flight, summary) {
+          cancelledPlaceholders.push(flight.id);
+          const cancelled = { ...flight, state: "cancelled" as const, summary, completedAt: 200 };
+          await runtime.upsertFlight(cancelled, { preserveCurrent: true });
+          return cancelled;
+        },
+      }));
+      // Bare waking: no not-submitted evidence. Supersession is the evidence.
+      await runtime.commitInvocation(invocation, testFlight({ state: "waking" }));
+      await runtime.upsertFlight(testFlight({ id: "peer-flight", state: "completed", startedAt: 150 }));
+
+      const response = await cancel(service);
+      expect(response.result).toEqual(expect.objectContaining({ id: "flight-1", status: expect.objectContaining({ state: "TASK_STATE_CANCELED" }) }));
+      expect(cancelledPlaceholders).toEqual(["flight-1"]);
+      expect(recordedFlights).toHaveLength(0);
+      expect(runtime.flightForInvocation("invocation-1")?.id).toBe("peer-flight");
+    });
   });
 });
