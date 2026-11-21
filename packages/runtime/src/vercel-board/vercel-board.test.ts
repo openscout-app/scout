@@ -358,6 +358,26 @@ test("host offline while the agent finishes: re-claim when nobody took the task,
   expect(h.notices).toContain("finished_claim_lost:result-b");
 });
 
+test("host away past the lease while its agent finished: the result still settles, and lands with nobody else's claim", async () => {
+  const h = custodyHarness();
+  const a = h.board.createTask({ channel: "work", text: "a" });
+  const rowA = await h.custody.claim({ taskId: a, workId: "wa", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(rowA.flightId!, { state: "completed", output: "result-a", metadata: { completedByBrokerReply: true } });
+  h.time.advance(61_000); // no tick ran while the host was away; the row is still held
+  await h.custody.tick();
+  expect(h.board.task(a)).toMatchObject({ state: "completed", result: "result-a", epoch: 2 });
+  expect(h.store.custody("c1", rowA.attemptId)!.state).toBe("settled");
+
+  const b = h.board.createTask({ channel: "work", text: "b" });
+  const rowB = await h.custody.claim({ taskId: b, workId: "wb", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(rowB.flightId!, { state: "completed", output: "result-b", metadata: { completedByBrokerReply: true } });
+  h.time.advance(61_000);
+  h.board.claimAs(b, "local:user:other+bot");
+  await h.custody.tick();
+  expect(h.store.custody("c1", rowB.attemptId)!).toMatchObject({ state: "lost", result: "result-b" });
+  expect(h.notices).toContain("finished_claim_lost:result-b");
+});
+
 // ---- outbox resend ------------------------------------------------------------
 
 test("outbox resend: a post whose answer was lost is read back by its id, and never posted twice", async () => {
@@ -930,6 +950,18 @@ test("the matcher gives one task at a time to an agent, and never matches a task
   expect(h.board.task(first)!.state).toBe("ready");
   expect(h.board.task(second)!.claim!.actor).toBe(h.reviewer);
   expect(h.board.count("POST", `/tasks/${first}/claim`)).toBe(1);
+});
+
+test("the matcher leaves a ready task the board has seen claimed, so a second host does not take it after a release", async () => {
+  const h = await matcherHarness();
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const task = h.board.createTask({ channel: "work", text: "Review A", for: h.reviewer, as: null });
+  h.board.claimAs(task, h.reviewer, 1); // another host claimed it; its lease lapses
+  h.time.advance(2_000);
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(task)).toMatchObject({ state: "ready", epoch: 1 });
+  expect(h.board.count("POST", `/tasks/${task}/claim`)).toBe(0);
 });
 
 test("an agent declares only its own role, never the planning profile", async () => {
