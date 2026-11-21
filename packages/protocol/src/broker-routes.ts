@@ -59,6 +59,8 @@ export const scoutBrokerPaths = {
     workMove: "/v1/work/move",
     workReview: "/v1/work/review",
     workClaim: "/v1/work/claim",
+    taskNotify: "/v1/tasks/notify",
+    taskReadyDecide: "/v1/tasks/ready/decide",
     vercelBoardConnect: "/v1/integrations/vercel-board/connect",
     vercelBoardStatus: "/v1/integrations/vercel-board/status",
     vercelBoardClaim: "/v1/integrations/vercel-board/claim",

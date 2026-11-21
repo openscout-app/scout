@@ -39,6 +39,48 @@ The apps adopt the notification policy after core lands.
 A receipt confirms durable recording separately from an unconfirmed push
 request. Device permissions, settings and transport still determine delivery.
 
+## Ready: tasks the operator is waiting on
+
+The operator marks a task they want to hear about when it is done. The mark is
+`notify` on an agent task: `scout ask --to <agent> --notify`, or MCP `ask` with
+`notify=true`. An agent that dispatches work on the operator's behalf can set
+it too. The operator, or the task's asker, can set or clear it later on a task
+that has not finished with `POST /v1/tasks/notify` `{ ref, notify }`. Unmarked
+tasks behave as before. Use the mark only for work the operator is waiting on;
+an ask already returns on acceptance, so `--notify` is not how to make an ask
+asynchronous.
+
+When a marked task's flight finishes (a final reply, or a reply waiting on
+review), the flight writer records Ready on the flight:
+
+- `metadata.ready`: `{ state: "ready", at, summary, nodeId }`. `summary` is the
+  first prose line of the agent's reply.
+- `metadata.nextMoveOwnerId`: the operator.
+
+The runtime decides this from the flight's state, never from the reply's
+wording. Ready is separate from done and stays until the operator acts. When
+the task has a work item, the item also lands in `review` with
+`acceptanceState: "pending"` and the operator as the next move.
+
+The runtime that wrote Ready sends one push through the operator attention
+service, keyed by the flight id, so a flight rings once. If the agent has an
+open operator question or permission, that request owns the ping and Ready
+does not ring.
+
+The operator has two moves, both through `POST /v1/tasks/ready/decide`
+`{ ref, decision }`. The route is machine-local and operator-only.
+
+- `continue`: "Continue" goes into the same session. An open task gets a
+  follow-up that starts its next turn. A finished task gets a successor in the
+  same session, still marked `notify`, and bound to the same work item. The
+  next move goes back to the agent, and the work item returns to `working`
+  with an `accepted` event.
+- `hold`: Ready leaves the operator's list but stays on the flight
+  (`heldAt`) and findable. The work item gets a `dismissed` event. A later
+  change to the work item brings it back (`taskReadyListed`).
+
+Ready is not the board station `ready` (planned and ready to start).
+
 ## Alertable Events
 
 Session attention already covers:

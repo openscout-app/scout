@@ -3373,6 +3373,7 @@ export const SCOUT_MCP_INSTRUCTIONS = [
   "- Which machines exist, what they hold: `hosts_list` (live; each machine's projects and the exact ask for it). Don't know an agent's name: `agents_search`. Never invent names.",
   "- After an ask: the receipt is proof it was accepted; `invocations_wait` / `invocations_get` follow it, including work running on another machine.",
   "- The operator: `ask` with operator=true for a task, fyi=true for news; notify=true requests a push for news.",
+  "- notify=true on an agent task tells the operator when it is done (Ready). Use it only when the operator is waiting on that work.",
   "- Answer with `reply` by task ref. progress=true updates its work record without closing it; the harness final turn is already an answer.",
   "- When Scout cannot do what you need, say which call failed and how, instead of working around it silently.",
 ].join("\n");
@@ -4519,7 +4520,7 @@ export function createScoutMcpServer(options: {
     "ask",
     {
       title: "Ask",
-      description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
+      description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. On an agent task, notify marks it Ready for the operator when it finishes (they get one ping and Continue or Hold); use it only for work the operator is waiting on. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
       inputSchema: z.object({
         operator: z.boolean().optional(), ref: z.string().min(1).optional(), continue: z.string().min(1).optional(),
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),

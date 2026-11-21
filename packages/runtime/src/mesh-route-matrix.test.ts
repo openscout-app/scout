@@ -104,6 +104,7 @@ describe("mesh route matrix", () => {
     expect(meshRouteTierFor("POST", "/v1/permissions/native")).toBe("local");
     expect(meshRouteTierFor("POST", "/v1/permissions/native/wait")).toBe("local");
     expect(meshRouteTierFor("POST", "/v1/operator-requests/dismiss")).toBe("local");
+    expect(meshRouteTierFor("POST", "/v1/tasks/ready/decide")).toBe("local");
     expect(meshRouteTierFor("GET", "/v1/request-receipts/request-1")).toBe("local");
   });
 
