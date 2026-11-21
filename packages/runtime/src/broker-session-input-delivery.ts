@@ -55,7 +55,7 @@ export function recoverSessionInputDelivery(message: MessageRecord | undefined, 
     || !response.targetAgentId || response.targetAgentId !== receipt.targetAgentId
     || submitted?.kind !== "in_place" || submitted.state !== "submitted"
     || (submitted.harness !== "claude" && submitted.harness !== "codex")
-    || !["herdr", "orca", "tmux", "lattices", "scout-app"].includes(submitted.via)
+    || !["herdr", "orca", "tmux", "claude-channel", "lattices", "scout-app"].includes(submitted.via)
     || typeof submitted.location !== "string" || !submitted.location
     || !submitted.sessionId || submitted.sessionId !== response.targetSessionId || submitted.sessionId !== receipt.targetSessionId) return null;
   const { scoutSessionInputAcceptance: _, ...metadata } = message.metadata ?? {};
