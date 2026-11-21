@@ -124,9 +124,10 @@ import {
   scoutAskHandler as defaultScoutAskHandler,
   type ScoutAskHandler,
 } from "../lib/core/broker/ask.ts";
-import type {
-  ScoutAskReplyMode,
-  ScoutAskReceipt,
+import {
+  ASK_ERROR_CODES,
+  type ScoutAskReplyMode,
+  type ScoutAskReceipt,
 } from "../lib/core/broker/ask-types.ts";
 import { classifySendInteraction } from "../lib/core/broker/send-interaction.ts";
 import { SCOUT_APP_VERSION } from "../lib/shared/product.ts";
@@ -1405,7 +1406,7 @@ const askReceiptSchema = z.object({
     .optional(),
   error: z
     .object({
-      code: z.enum(["broker_unreachable", "invalid_request", "preflight_failed", "target_unroutable"]),
+      code: z.enum(ASK_ERROR_CODES),
       message: z.string(),
       reason: z.string().optional(),
     })
@@ -4855,7 +4856,7 @@ export function createScoutMcpServer(options: {
             } : undefined,
           });
 
-      if (resolvedReplyMode === "inline" && structuredContent.ids.flightId) {
+      if (structuredContent.ok && resolvedReplyMode === "inline" && structuredContent.ids.flightId) {
         try {
           const flight = await deps.waitForFlight(
             deps.resolveBrokerUrl(),
@@ -4881,7 +4882,7 @@ export function createScoutMcpServer(options: {
           // Keep the initial receipt; callers can follow by flight id.
         }
       } else if (
-        resolvedReplyMode === "notify"
+        structuredContent.ok && resolvedReplyMode === "notify"
         && replyNotificationsEnabled
         && structuredContent.ids.flightId
       ) {

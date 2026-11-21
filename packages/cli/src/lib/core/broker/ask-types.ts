@@ -81,8 +81,13 @@ export type ScoutAskNextCall = {
   reason: string;
 };
 
+export const ASK_ERROR_CODES = [
+  "broker_unreachable", "invalid_request", "preflight_failed", "target_unroutable",
+  "task_followup_not_sent", "task_followup_unauthorized",
+] as const;
+
 export type ScoutAskError = {
-  code: "broker_unreachable" | "invalid_request" | "preflight_failed" | "target_unroutable" | "task_followup_not_sent";
+  code: (typeof ASK_ERROR_CODES)[number];
   message: string;
   /** The runtime's own refusal code, such as session_live_unbound, when it gave one. */
   reason?: string;

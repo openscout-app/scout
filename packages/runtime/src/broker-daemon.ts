@@ -3432,7 +3432,7 @@ const taskService = new BrokerTaskService({
       // Only a proven refusal from the task home settles the sender's receipt.
       if (kind === "ask" && response.status === 409) {
         const refusal = await response.clone().json().catch(() => null);
-        if (refusal?.error === "task_followup_not_sent" && typeof refusal.detail === "string" && typeof refusal.evidence === "string") {
+        if ((refusal?.error === "task_followup_not_sent" || refusal?.error === "task_followup_unauthorized") && typeof refusal.detail === "string" && typeof refusal.evidence === "string") {
           throw new ProvenRequestFailure(refusal.detail, refusal.error, refusal.evidence);
         }
       }

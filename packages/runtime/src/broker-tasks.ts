@@ -5,6 +5,7 @@ import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, SC
 import { ProvenRequestFailure } from "./broker-request-receipts.js";
 import { readMessageRecord } from "./broker-message-records.js";
 import { endpointStronglyMatchesSession } from "./broker-endpoint-selection.js";
+import { callerContextForDelivery } from "./broker-delivery-routing.js";
 import type { RuntimeRegistrySnapshot } from "./registry.js";
 import { resolveBrokerMessageRefAsync, messageVisibilityForConversation } from "./broker-conversation-helpers.js";
 
@@ -15,6 +16,23 @@ export function finishedTaskError(id: string): Error {
 }
 
 type Task = { invocation: InvocationRequest; flight: FlightRecord };
+
+export type FollowupSession = { id: string; harness: "claude" | "codex" };
+
+export function isRequesterSession(invocation: InvocationRequest, nodeId: string, session?: FollowupSession): boolean {
+  return Boolean(session?.id && (session.harness === "claude" || session.harness === "codex")
+    && nodeId === invocation.requesterNodeId && session.id === invocation.metadata?.replyToSessionId
+    && session.harness === invocation.metadata?.replyToSessionHarness);
+}
+
+function claimedFollowupSession(payload: ScoutDeliverRequest): FollowupSession | undefined {
+  // Both CLI and MCP attach the harness only when the return address agrees
+  // with a harness-provided session ID. A reply address alone isn't identity.
+  const id = payload.replyToSessionId?.trim();
+  const harness = payload.invocationMetadata?.replyToSessionHarness;
+  return id && (harness === "claude" || harness === "codex") ? { id, harness } : undefined;
+}
+
 
 /** Inbox notification is not input to an already-dispatched harness turn. */
 /**
@@ -175,12 +193,27 @@ export class BrokerTaskService {
     const task = await this.resolve(request.ref ?? request.continue!);
     if (this.home(task) !== this.options.nodeId) return await this.forward(task, "ask", payload) as ScoutDeliverResponse;
     const { invocation, flight } = task;
-    const actor = payload.caller?.actorId ?? payload.requesterId ?? this.options.operatorActorId;
+    const { requesterId: actor, requesterNodeId } = callerContextForDelivery(payload, this.options);
+    const claimedSession = claimedFollowupSession(payload);
+    const requesterSession = !request.cancel && !request.continue && requesterNodeId === this.options.nodeId
+      && isRequesterSession(invocation, requesterNodeId, claimedSession) ? claimedSession : undefined;
     const asker = actor === invocation.requesterId || actor === this.options.operatorActorId;
     const conversation = invocation.conversationId && this.options.snapshot().conversations[invocation.conversationId];
-    if (!asker && (request.cancel || request.continue || !conversation || !conversation.participantIds.includes(actor))) throw new Error("task follow-up is not authorized for this sender");
+    if (!asker && !requesterSession && (request.cancel || request.continue || !conversation || !conversation.participantIds.includes(actor))) {
+      // Name who may act; never tell the caller to claim another identity.
+      const requester = invocation.requesterId === this.options.operatorActorId
+        ? `the operator (${invocation.requesterId})`
+        : `the original requester (${invocation.requesterId}) or the operator`;
+      const eligible = request.cancel || request.continue
+        ? `Only ${requester} may ${request.cancel ? "cancel" : "continue"} it.`
+        : `Only ${requester}, the harness session that asked it, or a participant in the task conversation may add context to it.`;
+      throw new ProvenRequestFailure(
+        `Task ${invocation.id} is not authorized for sender ${actor}. ${eligible} Ask one of them to send it.`,
+        "task_followup_unauthorized", flight.id,
+      );
+    }
     if (request.continue) {
-      if (!taskTerminal(flight)) throw new Error(`task ${invocation.id} is unfinished; use --ref ${invocation.id}`);
+      if (!taskTerminal(flight)) throw new Error(`task ${invocation.id} is unfinished; use --ref ${invocation.id} to add context where supported, or wait for it to finish before continuing`);
       const context = `Previous task ${invocation.id} (${flight.state}):\n${flight.output ?? flight.error ?? flight.summary ?? "No result recorded."}`;
       const overrides = request.successor;
       if (overrides?.host && !overrides.projectPath?.trim()) throw new Error("successor --on requires --project <path on that host>");
@@ -236,7 +269,8 @@ export class BrokerTaskService {
       audience: request.cancel ? { delivery: "none" } : followupAudience(invocation, flight),
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
       metadata: { ...(payload.invocationMetadata?.attribution ? { attribution: payload.invocationMetadata.attribution } : {}),
-        source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: Boolean(request.cancel) },
+        source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: Boolean(request.cancel),
+          ...(requesterSession ? { requesterSession } : {}) },
         targetSessionId: flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId,
         workerInterrupted: interrupted, clientMessageId: taskMessageId(actor, payload.requestId!) },
     };
