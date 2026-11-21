@@ -5,6 +5,9 @@ import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
 import type { PostAuthorNamer } from "./broker-posts-http.js";
+import { queryFeedWork } from "./feed-work.js";
+import { configuredOperatorActorIds } from "./conversations/legacy-ids.js";
+import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteDatabase } from "./sqlite-adapter.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
@@ -3802,6 +3805,18 @@ const postAuthorName: PostAuthorNamer = ({ agentId, harness, sessionId, endpoint
   return display && display !== agentId ? display : undefined;
 };
 
+// The feed's read of work items, on its own read-only connection so a long
+// read never holds the projection's writer. Opened on first use; a database
+// not written yet is opened on the next read.
+let feedWorkDb: ControlPlaneSqliteDatabase | null = null;
+function readFeedWork(read: Parameters<typeof queryFeedWork>[1]) {
+  if (!feedWorkDb) {
+    feedWorkDb = openControlPlaneSqliteDatabase(dbPath, { readonly: true, create: false });
+    feedWorkDb.exec("PRAGMA busy_timeout = 2500;");
+  }
+  return queryFeedWork(feedWorkDb, read, configuredOperatorActorIds());
+}
+
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   workRetry,
@@ -3809,6 +3824,7 @@ const routeRequest = createBrokerHttpRouter({
   tasks: taskService,
   shows: { store: showStore, snapshot: () => runtime.snapshot() },
   posts: { store: new BrokerPostStore(join(supportDirectory, "posts"), nodeId), shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
+  feedWork: sqliteDisabled ? {} : { read: readFeedWork },
   attachments: {
     service: attachmentService, nodeId,
     snapshot: () => runtime.snapshot(),
