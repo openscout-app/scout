@@ -3599,7 +3599,11 @@ export function createBrokerHttpRouter(
 
   // ─── External agent cards (SCO-016) ────────────────────────────────────────
   if (method === "GET" && url.pathname === "/v1/agent-cards") {
-    json(response, 200, { cards: await a2aService.listScoutAgentCards() });
+    const actorId = url.searchParams.get("agentId")?.trim();
+    const cards = actorId
+      ? await a2aService.scoutAgentCardsForActor(actorId)
+      : await a2aService.listScoutAgentCards();
+    json(response, 200, { cards });
     return;
   }
   if (method === "POST" && url.pathname === "/v1/agent-cards") {

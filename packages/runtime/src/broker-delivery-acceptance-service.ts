@@ -1,3 +1,4 @@
+import { sessionSenderMetadata } from "./broker-session-sender-profile.js";
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
 import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY, applyDecisionToTask, normalizeDecisionCard } from "@openscout/protocol";
@@ -702,7 +703,9 @@ export class BrokerDeliveryAcceptanceService {
           policy: "durable",
           createdAt,
           metadata: {
-            ...(payload.messageMetadata ?? {}),
+            ...(conversation.kind === "channel"
+              ? sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata)
+              : payload.messageMetadata),
           ...(payload.task && payload.requestId ? { requestId: payload.requestId, requestIntent: payload.task.fyi ? "tell" : "consult" } : {}),
             ...(labels.length ? { labels } : {}),
             relayChannel: conversation.kind === "direct" ? "dm" : conversation.id.replace(/^channel\./, ""),
@@ -1015,7 +1018,7 @@ export class BrokerDeliveryAcceptanceService {
         policy: "durable",
         createdAt,
         metadata: {
-          ...(payload.messageMetadata ?? {}),
+          ...sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata),
           ...(payload.task && payload.requestId ? { requestId: payload.requestId, requestIntent: payload.task.fyi ? "tell" : "consult" } : {}),
           ...(labels.length ? { labels } : {}),
           relayChannel: deliveryChannel,
@@ -1256,7 +1259,9 @@ export class BrokerDeliveryAcceptanceService {
       createdAt: reusableMessage?.createdAt ?? createdAt,
       metadata: {
         ...(reusableMessage?.metadata ?? {}),
-        ...(payload.messageMetadata ?? {}),
+        ...(conversation.kind === "channel"
+          ? sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata)
+          : payload.messageMetadata),
         deliveryRequestId: requestId,
         ...(payload.requestId ? { requestId: payload.requestId, requestIntent: payload.intent } : {}),
         ...(labels.length ? { labels } : {}),
