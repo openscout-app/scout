@@ -56,7 +56,7 @@ export interface VercelBoardTarget {
 /** The board Scout makes or finds on a team when the operator names none. */
 export const VERCEL_BOARD_DEFAULT_BOARD = "scout";
 
-/** One board connection, operator-configured. One custodian per (board, principal). */
+/** One board connection on one host, operator-configured. Each host that connects has its own. */
 export interface VercelBoardConnectionConfig {
   /** Operator-owned and stable across credential rotation. */
   id: string;
@@ -94,7 +94,7 @@ export interface VercelBoardConnectionConfig {
   selfServe?: string[];
   /** Board channels whose Scout writes may be mirrored by Board's sync providers. */
   syncChannels?: string[];
-  /** The node recorded as custodian. A record, not a cross-host fence. */
+  /** The host that made this connection. A record only; the field keeps its old name so saved connections still load. */
   custodianNodeId: string;
   credential: VercelBoardCredentialReference;
   connectedAt: number;
@@ -254,6 +254,7 @@ export type VercelBoardConnectionState =
   | "auth_expired"
   | "unreachable"
   | "rate_limited"
+  /** Another runtime on this host holds the connection's lock. The name is kept for clients. */
   | "not_custodian"
   | "transport_unavailable"
   | "stopped";
@@ -265,8 +266,9 @@ export interface VercelBoardConnectionStatus {
   principal: string;
   profile: string;
   channels: string[];
+  /** The host that made this connection. */
   custodianNodeId: string;
-  /** This node. Status is answered by the node asked, which may not be the custodian. */
+  /** The host answering. */
   nodeId: string;
   state: VercelBoardConnectionState;
   detail?: string;

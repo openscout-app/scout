@@ -438,7 +438,7 @@ export class BrokerInvocationDispatchService {
       completedAt: now,
       summary: detail,
       error: detail,
-      metadata: invocation.metadata,
+      metadata: { ...invocation.metadata, failureCause: "endpoint_lost" },
     };
     await this.deps.recordFlight(failed);
     await this.deps.postInvocationStatusMessage(invocation, failed);

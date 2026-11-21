@@ -177,7 +177,8 @@ earlier outcome as context. This is distinct from active-parent `--continue-for`
 The recipient answers with `reply --ref <task> "answer"`. A final closes the
 task. `--progress` updates the work record and leaves it open; `--failed`
 closes it as failed. The first final wins. A cancelled task rejects a later
-answer. The harness final is already an automatic answer: do not answer twice.
+answer. If the ask requires a task reply, only a final reply by ref completes
+it. Otherwise the harness final turn is already the answer: do not answer twice.
 `reply --to <message>` is a conversation reply with no task lifecycle.
 
 ### Ask / Requested Reply

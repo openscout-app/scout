@@ -1,3 +1,4 @@
+import { FailedRunError, failureCauseForError } from "./failed-run-error.js";
 import { receiveTransportLiveness } from "./local-endpoint-liveness.js";
 import { hasExplicitCompletion } from "@openscout/protocol";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
@@ -15,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import type { SessionState } from "@openscout/agent-sessions";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
+import { isRexSurface, sendRexPrompt } from "./rex-terminal.js";
 import { resolveCodexExecutableInventory } from "@openscout/agent-sessions/codex-executable";
 import type {
   AgentCapability,
@@ -173,6 +175,7 @@ import {
   describeAttachedLiveTerminal,
   isAttachedLiveTerminalEndpoint,
   isAttachedLiveTerminalEndpointAlive,
+  attachedLiveTerminalExitedError,
   isAttachedLiveTerminalEndpointAliveSnapshot,
   sendGhosttyPrompt,
 } from "./live-terminal-session.js";
@@ -654,7 +657,7 @@ function buildLocalAgentTmuxProtocolPrompt(context: LocalAgentSystemPromptTempla
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
     "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
-    `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
+    `  - For asynchronous work, use ${context.relayCommand} ask (it returns on acceptance); do not downgrade the work to send merely to avoid blocking. Add --notify only when the operator is waiting on that work: it marks the task Ready for them`,
     "  - When replying to an [ask:<id>] request, include the same [ask:<id>] tag in your reply",
     "  - For prior Codex/Claude/Kimi session work, use scout search (explicit index then query) before grepping ~/.codex, ~/.claude, or ~/.kimi-code",
     "  - Use the CLI commands above when recent context is needed before responding",
@@ -686,7 +689,7 @@ function buildLocalAgentDirectProtocolPrompt(context: LocalAgentSystemPromptTemp
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
     "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
-    `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
+    `  - For asynchronous work, use ${context.relayCommand} ask (it returns on acceptance); do not downgrade the work to send merely to avoid blocking. Add --notify only when the operator is waiting on that work: it marks the task Ready for them`,
     "  - Do not curl broker HTTP endpoints to read messages",
     `  - Follow the scout skill at ${context.scoutSkill} for agent-to-agent communication`,
   ].join("\n");
@@ -1171,6 +1174,7 @@ export const DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS = [
   "mcp__scout__invocations_get",
   "mcp__scout__invocations_wait",
   "mcp__scout__work_update",
+  "mcp__scout__work_retry",
   "mcp__scout__work_move",
   "mcp__scout__work_review",
   "mcp__scout__work_lifecycle",
@@ -2896,6 +2900,19 @@ function attachedCodexSandbox(endpoint: AgentEndpoint): CodexSandboxMode | undef
     : undefined;
 }
 
+/**
+ * The Codex thread a launch of this endpoint must resume, or undefined when
+ * the launch may start its own thread (Scoutbot owns its threads). With a
+ * thread id the launch uses requireExistingThread, so it never starts a
+ * different thread in its place.
+ */
+export function codexEndpointResumeThreadId(endpoint: AgentEndpoint): string | undefined {
+  if (endpoint.metadata?.source === "scoutbot") return undefined;
+  return endpointMetadataString(endpoint, "threadId")
+    ?? endpointMetadataString(endpoint, "externalSessionId")
+    ?? undefined;
+}
+
 export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): CodexAppServerSessionOptions & {
   agentName: string;
   sessionId: string;
@@ -2910,11 +2927,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
   const agentName = endpointAgentName(endpoint);
   const runtimeDirectory = relayAgentRuntimeDirectory(agentName);
   const ownsSessionThread = endpoint.metadata?.source === "scoutbot";
-  const threadId = ownsSessionThread
-    ? undefined
-    : endpointMetadataString(endpoint, "threadId")
-      ?? endpointMetadataString(endpoint, "externalSessionId")
-      ?? undefined;
+  const threadId = codexEndpointResumeThreadId(endpoint);
 
   return withScoutReplyContextEnvironment({
     agentName,
@@ -3606,7 +3619,7 @@ function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string
   const replyInstruction = context?.completion ? [
     "> This ask requires explicit completion. Use `reply` with ref and progress=true for updates.",
     "> Before your final, call `current_reply_context` for the current flight and revision; wait for all joined work to settle.",
-    "> Submit `reply` with the task ref, and a new stable requestId. Reuse that requestId only for an identical retry.",
+    "> Submit `reply` with the task ref and a new stable requestId, or run `scout reply --ref <invocationId> \"<final result>\"`.",
     "> Your plain final assistant output does not complete this ask. Use `ask` with relation to opt child work into the parent's completion obligations.",
   ] : context?.replyPath === "mcp_reply"
     ? [
@@ -3864,11 +3877,16 @@ export async function sendTmuxPrompt(
   sessionName: string,
   prompt: string,
   strategy?: TmuxDispatchStrategy,
+  socketPath?: string,
 ): Promise<TmuxPromptDispatchResult> {
-  if (hasManagedPermissionContext()) {
+  // A socket-bound direct send must not use the broker's managed permission
+  // responder, which addresses panes on the broker's default socket.
+  const run = (args: string[], options: Parameters<typeof execSystemFile>[2]) =>
+    execSystemFile("tmux", socketPath ? ["-S", socketPath, ...args] : args, options);
+  if (!socketPath && hasManagedPermissionContext()) {
     const before = await captureTmuxPaneTail(sessionName, 80);
     if (parseTmuxPermission(before)) {
-      const cwd = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
+      const cwd = (await run(["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
       await handleManagedTmuxPermission(sessionName, cwd, before);
     }
   }
@@ -3877,38 +3895,38 @@ export async function sendTmuxPrompt(
   let bufferOwned = true;
   try {
     if (effectiveStrategy.pre && effectiveStrategy.pre.length > 0) {
-      await execSystemFile("tmux", ["send-keys", "-t", sessionName, ...effectiveStrategy.pre], { timeoutMs: 2_000 });
+      await run(["send-keys", "-t", sessionName, ...effectiveStrategy.pre], { timeoutMs: 2_000 });
     }
-    await execSystemFile("tmux", ["load-buffer", "-b", bufferName, "-"], {
+    await run(["load-buffer", "-b", bufferName, "-"], {
       input: prompt,
       timeoutMs: 5_000,
       maxStdoutBytes: 64 * 1024,
       maxStderrBytes: 64 * 1024,
     });
-    await execSystemFile("tmux", buildTmuxPasteBufferArgs(bufferName, sessionName), { timeoutMs: 2_000 });
+    await run(buildTmuxPasteBufferArgs(bufferName, sessionName), { timeoutMs: 2_000 });
     // paste-buffer -d deletes the buffer after consumption; no manual cleanup needed.
     bufferOwned = false;
 
     // Let the target PTY drain the bracketed paste before the submit chord lands —
     // without this gap, the submit keys can race the paste tail and get swallowed.
     await tmuxDispatchSleep(TMUX_PASTE_DRAIN_MS);
-    await execSystemFile("tmux", ["send-keys", "-t", sessionName, ...effectiveStrategy.submit], { timeoutMs: 2_000 });
+    await run(["send-keys", "-t", sessionName, ...effectiveStrategy.submit], { timeoutMs: 2_000 });
 
     // Sample twice: a fast probe at ~250ms catches the common-case clear; a
     // slower probe at ~1s catches harnesses that take a beat to flush the
     // composer after submit (e.g. while showing a "thinking…" placeholder).
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_FIRST_SAMPLE_MS)) {
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_FIRST_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 0 };
     }
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_SECOND_SAMPLE_MS)) {
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_SECOND_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 0 };
     }
 
     // Still stuck — retry with a bare Enter. Covers the case where the submit chord
     // landed while the harness was in a transient state (popup, suggestion menu)
     // that absorbed it.
-    await execSystemFile("tmux", ["send-keys", "-t", sessionName, "Enter"], { timeoutMs: 2_000 });
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_RETRY_SAMPLE_MS)) {
+    await run(["send-keys", "-t", sessionName, "Enter"], { timeoutMs: 2_000 });
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_RETRY_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 1 };
     }
 
@@ -3916,27 +3934,28 @@ export async function sendTmuxPrompt(
     // deadline sized by what the pane is actually doing: a visibly busy harness
     // gets the long grace period, an idle one stays close to the old budget.
     const deadlineAt = Date.now()
-      + tmuxVerifyDeadlineMs(await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES));
+      + tmuxVerifyDeadlineMs(await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath));
     while (Date.now() < deadlineAt) {
-      if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_POLL_MS)) {
+      if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_POLL_MS, socketPath)) {
         return { submitted: true, retries: 1 };
       }
     }
 
     throw new DispatchStalledError({
       sessionName,
-      paneTail: (await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES)).slice(0, 2_000),
+      paneTail: (await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath)).slice(0, 2_000),
       retries: 1,
     });
   } catch (error) {
     if (bufferOwned) {
       try {
-        await execSystemFile("tmux", ["delete-buffer", "-b", bufferName], { timeoutMs: 2_000 });
+        await run(["delete-buffer", "-b", bufferName], { timeoutMs: 2_000 });
       } catch {
         // Ignore cleanup failures after a tmux delivery error.
       }
     }
-    throw error;
+    if (error instanceof DispatchStalledError || error instanceof DeliveryBlockedError) throw error;
+    throw new FailedRunError(failureCauseForError(error, "harness_start"), error instanceof Error ? error.message : String(error), { cause: error });
   }
 }
 
@@ -3952,16 +3971,17 @@ async function dispatchVerifiedAfter(
   sessionName: string,
   strategy: TmuxDispatchStrategy,
   delayMs: number,
+  socketPath?: string,
 ): Promise<boolean> {
   await tmuxDispatchSleep(delayMs);
-  const paneTail = await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES);
+  const paneTail = await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath);
   if (!paneTail) {
     // Capture failed (session gone, tmux unavailable). Treat as verified to avoid
     // throwing a spurious stall — the broker's normal error paths will surface any
     // real session loss.
     return true;
   }
-  if (hasManagedPermissionContext()) {
+  if (!socketPath && hasManagedPermissionContext()) {
     const fullTail = await captureTmuxPaneTail(sessionName, 80);
     if (parseTmuxPermission(fullTail)) {
       const cwd = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
@@ -3971,12 +3991,13 @@ async function dispatchVerifiedAfter(
   return strategy.verify(paneTail);
 }
 
-async function captureTmuxPaneTail(sessionName: string, lines: number): Promise<string> {
+async function captureTmuxPaneTail(sessionName: string, lines: number, socketPath?: string): Promise<string> {
   return await captureTmuxPane(sessionName, {
     start: `-${lines}`,
     end: "-",
     joinWrapped: false,
     maxAgeMs: 0,
+    socketPath,
   }) ?? "";
 }
 
@@ -4011,7 +4032,7 @@ export async function waitForReadyComposer(options: {
   let previousTail: string | undefined;
   while (now() < deadline) {
     if (!options.isAlive()) {
-      throw new Error(`tmux session ${options.sessionName} exited before ${options.harnessLabel} was ready.`);
+      throw new FailedRunError("harness_start", `tmux session ${options.sessionName} exited before ${options.harnessLabel} was ready.`);
     }
 
     paneTail = await options.captureTail();
@@ -4044,7 +4065,7 @@ export async function waitForReadyComposer(options: {
 
   const elapsed = now() - startedAt;
   const tail = stripTerminalControlSequences(paneTail).trim().split(/\r?\n/).slice(-20).join("\n").trim();
-  throw new Error(
+  throw new FailedRunError("harness_start",
     `tmux session ${options.sessionName} did not show a ready ${options.harnessLabel} composer within ${elapsed}ms.`
       + (tail ? `\nRecent pane tail:\n${tail}` : ""),
   );
@@ -6946,7 +6967,7 @@ export async function waitForLocalAgentReply(input: {
     if (input.exitedError && Date.now() >= nextLivenessCheckAt) {
       nextLivenessCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
       const exited = await input.exitedError();
-      if (exited) throw new Error(exited);
+      if (exited) throw new FailedRunError("endpoint_lost", exited);
     }
     if (input.blockedError && Date.now() >= nextBlockedCheckAt) {
       nextBlockedCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
@@ -6984,7 +7005,11 @@ async function invokeAttachedLiveTerminalEndpoint(
   const flightId = createLocalAgentFlightId();
   const askedAt = nowSeconds();
   const nudge = buildLocalAgentNudge(agentRuntimeId, invocation, flightId);
-  if (endpoint.transport === "ghostty") {
+  if (endpoint.transport === "rex") {
+    const surface = endpoint.metadata?.terminalSurface;
+    if (!isRexSurface(surface)) throw new Error("Missing Rex block address");
+    await sendRexPrompt(surface, Number(endpoint.metadata?.livePid), harness, nudge);
+  } else if (endpoint.transport === "ghostty") {
     await sendGhosttyPrompt(String(endpoint.metadata?.ghosttyTerminalId), nudge);
   } else {
     // Only Claude exposes stable composer markers; every other TUI is judged by
@@ -7001,8 +7026,8 @@ async function invokeAttachedLiveTerminalEndpoint(
     flightId,
     askedAt,
     timeoutSeconds: invocation.timeoutMs ? Math.max(30, Math.floor(invocation.timeoutMs / 1000)) : 300,
-    exitedError: async () => await isAttachedLiveTerminalEndpointAlive(endpoint) ? null : goneError,
-    blockedError: harness === "claude" && endpoint.transport !== "ghostty"
+    exitedError: () => attachedLiveTerminalExitedError(endpoint, goneError),
+    blockedError: harness === "claude" && endpoint.transport === "tmux"
       ? async () => claudeLoginBlockedError(await captureTmuxPaneTail(endpoint.pane!, 40).catch(() => ""))
       : undefined,
   });

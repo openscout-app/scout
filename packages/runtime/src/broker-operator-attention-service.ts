@@ -9,6 +9,7 @@ import {
 import {
   agentNotificationForOperatorSignal,
   agentNotificationForPermissionRequest,
+  agentNotificationForReadyTask,
   notificationProjectName,
   pushDeliveryForLevel,
 } from "./agent-notification-builders.js";
@@ -61,6 +62,21 @@ export type PermissionRequestInput = {
   sessionId?: string;
   flightId?: string;
   invocationId?: string;
+  createdAt?: number;
+};
+
+/** Operator-requested work that entered Ready: finished, waiting on Continue or Hold. */
+/** A task entered Ready (see broker-task-ready). */
+export type ReadyTaskInput = {
+  flightId: string;
+  invocationId: string;
+  workId?: string;
+  /** The agent's one-line summary. Only ever travels sealed. */
+  summary: string;
+  /** The agent that finished it. */
+  agentId: string;
+  conversationId?: string;
+  projectRoot?: string;
   createdAt?: number;
 };
 
@@ -128,6 +144,53 @@ export class BrokerOperatorAttentionService {
         }`,
       );
     });
+  }
+
+  queueReadyTask(input: ReadyTaskInput): void {
+    if (input.agentId === this.options.operatorActorId) return;
+    void this.sendReadyTaskAlert(input).catch((error) => {
+      this.options.warn?.(
+        `[openscout-runtime] failed to notify operator about a ready task: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  async sendReadyTaskAlert(input: ReadyTaskInput): Promise<void> {
+    const notification = agentNotificationForReadyTask({
+      flightId: input.flightId,
+      invocationId: input.invocationId,
+      workId: input.workId,
+      summary: input.summary,
+      conversationId: input.conversationId,
+      agentName: this.agentName(input.agentId),
+      agentId: input.agentId,
+      ...this.agentShorthand(input.agentId),
+      project: notificationProjectName(input.projectRoot),
+      createdAt: input.createdAt ?? this.now(),
+    });
+    const result = await this.options.broadcastApnsAlertToActiveMobileDevices({
+      // Generic on purpose: the summary rides sealed to each paired phone.
+      title: "An agent is ready",
+      body: "Open Scout for details.",
+      ...pushDeliveryForLevel(notification.level),
+      threadId: "scout.agent-signal",
+      payload: {
+        destination: "inbox",
+        itemId: input.flightId,
+        kind: "task_ready",
+        flightId: input.flightId,
+        invocationId: input.invocationId,
+        ...(input.workId ? { workId: input.workId } : {}),
+        requesterId: input.agentId,
+        requesterNodeId: this.options.nodeId,
+        ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      },
+      notification,
+    });
+
+    this.warnForBroadcastResult(result);
   }
 
   async sendPermissionRequestAlert(input: PermissionRequestInput): Promise<void> {

@@ -5,10 +5,11 @@ import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 import type { RuntimeHttpRequestLike, RuntimeHttpResponseLike } from "./portable-types.js";
 import { json, readRequestBody } from "./broker-http-helpers.js";
 import { BrokerShowStore, ShowError } from "./broker-show-store.js";
+import { CallerMismatchError, callerSchema, resolveCallerSession } from "./broker-posts-http.js";
 
 const inputSchema = z.object({
   path: z.string().min(1).max(4096), caption: z.string().max(SHOW_LIMITS.captionCharacters).optional(),
-  caller: z.object({ actorId: z.string().min(1).max(256), currentDirectory: z.string().min(1).max(4096), metadata: z.object({ sessionId: z.string().max(512).optional(), harness: z.string().max(64).optional() }).optional() }).strict(),
+  caller: callerSchema,
 }).strict();
 export function showByteRange(value: string | undefined, size: number): [number, number] | undefined {
   if (value === undefined) return undefined;
@@ -41,13 +42,10 @@ export async function handleShowRoute(request: RuntimeHttpRequestLike, response:
       const parsed = inputSchema.safeParse(await readRequestBody(request, { maxBytes: 16_384, requireJsonContentType: true }));
       if (!parsed.success) throw new ShowError("invalid_show_request");
       const { caller, ...input } = parsed.data;
-      const sessionId = caller.metadata?.sessionId;
-      const snapshot = deps.snapshot();
-      const endpoints = Object.values(snapshot.endpoints).filter(e => e.agentId === caller.actorId);
-      const endpoint = sessionId ? endpoints.find(e => e.sessionId === sessionId || e.metadata?.harnessSessionId === sessionId) : endpoints.length === 1 ? endpoints[0] : undefined;
-      if (sessionId && endpoints.length && !endpoint) throw new ShowError("show_session_mismatch_check_caller", 409);
-      if (endpoint && caller.metadata?.harness && endpoint.harness !== caller.metadata.harness) throw new ShowError("show_harness_mismatch_check_caller", 409);
-      json(response, 201, { show: await store.show({ ...input, currentDirectory: caller.currentDirectory, agentId: caller.actorId, sessionId: sessionId || endpoint?.sessionId, harness: endpoint?.harness || caller.metadata?.harness }) });
+      let session: ReturnType<typeof resolveCallerSession>;
+      try { session = resolveCallerSession(deps.snapshot(), caller, "show"); }
+      catch (error) { if (error instanceof CallerMismatchError) { json(response, 409, { error: error.message, detail: error.detail }); return true; } throw error; }
+      json(response, 201, { show: await store.show({ ...input, currentDirectory: caller.currentDirectory, agentId: caller.actorId, sessionId: session.sessionId, harness: session.harness }) });
     } else if (list || events) {
       const project = url.searchParams.get("projectRoot");
       if (!project) throw new ShowError("show_project_root_required");

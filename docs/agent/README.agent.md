@@ -44,6 +44,7 @@ Start at [`INDEX.agent.md`](./INDEX.agent.md) for subsystem specs written for ag
 | Subsystem | Spec |
 |---|---|
 | Index / read order | `docs/agent/INDEX.agent.md` |
+| Failed runs, settling and retry | `docs/agent/failed-runs.agent.md` |
 | Broker records + routing | `docs/agent/broker.agent.md` |
 | Comms workflows | `docs/agent/scout-comms.agent.md` |
 | Harness sessions | `docs/agent/runtime-sessions.agent.md` |
@@ -52,6 +53,7 @@ Start at [`INDEX.agent.md`](./INDEX.agent.md) for subsystem specs written for ag
 | Instances (dev vs prod isolation) | `docs/agent/instances.agent.md` |
 
 Agent-selected screenshots, recordings and documents: [shows.agent.md](./shows.agent.md).
+Agent posts to the Feed: [posts.agent.md](./posts.agent.md).
 
 ## Must-Read Docs
 

@@ -11,6 +11,8 @@ import {
 } from "./local-agents.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 import type { ManagedLocalSessionTransport } from "./broker-managed-session-helpers.js";
+import type { BrokerManagedSessionService } from "./broker-managed-session-service.js";
+import type { RexStartInput } from "./rex-terminal.js";
 import type { LiveTerminalSession } from "./live-terminal-session.js";
 
 export type ManagedPairingAttachBody = {
@@ -27,7 +29,7 @@ export type ManagedPairingDetachBody = {
 
 export type ManagedLocalSessionAttachBody = {
   externalSessionId?: string;
-  transport?: ManagedLocalSessionTransport | "tmux" | "ghostty";
+  transport?: ManagedLocalSessionTransport | "tmux" | "ghostty" | "rex";
   cwd?: string;
   projectRoot?: string;
   agentId?: string;
@@ -47,6 +49,7 @@ export type ManagedLocalSessionDetachBody = {
 };
 
 export type BrokerManagedSessionHttpServiceDeps = {
+  startRexSession: BrokerManagedSessionService["startRexSession"];
   nodeId: string;
   runtimeSnapshot: () => RuntimeSnapshot;
   processCwd: () => string;
@@ -62,7 +65,7 @@ export type BrokerManagedSessionHttpServiceDeps = {
   ) => Promise<{ agentId: string; endpointId: string | null; detached: boolean }>;
   attachManagedLocalSession: (input: {
     externalSessionId: string;
-    transport: ManagedLocalSessionTransport | "tmux" | "ghostty";
+    transport: ManagedLocalSessionTransport | "tmux" | "ghostty" | "rex";
     cwd: string;
     projectRoot?: string;
     agentId?: string;
@@ -83,6 +86,8 @@ export type BrokerManagedSessionHttpServiceDeps = {
 
 export class BrokerManagedSessionHttpService {
   constructor(private readonly deps: BrokerManagedSessionHttpServiceDeps) {}
+
+  readonly startRexSession = (input: RexStartInput) => this.deps.startRexSession(input);
 
   readonly listPairingSessionCandidates = async (): Promise<PairingSessionCandidate[]> => {
     const sessions = await this.deps.listPairingSessions();

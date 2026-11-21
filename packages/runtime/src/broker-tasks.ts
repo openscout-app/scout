@@ -5,6 +5,7 @@ import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, SC
 import { ProvenRequestFailure } from "./broker-request-receipts.js";
 import { readMessageRecord } from "./broker-message-records.js";
 import { endpointStronglyMatchesSession } from "./broker-endpoint-selection.js";
+import { callerContextForDelivery } from "./broker-delivery-routing.js";
 import type { RuntimeRegistrySnapshot } from "./registry.js";
 import { resolveBrokerMessageRefAsync, messageVisibilityForConversation } from "./broker-conversation-helpers.js";
 
@@ -27,7 +28,37 @@ function supersededPlaceholder(task: Task): FlightRecord | undefined {
   return named && named.id !== task.flight.id && named.invocationId === task.invocation.id ? named : undefined;
 }
 
+export type FollowupSession = { id: string; harness: "claude" | "codex" };
+
+export function isRequesterSession(invocation: InvocationRequest, nodeId: string, session?: FollowupSession): boolean {
+  return Boolean(session?.id && (session.harness === "claude" || session.harness === "codex")
+    && nodeId === invocation.requesterNodeId && session.id === invocation.metadata?.replyToSessionId
+    && session.harness === invocation.metadata?.replyToSessionHarness);
+}
+
+function claimedFollowupSession(payload: ScoutDeliverRequest): FollowupSession | undefined {
+  // Both CLI and MCP attach the harness only when the return address agrees
+  // with a harness-provided session ID. A reply address alone isn't identity.
+  const id = payload.replyToSessionId?.trim();
+  const harness = payload.invocationMetadata?.replyToSessionHarness;
+  return id && (harness === "claude" || harness === "codex") ? { id, harness } : undefined;
+}
+
+
 /** Inbox notification is not input to an already-dispatched harness turn. */
+/**
+ * Keys only the runtime may write on a reply message. A client's reply
+ * metadata never carries them, so a client cannot plant a decision answer.
+ */
+const RUNTIME_REPLY_METADATA_KEYS = ["decisionAnswer"] as const;
+
+export function clientReplyMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!metadata) return {};
+  const clean = { ...metadata };
+  for (const key of RUNTIME_REPLY_METADATA_KEYS) delete clean[key];
+  return clean;
+}
+
 export function followupAudience(invocation: InvocationRequest, flight: FlightRecord): MessageRecord["audience"] {
   if (invocation.metadata?.humanOwned === true) return { notify: [invocation.targetAgentId], reason: "thread_reply" };
   if (flight.state === "queued" || flight.state === "waking") return { delivery: "none" };
@@ -168,19 +199,52 @@ export class BrokerTaskService {
     if (!this.options.forward) throw new Error(`task ${task.invocation.id} is remote; home node ${home} is unavailable`);
     return this.options.forward(home, kind, kind === "ask" ? taskHomeAskPayload(payload as ScoutDeliverRequest, task.invocation.id) : payload);
   }
-  async ask(payload: ScoutDeliverRequest): Promise<ScoutDeliverResponse | null> {
+  /**
+   * Ready's Continue: "Continue" goes into the task's own session. An open
+   * task (waiting on review) gets a follow-up that starts its next turn; a
+   * finished one gets a successor in the same session, bound to the same
+   * work item and still marked notify when it was.
+   */
+  async continueReady(input: { invocationId: string; requestId: string; actorId: string; notify: boolean; workId?: string; body?: string }): Promise<ScoutDeliverResponse> {
+    const task = await this.resolve(input.invocationId);
+    const body = input.body ?? "Continue";
+    const finished = taskTerminal(task.flight);
+    const response = await this.ask({
+      requestId: input.requestId, body, intent: "consult", requesterId: input.actorId, caller: { actorId: input.actorId },
+      task: { version: 1, ...(finished ? { continue: task.invocation.id } : { ref: task.invocation.id }), ...(input.notify ? { notify: true } : {}) },
+      ...(finished && input.workId ? { collaborationRecordId: input.workId, invocationMetadata: { collaborationRecordId: input.workId } } : {}),
+    }, { sameSession: true });
+    if (!response) throw new Error(`task ${task.invocation.id} could not be continued`);
+    return response;
+  }
+  async ask(payload: ScoutDeliverRequest, options: { sameSession?: boolean } = {}): Promise<ScoutDeliverResponse | null> {
     const request = payload.task;
     if (!request?.ref && !request?.continue) return null;
     const task = await this.resolve(request.ref ?? request.continue!);
     const placeholder = request.cancel ? supersededPlaceholder(task) : undefined;
     if (!placeholder && this.home(task) !== this.options.nodeId) return await this.forward(task, "ask", payload) as ScoutDeliverResponse;
     const { invocation, flight } = task;
-    const actor = payload.caller?.actorId ?? payload.requesterId ?? this.options.operatorActorId;
+    const { requesterId: actor, requesterNodeId } = callerContextForDelivery(payload, this.options);
+    const claimedSession = claimedFollowupSession(payload);
+    const requesterSession = !request.cancel && !request.continue && requesterNodeId === this.options.nodeId
+      && isRequesterSession(invocation, requesterNodeId, claimedSession) ? claimedSession : undefined;
     const asker = actor === invocation.requesterId || actor === this.options.operatorActorId;
     const conversation = invocation.conversationId && this.options.snapshot().conversations[invocation.conversationId];
-    if (!asker && (request.cancel || request.continue || !conversation || !conversation.participantIds.includes(actor))) throw new Error("task follow-up is not authorized for this sender");
+    if (!asker && !requesterSession && (request.cancel || request.continue || !conversation || !conversation.participantIds.includes(actor))) {
+      // Name who may act; never tell the caller to claim another identity.
+      const requester = invocation.requesterId === this.options.operatorActorId
+        ? `the operator (${invocation.requesterId})`
+        : `the original requester (${invocation.requesterId}) or the operator`;
+      const eligible = request.cancel || request.continue
+        ? `Only ${requester} may ${request.cancel ? "cancel" : "continue"} it.`
+        : `Only ${requester}, the harness session that asked it, or a participant in the task conversation may add context to it.`;
+      throw new ProvenRequestFailure(
+        `Task ${invocation.id} is not authorized for sender ${actor}. ${eligible} Ask one of them to send it.`,
+        "task_followup_unauthorized", flight.id,
+      );
+    }
     if (request.continue) {
-      if (!taskTerminal(flight)) throw new Error(`task ${invocation.id} is unfinished; use --ref ${invocation.id}`);
+      if (!taskTerminal(flight)) throw new Error(`task ${invocation.id} is unfinished; use --ref ${invocation.id} to add context where supported, or wait for it to finish before continuing`);
       const context = `Previous task ${invocation.id} (${flight.state}):\n${flight.output ?? flight.error ?? flight.summary ?? "No result recorded."}`;
       const overrides = request.successor;
       if (overrides?.host && !overrides.projectPath?.trim()) throw new Error("successor --on requires --project <path on that host>");
@@ -189,7 +253,8 @@ export class BrokerTaskService {
       // directly instead of giving the agent resolver the predecessor's ref.
       const trace = flightSessionTrace(flight).at(-1);
       const sessionActor = this.options.snapshot().actors[invocation.targetAgentId]?.kind === "session"
-        || invocation.execution?.targetSessionId === invocation.targetAgentId;
+        || invocation.execution?.targetSessionId === invocation.targetAgentId
+        || Boolean(options.sameSession && (trace?.sessionId ?? invocation.execution?.targetSessionId));
       const sessionId = sessionActor ? trace?.sessionId ?? invocation.execution?.targetSessionId ?? invocation.targetAgentId : undefined;
       const harness = trace?.harness ?? invocation.execution?.harness;
       const target = projectPath
@@ -200,7 +265,7 @@ export class BrokerTaskService {
         ? { ...payload.execution, ...(harness ? { harness } : {}), session: "existing" as const, targetSessionId: target.sessionId }
         : { ...payload.execution, session: "new" as const };
       return this.options.accept({ ...payload, task: { version: 1, ...(request.callback ? { callback: request.callback } : {}),
-        ...(request.because ? { because: request.because } : {}) },
+        ...(request.because ? { because: request.because } : {}), ...(request.notify ? { notify: true } : {}) },
         target, targetLabel: undefined, targetAgentId: target.kind === "agent_id" ? invocation.targetAgentId : undefined,
         body: `${context}\n\nSuccessor task:\n${payload.body}`, execution,
         invocationMetadata: { ...payload.invocationMetadata, predecessorTaskId: invocation.id, predecessorState: flight.state } });
@@ -237,7 +302,8 @@ export class BrokerTaskService {
       audience: request.cancel ? { delivery: "none" } : followupAudience(invocation, flight),
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
       metadata: { ...(payload.invocationMetadata?.attribution ? { attribution: payload.invocationMetadata.attribution } : {}),
-        source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: Boolean(request.cancel) },
+        source: "scout-task-followup", taskFollowup: { invocationId: invocation.id, cancel: Boolean(request.cancel),
+          ...(requesterSession ? { requesterSession } : {}) },
         targetSessionId: flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId,
         workerInterrupted: interrupted, clientMessageId: taskMessageId(actor, payload.requestId!) },
     };
@@ -283,7 +349,11 @@ export class BrokerTaskService {
     return message && ref ? this.followupReceipt(message, await this.resolve(ref)) : null;
   }
 
-  async reply(input: ScoutTaskReply): Promise<unknown> {
+  /**
+   * `extra.metadata` is for runtime callers only (a decision answer rides on
+   * its reply this way); it never comes from a client and is not forwarded.
+   */
+  async reply(input: ScoutTaskReply, extra: { metadata?: Record<string, unknown> } = {}): Promise<unknown> {
     validateTaskReply(input);
     if (!input.requestId?.trim() || !input.body?.trim() || !input.senderId?.trim()) throw new Error("reply requires requestId, senderId and non-empty body");
     if (input.ref) {
@@ -299,7 +369,7 @@ export class BrokerTaskService {
         actorId: input.senderId, originNodeId: this.options.nodeId, class: "agent", body: input.body, attachments: input.attachments,
         audience: { notify: [invocation.requesterId], reason: "thread_reply" },
         visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-        metadata: { ...(input.metadata ?? {}), clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
+        metadata: { ...clientReplyMetadata(input.metadata), ...extra.metadata, clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
           completionReply: { invocationId: invocation.id, flightId: flight.id, revision: flightCompletion(flight)?.revision ?? 0,
             kind: input.waitingOn ? "blocked" : input.progress ? "progress" : "final",
             ...(input.waitingOn ? { waitingOn: parseReplyWaitingOn(input.waitingOn) } : {}), ...(input.failed ? { outcome: "failed" } : {}) } } }, input.image);
@@ -312,7 +382,7 @@ export class BrokerTaskService {
       conversationId: message.conversationId, replyToMessageId: message.id, actorId: input.senderId, originNodeId: this.options.nodeId,
       class: "status", body: input.body, attachments: input.attachments, audience: { notify: [message.actorId], reason: "thread_reply" },
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-      metadata: { ...(input.metadata ?? {}), source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
+      metadata: { ...clientReplyMetadata(input.metadata), source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
   }
   private postMessage(message: MessageRecord, image?: ScoutTaskReply["image"]): Promise<unknown> {
     if (!image) return this.options.postMessage(message);

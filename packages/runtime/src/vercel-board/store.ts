@@ -80,8 +80,8 @@ export type VercelBoardDeclaredRole = { agentId: string; role: string; declaredB
 export class VercelBoardStore {
   /*
    * Connections known to have no active custody or no queued writes. The
-   * custodian is the only writer of these tables (its lease fences other
-   * processes), so a quiet connection needs no query until this store writes
+   * connection's runtime is the only writer of these tables (the host lock
+   * fences other processes), so a quiet connection needs no query until this store writes
    * a row that ends the quiet. Idle timers then cost no SQL at all.
    */
   private readonly quietCustody = new Set<string>();

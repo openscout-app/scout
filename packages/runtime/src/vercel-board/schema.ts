@@ -1,5 +1,5 @@
 /**
- * Custodian-local Board state. None of it is replicated across mesh nodes,
+ * Host-local Board state. None of it is replicated across mesh nodes,
  * none of it enters the journal, and no read model reads the custody table:
  * it holds raw claim tokens, which the runtime must present to Board.
  *

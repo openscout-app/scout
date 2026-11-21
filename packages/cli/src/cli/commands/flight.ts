@@ -272,6 +272,7 @@ function buildFlightFollowHandles(
     workId,
     sessionId,
     targetAgentId: flight.targetAgentId,
+    targetSessionId: metadataStringValue(flight.metadata, "targetSessionId"),
   }, env);
 
   return {
@@ -295,6 +296,7 @@ export function buildFlightLinks(
     workId?: string | null;
     sessionId?: string | null;
     targetAgentId?: string | null;
+    targetSessionId?: string | null;
   },
   env: NodeJS.ProcessEnv,
 ): ScoutFlightLinks {
@@ -302,12 +304,15 @@ export function buildFlightLinks(
   const tailPath = buildFollowPath(ids, "tail");
   const sessionPath = buildFollowPath(ids, "session");
   const work = ids.workId ? buildScoutPath(origin, `/work/${encodeURIComponent(ids.workId)}`) : null;
+  // A session-kind actor owns its own session ID, not an agent card.
+  // The flight's observed native session ID can differ from that actor ID.
+  const sessionActor = ids.targetAgentId === (ids.targetSessionId ?? ids.sessionId);
   return {
     follow: work ?? (sessionPath ? buildScoutPath(origin, sessionPath) : null),
     work,
     tail: tailPath ? buildScoutPath(origin, tailPath) : null,
     session: sessionPath ? buildScoutPath(origin, sessionPath) : null,
-    agent: ids.targetAgentId ? buildScoutPath(origin, `/agents/${encodeURIComponent(ids.targetAgentId)}?tab=message`) : null,
+    agent: ids.targetAgentId && !sessionActor ? buildScoutPath(origin, `/agents/${encodeURIComponent(ids.targetAgentId)}?tab=message`) : null,
   };
 }
 

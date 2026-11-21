@@ -1,5 +1,7 @@
 import {
+  flightCompletion,
   recordFlightSessionDispatch,
+  type FailedRunCause,
   type AgentDefinition,
   type AgentEndpoint,
   type FlightRecord,
@@ -13,6 +15,7 @@ import {
   endpointStartedAt,
   endpointTerminalAt,
   isRetiredLocalAgent,
+  isStaleLocalEndpoint,
   latestEndpointForAgent,
 } from "./broker-endpoint-selection.js";
 import { isResumableInPlaceFlight } from "./in-place/checkpoint.js";
@@ -140,6 +143,75 @@ export function isWorkingFlightState(state: FlightRecord["state"]): boolean {
 }
 
 export const STALE_WORKING_FLIGHT_NO_ENDPOINT_GRACE_MS = 2 * 60_000;
+
+/**
+ * The finished flight that took over this open one's invocation. An ask that
+ * starts its target elsewhere (another host, a fresh session) records a
+ * placeholder flight first and then the flight that carries the work. The
+ * placeholder has no dispatch of its own, so nothing closes it when the work
+ * ends. A placeholder is known by its missing dispatch, so a twin that started
+ * on another host's clock still closes it. Any other open flight closes only
+ * for a later attempt: a late result from an older attempt never closes a
+ * newer one that is still running.
+ */
+export function supersedingTwinFlight(
+  snapshot: Pick<RuntimeSnapshot, "flights">,
+  flight: FlightRecord,
+): FlightRecord | null {
+  if (!isWorkingFlightState(flight.state)) return null;
+  const startedAt = flight.startedAt ?? 0;
+  const placeholder = isUndispatchedFlight(flight);
+  let twin: FlightRecord | null = null;
+  for (const candidate of Object.values(snapshot.flights)) {
+    if (candidate.id === flight.id
+      || candidate.invocationId !== flight.invocationId
+      || candidate.targetAgentId !== flight.targetAgentId
+      || !isTerminalFlightState(candidate.state)
+      || (!placeholder && (candidate.startedAt ?? 0) < startedAt)) continue;
+    if (!twin || flightTimestamp(candidate) > flightTimestamp(twin)) twin = candidate;
+  }
+  return twin;
+}
+
+/** A flight that never reached a target: no dispatch acknowledgement and no submission. */
+function isUndispatchedFlight(flight: FlightRecord): boolean {
+  if (flight.metadata?.dispatchAck !== undefined) return false;
+  const outcome = flight.metadata?.dispatchOutcome as { status?: unknown } | undefined;
+  return outcome?.status === "not_submitted";
+}
+
+/** The open flight, closed with the outcome its twin already reported. */
+export function closedAsSupersededTwin(flight: FlightRecord, twin: FlightRecord, now: number): FlightRecord {
+  const reason = `superseded by ${twin.state} flight ${twin.id} for the same invocation`;
+  return {
+    ...flight,
+    state: twin.state,
+    summary: twin.summary ?? flight.summary,
+    output: twin.output,
+    error: twin.error,
+    completedAt: twin.completedAt ?? now,
+    metadata: {
+      ...(flight.metadata ?? {}),
+      supersededByFlightId: twin.id,
+      reconciledStaleFlight: true,
+      reconciledReason: reason,
+      reconciledAt: now,
+    },
+  };
+}
+
+/**
+ * A flight closed as its twin's copy. The twin owns the outcome: its report,
+ * work item, callback and forwarding already ran, so the copy runs none again.
+ */
+export function isSupersededTwinCopy(snapshot: Pick<RuntimeSnapshot, "flights">, flight: FlightRecord): boolean {
+  const twinId = flight.metadata?.supersededByFlightId;
+  if (typeof twinId !== "string" || twinId === flight.id) return false;
+  const twin = snapshot.flights[twinId];
+  return Boolean(twin && twin.invocationId === flight.invocationId
+    && twin.targetAgentId === flight.targetAgentId
+    && isTerminalFlightState(twin.state) && twin.state === flight.state);
+}
 
 export function isTerminalFlightState(state: FlightRecord["state"]): boolean {
   return state === "completed" || state === "failed" || state === "cancelled";
@@ -304,7 +376,58 @@ export function dispatchAckStrategyForEndpoint(input: {
   return "queued";
 }
 
-export function staleWorkingFlightReason(
+/**
+ * How long a flight may wait for its task reply after the session's turn ended
+ * with no sign of a new turn. A session that keeps working (background jobs that
+ * wake it, a new turn) restarts the clock.
+ */
+export const AWAITING_FINAL_REPLY_IDLE_MS = 30 * 60_000;
+
+const ENDED_ENDPOINT_STATES = new Set(["offline", "failed", "superseded", "stopped"]);
+
+/** When the session last ended a turn without the task reply. */
+export function awaitingFinalReplySince(flight: FlightRecord): number {
+  const since = flight.metadata?.awaitingFinalSince;
+  return typeof since === "number" && Number.isFinite(since) ? since : flightTimestamp(flight);
+}
+
+/**
+ * Why a flight that waits for an explicit task reply can no longer expect one,
+ * or null while it still can. The broker treats such a flight as active, so the
+ * general stale rules never reach it: this is its only exit.
+ */
+export function awaitingFinalReplyExitReason(
+  snapshot: RuntimeSnapshot,
+  flight: FlightRecord,
+  now: number,
+): string | null {
+  if (flight.state !== "waiting" || flightCompletion(flight)?.awaitingFinal !== true) return null;
+  const agent = snapshot.agents[flight.targetAgentId];
+  if (isRetiredLocalAgent(agent)) {
+    return `target agent ${flight.targetAgentId} was retired from the fleet before its task reply`;
+  }
+  if (agent?.metadata?.staleLocalRegistration === true) {
+    return `target agent ${flight.targetAgentId} is a superseded local registration; no task reply can arrive`;
+  }
+  const completionEndpointId = snapshot.invocations[flight.invocationId]?.metadata?.completionEndpointId;
+  const endpointId = flightDispatchEndpointId(flight)
+    ?? (typeof completionEndpointId === "string" && completionEndpointId ? completionEndpointId : null);
+  const endpoint = endpointId ? snapshot.endpoints[endpointId] : undefined;
+  if (!endpoint || endpoint.agentId !== flight.targetAgentId) {
+    return `the session for ${flight.targetAgentId} is gone; no task reply can arrive`;
+  }
+  if (isStaleLocalEndpoint(snapshot, endpoint) || ENDED_ENDPOINT_STATES.has(endpoint.state)) {
+    return `endpoint ${endpoint.id} is ${endpoint.state}; no task reply can arrive`;
+  }
+  const since = Math.max(awaitingFinalReplySince(flight), endpointStartedAt(endpoint));
+  const idleMs = now - since;
+  if (idleMs >= AWAITING_FINAL_REPLY_IDLE_MS) {
+    return `the session ended its turn without a task reply and stayed idle for ${Math.floor(idleMs / 60_000)} min`;
+  }
+  return null;
+}
+
+export function staleWorkingFlightFailure(
   snapshot: RuntimeSnapshot,
   flight: FlightRecord,
   options: {
@@ -316,9 +439,15 @@ export function staleWorkingFlightReason(
      */
     bootedAt?: number;
   },
-): string | null {
+): { cause: FailedRunCause; detail: string; supersededByFlightId?: string } | null {
   if (!isWorkingFlightState(flight.state)) {
     return null;
+  }
+  const awaitingExit = awaitingFinalReplyExitReason(snapshot, flight, options.now ?? Date.now());
+  if (awaitingExit) {
+    // The idle window is the one exit where the session itself is still there.
+    const idle = awaitingExit.startsWith("the session ended its turn");
+    return { cause: idle ? "unknown" : "endpoint_lost", detail: awaitingExit };
   }
   if (options.isInvocationActive(flight.invocationId)) {
     return null;
@@ -339,16 +468,16 @@ export function staleWorkingFlightReason(
     ))
     .sort((left, right) => flightTimestamp(right) - flightTimestamp(left))[0] ?? null;
   if (newerTerminalFlight) {
-    return `superseded by newer ${newerTerminalFlight.state} flight ${newerTerminalFlight.id}`;
+    return { cause: "superseded", detail: `superseded by newer ${newerTerminalFlight.state} flight ${newerTerminalFlight.id}`, supersededByFlightId: newerTerminalFlight.id };
   }
 
   const agent = snapshot.agents[flight.targetAgentId];
   if (isRetiredLocalAgent(agent)) {
-    return `target agent ${flight.targetAgentId} was retired from the fleet`;
+    return { cause: "endpoint_lost", detail: `target agent ${flight.targetAgentId} was retired from the fleet` };
   }
   if (agent?.metadata?.staleLocalRegistration === true) {
-    return staleLocalEndpointReason(latestEndpointForAgent(snapshot, flight.targetAgentId))
-      ?? `target agent ${flight.targetAgentId} is a superseded local registration replaced by current setup`;
+    return { cause: "endpoint_lost", detail: staleLocalEndpointReason(latestEndpointForAgent(snapshot, flight.targetAgentId))
+      ?? `target agent ${flight.targetAgentId} is a superseded local registration replaced by current setup` };
   }
 
   // A delivery into a session open in the operator's own place is picked up
@@ -360,7 +489,7 @@ export function staleWorkingFlightReason(
 
   const dispatchEndpointReason = flightDispatchEndpointUnavailableReason(snapshot, flight);
   if (dispatchEndpointReason) {
-    return dispatchEndpointReason;
+    return { cause: "endpoint_lost", detail: dispatchEndpointReason };
   }
 
   const endpoint = endpointForFlight(snapshot, flight);
@@ -372,19 +501,19 @@ export function staleWorkingFlightReason(
     const now = options.now ?? Date.now();
     const ageMs = now - startedAt;
     if (startedAt > 0 && ageMs >= STALE_WORKING_FLIGHT_NO_ENDPOINT_GRACE_MS) {
-      return `target agent ${flight.targetAgentId} has no registered endpoint after ${Math.floor(ageMs / 1000)}s`;
+      return { cause: "endpoint_lost", detail: `target agent ${flight.targetAgentId} has no registered endpoint after ${Math.floor(ageMs / 1000)}s` };
     }
     return null;
   }
 
   const staleEndpointReason = staleLocalEndpointReason(endpoint);
   if (staleEndpointReason) {
-    return staleEndpointReason;
+    return { cause: "endpoint_lost", detail: staleEndpointReason };
   }
 
   const terminalAt = endpointTerminalAt(endpoint);
   if (endpoint.state !== "active" && terminalAt > startedAt) {
-    return `endpoint ${endpoint.id} moved to ${endpoint.state} at ${terminalAt}`;
+    return { cause: "endpoint_lost", detail: `endpoint ${endpoint.id} moved to ${endpoint.state} at ${terminalAt}` };
   }
 
   const startedEndpointAt = endpointStartedAt(endpoint);
@@ -410,7 +539,7 @@ export function staleWorkingFlightReason(
     if (flight.metadata?.requesterTimedOut === true && !turnPredatesBoot) {
       return null;
     }
-    return `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task`;
+    return { cause: "endpoint_lost", detail: `endpoint ${endpoint.id} was replayed active for invocation ${flight.invocationId} without a live broker task` };
   }
   // Positive offline, stale or superseded endpoint evidence still reconciles
   // every transport normally.
@@ -420,8 +549,13 @@ export function staleWorkingFlightReason(
     && endpointInvocationId !== null
     && endpointInvocationId !== flight.invocationId
   ) {
-    return `endpoint ${endpoint.id} started newer work at ${startedEndpointAt}`;
+    return { cause: "endpoint_lost", detail: `endpoint ${endpoint.id} started newer work at ${startedEndpointAt}` };
   }
 
   return null;
+}
+
+/** Compatibility text view; failure writers use the structured decision. */
+export function staleWorkingFlightReason(...args: Parameters<typeof staleWorkingFlightFailure>): string | null {
+  return staleWorkingFlightFailure(...args)?.detail ?? null;
 }
