@@ -1728,6 +1728,22 @@ test("endpoint inventory uses metadata-only peek, supports exact selection and n
   expect((await requestRouter(h, "GET", "/v1/endpoints")).response.status).toBe(503);
 });
 
+test("the flight list returns unfinished flights from peek and never scans a snapshot", async () => {
+  const flight = (id: string, state: string) => ({ id, invocationId: `inv-${id}`, requesterId: "operator", targetAgentId: "agent", state }) as any;
+  const flights = Object.fromEntries([flight("queued", "queued"), flight("running", "running"), flight("waiting", "waiting"),
+    flight("done", "completed"), flight("failed", "failed")].map(item => [item.id, item]));
+  const h = createHarness();
+  h.deps.runtime.snapshot = () => { throw Error("must not scan message history"); };
+  h.deps.runtime.peek = () => ({ endpoints: {}, flights });
+  const listed = await requestRouter(h, "GET", "/v1/flights?active=1");
+  expect(listed.response.status).toBe(200);
+  expect((listed.body as { flights: Array<{ id: string }> }).flights.map(item => item.id).sort()).toEqual(["queued", "running", "waiting"]);
+  // Only the bounded list is served; history is read one flight at a time.
+  expect((await requestRouter(h, "GET", "/v1/flights")).response.status).toBe(400);
+  h.deps.runtime.peek = () => ({ endpoints: {} });
+  expect((await requestRouter(h, "GET", "/v1/flights?active=1")).response.status).toBe(503);
+});
+
 test("native owner control is local-only, refuses invalid input and never invokes or discovers a replacement", async () => {
   const h = createHarness();
   const endpoint = { id: "owner", agentId: "not-owned", nodeId: "node-1", sessionId: "no-session", state: "idle",
@@ -2200,4 +2216,62 @@ test("harness hooks are read, applied and removed only from this machine", async
     }
   }
   expect(calls).toHaveLength(3);
+});
+
+
+test("work retry HTTP delegates to the runtime and retains actionable conflict diagnostics", async () => {
+  const calls: unknown[] = [];
+  const h = createHarness({ workRetry: { retry: async input => {
+    calls.push(input);
+    if (input.attempt === 2) throw new (await import("./broker-work-lifecycles.js")).WorkLifecycleError(409, "Next retry attempt is 1; reuse an earlier attempt only to recover its receipt.");
+    return { ...input, requestId: "stable", invocationId: "ask", flightId: "flight" };
+  } } as BrokerHttpRouterDeps["workRetry"] });
+  const a = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1", attempt: 1 } });
+  expect(a.response.status).toBe(200); expect(a.body).toMatchObject({ requestId: "stable", flightId: "flight" });
+  expect(calls).toEqual([{ workId: "work-1", attempt: 1 }]);
+  const b = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1", attempt: 2 } });
+  expect(b.response.status).toBe(409); expect(b.body).toMatchObject({ error: expect.stringContaining("Next retry attempt is 1") });
+  const c = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1" } });
+  expect(c.response.status).toBe(200); expect(calls.at(-1)).toEqual({ workId: "work-1" });
+});
+
+describe("derived record routes", () => {
+  test("read, write against a version, refuse a stale write, and list pending", async () => {
+    const { createInMemoryControlRuntime } = await import("./broker.js");
+    const { BrokerDurableStore } = await import("./broker-durable-store.js");
+    const { BrokerDerivedRecordService } = await import("./broker-derived-records.js");
+    const { DEFAULT_WORK_LIFECYCLE, compileWorkLifecycle } = await import("@openscout/protocol");
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    await runtime.upsertCollaboration({
+      id: "work-1", kind: "work_item", title: "Ship", createdById: "operator", ownerId: "agent-1", nextMoveOwnerId: "agent-1", state: "waiting", acceptanceState: "none",
+      createdAt: 1, updatedAt: 5, waitingOn: { kind: "condition", label: "a decision" },
+    } as never);
+    const machine = compileWorkLifecycle({
+      ...DEFAULT_WORK_LIFECYCLE,
+      stations: DEFAULT_WORK_LIFECYCLE.stations.map((s) => s.id === "waiting" ? { ...s, derive: [{ kind: "presentation", instructions: "Pick." }] } : s),
+    });
+    const derivedRecords = new BrokerDerivedRecordService({
+      registry: { forRecord: () => machine },
+      durableStore: new BrokerDurableStore({
+        journal: { async appendEntries(entries) { return entries; } },
+        projection: { async applyEntries() { return []; } },
+        threadEvents: { publish() {} },
+      }),
+      runtime,
+      listWorkItems: () => Object.values(runtime.peek().collaborationRecords) as never,
+      producerActorId: "scout.deriver",
+    });
+    const h = createHarness({ derivedRecords });
+    expect((await requestRouter(h, "GET", "/v1/derived/pending")).body).toEqual({
+      pending: [{ workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r0.u5", status: "missing", dispatchable: false }],
+    });
+    const stale = await requestRouter(h, "POST", "/v1/derived", { body: { workId: "work-1", kind: "presentation", sourceVersion: "r0.u4", body: {} } });
+    expect(stale.body).toEqual({ status: "stale", currentVersion: "r0.u5" });
+    const written = await requestRouter(h, "POST", "/v1/derived", { body: { workId: "work-1", kind: "presentation", sourceVersion: "r0.u5", body: { primary: "a" }, producerId: "agent-1" } });
+    expect(written.body).toMatchObject({ status: "written", record: { body: { primary: "a" } } });
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=presentation")).body).toMatchObject({ status: "current", record: { producer: { id: "agent-1" } } });
+    expect((await requestRouter(h, "GET", "/v1/derived/pending")).body).toEqual({ pending: [] });
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=Bad")).response.status).toBe(400);
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=nope&kind=presentation")).response.status).toBe(404);
+  });
 });

@@ -36,6 +36,6 @@ test("scout board parses a credential reference and refuses anything else", () =
   expect(connect).toMatchObject({ kind: "connect", method: "POST", body: { url: "http://127.0.0.1:4000", credential: { backend: "env", key: "VERCEL_BOARD_TOKEN" }, channels: ["work", "decisions"], probe: false } });
   expect(parseVercelBoardCommand(["status", "--connection", "c 1"]).path).toBe("/v1/integrations/vercel-board/status?connection=c%201");
   expect(parseVercelBoardCommand(["claim", "--connection", "c1", "--task", "7", "--agent", "agent.dev"]).body).toMatchObject({ actorId: "operator", taskId: "7" });
-  expect(() => parseVercelBoardCommand(["connect", "--url", "x", "--credential", "env:A", "--takeover"])).toThrow("--experimental-marker");
+  expect(() => parseVercelBoardCommand(["connect", "--url", "x", "--credential", "env:A", "--takeover"])).toThrow("Unknown or repeated option --takeover");
   expect(() => parseVercelBoardCommand(["claim", "--connection", "c1"])).toThrow("--task");
 });

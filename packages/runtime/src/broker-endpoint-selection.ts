@@ -405,6 +405,12 @@ export type BrokerAvailability = {
 export type VerifiedLaunchRoute = {
   projectRoot: string;
   harness: AgentEndpoint["harness"];
+  /**
+   * Set only when this launcher resumes one exact session and cannot start a
+   * fresh one in its place (Codex `thread/resume` with requireExistingThread).
+   * Such a launch is still an exact continuation.
+   */
+  resumesSessionId?: string;
 };
 
 /** A verified launcher must come from the authority's capability check. */
@@ -450,8 +456,19 @@ export function evaluateBrokerAvailability(input: {
       selectedRoute: { kind: "session", endpointId: endpoint.id, sessionId: endpoint.sessionId ?? null },
     };
   }
-  // Exact continuation cannot fall through to launch, even with a valid launcher.
+  // Exact continuation cannot fall through to a launch that could start a
+  // different session. It can launch only a resume of that same session:
+  // a harness that runs per turn (Codex app-server) is never live between turns.
   if (input.targetSessionId) {
+    const resumes = input.launchRoute?.resumesSessionId?.trim();
+    if (endpoint && resumes && input.launchRoute?.projectRoot.trim() && input.launchRoute.harness
+      && endpointMatchesTargetSession(endpoint, resumes)) {
+      return {
+        ...result, state: "can_start", reason: "verified_session_resume",
+        supportedActions: ["start"],
+        selectedRoute: { kind: "launch", projectRoot: input.launchRoute.projectRoot, harness: input.launchRoute.harness },
+      };
+    }
     result.reason = "session_reference_not_attachable";
     return result;
   }

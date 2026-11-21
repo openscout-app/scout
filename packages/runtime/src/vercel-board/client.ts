@@ -23,7 +23,7 @@ export interface VercelBoardClaimGrant { epoch: number; token: string; until: nu
 export interface VercelBoardMe { actor: string; principal: string; profile: string | null; expiresAt: number | null }
 
 /**
- * The closed set of operations the custodian uses. A transport carries them;
+ * The closed set of operations the runtime uses. A transport carries them;
  * it holds no claim token, cursor or retry policy of its own. A second
  * transport (the Vercel API worker) implements the same interface.
  */
@@ -50,7 +50,7 @@ export interface VercelBoardTransport {
   release(taskId: string, grant: { epoch: number; token: string }): Promise<VercelBoardWireMessage>;
   /** Holds a claimed task for a person, which ends the claim. `kind`: `needs_input` or `awaiting_approval`. */
   block(taskId: string, grant: { epoch: number; token: string }, reason: string, kind: VercelBoardBlockKind): Promise<VercelBoardWireMessage>;
-  /** Lifts a hold. Board allows it to the task's owner, so the custodian sends it as the principal (`as(null)`). */
+  /** Lifts a hold. Board allows it to the task's owner, so the runtime sends it as the principal (`as(null)`). */
   unblock(taskId: string): Promise<VercelBoardWireMessage>;
   /**
    * The same transport writing as another profile from the connection's role
@@ -77,7 +77,7 @@ export function retryAfterMs(header: string | null, now = Date.now()): number | 
 /**
  * Board's documented HTTP protocol. Every request carries the credential,
  * the `scout` profile and `x-board-can`. Board's IDs go in paths
- * URL-encoded. Nothing here retries: the custodian decides what is safe to
+ * URL-encoded. Nothing here retries: the runtime decides what is safe to
  * send again.
  */
 export class VercelBoardHttpTransport implements VercelBoardTransport {

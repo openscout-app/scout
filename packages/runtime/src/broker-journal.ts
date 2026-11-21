@@ -1,3 +1,4 @@
+import { newestWorkFlight } from "./broker-failed-work.js";
 import { projectFlightRecord } from "@openscout/protocol";
 import type { ControlPlaneHistoryReader, HistoricalRecord, HistoricalPublication } from "./control-plane-history-store.js";
 import type { BrokerMessageHistory } from "./broker-message-history.js";
@@ -1200,6 +1201,11 @@ export class FileBackedBrokerJournal {
     return cloneSnapshot(this.state.snapshot);
   }
 
+  /** Retained canonical coordination only; never opens harness history. */
+  newestFlightForWork(workId: string): FlightRecord | undefined {
+    return newestWorkFlight(workId, Object.values(this.state.snapshot.invocations), Object.values(this.state.snapshot.flights));
+  }
+
   /** The node record this journal last accepted, without copying the snapshot. Read only. */
   journaledNode(nodeId: string): Readonly<NodeDefinition> | undefined {
     return this.state.snapshot.nodes[nodeId];
@@ -2242,7 +2248,9 @@ export class FileBackedBrokerJournal {
         }
         if ((entry.flight.metadata?.resultReply as { status?: unknown } | undefined)?.status === "pending") {
           this.pendingResultFlights.set(entry.flight.invocationId, entry.flight);
-        } else {
+        } else if (!entry.preserveCurrent || this.pendingResultFlights.get(entry.flight.invocationId)?.id === entry.flight.id) {
+          // A record that leaves another flight current (a closed twin copy)
+          // leaves that flight's result pending.
           this.pendingResultFlights.delete(entry.flight.invocationId);
         }
         return;

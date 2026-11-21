@@ -134,6 +134,7 @@ export class CoreHttpAdapter {
       return { ...context, usedBroker: true, workItem: updated, workId: updated.id };
     }
     // The runtime decides every move; the relay principal is always the mover or reviewer.
+    if (name === 'work_retry') return request('/v1/work/retry', pick(a, ['workId','attempt']));
     if (name === 'work_move') {
       const result = await request('/v1/work/move', { ...pick(a, ['workId','to','note','waitingOn','evidence','claim','dryRun']), actorId: senderId });
       return { senderId, applied: result.applied, verdict: result.decision.verdict, from: result.decision.from, to: result.decision.to,
@@ -174,6 +175,7 @@ export class CoreHttpAdapter {
     if (name === 'ask') {
       const isAsk = !a.fyi, operator = a.operator === true;
       if (a.callback) throw new Error('callback paths are host-local; send the ask through a local Scout client');
+      if (a.decision) throw new Error('decision cards read local pictures; send the ask through a local Scout client');
       const task = { version: 1, ...pick(a, ['operator','ref','continue','cancel','fyi','notify','defaultAction','options','permission','because','window']) } as import('@openscout/protocol').ScoutTaskAsk;
       validateTaskAsk(task, { to: a.to ?? a.targetSessionId, channel: a.channel, capability: !a.continue && Boolean(a.projectPath || a.profile),
         execution: Boolean(a.harness || a.model || a.reasoningEffort || a.on || a.runtime || a.placement || a.projectPath), relation: Boolean(a.relation) });

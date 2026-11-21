@@ -235,6 +235,9 @@ describe("availability admission table", () => {
     { name: "failed liveness probe", endpoint: endpoint({ state: "idle" }), alive: false, state: "gone" },
     { name: "exact offline cannot launch", endpoint: endpoint(), targetSessionId: "session-1", launchRoute: launcher, state: "gone" },
     { name: "exact mismatched session cannot launch", endpoint: endpoint({ state: "idle" }), targetSessionId: "other", launchRoute: launcher, state: "gone" },
+    { name: "exact offline resumes the same session", endpoint: endpoint(), targetSessionId: "session-1", launchRoute: { ...launcher, resumesSessionId: "session-1" }, state: "can_start" },
+    { name: "exact offline cannot resume a different session", endpoint: endpoint(), targetSessionId: "session-1", launchRoute: { ...launcher, resumesSessionId: "other" }, state: "gone" },
+    { name: "exact mismatched session cannot resume", endpoint: endpoint({ state: "idle" }), targetSessionId: "other", launchRoute: { ...launcher, resumesSessionId: "other" }, state: "gone" },
     { name: "exact live attachment", endpoint: endpoint({ state: "idle" }), targetSessionId: "session-1", state: "ready" },
     { name: "wake policy not launch evidence", endpoint: null, agent: agent({ wakePolicy: "on_demand" }), state: "gone" },
   ];
@@ -289,6 +292,25 @@ test("exact continuation selects the requested endpoint rather than the home end
   });
   expect(service.evaluate(snapshot, target).state).toBe("ready");
   expect(service.evaluate(snapshot, target, "exact-session").state).toBe("gone");
+});
+
+test("exact continuation of a per-turn session launches only a resume of that session", () => {
+  const target = agent();
+  const snapshot = createRuntimeRegistrySnapshot({ agents: { [target.id]: target },
+    endpoints: {
+      home: endpoint({ id: "home", preferred: true, state: "idle", sessionId: "home-session" }),
+      exact: endpoint({ id: "exact", transport: "codex_app_server", state: "idle", sessionId: "exact-session",
+        metadata: { threadId: "thread-exact" } }),
+    } });
+  const resuming = (resumesSessionId: string) => new BrokerUnavailableTargetService({ nodeId: "node-local",
+    describeRemoteAuthorityIssue: () => null,
+    isEndpointAlive: () => false,
+    verifiedLaunchRoute: () => ({ projectRoot: "/repo", harness: "codex", resumesSessionId }),
+  });
+  const resumed = resuming("thread-exact").evaluate(snapshot, target, "exact-session");
+  expect(resumed.state).toBe("can_start");
+  expect(resumed.reason).toBe("verified_session_resume");
+  expect(resuming("home-session").evaluate(snapshot, target, "exact-session").state).toBe("gone");
 });
 
 

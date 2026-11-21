@@ -576,6 +576,20 @@ test("pending result index replaces flights and reconstructs only undelivered re
   expect([...restored.pendingInvocationResultFlights()]).toEqual([next]);
 });
 
+test("a sibling flight recorded without becoming current leaves the current flight's result pending", async () => {
+  const { journal, journalPath } = createJournal();
+  await journal.load();
+  const twin = { ...sampleFlight(), state: "completed" as const, metadata: { resultReply: { status: "pending" } } };
+  await journal.appendEntries({ kind: "flight.record", flight: twin });
+  const copy = { ...sampleFlight(), id: "flight-placeholder", state: "completed" as const, metadata: { supersededByFlightId: twin.id } };
+  await journal.appendEntries({ kind: "flight.record", flight: copy, preserveCurrent: true });
+  expect([...journal.pendingInvocationResultFlights()]).toEqual([twin]);
+  expect(journal.getCurrentFlightForInvocation(twin.invocationId)?.id).toBe(twin.id);
+  const restored = new FileBackedBrokerJournal(journalPath); await restored.load();
+  expect([...restored.pendingInvocationResultFlights()].map(flight => flight.id)).toEqual([twin.id]);
+  expect(restored.getCurrentFlightForInvocation(twin.invocationId)?.id).toBe(twin.id);
+});
+
 test("complete delivery traversal yields and excludes later appends without freezing replacements", async () => {
   const { journal } = createJournal();
   await journal.load();

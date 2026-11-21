@@ -1,6 +1,7 @@
 import { hasLiveAcpWorker } from "./acp-agent-invocation.js";
 import { warmWorkerContinuation, HostLaunchDeferred, type HostLaunchAdmission } from "./host-launch-admission.js";
 import { deferredDispatchCheckedAt } from "./broker-dispatch-recovery-service.js";
+import { failureCauseForError } from "./failed-run-error.js";
 import { withManagedPermissionContext } from "./managed-permission.js";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
 import { isCodexAppServerControlError } from "@openscout/agent-sessions/local";
@@ -430,6 +431,7 @@ export class BrokerLocalInvocationService {
       completedAt: this.now(),
       metadata: {
         failureStage: "endpoint_resolution",
+        failureCause: failureCauseForError(error, "harness_start"),
       },
     });
     if (failedFlight.state === "failed") {
@@ -486,6 +488,7 @@ export class BrokerLocalInvocationService {
           completedAt: this.now(),
           metadata: {
             failureStage: "endpoint_resolution",
+            failureCause: "endpoint_lost",
             staleLocalRegistration: true,
           },
         });
@@ -515,6 +518,7 @@ export class BrokerLocalInvocationService {
       const failedFlight = await this.options.transitionInvocation(invocation.id, {
         state: "failed",
         summary: `${target.displayName} has no supported local executor.`,
+        metadata: { failureCause: "harness_start" },
         error: `Endpoint transport ${endpoint.transport} is registered for ${target.id}, but the broker only routes through direct local agent adapters or A2A HTTP endpoints.`,
         completedAt: this.now(),
       });
@@ -713,6 +717,7 @@ export class BrokerLocalInvocationService {
           completedAt: this.now(),
           metadata: {
             failureStage: "empty_reply",
+            failureCause: "harness_error",
             dispatchAck: completedDispatchAck,
           },
         });
@@ -946,6 +951,7 @@ export class BrokerLocalInvocationService {
           completedAt: this.now(),
           metadata: {
             failureStage: "dispatch_stalled",
+            failureCause: "harness_start",
             dispatchStalledSession: error.sessionName,
             dispatchStalledRetries: error.retries,
             dispatchStalledPaneTail: error.paneTail.slice(0, 1_000),
@@ -983,7 +989,7 @@ export class BrokerLocalInvocationService {
           summary: `${target.displayName}: ${error.summary}`,
           error: message,
           completedAt: this.now(),
-          metadata: { failureStage: error.stage },
+          metadata: { failureStage: error.stage, failureCause: "harness_error" },
         });
 
       await this.options.persistEndpoint({
@@ -1020,6 +1026,7 @@ export class BrokerLocalInvocationService {
           completedAt: interruptedAt,
           metadata: {
             failureStage,
+            failureCause: "endpoint_lost",
             failureSeverity: "noteworthy",
             noteworthy: true,
             exitKind: error.exitKind,
@@ -1088,6 +1095,7 @@ export class BrokerLocalInvocationService {
       : await this.options.transitionInvocation(invocation.id, {
         state: "failed",
         summary: `${target.displayName} failed to respond.`,
+        metadata: { failureCause: failureCauseForError(error, isCodexAppServerExitError(error) ? "harness_start" : "harness_error") },
         error: message,
         completedAt: this.now(),
       });
