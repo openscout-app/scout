@@ -127,7 +127,8 @@ import {
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
 import { WorkClaimConflictError } from "./broker-work-claims.js";
-import type { WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import type { DerivedWriteRequest, WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import { DerivedRecordError, type BrokerDerivedRecordService } from "./broker-derived-records.js";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -231,6 +232,7 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 export type BrokerHttpRouterDeps = {
   /** Work lifecycles: stations, moves and reviews. */
   workLifecycles?: BrokerWorkLifecycleService;
+  derivedRecords?: BrokerDerivedRecordService;
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
@@ -2104,6 +2106,32 @@ export function createBrokerHttpRouter(
       conversationId: url.searchParams.get("conversationId") ?? undefined,
     }));
     return;
+  }
+
+  if (deps.derivedRecords && (url.pathname === "/v1/derived" || url.pathname === "/v1/derived/pending")) {
+    const derived = deps.derivedRecords;
+    try {
+      if (method === "GET" && url.pathname === "/v1/derived/pending") {
+        json(response, 200, { pending: derived.pending({ limit: parseLimit(url) }) });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/derived") {
+        json(response, 200, derived.read({
+          workId: url.searchParams.get("workId") ?? "",
+          kind: url.searchParams.get("kind") ?? "",
+          producerVersion: url.searchParams.get("producerVersion") ?? undefined,
+        }));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/derived") {
+        json(response, 200, await derived.write(await readRequestBody<DerivedWriteRequest>(request, { maxBytes: 64 * 1024 })));
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DerivedRecordError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+      return;
+    }
   }
 
   if (deps.workLifecycles && url.pathname.startsWith("/v1/work/")) {

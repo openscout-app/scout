@@ -91,6 +91,9 @@ import {
   planScoutBoardTasks,
   reviewScoutWorkMove,
   readScoutWorkLifecycles,
+  readScoutDerivedRecord,
+  writeScoutDerivedRecord,
+  readScoutDerivedPending,
   waitForScoutFlight,
   type ScoutAskByIdResult,
   type ScoutAskResult,
@@ -617,6 +620,9 @@ type ScoutMcpDependencies = {
   moveWorkItem?: typeof moveScoutWorkItem;
   planBoardTasks?: typeof planScoutBoardTasks;
   reviewWorkMove?: typeof reviewScoutWorkMove;
+  readDerivedRecord?: typeof readScoutDerivedRecord;
+  writeDerivedRecord?: typeof writeScoutDerivedRecord;
+  readDerivedPending?: typeof readScoutDerivedPending;
   readWorkLifecycles?: typeof readScoutWorkLifecycles;
   waitForFlight: (
     baseUrl: string,
@@ -5807,6 +5813,70 @@ export function createScoutMcpServer(options: {
       const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
       const result = await (deps.reviewWorkMove ?? reviewScoutWorkMove)({ workId, moveId, revision, verdict, note, actorId: resolvedSenderId });
       const structuredContent = { senderId: resolvedSenderId, status: result.status, station: result.station ?? null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_read",
+    {
+      title: "Read Scout Derived Record",
+      description:
+        "Read a derived record on a work item: something made from it, such as a presentation. status is current, stale (the item changed since) or missing. currentVersion is the version to pass to derived_write.",
+      inputSchema: z.object({ workId: z.string(), kind: z.string() }),
+      outputSchema: z.object({ status: z.string(), currentVersion: z.string(), record: z.record(z.string(), z.unknown()).nullable() }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workId, kind }) => {
+      const result = await (deps.readDerivedRecord ?? readScoutDerivedRecord)({ workId, kind });
+      const structuredContent = { status: result.status, currentVersion: result.currentVersion, record: (result.record ?? null) as Record<string, unknown> | null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_write",
+    {
+      title: "Write Scout Derived Record",
+      description:
+        "Write a derived record on a work item. Pass the sourceVersion you read; if the item changed since, nothing is written and the answer is stale with the current version. It never changes the item itself.",
+      inputSchema: z.object({
+        currentDirectory: z.string().optional(),
+        senderId: z.string().optional(),
+        workId: z.string(),
+        kind: z.string(),
+        sourceVersion: z.string(),
+        body: z.unknown(),
+        producerVersion: z.string().optional(),
+      }),
+      outputSchema: z.object({ senderId: z.string(), status: z.string(), currentVersion: z.string().nullable() }),
+      annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ currentDirectory, senderId, workId, kind, sourceVersion, body, producerVersion }) => {
+      const resolvedCurrentDirectory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
+      const resolvedSenderId = await resolveMcpSenderId(deps, senderId, resolvedCurrentDirectory, env);
+      const result = await (deps.writeDerivedRecord ?? writeScoutDerivedRecord)({
+        workId, kind, sourceVersion, body, producerId: resolvedSenderId, producerKind: "agent",
+        ...(producerVersion ? { producerVersion } : {}),
+      });
+      const structuredContent = { senderId: resolvedSenderId, status: result.status, currentVersion: result.status === "stale" ? result.currentVersion : null };
+      return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+
+  server.registerTool(
+    "derived_pending",
+    {
+      title: "List Pending Scout Derived Records",
+      description:
+        "List open work items whose lifecycle station names a derived record they have no current version of. A producer that pulls work reads this, then calls derived_write.",
+      inputSchema: z.object({ limit: z.number().int().min(1).max(1000).optional() }),
+      outputSchema: z.object({ pending: z.array(z.record(z.string(), z.unknown())) }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ limit }) => {
+      const pending = await (deps.readDerivedPending ?? readScoutDerivedPending)(limit);
+      const structuredContent = { pending: pending as unknown as Record<string, unknown>[] };
       return { content: createTextContent(structuredContent), structuredContent };
     },
   );
