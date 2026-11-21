@@ -2831,6 +2831,22 @@ test("show MCP is discoverable and sends local path, caption and resolved caller
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("post MCP carries its posting guidance and sends text, file, links and caller", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ path: string; body: any }> = [];
+  try {
+    globalThis.fetch = (async (input, init) => {
+      requests.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });
+      return Response.json({ post: { id: "post-test" } }, { status: 201 });
+    }) as typeof fetch;
+    const { client } = await connectTestServer({ resolveSenderId: async () => "agent-test" });
+    const tool = (await client.listTools()).tools.find(t => t.name === "post");
+    for (const phrase of ["Post when", "you're blocked", "Don't post", "acknowledgements", "short, plain and confident"]) expect(tool?.description).toContain(phrase);
+    const result = await client.callTool({ name: "post", arguments: { text: "The header ships", file: "shot.png", links: [{ url: "https://example.test/pr/1" }], milestone: true } });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toEqual([{ path: "/v1/posts", body: { text: "The header ships", file: "shot.png", links: [{ url: "https://example.test/pr/1" }], milestone: true, caller: { actorId: "agent-test", currentDirectory: "/tmp/openscout-test", metadata: { sessionId: "019ddb1b-test-thread", harness: "codex" } } } }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
 
 test("work_retry forwards the work id and optional idempotent attempt and returns runtime diagnostics", async () => {
   const calls: unknown[] = [];

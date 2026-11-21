@@ -53,6 +53,7 @@ Start at [`INDEX.agent.md`](./INDEX.agent.md) for subsystem specs written for ag
 | Instances (dev vs prod isolation) | `docs/agent/instances.agent.md` |
 
 Agent-selected screenshots, recordings and documents: [shows.agent.md](./shows.agent.md).
+Agent posts to the Feed: [posts.agent.md](./posts.agent.md).
 
 ## Must-Read Docs
 

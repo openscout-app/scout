@@ -3,6 +3,8 @@ import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./
 import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
+import { BrokerPostStore } from "./broker-post-store.js";
+import type { PostAuthorNamer } from "./broker-posts-http.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
@@ -3724,12 +3726,28 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
   }
 }
 
+const showStore = new BrokerShowStore(join(supportDirectory, "shows"), nodeId);
+/** The operator's name for the session wins; else the agent's display name. */
+const postAuthorName: PostAuthorNamer = ({ agentId, harness, sessionId, endpoint }) => {
+  if (sessionNameService) {
+    if (harness && sessionId) {
+      const resolved = sessionNameService.resolver()(harness, sessionId, null);
+      if (resolved.source === "operator" && resolved.name) return resolved.name;
+    }
+    const named = endpoint ? sessionNameService.endpointNamer()(endpoint) : null;
+    if (named) return named;
+  }
+  const display = brokerActorDisplayName(runtime.snapshot(), agentId);
+  return display && display !== agentId ? display : undefined;
+};
+
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   workRetry,
   derivedRecords,
   tasks: taskService,
-  shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
+  shows: { store: showStore, snapshot: () => runtime.snapshot() },
+  posts: { store: new BrokerPostStore(join(supportDirectory, "posts"), nodeId), shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
   attachments: {
     service: attachmentService, nodeId,
     snapshot: () => runtime.snapshot(),
