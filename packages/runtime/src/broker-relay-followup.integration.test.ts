@@ -33,14 +33,14 @@ async function runningRelay() {
   expect(await broker.waitFor(async () => pasteCount(), count => count === 1)).toBe(1);
   const current = () => broker.getJson<{ flight: FlightRecord }>(baseUrl, `/v1/invocations/${ask.flight!.invocationId}`);
   expect((await current()).flight.state).toBe("running");
-  const endTurn = async () => {
-    await broker.postJson(baseUrl, "/v1/deliver", {
-      requestId: "answer", caller: { actorId: session, nodeId }, target: { kind: "binding_ref", ref: ask.message.id },
-      intent: "tell", body: "Finished the original brief.",
+  const answerTask = async () => {
+    await broker.postJson(baseUrl, "/v1/messages/reply", {
+      requestId: "answer", senderId: session, ref: ask.flight!.invocationId,
+      body: "Finished the original brief.",
     });
     expect((await current()).flight.state).toBe("completed");
   };
-  return { ask, baseUrl, caller, session, pasteCount, endTurn };
+  return { ask, baseUrl, caller, session, pasteCount, answerTask };
 }
 
 test("a tmux turn can finish without reading its inbox; the sender gets a refusal, not acceptance", async () => {
@@ -68,7 +68,7 @@ test("a tmux turn can finish without reading its inbox; the sender gets a refusa
   }
   const response = await send();
   // The relay answers only the original prompt; it never polls Scout's inbox.
-  await relay.endTurn();
+  await relay.answerTask();
   expect(relay.pasteCount()).toBe(1);
   expect(response).toMatchObject({ status: 409, body: {
     error: "task_followup_not_sent", detail: expect.stringContaining(`--to session:claude:${relay.session}`),
@@ -82,7 +82,7 @@ test("a tmux turn can finish without reading its inbox; the sender gets a refusa
 
 test("continue with a copied ref routes a finished cardless task back to its relay", async () => {
   const relay = await runningRelay();
-  await relay.endTurn();
+  await relay.answerTask();
   // Older clients kept the copied prefix in the ref and rendered another in the label.
   const ref = `ref:${relay.ask.bindingRef}`;
   const next = await broker.postJson<ScoutDeliverAcceptedResponse>(relay.baseUrl, "/v1/deliver", {
@@ -95,6 +95,26 @@ test("continue with a copied ref routes a finished cardless task back to its rel
   expect(await broker.waitFor(async () => relay.pasteCount(), count => count === 2)).toBe(2);
 }, 30_000);
 
+test("an ask to a managed tmux Claude session stays open through a turn end until its task reply", async () => {
+  const relay = await runningRelay();
+  const detail = () => broker.getJson<{ invocation: { metadata?: Record<string, unknown> }; flight: FlightRecord }>(
+    relay.baseUrl, `/v1/invocations/${relay.ask.flight!.invocationId}`);
+  const accepted = await detail();
+  expect(accepted.invocation.metadata).toMatchObject({
+    completion: { mode: "explicit" }, completionEndpointId: "worker-endpoint",
+  });
+  // The session ends an interim turn: the adapter reports its output as a result.
+  await broker.postJson(relay.baseUrl, "/v1/flights", {
+    ...accepted.flight, state: "completed", output: "Started the build; reporting back when it lands.", completedAt: Date.now(),
+  });
+  const interim = (await detail()).flight;
+  expect(interim).toMatchObject({ state: "waiting", metadata: {
+    completion: { awaitingFinal: true }, awaitingFinalOutput: "Started the build; reporting back when it lands.",
+  } });
+  expect(interim.output).toBeUndefined();
+  await relay.answerTask();
+  expect((await detail()).flight.output).toBe("Finished the original brief.");
+});
 
 test("the requester session can add context to an open operator task with a different CLI actor", async () => {
   const { baseUrl, nodeId } = await broker.startBroker({ devInstance: true });

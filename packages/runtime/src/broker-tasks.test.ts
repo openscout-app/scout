@@ -628,6 +628,24 @@ test("an answer to a flight waiting on a question or review wakes the worker; a 
   expect(() => followupAudience(invocation, flight("running"))).toThrow("cannot add context to the active turn");
 });
 
+test("an interim adapter turn end leaves the explicit task open for a later task reply", async () => {
+  const { h, answer } = await taskFixture("running", { completion: { mode: "explicit" } });
+  await h.lifecycle.recordFlight({
+    ...h.runtime.flightForInvocation("parent")!,
+    state: "completed",
+    output: "Adapter code read, then building the deck in this same task.",
+    completedAt: 4,
+  });
+  expect(h.journal.getFlight("flight-parent")).toMatchObject({
+    state: "waiting", metadata: { completion: { awaitingFinal: true } },
+  });
+  expect(h.journal.getFlight("flight-parent")?.output).toBeUndefined();
+  await answer({ body: "The deck is ready." });
+  expect(h.journal.getFlight("flight-parent")).toMatchObject({
+    state: "completed", output: "The deck is ready.",
+  });
+});
+
 test("a client cannot plant a decision answer through reply metadata; its other metadata still rides", async () => {
   const planted = { answer: { kind: "pick", key: "A" }, text: "A (Merge now).", at: 1, by: "operator" };
   const client = await taskFixture();

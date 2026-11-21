@@ -238,6 +238,7 @@ function createHarness(input: {
         agentId: "cardless-agent",
         sessionId: "session-cardless",
         harness: input.cardlessEndpointHarness ?? "codex",
+        metadata: { cardless: true },
       });
       return {
         kind: "resolved_session",
@@ -1868,4 +1869,19 @@ test("titles a task's default work item by its first line, and a continued task 
   expect(defaultTaskWorkItemTitle("Previous task inv-1 (completed):\nShipped.\n\nSuccessor task:\nLand the follow-up"))
     .toBe("Land the follow-up");
   expect(defaultTaskWorkItemTitle("```\n```")).toBe("```\n```");
+});
+
+test("a legacy project ask to managed tmux Claude requires a task reply, not its first turn's output", async () => {
+  const h = createHarness({ cardlessEndpointHarness: "claude" });
+  await h.service.accept({
+    requestId: "legacy-project-ask", body: "Build the deck", intent: "consult",
+    target: { kind: "project_path", projectPath: "/tmp/board" },
+    caller: { actorId: "operator", nodeId: "node-1" }, task: { version: 1 },
+    execution: { harness: "claude", session: "new" },
+  });
+  expect(h.acceptedInvocations[0]?.metadata).toMatchObject({
+    completion: { mode: "explicit" }, completionLocalNodeId: "node-1",
+    completionEndpointId: "endpoint-cardless",
+  });
+  expect(h.dispatchedInvocations[0]?.metadata?.completionFlightId).toBe("flight-1");
 });
