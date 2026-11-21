@@ -1,4 +1,5 @@
-import type { HostLaunchAdmission } from "./host-launch-admission.js";
+import { withLiveAcpWorker } from "./acp-agent-invocation.js";
+import { HostLaunchDeferred, type HostLaunchAdmission } from "./host-launch-admission.js";
 import { deferredDispatchCheckedAt } from "./broker-dispatch-recovery-service.js";
 import { withManagedPermissionContext } from "./managed-permission.js";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
@@ -185,7 +186,7 @@ export type BrokerLocalInvocationServiceOptions = {
   runtime: LocalInvocationRuntime;
   endpointResolver: LocalInvocationEndpointResolver;
   activeInvocationTasks: Map<string, Promise<void>>;
-  launchAdmission?: Pick<HostLaunchAdmission, "wait">;
+  launchAdmission?: Pick<HostLaunchAdmission, "wait" | "reserve">;
   /** Physical transport liveness, independent of the most recent turn result. */
   isLocalAgentEndpointAlive?: (endpoint: AgentEndpoint) => boolean;
   /**
@@ -327,7 +328,11 @@ export class BrokerLocalInvocationService {
       invocationTargetSessionId(invocation),
     );
 
-    const initialFlightId = this.options.runtime.flightForInvocation(invocation.id)?.id;
+    const initial = this.options.runtime.flightForInvocation(invocation.id);
+    const outcome = initial?.metadata?.dispatchOutcome;
+    const needsReplacement = typeof outcome === "object" && outcome !== null && "reason" in outcome
+      && outcome.reason === "acp_worker_replacement";
+    const initialFlightId = initial?.id;
     if (!initialFlightId) return;
     let aborted = false;
     let admittedAt: number | undefined;
@@ -364,6 +369,14 @@ export class BrokerLocalInvocationService {
         // The resolver may already have reserved a start for a wake. A turn
         // queued behind another on this endpoint needs a new host decision.
         if (this.options.runtime.flightForInvocation(invocation.id)?.id !== initialFlightId) return;
+        const owner = endpoint!;
+        const gate = this.options.launchAdmission;
+        if (gate && !needsReplacement && owner.transport.endsWith("_acp") && await withLiveAcpWorker(owner.id, () => gate.reserve(), async () => {
+          this.#waitingToLaunch.delete(invocation.id);
+          if (this.options.runtime.flightForInvocation(invocation.id)?.id === initialFlightId) {
+            await this.executeOnEndpoint(invocation, owner, previousEndpoint);
+          }
+        })) return;
         const freshReservation = admittedAt !== undefined && this.now() - admittedAt < 2_000 && !previousTask;
         if (!freshReservation && localWorker && !await admit()) return;
         await this.executeOnEndpoint(invocation, endpoint, previousEndpoint);
@@ -850,6 +863,24 @@ export class BrokerLocalInvocationService {
       priorEndpointState,
     } = input;
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof HostLaunchDeferred) {
+      // The pool refused a replacement before closing the prior client or
+      // submitting a prompt. Only that pre-effect refusal permits replay.
+      const stillCurrent = () => {
+        const flight = this.options.runtime.flightForInvocation(invocation.id);
+        return flight?.id === runningFlight.id && flight.state === "running";
+      };
+      if (!stillCurrent()) return;
+      const checkedAt = this.now();
+      this.options.deferInvocationRetry?.(invocation.id, error.retryAt);
+      await this.options.transitionInvocation(invocation.id, {
+        state: "queued", summary: error.message, metadata: {
+          dispatchOutcome: { status: "not_submitted", reason: "acp_worker_replacement", checkedAt },
+        },
+      }, stillCurrent);
+      await this.options.persistEndpointWithoutRecovery({ ...runningEndpoint, state: priorEndpointState });
+      return;
+    }
     if (isCodexAppServerControlError(error) && error.submissionUnknown) {
       // The prompt may already have been accepted. Keep that uncertainty
       // durable and never turn a missing control reply into a replay decision.

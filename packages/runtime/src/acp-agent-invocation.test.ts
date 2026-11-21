@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   acpTurnCeilingMs,
+  withLiveAcpWorker,
   invokeAcpAgent,
   shutdownAcpAgentSession,
   shutdownAllAcpAgentSessions,
@@ -132,6 +133,15 @@ for await (const line of rl) {
     expect(first.sessionId).toBe("provider-session-42");
     const identity = JSON.parse(readFileSync(logPath, "utf8").split("\n").find(line => line.startsWith("identity:"))!.slice("identity:".length));
     expect(identity).toEqual({ agent: common.sessionId, managed: "1", cwd: tempRoot });
+
+    // A changed fingerprint would normally close the old client. Admission
+    // refusal must precede that close, so the original session stays usable.
+    let reservations = 0;
+    const refuse = async () => { reservations++; throw new Error("pressure hold"); };
+    await expect(withLiveAcpWorker(common.poolKey, refuse, async () => {
+      await invokeAcpAgent({ ...common, adapterOptions: { ...common.adapterOptions, model: "changed" } });
+    })).rejects.toThrow("pressure hold");
+    expect(reservations).toBe(1);
 
     const second = await invokeAcpAgent({ ...common, prompt: "hello again" });
     expect(second.sessionId).toBe("provider-session-42");
