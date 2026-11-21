@@ -2248,7 +2248,9 @@ export class FileBackedBrokerJournal {
         }
         if ((entry.flight.metadata?.resultReply as { status?: unknown } | undefined)?.status === "pending") {
           this.pendingResultFlights.set(entry.flight.invocationId, entry.flight);
-        } else {
+        } else if (!entry.preserveCurrent || this.pendingResultFlights.get(entry.flight.invocationId)?.id === entry.flight.id) {
+          // A record that leaves another flight current (a closed twin copy)
+          // leaves that flight's result pending.
           this.pendingResultFlights.delete(entry.flight.invocationId);
         }
         return;

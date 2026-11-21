@@ -24,16 +24,19 @@ import {
   endpointStartedAt,
 } from "./broker-endpoint-selection.js";
 import {
+  closedAsSupersededTwin,
+  isSupersededTwinCopy,
   isTerminalFlightState,
   staleLocalEndpointReason,
   staleWorkingFlightFailure,
+  supersedingTwinFlight,
 } from "./broker-local-invocation-helpers.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
 type FlightLifecycleRuntime = {
   snapshot(): RuntimeSnapshot;
   peek?(): Readonly<RuntimeSnapshot>;
-  upsertFlight(flight: FlightRecord): Promise<void>;
+  upsertFlight(flight: FlightRecord, options?: { preserveCurrent?: boolean }): Promise<void>;
 };
 
 type FlightLifecycleJournal = {
@@ -283,7 +286,8 @@ function normalizeRecordedFlight(
 export class BrokerFlightLifecycleService {
   constructor(private readonly options: BrokerFlightLifecycleServiceOptions) {}
 
-  readonly recordFlight = async (flight: FlightRecord, eligible?: () => boolean): Promise<void> => {
+  /** Resolves true when a record was written. */
+  readonly recordFlight = async (flight: FlightRecord, eligible?: () => boolean): Promise<boolean> => {
     const invocation = this.options.invocationFor(flight.invocationId)
       ?? this.options.runtime.snapshot().invocations[flight.invocationId];
     // Single chokepoint before journal/sqlite persistence, work-item promotion,
@@ -293,6 +297,7 @@ export class BrokerFlightLifecycleService {
     );
     let didRecordFlight = false;
     let previousFlight: FlightRecord | undefined;
+    const twinCopy = isSupersededTwinCopy(this.options.runtime.peek?.() ?? this.options.runtime.snapshot(), flightToRecord);
     await this.options.durableStore.runWrite(async () => {
       // Recheck the caller's observation after acquiring the canonical writer.
       if (eligible && !eligible()) return;
@@ -304,7 +309,9 @@ export class BrokerFlightLifecycleService {
         || previous.requesterId !== flightToRecord.requesterId)) {
         throw new Error("completion_flight_identity_mismatch");
       }
-      if (invocation && hasExplicitCompletion(invocation)) {
+      // A twin copy repeats an outcome the current flight already settled
+      // under the completion contract, so it skips the contract's gates.
+      if (invocation && hasExplicitCompletion(invocation) && !twinCopy) {
         if (!previous) throw new Error("completion_flight_unknown");
         if (this.options.journal.getCurrentFlightForInvocation
           && this.options.journal.getCurrentFlightForInvocation(invocation.id)?.id !== flightToRecord.id) return;
@@ -355,11 +362,16 @@ export class BrokerFlightLifecycleService {
           ...(previous.metadata?.terminalReport ? { terminalReport: previous.metadata.terminalReport } : {}),
         } };
       }
-      if (!previous?.metadata?.terminalReport) {
-        flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
+      if (twinCopy) {
+        const { terminalReport: _report, workPromotion: _promotion, ...metadata } = flightToRecord.metadata ?? {};
+        flightToRecord = { ...flightToRecord, metadata };
+      } else {
+        if (!previous?.metadata?.terminalReport) {
+          flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
+        }
+        flightToRecord = this.options.prepareTaskReady?.(previous, flightToRecord, invocation) ?? flightToRecord;
+        flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       }
-      flightToRecord = this.options.prepareTaskReady?.(previous, flightToRecord, invocation) ?? flightToRecord;
-      flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       if (previous && isDuplicateFlightUpdate(previous, flightToRecord)) {
         return;
       }
@@ -370,17 +382,19 @@ export class BrokerFlightLifecycleService {
         return;
       }
 
+      // A twin copy never becomes the invocation's current flight: the twin
+      // keeps its dispatch, pending result reply and work promotion.
       const entries = await this.options.durableStore.commitEntries(
-        { kind: "flight.record", flight: flightToRecord },
+        { kind: "flight.record", flight: flightToRecord, ...(twinCopy ? { preserveCurrent: true } : {}) },
         async () => {
-          await this.options.runtime.upsertFlight(flightToRecord);
+          await this.options.runtime.upsertFlight(flightToRecord, twinCopy ? { preserveCurrent: true } : undefined);
         },
         { enqueueProjection: false },
       );
       await this.options.durableStore.applyProjectedEntries(entries);
       didRecordFlight = true;
     });
-    if (!didRecordFlight) return;
+    if (!didRecordFlight) return false;
 
     // Start delivery before unrelated endpoint/work bookkeeping can fail. The
     // durable intent remains recoverable even when this process stops here.
@@ -390,6 +404,7 @@ export class BrokerFlightLifecycleService {
       });
     }
     await this.reconcileMessageDeliveriesForFlight(flightToRecord, invocation);
+    if (twinCopy) return true;
     if (this.options.onFlightRecorded) {
       try {
         await this.options.onFlightRecorded(previousFlight, flightToRecord, invocation);
@@ -444,6 +459,11 @@ export class BrokerFlightLifecycleService {
         error instanceof Error ? error.message : String(error),
       );
     }
+
+    if (isTerminalFlightState(flightToRecord.state) && !isTerminalFlightState(previousFlight?.state ?? "queued")) {
+      await this.closeSupersededTwins(flightToRecord, invocation);
+    }
+    return true;
   };
 
   readonly reconcileStaleLocalDeliveries = async (): Promise<void> => {
@@ -495,12 +515,42 @@ export class BrokerFlightLifecycleService {
     }, { activeOnly: true });
   };
 
+  /** Closes open flights that this newly finished flight took over. */
+  private async closeSupersededTwins(twin: FlightRecord, invocation: InvocationRequest | undefined): Promise<void> {
+    // Operator-owned tasks settle through their own answer path.
+    if (invocation?.metadata?.humanOwned === true) return;
+    const snapshot = this.options.runtime.peek?.() ?? this.options.runtime.snapshot();
+    const open = Object.values(snapshot.flights).filter((flight) => (
+      flight.id !== twin.id
+      && flight.invocationId === twin.invocationId
+      && supersedingTwinFlight(snapshot, flight)?.id === twin.id
+    ));
+    if (open.length === 0 || this.options.isInvocationActive(twin.invocationId)) return;
+    for (const flight of open) {
+      try {
+        await this.recordFlight(closedAsSupersededTwin(flight, twin, this.now()));
+      } catch (error) {
+        this.options.warn?.(
+          `[openscout-runtime] failed to close flight ${flight.id} superseded by ${twin.id}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+  }
+
   readonly reconcileStaleWorkingFlights = async (): Promise<void> => {
     const snapshot = this.options.runtime.snapshot();
     const now = this.now();
 
     for (const flight of Object.values(snapshot.flights)) {
       if (snapshot.invocations[flight.invocationId]?.metadata?.humanOwned === true) continue;
+      const twin = supersedingTwinFlight(snapshot, flight);
+      if (twin && !this.options.isInvocationActive(flight.invocationId)) {
+        if (await this.recordFlight(closedAsSupersededTwin(flight, twin, now))) {
+          this.options.warn?.(`[openscout-runtime] closed flight ${flight.id}: superseded by ${twin.state} flight ${twin.id}`);
+        }
+        continue;
+      }
       const failure = staleWorkingFlightFailure(snapshot, flight, {
         isInvocationActive: this.options.isInvocationActive,
         now,
