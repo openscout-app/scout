@@ -557,8 +557,8 @@ ForInvocation` settles that debt for the transports that can be asked directly
       // Codex guards its own thread: the revive below parks on the lock.
       if (probe.held && session.harness === "claude") {
         throw new Error(
-          `session_live_unbound: Claude session ${session.sessionId} is running, but not in Herdr, Orca, tmux or a terminal `
-            + "Scout can type into; nothing was started",
+          `session_live_unbound: Claude session ${session.sessionId} is running, but not in Herdr, Orca, tmux, a terminal `
+            + "Scout can type into, or with the Scout channel; nothing was started",
         );
       }
       return null;

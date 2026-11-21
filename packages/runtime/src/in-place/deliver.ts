@@ -16,6 +16,12 @@ import { callLattices, submitLatticesComposer, type LatticesCall } from "./latti
 //   herdr    — `herdr agent prompt`, which submits through Herdr's agent surface.
 //   orca     — `orca terminal send --enter`, Orca's own terminal input.
 //   tmux     — a bracketed paste and Enter, the dispatch Scout uses for its panes.
+//   channel  — a Claude session running the Scout channel (claude-scout's
+//              `scout channel` MCP server). The words go in as a channel
+//              notification through the socket named by the session id
+//              (claude-channel-socket.ts): no terminal, pane or composer, so a
+//              session in a plain terminal tab or a background job is reached,
+//              and nothing a person is typing can be overwritten.
 //   terminal — a Claude session in a plain terminal tab, typed into by its tty
 //              through Lattices' computer-use surface.
 // A Codex thread held by the ChatGPT app's Codex (its app-server is stdio-only,
@@ -54,12 +60,16 @@ import {
   type ProcessHostLocation,
 } from "./process-host.js";
 import { askScoutApp, type ScoutAppReply } from "./scout-app-socket.js";
+import { askClaudeChannel, isClaudeChannelSessionId, type ClaudeChannelReply } from "./claude-channel-socket.js";
 
-export type InPlaceHost = "herdr" | "orca" | "tmux" | "terminal";
-export type InPlaceVia = "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
+export type InPlaceHost = "herdr" | "orca" | "tmux" | "channel" | "terminal";
+export type InPlaceVia = "herdr" | "orca" | "tmux" | "claude-channel" | "lattices" | "scout-app";
 
-/** The preferred order when more than one host holds a session. */
-export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "terminal"];
+/**
+ * The preferred order when more than one host holds a session. The channel
+ * comes before the plain terminal: it needs no keystrokes and no composer read.
+ */
+export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "channel", "terminal"];
 
 export type InPlaceDelivery =
   | { ok: true; via: InPlaceVia; location: string; delivered?: "draft" }
@@ -126,6 +136,8 @@ export type DeliverInPlaceDeps = {
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
+  /** Asks the session's Scout channel; injectable for tests. Never rejects. */
+  askClaudeChannel?: (request: { op: "ping"; sessionId: string } | { op: "deliver"; sessionId: string; body: string }) => Promise<ClaudeChannelReply>;
   /** Preferred host order; defaults to OPENSCOUT_IN_PLACE_ORDER, then IN_PLACE_HOSTS. */
   order?: readonly InPlaceHost[];
 };
@@ -183,6 +195,8 @@ type Candidates = {
   herdr: HerdrPaneMatch | null;
   orca: { terminalHandle: string; paneKey: string | null } | null;
   tmux: { target: string; location: string } | null;
+  /** A Scout channel answers for this exact session. */
+  channel: boolean;
   /** The Claude process, for typing into a plain terminal tab. */
   terminalPid: number | null;
   /** Claude's own record of the live process, which carries its activity. */
@@ -201,7 +215,7 @@ async function gatherInPlaceCandidates(
   deps: DeliverInPlaceDeps,
 ): Promise<GatheredCandidates> {
   const { sessionId, harness } = input;
-  const candidates: Candidates = { herdr: null, orca: null, tmux: null, terminalPid: null, claude: null, held: false };
+  const candidates: Candidates = { herdr: null, orca: null, tmux: null, channel: false, terminalPid: null, claude: null, held: false };
 
   // Herdr names the session itself when its integration is installed.
   if (input.requireExactHarness && !harness) return { ok: false, code: "session_runtime_unobserved" };
@@ -237,8 +251,9 @@ async function gatherInPlaceCandidates(
       pids.push(record.pid);
       candidates.claude = record;
       // A process whose pane could not be shown to hold it is open, but
-      // neither that pane nor its terminal is a place to type.
-      if (!record.paneUnverified) candidates.terminalPid = record.pid;
+      // neither that pane nor its terminal is a place to type. A background
+      // job has no tab of its own: its tty belongs to Claude's job runner.
+      if (!record.paneUnverified && record.kind !== "bg") candidates.terminalPid = record.pid;
       if (record.tmux && !record.paneUnverified) {
         candidates.tmux = {
           target: record.tmux.pane ?? record.tmux.session,
@@ -249,6 +264,16 @@ async function gatherInPlaceCandidates(
   }
   if (!harness || harness === "codex") {
     pids.push(...await (deps.codexThreadPids ?? codexThreadHolderPids)(sessionId).catch(() => []));
+  }
+  // A channel's answer counts only beside Claude's own record of the session:
+  // the record must be live, not Scout's copy, and held by the very process
+  // the channel runs in. A channel left naming a session its process has
+  // moved on from (/clear, /resume), or running in Scout's background copy,
+  // is never taken for the operator's session.
+  if (candidates.claude && isClaudeChannelSessionId(sessionId)
+    && !(deps.ownSessionIds ?? []).includes(sessionId)) {
+    const ping = await claudeChannel(deps)({ op: "ping", sessionId }).catch(() => null);
+    candidates.channel = ping?.ok === true && ping.hostPid === candidates.claude.pid;
   }
   candidates.held = pids.length > 0;
   for (const pid of pids) {
@@ -342,6 +367,9 @@ export async function probeInPlace(
         activity = draft === undefined ? "unknown" : draft ? "composing" : "idle";
       }
       return { live: true, via: "tmux", location: candidates.tmux.location, activity };
+    }
+    if (host === "channel" && candidates.channel) {
+      return { live: true, via: "claude-channel", location: channelLocation(sessionId), activity: await harnessActivity() };
     }
   }
 
@@ -609,6 +637,7 @@ export async function deliverInPlace(
       }
       return typeAt({ via: "tmux", location }, before, () => (deps.promptTmux ?? promptTmuxPane)(target, body));
     }
+    if (host === "channel" && candidates.channel) return deliverToClaudeChannel(sessionId, body, candidates, deps, before);
   }
 
   const managed = await deliverToManagedTmux({ sessionId, harness, body }, deps, before);
@@ -652,6 +681,47 @@ export async function deliverInPlace(
   const ownTty = await (deps.selfTty ?? callerTty)().catch(() => null);
   if (tty === ownTty) return { ok: false, code: "not_live" };
   return typeWithEmptyComposer({ via: "lattices", location: `terminal ${tty}` }, deps, before, () => (deps.typeIntoTty ?? typeIntoTtyWithLattices)(tty, body));
+}
+
+function channelLocation(sessionId: string): string {
+  return `Claude channel ${sessionId.slice(0, 8)}`;
+}
+
+/**
+ * The channel puts the words beside the conversation, not in the composer, so
+ * no composer read is needed and a busy turn takes them at its next step. A
+ * session sitting at a permission prompt or a question is still refused: the
+ * operator answers that first.
+ */
+async function deliverToClaudeChannel(
+  sessionId: string,
+  body: string,
+  candidates: Candidates,
+  deps: DeliverInPlaceDeps,
+  before?: BeforeKeystroke,
+): Promise<InPlaceDelivery> {
+  const place = { via: "claude-channel" as const, location: channelLocation(sessionId) };
+  if (candidates.claude?.status === "waiting") return { ok: false, code: "session_blocked", ...place };
+  try {
+    await before?.(place);
+  } catch (error) {
+    return { ok: false, code: "in_place_failed", ...place, nothingSent: true, detail: errorText(error) };
+  }
+  const reply = await claudeChannel(deps)({ op: "deliver", sessionId, body })
+    .catch((error): ClaudeChannelReply => ({ ok: false, code: "channel_no_answer", message: errorText(error) }));
+  if (reply.ok) return { ok: true, ...place };
+  return {
+    ok: false,
+    code: "in_place_failed",
+    ...place,
+    detail: reply.message,
+    // Only silence after the words were written leaves them possibly delivered.
+    ...(reply.code === "channel_no_answer" ? {} : { nothingSent: true as const }),
+  };
+}
+
+function claudeChannel(deps: DeliverInPlaceDeps): NonNullable<DeliverInPlaceDeps["askClaudeChannel"]> {
+  return deps.askClaudeChannel ?? ((request) => askClaudeChannel(request));
 }
 
 async function promptHerdrCandidate(

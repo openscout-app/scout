@@ -156,6 +156,18 @@ describe("invokeSessionInPlace", () => {
     expect(session.progress).toEqual(["Delivered to app:0199aaaa in Herdr work · w1:p2. Waiting for its reply."]);
   });
 
+  test("an ask through a Claude channel skips the transcript and is answered through Scout", async () => {
+    const CHANNEL = { via: "claude-channel", location: "Claude channel 0199aaaa" } as const;
+    const session = harness({
+      probes: [{ live: true, ...CHANNEL, activity: "idle" }],
+      deliveries: [{ ok: true, ...CHANNEL }],
+      explicit: [null, "Built clean."],
+    });
+    expect(await session.run()).toEqual({ output: "Built clean.", delivery: { ...CHANNEL, heldMs: 0, replySource: "scout_reply" } });
+    expect(session.typed).toEqual(["the ask, reply with scout reply. Scout task inv-1"]);
+    expect(session.readFrom).toEqual([]);
+  });
+
   test("a busy session is not typed into until it is idle, and the hold is reported once", async () => {
     const session = harness({ probes: [live("busy"), live("busy"), live("busy"), live("idle")], replies: [{ state: "answered", text: "done" }] });
     const result = await session.run();
