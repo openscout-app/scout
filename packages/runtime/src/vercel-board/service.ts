@@ -693,8 +693,10 @@ export class BrokerVercelBoardService {
    * declared role, made and written by the operator or Scout, goes to the
    * longest-declared idle agent with that role. Demand comes from the mirror;
    * the board's own copy is checked again before the claim. Scout matches a
-   * task once: after any claim of it, a release, a failure or a lost lease,
-   * it waits for the operator.
+   * task once: only a task the board has never seen claimed (epoch 0). After
+   * any claim of it, by any host or anyone else, then a release, a failure or
+   * a lost lease, it waits for the operator. The rule reads the board, so
+   * every host connected to it agrees.
    */
   async match(live: LiveConnection): Promise<void> {
     const { config, store, mirror } = live;
@@ -710,14 +712,14 @@ export class BrokerVercelBoardService {
       const busy = new Set(store.activeCustody(config.id).map(row => row.agentId));
       for (const channel of channels) for (const id of mirror.openTasks(config.id, channel)) {
         const copy = mirror.message(config.id, id);
-        if (!copy?.task || copy.re !== null || copy.task.state !== "ready") continue;
+        if (!copy?.task || copy.re !== null || copy.task.state !== "ready" || copy.task.epoch !== 0) continue;
         const role = vercelBoardRoleOf(config, copy.task.for);
         if (!role || role === config.profile || !this.writtenByOperator(config, copy.by, copy.task.owner)) continue;
         if (store.latestCustody(config.id, id)) continue;
         const agent = declared.find(entry => entry.role === role && !busy.has(entry.agentId));
         if (!agent) continue;
         const root = await live.transport.message(id).catch(() => null);
-        if (!root?.task || root.re !== null || root.deleted || root.task.state !== "ready" || vercelBoardRoleOf(config, root.task.for) !== role
+        if (!root?.task || root.re !== null || root.deleted || root.task.state !== "ready" || root.task.epoch !== 0 || vercelBoardRoleOf(config, root.task.for) !== role
           || !this.writtenByOperator(config, root.by, root.task.owner)) continue;
         busy.add(agent.agentId);
         // A refusal or a failed dispatch leaves a custody row, so the task is not matched again.
