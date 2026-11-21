@@ -51,6 +51,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/shows": "local",
   "GET /v1/posts": "local",
   "POST /v1/posts": "local",
+  "GET /v1/feed/work": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
   "POST /v1/access/admin": "local",
