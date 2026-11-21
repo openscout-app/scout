@@ -406,6 +406,18 @@ test("duplicate custodian on one host: the local lease admits one runtime per (b
   expect(() => first.renew("c1", "local:user:operator", grant)).toThrow("no longer holds");
 });
 
+test("a lapsed lease nobody took is still this runtime's: a stall past the TTL renews instead of dropping the connection", () => {
+  const db = database();
+  const time = clock();
+  const lease = new VercelBoardCustodianLease(db, "first", time.now);
+  const grant = lease.claim("c1", "local:user:operator");
+  time.advance(5 * 60_000); // the host slept
+  const renewed = lease.renew("c1", "local:user:operator", grant);
+  expect(renewed.generation).toBe(grant.generation);
+  expect(renewed.expiresAt).toBe(time.now() + 30_000);
+  expect(() => new VercelBoardCustodianLease(db, "second", time.now).claim("c1", "local:user:operator")).toThrow(VercelBoardCustodianError);
+});
+
 test("experimental board marker: a second node refuses without takeover, and a racing write is a conflict", async () => {
   const h = harness();
   const conn = { id: "c1", principal: "local:user:operator", probeChannel: "scout-probe" };
@@ -466,7 +478,7 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   cleanup.push(() => { void service.stop(); });
   const connect = (extra: Record<string, unknown> = {}) => service.connect({ url: URL_, id: "c1", channels: ["work"], credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" }, ...extra });
   const workItems = () => [...records.values()].filter(record => record.kind === "work_item");
-  return { time, board, service, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
+  return { time, board, service, db, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
 }
 
 test("connect reads the principal, makes the channels and a room for each, and is verified only after the probe task completes", async () => {
@@ -485,6 +497,23 @@ test("a team board URL goes to the Board worker, never to the HTTP transport", a
   await expect(h.service.connect({ url: "https://api.vercel.com/v1/messageboard/boards/scout?teamId=team_1", credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" } }))
     .rejects.toMatchObject({ status: 503 });
   expect(h.board.requests.length).toBe(0);
+});
+
+test("a connection whose local lease was taken comes back once the lease is free, without a restart", async () => {
+  const h = serviceHarness();
+  await h.connect();
+  const principal = "local:user:operator";
+  h.time.advance(31_000);
+  const other = new VercelBoardCustodianLease(h.db, "other-runtime", h.time.now);
+  const taken = other.claim("c1", principal);
+  await expect(h.service.pump("c1")).rejects.toMatchObject({ code: "custodian_lost" });
+  expect((await h.service.status("c1"))[0]).toMatchObject({ state: "not_custodian" });
+  // Still held by the other runtime: the retry leaves it dark.
+  expect(await h.service.reclaim("c1")).toBe("not_custodian");
+  other.release("c1", principal, taken);
+  expect(await h.service.reclaim("c1")).not.toBe("not_custodian");
+  await h.service.pump("c1");
+  expect((await h.service.status("c1"))[0]!.state).not.toBe("not_custodian");
 });
 
 test("a refused credential names the fix and the connection is not saved", async () => {

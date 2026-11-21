@@ -94,6 +94,8 @@ const FOLLOW_WAIT_SECONDS = 300;
 const TICK_MS = 5_000;
 const OUTBOX_MS = 15_000;
 const RECONCILE_MS = 10 * 60_000;
+/** How often a connection this node holds, but whose local lease another runtime has, tries to take the lease again. */
+const RECLAIM_MS = 30_000;
 const LEASE_RENEW_MS = 10_000;
 const MAX_PLAN_TASKS = 50;
 /**
@@ -129,6 +131,7 @@ export class BrokerVercelBoardService {
   private readonly file: VercelBoardConnectionFile;
   private readonly lease: VercelBoardCustodianLease;
   private readonly live = new Map<string, LiveConnection>();
+  private readonly reclaims = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly actors = new Set<string>();
   private readonly now: () => number;
 
@@ -148,6 +151,8 @@ export class BrokerVercelBoardService {
   }
 
   async stop(): Promise<void> {
+    for (const timer of this.reclaims.values()) clearTimeout(timer);
+    this.reclaims.clear();
     for (const live of this.live.values()) this.close(live, "stopped");
     this.live.clear();
   }
@@ -194,11 +199,12 @@ export class BrokerVercelBoardService {
   private async open(config: VercelBoardConnectionConfig, prepared?: { credential: VercelBoardCredential; worker: VercelBoardWorkerSupervisor }): Promise<LiveConnection> {
     const existing = this.live.get(config.id);
     if (existing) this.close(existing, "stopped");
+    this.clearReclaim(config.id);
     const live = this.build(config, prepared);
     try {
       live.grant = this.lease.claim(config.id, config.principal);
     } catch (error) {
-      if (error instanceof VercelBoardCustodianError) { live.state = "not_custodian"; live.detail = error.message; this.live.set(config.id, live); return live; }
+      if (error instanceof VercelBoardCustodianError) { live.state = "not_custodian"; live.detail = error.message; this.live.set(config.id, live); this.reclaimLater(live); return live; }
       throw error;
     }
     this.live.set(config.id, live);
@@ -279,8 +285,11 @@ export class BrokerVercelBoardService {
   /** Name the state for an error. Returns how long to wait, when the error says. */
   private classify(live: LiveConnection, error: unknown): number | undefined {
     if (error instanceof VercelBoardCustodianError) {
+      if (live.state === "not_custodian") return;
       this.close(live, "not_custodian");
       live.detail = error.message;
+      // A marker naming another node is an operator's takeover: not retried.
+      if (error.code !== "marker_moved") this.reclaimLater(live);
       return;
     }
     if (error instanceof VercelBoardHttpError) {
@@ -328,7 +337,7 @@ export class BrokerVercelBoardService {
     if (live.markerId) {
       const marker = await live.transport.message(live.markerId);
       if (marker && markerNamesOtherNode(marker.labels, this.options.nodeId)) {
-        throw new VercelBoardCustodianError("custodian_lost", "The custodian marker on the board names another node. This node stopped following.");
+        throw new VercelBoardCustodianError("marker_moved", "The custodian marker on the board names another node. This node stopped following.");
       }
     }
     if (live.readsBlockedUntil > this.now()) return;
@@ -337,6 +346,33 @@ export class BrokerVercelBoardService {
       if (!live.store.cursor(live.config.id, channel) || live.phases.has(channel)) continue;
       await live.follower.refresh(channel);
     }
+  }
+
+  /**
+   * A connection this node holds stays this node's. When its local lease is
+   * lost (another runtime on this host took it, or a renew failed), keep
+   * trying to take it back instead of staying dark until a restart.
+   */
+  private reclaimLater(live: LiveConnection): void {
+    if (this.options.autoStart === false) return;
+    this.clearReclaim(live.config.id);
+    this.reclaims.set(live.config.id, setTimeout(() => {
+      this.reclaims.delete(live.config.id);
+      void this.reclaim(live.config.id).catch(error => this.options.warn?.(`[vercel-board] ${live.config.id} did not restart`, error));
+    }, RECLAIM_MS));
+  }
+
+  private clearReclaim(connectionId: string): void {
+    const timer = this.reclaims.get(connectionId);
+    if (timer) clearTimeout(timer);
+    this.reclaims.delete(connectionId);
+  }
+
+  /** Test and CLI hook: take the local lease again for a connection that lost it. Returns the new state. */
+  async reclaim(connectionId: string): Promise<VercelBoardConnectionState | undefined> {
+    const live = this.live.get(connectionId);
+    if (!live || live.state !== "not_custodian") return live?.state;
+    return (await this.open(live.config)).state;
   }
 
   /** Test and CLI hook: one read per followed channel, one custody pass, one outbox pass. */
