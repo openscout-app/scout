@@ -564,13 +564,15 @@ export class BrokerA2AService {
         a2aCancelledAt: completedAt,
       },
     };
+    const currentFlight = () => this.options.currentFlightForInvocation
+      ? this.options.currentFlightForInvocation(found.flight.invocationId)
+      : this.taskById(taskId)?.flight;
     await this.options.recordFlight(cancelled, () => {
-      const latest = this.taskById(taskId)?.flight;
-      return latest?.state === found.flight.state && !active()
-        && (this.options.currentFlightForInvocation?.(found.flight.invocationId)?.id ?? latest.id) === latest.id;
+      const latest = currentFlight();
+      return latest?.id === taskId && latest.state === found.flight.state && !active();
     });
-    const recorded = this.taskById(taskId)?.flight;
-    if (!recorded || !isA2ATerminalTaskState(a2aTaskStateFromFlightState(recorded.state))) {
+    const recorded = currentFlight();
+    if (recorded?.id !== taskId || !isA2ATerminalTaskState(a2aTaskStateFromFlightState(recorded.state))) {
       throw Object.assign(new Error(`A2A task ${taskId} changed before it could be cancelled.`), { code: -32004, data: { taskId } });
     }
     return a2aTaskForFlight(recorded, found.invocation);

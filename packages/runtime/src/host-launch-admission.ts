@@ -31,9 +31,15 @@ const CAUTIOUS_START_MS = 10_000;
 const RECOVERY_MS = 30_000;
 
 export async function readMacHostPressure(): Promise<HostPressure> {
-  const level = typeof Bun !== "undefined" ? nativeDarwinProcessSource().memoryPressureLevel() : Number((await execSystemFile("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], {
-    timeoutMs: 1_000, maxStdoutBytes: 32, maxStderrBytes: 256,
-  })).stdout.trim());
+  let level: number;
+  if (typeof Bun !== "undefined") {
+    level = nativeDarwinProcessSource().memoryPressureLevel();
+  } else {
+    const result = await execSystemFile("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], {
+      timeoutMs: 1_000, maxStdoutBytes: 32, maxStderrBytes: 256,
+    });
+    level = Number(result.stdout.trim());
+  }
   switch (level) {
     case 1: return "normal";
     case 2: return "warning";

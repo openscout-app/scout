@@ -320,6 +320,21 @@ describe("BrokerA2AService", () => {
       expect(recordedFlights.map(flight => flight.state)).toEqual(["cancelled"]);
     });
 
+    test("a worker admitted during a pending cancel keeps its flight", async () => {
+      let executing = false;
+      const { runtime, service } = createService(runtime => ({
+        currentFlightForInvocation: id => runtime.flightForInvocation(id),
+        isInvocationActive: () => executing,
+        async recordFlight(proposed, eligible) {
+          executing = true;
+          if (eligible?.()) await runtime.upsertFlight(proposed);
+        },
+      }));
+      await runtime.commitInvocation(invocation, testFlight({ state: "queued", metadata: notSubmitted }));
+      expect((await cancel(service)).error?.code).toBe(-32004);
+      expect(runtime.flightForInvocation(invocation.id)?.state).toBe("queued");
+    });
+
     test("refuses a waking flight that another executor holds", async () => {
       const { runtime, service, recordedFlights } = createService(() => ({ isInvocationActive: () => true }));
       await runtime.commitInvocation(invocation, testFlight({ state: "waking", metadata: notSubmitted }));
