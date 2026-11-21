@@ -406,6 +406,19 @@ test("duplicate custodian on one host: the local lease admits one runtime per (b
   expect(() => first.renew("c1", "local:user:operator", grant)).toThrow("no longer holds");
 });
 
+test("custodian lease: a lapse that nobody took still renews; a release or a newer claim does not", () => {
+  const db = database();
+  const time = clock();
+  const lease = new VercelBoardCustodianLease(db, "first", time.now);
+  const grant = lease.claim("c1", "local:user:operator");
+  time.advance(45_000); // the process stalled past the 30 s TTL, and no other runtime claimed
+  const renewed = lease.renew("c1", "local:user:operator", grant);
+  expect(renewed).toMatchObject({ generation: 1, expiresAt: time.now() + 30_000 });
+  expect(lease.observe("c1", "local:user:operator")).toMatchObject({ generation: 1, heldHere: true });
+  lease.release("c1", "local:user:operator", renewed);
+  expect(() => lease.renew("c1", "local:user:operator", renewed)).toThrow("no longer holds");
+});
+
 test("experimental board marker: a second node refuses without takeover, and a racing write is a conflict", async () => {
   const h = harness();
   const conn = { id: "c1", principal: "local:user:operator", probeChannel: "scout-probe" };
@@ -419,7 +432,7 @@ test("experimental board marker: a second node refuses without takeover, and a r
 
 // ---- service ------------------------------------------------------------------
 
-function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void) {
+function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void, options: { custodianRetryMs?: number } = {}) {
   const cancelled: { id: string; reason: string }[] = [];
   const time = clock();
   const board = new FakeVercelBoard({ now: time.now });
@@ -462,11 +475,12 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
       rooms.set(room.id, current ? { ...current, participantIds: [...new Set([...current.participantIds, ...room.participantIds])] } : room);
     },
     publish: event => { live.push(event); },
+    ...options,
   });
   cleanup.push(() => { void service.stop(); });
   const connect = (extra: Record<string, unknown> = {}) => service.connect({ url: URL_, id: "c1", channels: ["work"], credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" }, ...extra });
   const workItems = () => [...records.values()].filter(record => record.kind === "work_item");
-  return { time, board, service, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
+  return { time, board, db, service, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
 }
 
 test("connect reads the principal, makes the channels and a room for each, and is verified only after the probe task completes", async () => {
@@ -478,6 +492,30 @@ test("connect reads the principal, makes the channels and a room for each, and i
   expect(JSON.stringify(response)).not.toContain(h.board.token);
   expect(h.board.count("POST", "/channels")).toBe(2);
   expect(h.rooms.get(vercelBoardRoomId("c1", "work"))).toMatchObject({ kind: "channel", participantIds: ["operator"], metadata: { vercelBoardChannel: "work" } });
+});
+
+test("a connection that lost its lease opens again on its own, once the other holder lets go", async () => {
+  const h = serviceHarness(undefined, { custodianRetryMs: 1 });
+  await h.connect();
+  await h.service.pump("c1");
+  // This runtime stalls past its TTL, and another runtime on the host takes the lease.
+  h.time.advance(31_000);
+  const other = new VercelBoardCustodianLease(h.db, "other", h.time.now);
+  const theirs = other.claim("c1", "local:user:operator");
+  await expect(h.service.pump("c1")).rejects.toMatchObject({ code: "custodian_lost" });
+  const [lost] = await h.service.status("c1");
+  expect(lost).toMatchObject({ state: "not_custodian" });
+  expect(lost!.detail).toContain("Opening it again in");
+  // While the other runtime holds it, the retries back off and change nothing.
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(other.observe("c1", "local:user:operator")).toMatchObject({ generation: 2 });
+  other.release("c1", "local:user:operator", theirs);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline && (await h.service.status("c1"))[0]?.state === "not_custodian") await new Promise(resolve => setTimeout(resolve, 10));
+  expect((await h.service.status("c1"))[0]?.state).not.toBe("not_custodian");
+  expect(other.observe("c1", "local:user:operator")).toMatchObject({ generation: 3 });
+  await h.service.pump("c1");
+  expect((await h.service.status("c1"))[0]).toMatchObject({ state: "following" });
 });
 
 test("a team board URL goes to the Board worker, never to the HTTP transport", async () => {

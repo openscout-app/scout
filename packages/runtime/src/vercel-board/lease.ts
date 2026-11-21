@@ -5,7 +5,7 @@ import { VercelBoardHttpError, type VercelBoardTransport } from "./client.js";
 import { vercelBoardScopedId } from "./projection.js";
 
 export class VercelBoardCustodianError extends Error {
-  constructor(readonly code: "custodian_held" | "custodian_lost" | "marker_conflict", message: string) {
+  constructor(readonly code: "custodian_held" | "custodian_lost" | "custodian_moved" | "marker_conflict", message: string) {
     super(message);
     this.name = "VercelBoardCustodianError";
   }
@@ -56,12 +56,18 @@ export class VercelBoardCustodianLease {
     })();
   }
 
-  /** Renew, or throw `custodian_lost` when the generation moved on. Call before each unit of Board IO. */
+  /**
+   * Renew, or throw `custodian_lost` when another runtime took the lease or this
+   * one released it. Call before each unit of Board IO. A lease that lapsed with
+   * no other writer is still this runtime's: a stalled process renews late, and
+   * nobody claimed in the gap, since a claim changes the owner and generation.
+   */
   renew(connectionId: string, principal: string, grant: VercelBoardCustodianGrant): VercelBoardCustodianGrant {
     return this.database.transaction(() => {
       const now = this.now();
       const current = this.row(connectionId, principal);
-      if (!current || current.generation !== grant.generation || current.token_hash !== hash(grant.token) || current.expires_at <= now) {
+      if (!current || current.owner_id !== this.ownerId || current.generation !== grant.generation
+        || current.token_hash !== hash(grant.token) || current.expires_at === 0) {
         throw new VercelBoardCustodianError("custodian_lost", `This runtime no longer holds board connection ${connectionId}.`);
       }
       const expiresAt = now + this.ttlMs;

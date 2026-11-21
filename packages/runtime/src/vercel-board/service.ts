@@ -58,6 +58,8 @@ export interface BrokerVercelBoardServiceOptions {
   vercelBoardWorker?: VercelBoardWorkerOptions & { memory?: boolean };
   /** Tests drive the loops by hand. */
   autoStart?: boolean;
+  /** First wait before a connection that lost its lease opens again; it doubles up to a minute. */
+  custodianRetryMs?: number;
   now?: () => number;
   warn?(message: string, error?: unknown): void;
 }
@@ -129,6 +131,10 @@ export class BrokerVercelBoardService {
   private readonly file: VercelBoardConnectionFile;
   private readonly lease: VercelBoardCustodianLease;
   private readonly live = new Map<string, LiveConnection>();
+  /** Pending restarts after a lost lease, and the next wait for each connection. */
+  private readonly retakes = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly retakeWaits = new Map<string, number>();
+  private stopped = false;
   private readonly actors = new Set<string>();
   private readonly now: () => number;
 
@@ -140,6 +146,7 @@ export class BrokerVercelBoardService {
 
   /** Start every connection this node is custodian for. A bad connection does not stop the others. */
   async start(): Promise<void> {
+    this.stopped = false;
     for (const config of await this.file.list().catch(error => { this.options.warn?.("[vercel-board] connection file unreadable", error); return []; })) {
       if (config.custodianNodeId !== this.options.nodeId) continue;
       try { await this.open(config); }
@@ -148,6 +155,9 @@ export class BrokerVercelBoardService {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    for (const timer of this.retakes.values()) clearTimeout(timer);
+    this.retakes.clear();
     for (const live of this.live.values()) this.close(live, "stopped");
     this.live.clear();
   }
@@ -198,7 +208,14 @@ export class BrokerVercelBoardService {
     try {
       live.grant = this.lease.claim(config.id, config.principal);
     } catch (error) {
-      if (error instanceof VercelBoardCustodianError) { live.state = "not_custodian"; live.detail = error.message; this.live.set(config.id, live); return live; }
+      if (error instanceof VercelBoardCustodianError) {
+        live.state = "not_custodian";
+        live.detail = error.message;
+        this.live.set(config.id, live);
+        // Another runtime on this host holds it; take it when that one stops renewing.
+        this.retake(live);
+        return live;
+      }
       throw error;
     }
     this.live.set(config.id, live);
@@ -214,6 +231,31 @@ export class BrokerVercelBoardService {
     if (live.grant) this.lease.release(live.config.id, live.config.principal, live.grant);
     live.grant = undefined;
     live.state = state;
+  }
+
+  /**
+   * Supervise the connection like any long-running process: after a lost lease,
+   * wait, then open it again. The wait doubles while another runtime holds the
+   * lease, up to a minute. Board's own claim leases outlast the wait, and the
+   * claim tokens are in SQLite, so the new connection renews the same claims.
+   * A marker naming another node is a takeover the operator asked for: stay down.
+   */
+  private retake(live: LiveConnection): void {
+    const id = live.config.id;
+    if (this.stopped || this.retakes.has(id) || this.live.get(id) !== live) return;
+    const waitMs = this.retakeWaits.get(id) ?? this.options.custodianRetryMs ?? 5_000;
+    this.retakeWaits.set(id, Math.min(Math.max(waitMs * 2, 1), 60_000));
+    live.detail = `${live.detail ?? "This runtime lost the connection."} Opening it again in ${Math.ceil(waitMs / 1000)}s.`;
+    const timer = setTimeout(() => {
+      this.retakes.delete(id);
+      if (this.stopped || this.live.get(id) !== live) return;
+      this.open(live.config).then(next => { if (live.markerId) next.markerId = live.markerId; }).catch(error => {
+        this.options.warn?.(`[vercel-board] ${id} did not open again`, error);
+        this.retake(this.live.get(id) ?? live);
+      });
+    }, waitMs);
+    timer.unref?.();
+    this.retakes.set(id, timer);
   }
 
   private every(live: LiveConnection, ms: number, work: () => Promise<void>): void {
@@ -271,6 +313,7 @@ export class BrokerVercelBoardService {
 
   private markGood(live: LiveConnection): void {
     live.state = "following";
+    this.retakeWaits.delete(live.config.id);
     live.detail = undefined;
     live.fix = undefined;
     live.lastGoodReadAt = this.now();
@@ -279,8 +322,11 @@ export class BrokerVercelBoardService {
   /** Name the state for an error. Returns how long to wait, when the error says. */
   private classify(live: LiveConnection, error: unknown): number | undefined {
     if (error instanceof VercelBoardCustodianError) {
+      // Every loop sees the loss; the first one to get here handles it.
+      if (live.abort.signal.aborted) return;
       this.close(live, "not_custodian");
       live.detail = error.message;
+      if (error.code !== "custodian_moved") this.retake(live);
       return;
     }
     if (error instanceof VercelBoardHttpError) {
@@ -328,7 +374,7 @@ export class BrokerVercelBoardService {
     if (live.markerId) {
       const marker = await live.transport.message(live.markerId);
       if (marker && markerNamesOtherNode(marker.labels, this.options.nodeId)) {
-        throw new VercelBoardCustodianError("custodian_lost", "The custodian marker on the board names another node. This node stopped following.");
+        throw new VercelBoardCustodianError("custodian_moved", "The custodian marker on the board names another node. This node stopped following.");
       }
     }
     if (live.readsBlockedUntil > this.now()) return;
