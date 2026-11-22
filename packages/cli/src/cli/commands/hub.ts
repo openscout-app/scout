@@ -158,7 +158,7 @@ function runConnect(options: HubOptions, cwd: string): { value: Record<string, u
     "  1. Review and commit .claude/scout/ and .claude/settings.json, then push.",
     "     hub.json holds a write-only token: it can add sealed chunks to your inbox and nothing else.",
     `  2. If the repo's cloud environment limits network access, allow ${host}.`,
-    "  3. Start a cloud session on the repo. It shows up in Scout within about 15 seconds of its first tool call.",
+    "  3. Start a cloud session on the repo. It shows up in Scout within about a minute of its first tool call.",
   ].join("\n");
   return { value: { ...result }, text };
 }
