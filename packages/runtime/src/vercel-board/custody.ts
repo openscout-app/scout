@@ -65,13 +65,26 @@ function blockOf(flight: CustodyFlight): { reason: string; kind: VercelBoardBloc
 }
 
 /**
+ * Whether the runtime published the harness's final output as the agent's
+ * reply. Harnesses that return their answer (a Codex app server, ACP) are told
+ * that their final response is the reply and cannot run `reply --ref`; the
+ * runtime posts that output as a result reply, which is their verb. A
+ * superseded result reply was refused, so it is not one.
+ */
+function repliedByFinalResponse(flight: CustodyFlight): boolean {
+  const intent = flight.metadata?.resultReply as { status?: unknown } | undefined;
+  return !!intent && typeof intent === "object" && (intent.status === "pending" || intent.status === "delivered");
+}
+
+/**
  * How a finished flight settles its task. Only a verb ends it: a final
- * `reply --ref` completes, a failed reply fails. A harness failure fails. A
- * turn that ends without a verb, or a cancel, releases the task; its text
- * stays in Scout and never reads as the task's result.
+ * `reply --ref`, or a final response the runtime published as the reply,
+ * completes; a failed reply fails. A harness failure fails. A turn that ends
+ * without a verb, or a cancel, releases the task; its text stays in Scout and
+ * never reads as the task's result.
  */
 export function settlementOf(flight: CustodyFlight): { outcome: VercelBoardSettleOutcome; result?: string; detail?: string } {
-  const replied = flight.metadata?.completedByBrokerReply === true;
+  const replied = flight.metadata?.completedByBrokerReply === true || repliedByFinalResponse(flight);
   if (flight.state === "completed" && replied) return { outcome: "completed", result: flight.output ?? flight.summary ?? "Done." };
   if (flight.state === "failed") return { outcome: "failed", result: flight.error ?? flight.output ?? flight.summary ?? "The Scout agent failed." };
   if (flight.state === "cancelled") return { outcome: "released", detail: "the Scout flight was cancelled" };
