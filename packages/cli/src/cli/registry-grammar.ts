@@ -34,6 +34,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "session": node("--alias= --all --attach --backend= --cwd= --draft --dry-run --harness= --last --limit= --name= --no-reattach --project= --prompt-file= --request-reply --session-id= --session= --terminal-backend= --title= --tmux=", { "intake": node(), "handoff": node(), "onboard": node(), "list": node(), "ls": node(), "address": node(), "addr": node(), "fork": node(), "touched": node(), "touches": node(), "send": node(), "transfer": node(), "move": node(), "pin": node() }),
   "statusline": node("--delegate --no-delegate", { "claude": node() }),
   "permission-hook": node("", { "claude": node() }),
+  "hub": node("--inbox= --label= --read-token= --write-token=", { "status": node(), "init": node(), "connect": node("", { "claude-code": node() }), "disconnect": node("", { "claude-code": node() }), "collect": node() }),
   "hooks": node("--json", { "status": node(), "apply": node(), "remove": node() }),
   "speak": node("--alias-host= --alias-project= --as= --body-file= --channel= --context-root= --harness= --message-file= --ref= --speak --to= --wake"),
   "voice": node("--thread=", { "status": node(), "talk": node(), "mic": node("", { "on": node(), "off": node(), "toggle": node() }), "speakers": node("", { "on": node(), "off": node(), "toggle": node() }), "stop": node() }),

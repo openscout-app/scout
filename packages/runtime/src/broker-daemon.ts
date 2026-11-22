@@ -2,6 +2,7 @@
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
 import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
+import { HubCollectorService } from "./hub/collector.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
 import type { PostAuthorNamer } from "./broker-posts-http.js";
@@ -2499,6 +2500,10 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
 
 // The Vercel Board adapter. It runs every connection this host made; the
 // credential and claim tokens never leave this host.
+// Scout Hub: mirror cloud sessions sealed to this runtime. Idle until `scout hub init`.
+const hubCollector = process.env.OPENSCOUT_HUB_COLLECTOR === "0"
+  ? null
+  : new HubCollectorService({ log: (message) => console.warn(message) });
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
@@ -4651,6 +4656,7 @@ function startBrokerCoordination(): void {
 
   slackWorkerSupervisor?.start();
   void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
+  hubCollector?.start();
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4679,6 +4685,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
   await vercelBoardService?.stop();
+  await hubCollector?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });

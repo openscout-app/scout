@@ -205,6 +205,12 @@
       "import": "./dist/shared-mcp.js",
       "default": "./dist/shared-mcp.js"
     },
+    "./hub": {
+      "bun": "./src/hub/index.ts",
+      "types": "./dist/hub/index.d.ts",
+      "import": "./dist/hub/index.js",
+      "default": "./dist/hub/index.js"
+    },
     "./support-paths": {
       "bun": "./src/support-paths.ts",
       "types": "./dist/support-paths.d.ts",

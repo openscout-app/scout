@@ -1,0 +1,13 @@
+{
+  "name": "@openscout/hub-inbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scout Hub inbox: a Cloudflare Worker that holds sealed chunks until your runtime collects them",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "bun test src",
+    "dev": "bun src/serve-local.ts",
+    "deploy": "bunx wrangler@4 deploy"
+  }
+}
