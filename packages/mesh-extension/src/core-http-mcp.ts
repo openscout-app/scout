@@ -1,4 +1,4 @@
-import { TaskClosedError, validateTaskAsk, validateTaskReply, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
+import { TaskClosedError, validateTaskAsk, validateTaskReply, REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
 import { principalSchema } from "./identity.ts";
 import { labelBrief, labelFeed, matchingLabelWorks } from "./label-views.ts";
 import { createHash, randomUUID } from 'node:crypto';
@@ -164,12 +164,13 @@ export class CoreHttpAdapter {
       if (a.sessionId || a.deliveryId || a.replyToken) {
         if (!a.ref || !a.sessionId || !a.deliveryId || a.image)
           throw new Error('external reply requires its exact task and correlated return address');
-        return request('/v1/external-sessions/reply', { ...pick(a, ['sessionId','deliveryId','replyToken','body','ref','progress','failed','attachments']), requestId: a.requestId ?? `external-${createHash("sha256").update(JSON.stringify([a.deliveryId, a.progress ? ["progress", a.body] : ["final"]])).digest("hex")}`, ownerId: senderId });
+        return request('/v1/external-sessions/reply', { ...pick(a, ['sessionId','deliveryId','replyToken','body','ref','progress','failed','points','attachments']), requestId: a.requestId ?? `external-${createHash("sha256").update(JSON.stringify([a.deliveryId, a.progress ? ["progress", a.body] : ["final"]])).digest("hex")}`, ownerId: senderId });
       }
       const node = await request('/v1/node');
       if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`runtime requires ${SCOUT_TASKS_CAPABILITY}`);
+      if (a.points?.length && !node.capabilities.includes(REPLY_POINTS_CAPABILITY)) throw new Error(`runtime requires ${REPLY_POINTS_CAPABILITY} for reply points`);
       if (a.image) throw new Error('image paths are host-local; submit inline evidence through a local Scout client');
-      return request('/v1/messages/reply', { ...pick(a, ['ref','to','progress','failed','body','attachments']),
+      return request('/v1/messages/reply', { ...pick(a, ['ref','to','progress','failed','points','body','attachments']),
         requestId: a.requestId ?? `reply-${randomUUID()}`, senderId });
     }
     if (name === 'ask') {

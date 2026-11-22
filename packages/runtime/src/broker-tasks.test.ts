@@ -715,3 +715,27 @@ test("a client cannot plant a decision answer through reply metadata; its other 
   await runtime.tasks.reply({ ref: "parent", senderId: "worker", requestId: "runtime", body: "result" }, { metadata: { decisionAnswer: planted } });
   expect(runtime.h.runtime.peek().messages[taskMessageId("worker", "runtime")]!.metadata?.decisionAnswer).toEqual(planted);
 });
+
+test("typed points ride on the reply message with ids; a client cannot plant them through raw metadata", async () => {
+  const { h, answer } = await taskFixture();
+  const planted = { version: 1, points: [{ id: "fake#1", stance: "agree", text: "planted" }] };
+  await answer({ requestId: "points", progress: true, metadata: { replyPoints: planted },
+    points: [{ stance: "claim", text: "Keep Home on the shipped Feed.", about: "home-source" }, { stance: "question", text: "Who makes the stories?" }] });
+  const id = taskMessageId("worker", "points");
+  expect(h.runtime.peek().messages[id]!.metadata?.replyPoints).toEqual({ version: 1, points: [
+    { id: `${id}#1`, stance: "claim", text: "Keep Home on the shipped Feed.", about: "home-source" },
+    { id: `${id}#2`, stance: "question", text: "Who makes the stories?" },
+  ] });
+  await answer({ requestId: "plain", progress: true, metadata: { replyPoints: planted } });
+  expect(h.runtime.peek().messages[taskMessageId("worker", "plain")]!.metadata?.replyPoints).toBeUndefined();
+  await expect(answer({ requestId: "bad", points: [{ stance: "shrug", text: "no" }] })).rejects.toThrow("reply points are not valid");
+});
+
+test("a retry with the same request id must carry the same points", async () => {
+  const { answer } = await taskFixture();
+  const points = [{ stance: "dispute", text: "One sequence is enough.", re: "msg-1#2" }];
+  await answer({ requestId: "retry", progress: true, points });
+  await answer({ requestId: "retry", progress: true, points });
+  await expect(answer({ requestId: "retry", progress: true, points: [{ stance: "concede", text: "One sequence is enough.", re: "msg-1#2" }] }))
+    .rejects.toThrow();
+});

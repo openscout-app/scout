@@ -1096,6 +1096,7 @@ export function createBrokerHttpRouter(
         ? await service.reply({ ownerId: input.ownerId, sessionId: string("sessionId"), deliveryId: string("deliveryId"), replyToken: typeof input.replyToken === "string" ? input.replyToken : undefined, body: string("body"),
           ...(typeof input.ref === "string" ? { ref: input.ref, requestId: string("requestId"), progress: input.progress === true,
             failed: input.failed === true, image: input.image as import("@openscout/protocol").ScoutTaskReply["image"],
+            ...(input.points !== undefined ? { points: input.points as import("@openscout/protocol").ScoutTaskReply["points"] } : {}),
             attachments: input.attachments as import("@openscout/protocol").ScoutTaskReply["attachments"] } : {}) })
         : url.pathname.endsWith("/poll")
         ? await service.poll({ ownerId: input.ownerId, sessionId: string("sessionId"), cursor: typeof input.cursor === "string" ? input.cursor : undefined, limit: typeof input.limit === "number" ? input.limit : undefined })
