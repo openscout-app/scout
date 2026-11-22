@@ -223,6 +223,40 @@ describe("BrokerWebControlService", () => {
     expect(child.killed).toBe(true);
   });
 
+  test("hands scout-web the operator attribution key file only when the runtime has one", async () => {
+    const spawned: SpawnOptions[] = [];
+    const start = async (operatorAttributionKeyFile?: string) => {
+      const child = fakeChild(1357);
+      let healthChecks = 0;
+      const service = new BrokerWebControlService({
+        brokerControlUrl: "http://127.0.0.1:4321",
+        env: { OPENSCOUT_WEB_AUTH_TOKEN: "test-web-token", OPENSCOUT_WEB_PORT: "4321", OPENSCOUT_SETUP_CWD: "/repo" },
+        ...(operatorAttributionKeyFile ? { operatorAttributionKeyFile } : {}),
+        healthCheck: async () => ++healthChecks >= 2,
+        spawnProcess(_command, _args, options) {
+          spawned.push(options);
+          return child;
+        },
+        resolveEntry: () => "/repo/packages/web/server/index.ts",
+        resolveBun: () => ({ path: "/usr/local/bin/bun" }),
+        resolveLogPath: () => "/dev/null",
+        startPollTimeoutMs: 1_000,
+        startPollIntervalMs: 1,
+        sleep: async () => {
+          if (child.killed && child.exitCode === null) child.emitExit();
+        },
+        log() {},
+      });
+      await service.startIfNeeded();
+      await service.stop();
+    };
+
+    await start("/support/runtime/operator-attribution.key");
+    await start();
+    expect(spawned[0]?.env?.OPENSCOUT_ATTRIBUTION_KEY_FILE).toBe("/support/runtime/operator-attribution.key");
+    expect(spawned[1]?.env && "OPENSCOUT_ATTRIBUTION_KEY_FILE" in spawned[1].env).toBe(false);
+  });
+
   test("waits for its owned web child to exit during broker shutdown", async () => {
     const child = fakeChild(2468);
     let healthChecks = 0;

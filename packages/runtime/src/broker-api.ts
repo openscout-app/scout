@@ -346,11 +346,32 @@ function requestBody(options: ScoutBrokerJsonRequestOptions<any>): string | unde
 }
 
 const brokerAttributionAudiences = new Map<string, string>();
+let adoptedBrokerAttributionKey: string | undefined;
+
+/**
+ * For the operator's own long-lived surfaces (scout-web, pairing): read the
+ * attribution key into memory and drop OPENSCOUT_ATTRIBUTION_KEY_FILE from the
+ * environment, so agents and tools this process spawns cannot sign as the
+ * operator. Call once at startup, before spawning anything. Returns whether a
+ * key was adopted.
+ */
+export function adoptBrokerAttributionKey(env: Record<string, string | undefined> = process.env): boolean {
+  const keyFile = env.OPENSCOUT_ATTRIBUTION_KEY_FILE?.trim();
+  delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  if (!keyFile) return false;
+  adoptedBrokerAttributionKey = readLocalAdminKey(keyFile);
+  return Boolean(adoptedBrokerAttributionKey);
+}
+
+/** Tests only: drop a key adopted earlier in this process. */
+export function forgetAdoptedBrokerAttributionKey(): void {
+  adoptedBrokerAttributionKey = undefined;
+}
 
 async function withBrokerAttribution<T>(baseUrl: string, path: string, options: ScoutBrokerJsonRequestOptions<T>): Promise<ScoutBrokerJsonRequestOptions<T>> {
-  const keyFile = process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
-  if (!keyFile || options.headers?.["x-openscout-local-admin"]) return options;
-  const key = readLocalAdminKey(keyFile);
+  if (options.headers?.["x-openscout-local-admin"]) return options;
+  const keyFile = adoptedBrokerAttributionKey ? undefined : process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  const key = adoptedBrokerAttributionKey ?? (keyFile ? readLocalAdminKey(keyFile) : undefined);
   if (!key) return options;
   let destinationKeyId = brokerAttributionAudiences.get(baseUrl);
   if (!destinationKeyId) {

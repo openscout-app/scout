@@ -12,6 +12,7 @@ import { runScoutSetup } from "../../lib/core/setup/service.ts";
 import { renderScoutSetupReport } from "../../lib/ui/terminal/setup.ts";
 import { readOpenScoutSettings } from "@openscout/runtime/setup";
 import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { ensureOperatorAttributionKey } from "@openscout/runtime/mesh/local-auth";
 import { scoutTuiNeedsDownload, SCOUT_TUI_INSTALL_OFFER } from "./tui.ts";
 
 type SourceRootPrompt = (suggestedRoot: string, additionalRootCount: number) => Promise<string>;
@@ -187,6 +188,10 @@ export async function runSetupCommand(context: ScoutCommandContext, args: string
       answeredAt: hasSavedSettings ? settings.onboarding.sourceRootsAnsweredAt : null,
     },
   );
+  // The runtime and the operator's own surfaces (web, pairing) sign
+  // operator-only requests with this key: Continue/Hold, permission answers.
+  // Created once, owner-only; agents never receive it.
+  ensureOperatorAttributionKey(resolveOpenScoutSupportPaths().supportDirectory);
   const report = await runScoutSetup(options);
   const completion = assessScoutSetupCompletion({ ...report,
     failures: [

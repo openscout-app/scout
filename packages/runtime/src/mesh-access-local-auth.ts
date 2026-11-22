@@ -67,6 +67,42 @@ export function verifyLocalAdminRequest(key: string, input: LocalAdminRequestInp
   return { ok: true };
 }
 
+/**
+ * Operator attribution key that `scout setup` creates. The runtime verifies
+ * operator-only requests with it; only the operator's own surfaces (scout-web,
+ * pairing) receive its path, and they read it into memory at startup and drop
+ * the variable, so agents they spawn never inherit it.
+ */
+export const OPERATOR_ATTRIBUTION_KEY_FILE_NAME = "operator-attribution.key";
+
+export function defaultOperatorAttributionKeyFile(supportDirectory: string): string {
+  return join(supportDirectory, "runtime", OPERATOR_ATTRIBUTION_KEY_FILE_NAME);
+}
+
+/** Setup step, never broker startup: create the key once as an owner-only file. */
+export function ensureOperatorAttributionKey(supportDirectory: string): { file: string; created: boolean } {
+  const file = defaultOperatorAttributionKeyFile(supportDirectory);
+  mkdirSync(join(supportDirectory, "runtime"), { recursive: true, mode: 0o700 });
+  try {
+    writeFileSync(file, randomBytes(32).toString("hex") + "\n", { flag: "wx", mode: 0o600 });
+    return { file, created: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return { file, created: false };
+  }
+}
+
+/** Explicit OPENSCOUT_ATTRIBUTION_KEY_FILE first, then the setup key when it exists. Never creates one. */
+export function resolveOperatorAttributionKeyFile(
+  env: Record<string, string | undefined>,
+  supportDirectory: string,
+): { file: string; explicit: boolean } | undefined {
+  const explicit = env.OPENSCOUT_ATTRIBUTION_KEY_FILE?.trim();
+  if (explicit) return { file: explicit, explicit: true };
+  const fallback = defaultOperatorAttributionKeyFile(supportDirectory);
+  return existsSync(fallback) ? { file: fallback, explicit: false } : undefined;
+}
+
 /** Persist before serving any policy, so forgetting the opt-in cannot reopen
  * ambient local authority over previously scoped resources on next restart. */
 export function preserveProtectedIngress(supportDirectory: string, key: string | undefined): void {

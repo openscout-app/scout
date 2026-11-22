@@ -49,6 +49,8 @@ export type BrokerWebControlServiceOptions = {
   trustedHosts?: Iterable<string>;
   webProcessName?: string;
   env?: RuntimeEnv;
+  /** Operator attribution key file for scout-web, which reads it at startup and drops the variable. */
+  operatorAttributionKeyFile?: string;
   fetch?: typeof fetch;
   spawnProcess?: RuntimeSpawnFunction<RuntimeChildProcessLike>;
   moduleDirectory?: string;
@@ -693,6 +695,9 @@ export class BrokerWebControlService {
         : {}),
       ...(trustedHosts ? { OPENSCOUT_WEB_TRUSTED_HOSTS: trustedHosts } : {}),
       OPENSCOUT_SETUP_CWD: this.resolveSetupCwd(),
+      ...(this.options.operatorAttributionKeyFile
+        ? { OPENSCOUT_ATTRIBUTION_KEY_FILE: this.options.operatorAttributionKeyFile }
+        : {}),
     };
     this.options.log?.("[openscout-runtime] starting Scout web server", {
       webUrl: this.url(),

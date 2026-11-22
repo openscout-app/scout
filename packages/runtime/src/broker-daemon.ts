@@ -43,7 +43,7 @@ import { configureManagedPermissionHandler } from "./managed-permission.js";
 import { requireProtectedAccessState, protectAccessDirectories, removeLocalAdminEnvironment } from "./mesh-access-startup.js";
 import { inspectMeshAccessIngressPosture } from "./mesh-access-ingress-posture.js";
 import { BrokerMcpEvents } from "./broker-mcp-events.js";
-import { readLocalAdminKey, preserveProtectedIngress } from "./mesh-access-local-auth.js";
+import { readLocalAdminKey, preserveProtectedIngress, resolveOperatorAttributionKeyFile } from "./mesh-access-local-auth.js";
 import { MeshAccessStore } from "./mesh-access-store.js";
 import { IntegrationSlackEvents } from "./integration-slack-events.js";
 import { IntegrationSlackDeliveryService } from "./integration-slack-delivery.js";
@@ -564,7 +564,22 @@ if (meshInstanceRefusal) {
   console.log(`[openscout-runtime] mesh off: ${meshInstanceRefusal}`);
 }
 const localAdminKey = readLocalAdminKey(process.env.OPENSCOUT_LOCAL_ADMIN_KEY_FILE);
-const attributionKey = localAdminKey ?? readLocalAdminKey(process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE);
+// The key file scout-web signs operator requests with. Protected ingress
+// (local admin key) keeps its own credentials, so it hands web nothing here.
+let operatorAttributionKeyFile: string | undefined;
+let attributionKey = localAdminKey;
+if (!localAdminKey) {
+  const resolved = resolveOperatorAttributionKeyFile(process.env, supportDirectory);
+  if (resolved) {
+    try {
+      attributionKey = readLocalAdminKey(resolved.file);
+      operatorAttributionKeyFile = attributionKey ? resolved.file : undefined;
+    } catch (error) {
+      if (resolved.explicit) throw error;
+      console.warn(`[openscout-runtime] operator attribution off: ${resolved.file}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
 delete process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
 removeLocalAdminEnvironment(process.env);
 requireProtectedAccessState(dbPath, Boolean(localAdminKey));
@@ -1233,6 +1248,7 @@ const webControl = new BrokerWebControlService({
   tailnetWebHosts,
   trustedHosts: webStartTrustedHosts,
   env: process.env,
+  operatorAttributionKeyFile,
   log: (message, detail) => {
     if (detail === undefined) {
       console.log(message);
