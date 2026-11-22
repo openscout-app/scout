@@ -205,9 +205,9 @@ export async function runSetupCommand(context: ScoutCommandContext, args: string
   if (completion.outcome === "failed") process.exitCode = 1;
   // The runtime reads the key at start, so a running one needs a restart.
   if (context.output.mode !== "json" && operatorKey.created) {
-    context.output.writeText("Operator approvals (Continue, Hold, permission answers) turn on after a runtime restart: scout restart");
+    context.output.writeText("Operator approvals (Continue, Hold, permission answers) turn on after a runtime restart: scout app restart");
   } else if (context.output.mode !== "json" && operatorKey.problem) {
-    context.output.writeText(`Operator approvals are off: ${operatorKey.file}: ${operatorKey.problem}. Remove the file, then run scout setup and scout restart.`);
+    context.output.writeText(`Operator approvals are off: ${operatorKey.file}: ${operatorKey.problem}. Remove the file, then run scout setup and scout app restart.`);
   }
   // An offer only; setup never downloads it.
   if (context.output.mode !== "json" && scoutTuiNeedsDownload({ env: context.env, cwd: options.currentDirectory })) {
