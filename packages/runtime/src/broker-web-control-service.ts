@@ -1,3 +1,4 @@
+import { OPERATOR_ATTRIBUTION_HANDOFF_ENV } from "./mesh-access-local-auth.js";
 import { WEB_START_HOST_HEADER, WEB_START_SCHEME_HEADER } from "./web-start-context.js";
 import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } from "./host-web-request.js";
 import type { RuntimeChildProcessLike, RuntimeEnv, RuntimeHttpRequestLike, RuntimeSpawnFunction } from "./portable-types.js";
@@ -696,7 +697,7 @@ export class BrokerWebControlService {
       ...(trustedHosts ? { OPENSCOUT_WEB_TRUSTED_HOSTS: trustedHosts } : {}),
       OPENSCOUT_SETUP_CWD: this.resolveSetupCwd(),
       ...(this.options.operatorAttributionKeyFile
-        ? { OPENSCOUT_ATTRIBUTION_KEY_FILE: this.options.operatorAttributionKeyFile }
+        ? { [OPERATOR_ATTRIBUTION_HANDOFF_ENV]: this.options.operatorAttributionKeyFile }
         : {}),
     };
     this.options.log?.("[openscout-runtime] starting Scout web server", {

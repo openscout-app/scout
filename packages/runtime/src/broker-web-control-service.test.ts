@@ -253,8 +253,10 @@ describe("BrokerWebControlService", () => {
 
     await start("/support/runtime/operator-attribution.key");
     await start();
-    expect(spawned[0]?.env?.OPENSCOUT_ATTRIBUTION_KEY_FILE).toBe("/support/runtime/operator-attribution.key");
-    expect(spawned[1]?.env && "OPENSCOUT_ATTRIBUTION_KEY_FILE" in spawned[1].env).toBe(false);
+    // Never the signer's own variable: a web build that does not adopt must not leak it to what it spawns.
+    expect(spawned[0]?.env?.OPENSCOUT_OPERATOR_ATTRIBUTION_HANDOFF_FILE).toBe("/support/runtime/operator-attribution.key");
+    expect(spawned[0]?.env && "OPENSCOUT_ATTRIBUTION_KEY_FILE" in spawned[0].env).toBe(false);
+    expect(spawned[1]?.env && "OPENSCOUT_OPERATOR_ATTRIBUTION_HANDOFF_FILE" in spawned[1].env).toBe(false);
   });
 
   test("waits for its owned web child to exit during broker shutdown", async () => {

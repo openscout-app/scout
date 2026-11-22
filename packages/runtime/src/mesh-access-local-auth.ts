@@ -75,12 +75,24 @@ export function verifyLocalAdminRequest(key: string, input: LocalAdminRequestInp
  */
 export const OPERATOR_ATTRIBUTION_KEY_FILE_NAME = "operator-attribution.key";
 
+/**
+ * How the runtime hands the key path to scout-web and pairing. Deliberately not
+ * OPENSCOUT_ATTRIBUTION_KEY_FILE: the broker client signs with that variable
+ * whenever it is set, so a surface that never adopts the key would pass it to
+ * every agent it spawns. Only adoptBrokerAttributionKey reads this one.
+ */
+export const OPERATOR_ATTRIBUTION_HANDOFF_ENV = "OPENSCOUT_OPERATOR_ATTRIBUTION_HANDOFF_FILE";
+
 export function defaultOperatorAttributionKeyFile(supportDirectory: string): string {
   return join(supportDirectory, "runtime", OPERATOR_ATTRIBUTION_KEY_FILE_NAME);
 }
 
-/** Setup step, never broker startup: create the key once as an owner-only file. */
-export function ensureOperatorAttributionKey(supportDirectory: string): { file: string; created: boolean } {
+/**
+ * Setup step, never broker startup: create the key once as an owner-only file.
+ * An existing file the runtime would refuse comes back with its problem, so
+ * setup can say so instead of leaving operator approvals silently off.
+ */
+export function ensureOperatorAttributionKey(supportDirectory: string): { file: string; created: boolean; problem?: string } {
   const file = defaultOperatorAttributionKeyFile(supportDirectory);
   mkdirSync(join(supportDirectory, "runtime"), { recursive: true, mode: 0o700 });
   try {
@@ -88,7 +100,12 @@ export function ensureOperatorAttributionKey(supportDirectory: string): { file: 
     return { file, created: true };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return { file, created: false };
+    try {
+      readLocalAdminKey(file);
+      return { file, created: false };
+    } catch (readError) {
+      return { file, created: false, problem: readError instanceof Error ? readError.message : String(readError) };
+    }
   }
 }
 

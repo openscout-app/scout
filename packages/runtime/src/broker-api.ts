@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { readLocalAdminKey, signLocalAdminRequest } from "./mesh-access-local-auth.js";
+import { OPERATOR_ATTRIBUTION_HANDOFF_ENV, readLocalAdminKey, signLocalAdminRequest } from "./mesh-access-local-auth.js";
 
 import type {
   ActorIdentity,
@@ -350,13 +350,14 @@ let adoptedBrokerAttributionKey: string | undefined;
 
 /**
  * For the operator's own long-lived surfaces (scout-web, pairing): read the
- * attribution key into memory and drop OPENSCOUT_ATTRIBUTION_KEY_FILE from the
- * environment, so agents and tools this process spawns cannot sign as the
- * operator. Call once at startup, before spawning anything. Returns whether a
- * key was adopted.
+ * key the runtime handed off (or an explicit OPENSCOUT_ATTRIBUTION_KEY_FILE)
+ * into memory and drop both variables, so agents and tools this process spawns
+ * cannot sign as the operator. Call once at startup, before spawning anything.
+ * Returns whether a key was adopted.
  */
 export function adoptBrokerAttributionKey(env: Record<string, string | undefined> = process.env): boolean {
-  const keyFile = env.OPENSCOUT_ATTRIBUTION_KEY_FILE?.trim();
+  const keyFile = env[OPERATOR_ATTRIBUTION_HANDOFF_ENV]?.trim() || env.OPENSCOUT_ATTRIBUTION_KEY_FILE?.trim();
+  delete env[OPERATOR_ATTRIBUTION_HANDOFF_ENV];
   delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
   if (!keyFile) return false;
   adoptedBrokerAttributionKey = readLocalAdminKey(keyFile);

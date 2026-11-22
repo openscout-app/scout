@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adoptBrokerAttributionKey, forgetAdoptedBrokerAttributionKey, requestScoutBrokerJson } from "./broker-api.js";
 import {
   defaultOperatorAttributionKeyFile,
   ensureOperatorAttributionKey,
+  OPERATOR_ATTRIBUTION_HANDOFF_ENV,
   resolveOperatorAttributionKeyFile,
 } from "./mesh-access-local-auth.js";
 import { createBrokerDaemonTestHarness } from "./test-helpers/broker-daemon-harness.test";
@@ -49,6 +50,17 @@ test("adopting the key drops the variable so spawned children cannot inherit it"
   expect(adoptBrokerAttributionKey(env)).toBe(true);
   expect(env).toEqual({ KEEP: "1" });
   expect(adoptBrokerAttributionKey({})).toBe(false);
+
+  const handoff: Record<string, string | undefined> = { [OPERATOR_ATTRIBUTION_HANDOFF_ENV]: file };
+  expect(adoptBrokerAttributionKey(handoff)).toBe(true);
+  expect(handoff).toEqual({});
+});
+
+test("setup reports an existing key the runtime would refuse", () => {
+  const support = tempDirectory();
+  const { file } = ensureOperatorAttributionKey(support);
+  chmodSync(file, 0o644);
+  expect(ensureOperatorAttributionKey(support)).toMatchObject({ file, created: false, problem: expect.stringContaining("owner-only") });
 });
 
 test("a runtime with only the setup key accepts Ready decisions from a surface that adopted it", async () => {
@@ -61,7 +73,8 @@ test("a runtime with only the setup key accepts Ready decisions from a surface t
   const unsigned = await requestScoutBrokerJson(h.baseUrl, "/v1/tasks/ready/decide", { method: "POST", body, acceptErrorJson: acceptAny });
   expect(unsigned.error).toBe("operator_attribution_required");
 
-  expect(adoptBrokerAttributionKey({ OPENSCOUT_ATTRIBUTION_KEY_FILE: file })).toBe(true);
+  expect(adoptBrokerAttributionKey({ [OPERATOR_ATTRIBUTION_HANDOFF_ENV]: file })).toBe(true);
   const signed = await requestScoutBrokerJson(h.baseUrl, "/v1/tasks/ready/decide", { method: "POST", body, acceptErrorJson: acceptAny });
-  expect(signed.error).not.toBe("operator_attribution_required");
+  // The proof verified, so the route itself answered; a wrong key gets invalid_local_admin_proof.
+  expect(signed.error).toMatch(/^unknown task missing/);
 }, 20_000);

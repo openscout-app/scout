@@ -71,7 +71,7 @@ import { openScoutNetworkServiceEnvironment } from "./open-scout-network.js";
 import { readTailscaleSelfWebHosts } from "./tailscale.js";
 import { createBaseEdgeRefresh } from "./base-edge-refresh.js";
 import { resolveOpenScoutLocalEdgeDirectory, resolveOpenScoutSupportPaths } from "./support-paths.js";
-import { resolveOperatorAttributionKeyFile } from "./mesh-access-local-auth.js";
+import { OPERATOR_ATTRIBUTION_HANDOFF_ENV, resolveOperatorAttributionKeyFile } from "./mesh-access-local-auth.js";
 import { createAppsSettingsReader } from "./apps-settings.js";
 import {
   MENU_HELPER_RECONCILE_INTERVAL_MS,
@@ -875,7 +875,7 @@ function spawnPairingController(): void {
     env: {
       ...process.env,
       OPENSCOUT_PARENT_PID: String(process.pid),
-      ...(attribution ? { OPENSCOUT_ATTRIBUTION_KEY_FILE: attribution.file } : {}),
+      ...(attribution ? { [OPERATOR_ATTRIBUTION_HANDOFF_ENV]: attribution.file } : {}),
     },
     stdio: [
       "ignore",
