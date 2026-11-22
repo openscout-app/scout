@@ -12,6 +12,7 @@ import { runScoutSetup } from "../../lib/core/setup/service.ts";
 import { renderScoutSetupReport } from "../../lib/ui/terminal/setup.ts";
 import { readOpenScoutSettings } from "@openscout/runtime/setup";
 import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { ensureOperatorAttributionKey } from "@openscout/runtime/mesh/local-auth";
 import { scoutTuiNeedsDownload, SCOUT_TUI_INSTALL_OFFER } from "./tui.ts";
 
 type SourceRootPrompt = (suggestedRoot: string, additionalRootCount: number) => Promise<string>;
@@ -187,6 +188,10 @@ export async function runSetupCommand(context: ScoutCommandContext, args: string
       answeredAt: hasSavedSettings ? settings.onboarding.sourceRootsAnsweredAt : null,
     },
   );
+  // The runtime and the operator's own surfaces (web, pairing) sign
+  // operator-only requests with this key: Continue/Hold, permission answers.
+  // Created once, owner-only; agents never receive it.
+  const operatorKey = ensureOperatorAttributionKey(resolveOpenScoutSupportPaths().supportDirectory);
   const report = await runScoutSetup(options);
   const completion = assessScoutSetupCompletion({ ...report,
     failures: [
@@ -198,6 +203,12 @@ export async function runSetupCommand(context: ScoutCommandContext, args: string
   });
   context.output.writeValue({ schema: "scout.setup.v2", ...report, ...completion }, (value) => renderScoutSetupReport(value, completion));
   if (completion.outcome === "failed") process.exitCode = 1;
+  // The runtime reads the key at start, so a running one needs a restart.
+  if (context.output.mode !== "json" && operatorKey.created) {
+    context.output.writeText("Operator approvals (Continue, Hold, permission answers) turn on after a runtime restart: scout app restart");
+  } else if (context.output.mode !== "json" && operatorKey.problem) {
+    context.output.writeText(`Operator approvals are off: ${operatorKey.file}: ${operatorKey.problem}. Remove the file, then run scout setup and scout app restart.`);
+  }
   // An offer only; setup never downloads it.
   if (context.output.mode !== "json" && scoutTuiNeedsDownload({ env: context.env, cwd: options.currentDirectory })) {
     context.output.writeText(SCOUT_TUI_INSTALL_OFFER);
