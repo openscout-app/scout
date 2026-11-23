@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import {
   VERCEL_BOARD_ADAPTER_ID, VERCEL_BOARD_DEFAULT_BOARD, VERCEL_BOARD_LABELS, vercelBoardCanHeader, isVercelBoardChannelPath, isVercelBoardPrincipal, isVercelBoardProfileName, vercelBoardRoles, vercelBoardRoleActor, validateVercelBoardCredentialReference,
@@ -992,6 +994,113 @@ export class BrokerVercelBoardService {
       const code = error instanceof VercelBoardHttpError ? error.code : error instanceof VercelBoardUnknownOutcomeError ? "outcome_unknown" : "probe_failed";
       throw new VercelBoardServiceError(502, `probe_${code}`.slice(0, 64), `The setup probe did not complete: ${error instanceof Error ? error.message : code}. The connection was not saved.`);
     }
+  }
+
+  // ---- manual review ----------------------------------------------------
+
+  /**
+   * Whether a review routine may name this connection and channel: the
+   * connection is configured on this host, and the channel is one it is
+   * configured for and mirrors. Reads local configuration only.
+   */
+  async reviewChannel(request: { connectionId: string; channel: string }): Promise<void> {
+    const config = this.live.get(request.connectionId)?.config ?? (await this.file.list()).find(entry => entry.id === request.connectionId);
+    if (!config) throw new VercelBoardServiceError(404, "not_found", `No board connection ${request.connectionId} on this host.`, "Run: scout integration status vercel-board");
+    this.requireReviewChannel(config, request.channel);
+  }
+
+  private requireReviewChannel(config: VercelBoardConnectionConfig, channel: string): void {
+    if (!config.channels.includes(channel) || !vercelBoardMirroredChannels(config).includes(channel)) {
+      throw new VercelBoardServiceError(403, "review_channel_not_permitted", `Connection ${config.id} is not configured to mirror channel ${channel}.`, "Run: scout integration status vercel-board");
+    }
+  }
+
+  /** Capture the local grant before any awaits; replacement or revocation invalidates it. */
+  reviewGrant(request: { connectionId: string; channel: string; itemId: string }) {
+    const live = this.requireLive(request.connectionId);
+    const generation = live.grant?.generation;
+    let readVersion: number | undefined;
+    const moved = () => new VercelBoardServiceError(409, "review_item_moved", `Board item ${request.itemId} is not in channel ${request.channel}.`);
+    const deleted = () => new VercelBoardServiceError(409, "review_item_deleted", `Board item ${request.itemId} is deleted, or no longer on the board.`);
+    const protectedItem = () => new VercelBoardServiceError(403, "review_item_protected", "A Board item marked noSync cannot be copied into a routine review.");
+    const check = () => {
+      if (this.requireLive(request.connectionId) !== live || live.state !== "following" || live.abort.signal.aborted) {
+        throw new VercelBoardServiceError(409, "review_connection_not_live", `Board connection ${request.connectionId} is no longer following under the same grant.`);
+      }
+      const lease = this.lock.observe(live.config.id, live.config.principal);
+      if (generation === undefined || !lease?.heldHere || lease.generation !== generation) {
+        throw new VercelBoardServiceError(409, "not_custodian", "The Board connection grant is no longer current.");
+      }
+      this.requireReviewChannel(live.config, request.channel);
+      const known = live.mirror.message(live.config.id, request.itemId);
+      if (!known) throw new VercelBoardServiceError(404, "review_item_unknown", `This host has not mirrored a Board item ${request.itemId} on connection ${request.connectionId}.`);
+      if (known.channel !== request.channel) throw moved();
+      if (known.deleted) throw deleted();
+      if (known.noSync) throw protectedItem();
+      if (readVersion !== undefined && known.version > readVersion) {
+        throw new VercelBoardServiceError(409, "review_item_changed", "The Board mirror observed a newer version while preparing this review.");
+      }
+    };
+    check();
+    return {
+      check,
+      read: async () => {
+        check();
+        if (live.readsBlockedUntil > this.now()) {
+          throw new VercelBoardServiceError(429, "rate_limited", "The board is rate limiting this connection. Try again shortly.");
+        }
+        let fresh: VercelBoardWireMessage | null;
+        try {
+          fresh = await live.transport.message(request.itemId);
+        } catch (error) {
+          check();
+          if (error instanceof VercelBoardHttpError && error.status === 403) {
+            throw new VercelBoardServiceError(403, "review_item_forbidden", `The board refused to show item ${request.itemId} to this connection.`);
+          }
+          this.classify(live, error);
+          throw new VercelBoardServiceError(502, "review_read_failed", `The board did not answer the read of item ${request.itemId}. Nothing was started.`);
+        }
+        check();
+        if (!fresh) throw deleted();
+        if (fresh.id !== request.itemId) throw new VercelBoardServiceError(502, "review_item_mismatch", "The board answered the read with a different item.");
+        if (fresh.channel !== request.channel) throw moved();
+        if (fresh.deleted) throw deleted();
+        if (fresh.noSync) throw protectedItem();
+        if (!fresh.task || fresh.re !== null || !fresh.text.trim()) {
+          throw new VercelBoardServiceError(409, "review_item_not_task", "A routine requires a Board task root with readable text.");
+        }
+        const { id, version, text } = fresh;
+        readVersion = version;
+        check();
+        return { id, version, pinSource: () => {
+          check();
+          return this.pinReviewSource(request, version, text);
+        } };
+      },
+    };
+  }
+
+  /** Same-user native reviewers can read this pinned source without Board credentials.
+   * Keep provider text out of the journal, deliver payload, and request receipts. */
+  private pinReviewSource(request: { connectionId: string; channel: string; itemId: string }, version: number, text: string): string {
+    const directory = resolve(this.options.connectionsDirectory, "review-source");
+    const normalized = text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, " ");
+    const bounded = Array.from(normalized).slice(0, 6000).join("");
+    const quoted = bounded.split("\n").map(line => `> ${line}`).join("\n");
+    const source = `${quoted}\n${bounded.length < normalized.length ? "\n[Board task excerpt truncated.]\n" : ""}`;
+    const digest = createHash("sha256").update(JSON.stringify([request.connectionId, request.channel, request.itemId, version, source])).digest("hex");
+    const path = resolve(directory, `${digest}.txt`);
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      try {
+        writeFileSync(path, source, { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || readFileSync(path, "utf8") !== source) throw error;
+      }
+    } catch {
+      throw new VercelBoardServiceError(503, "review_source_unavailable", "Scout could not pin the Board task text for the local reviewer.");
+    }
+    return path;
   }
 
   private requireLive(connectionId: string): LiveConnection {

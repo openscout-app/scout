@@ -320,6 +320,8 @@ describe("manual review dispatch", () => {
     expect(invocation).toMatchObject({ requesterId: "operator", targetAgentId: "reviewer", action: "consult", requestId: askRequestId });
     expect(invocation.metadata).toMatchObject({ taskVersion: 1, source: "scout-manual-review", manualReviewOccurrenceId: occurrenceId, attribution: OPERATOR });
     expect(message.metadata).toMatchObject({ attribution: OPERATOR, workId: manualReviewWorkId(occurrenceId) });
+    expect(runtime.delivered[0]?.workItem).not.toHaveProperty("acceptanceState");
+    expect(message.body).toContain("Scout fetched neither the request nor the artifact. Read them yourself from these references:");
     expect(message.body).toContain(`Review pull_request example/repo#12 at revision ${HEAD}.`);
     expect(message.body).toContain(JSON.stringify({
       occurrenceId, scope: "review", requestId: "run-1",

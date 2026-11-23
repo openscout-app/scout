@@ -5,7 +5,10 @@ import type { MetadataMap, ScoutId } from "./common.js";
 // `manual_review` is a recorded occurrence (see manual-review-occurrences.ts).
 // It carries no due time and no lease, so nothing claims or runs it. Its one
 // ask starts through the manual review dispatch entry point, not a worker.
-export type DurableActionKind = "ask" | "message_delivery" | "checkback" | "manual_review";
+// `manual_review_routine` is a saved Board review routine (see
+// manual-review-board.ts). It is configuration held as a record: no due time,
+// no lease, and nothing runs it.
+export type DurableActionKind = "ask" | "message_delivery" | "checkback" | "manual_review" | "manual_review_routine";
 
 export type DurableCheckbackMode =
   | "notify"
