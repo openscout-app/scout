@@ -22,6 +22,26 @@ afterEach(() => {
 });
 
 describe("locateHarnessSession", () => {
+  test("finds a mirrored Claude session only when the mirror is enabled alongside an override", () => {
+    const key = "OPENSCOUT_HUB_CLAUDE_MIRROR_ROOT";
+    const original = process.env[key];
+    try {
+      const mirror = makeRoot("claude-mirror");
+      const dir = join(mirror, "cloud-label");
+      mkdirSync(dir);
+      const path = join(dir, "mirror-session.jsonl");
+      writeFileSync(path, JSON.stringify({ type: "user", sessionId: "mirror-session", cwd: "/home/user/repo" }) + "\n");
+      const input = { nativeSessionId: "mirror-session", harness: "claude" as const, claudeProjectsRoot: makeRoot("claude-local") };
+      delete process.env[key];
+      expect(locateHarnessSession(input)).toMatchObject({ ok: false, reason: "session_unknown" });
+      process.env[key] = mirror;
+      expect(locateHarnessSession(input)).toMatchObject({ ok: true, session: { path, harness: "claude" } });
+    } finally {
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
+  });
+
   test("does not assign Claude a nonexistent decoded cwd", () => {
     const root = makeRoot("claude-slug");
     const dir = join(root, "-example-worktrees-my-project");

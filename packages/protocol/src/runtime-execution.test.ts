@@ -226,6 +226,12 @@ describe("runtime execution contracts", () => {
     })).toThrow("cannot encode effort without a model");
   });
 
+  test("Antigravity accepts account-provided model IDs and keeps the native default when omitted", () => {
+    expect(isModelSelectableHarness("antigravity")).toBe(true);
+    expect(validateScoutRuntimeTuple({ harness: "antigravity", model: "gemini-fixture" })).toEqual([]);
+    expect(scoutRuntimeDefaultModel("antigravity")).toBeNull();
+  });
+
   test("devin with a catalog model passes model selectability", () => {
     const model = SCOUT_RUNTIME_CATALOG.harnesses
       .find((entry) => entry.id === "devin")!

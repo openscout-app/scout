@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import type { SessionState } from "@openscout/agent-sessions";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
 import { isRexSurface, sendRexPrompt } from "./rex-terminal.js";
+import { resolveExecutableFromSearch } from "./tool-resolution.js";
 import { resolveCodexExecutableInventory } from "@openscout/agent-sessions/codex-executable";
 import type {
   AgentCapability,
@@ -72,7 +73,7 @@ import { invokeKimiAcpAgent } from "./kimi-acp-invocation.js";
 import { invokeCursorAcpAgent } from "./cursor-acp-invocation.js";
 import { invokeOpencodeAcpAgent } from "./opencode-acp-invocation.js";
 import { invokeDevinAcpAgent } from "./devin-acp-invocation.js";
-import { shutdownAcpAgentSession } from "./acp-agent-invocation.js";
+import { invokeAntigravityAcpAgent, shutdownAcpAgentSession } from "./acp-agent-invocation.js";
 import { findHarnessEntry } from "./harness-catalog.js";
 
 import {
@@ -803,6 +804,7 @@ export function renderLocalAgentSystemPromptTemplate(
     || options.transport === "pi_rpc"
     || options.transport === "grok_acp"
     || options.transport === "kimi_acp"
+    || options.transport === "antigravity_acp"
     || options.transport === "devin_acp"
     ? buildLocalAgentDirectProtocolPrompt(context)
     : buildLocalAgentTmuxProtocolPrompt(context);
@@ -942,6 +944,7 @@ function generatedLocalAgentSystemPromptCandidates(
     "pi_rpc",
     "grok_acp",
     "kimi_acp",
+    "antigravity_acp",
     "devin_acp",
   ];
   const candidates = new Set<string>();
@@ -1054,9 +1057,22 @@ function normalizeTmuxSessionName(value: string | undefined, agentId: string): s
   return normalized || fallback.replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "") || "relay-agent";
 }
 
+const acpAdapterByTransport = {
+  grok_acp: "grok-acp",
+  kimi_acp: "kimi-acp",
+  cursor_acp: "cursor-acp",
+  opencode_acp: "opencode-acp",
+  devin_acp: "devin-acp",
+  antigravity_acp: "antigravity-acp",
+} as const;
+
+function isLazyAcpTransport(transport: string | undefined): transport is "grok_acp" | "kimi_acp" | "devin_acp" | "antigravity_acp" {
+  return transport === "grok_acp" || transport === "kimi_acp" || transport === "devin_acp" || transport === "antigravity_acp";
+}
+
 function normalizeLocalAgentHarness(value: string | undefined): AgentHarness {
-  if (value === "codex" || value === "claude" || value === "grok" || value === "grok-acp" || value === "kimi" || value === "pi" || value === "cursor" || value === "opencode" || value === "devin") {
-    return value;
+  if (SUPPORTED_LOCAL_AGENT_HARNESSES.includes(value as AgentHarness)) {
+    return value as AgentHarness;
   }
   return DEFAULT_LOCAL_AGENT_HARNESS;
 }
@@ -1095,6 +1111,8 @@ function normalizeLocalAgentTransport(value: string | undefined, harness: AgentH
     return "cursor_acp";
   }
 
+  if (harness === "antigravity") return "antigravity_acp";
+
   if (harness === "devin") {
     return "devin_acp";
   }
@@ -1123,7 +1141,7 @@ function normalizeLocalAgentTransport(value: string | undefined, harness: AgentH
     return "pi_rpc";
   }
 
-  if (value === "grok_acp" || value === "kimi_acp" || value === "cursor_acp" || value === "opencode_acp" || value === "devin_acp") {
+  if (value === "grok_acp" || value === "kimi_acp" || value === "cursor_acp" || value === "opencode_acp" || value === "antigravity_acp" || value === "devin_acp") {
     return value;
   }
 
@@ -1635,25 +1653,9 @@ function overrideHarnessProfile(
 }
 
 function normalizeManagedHarness(value: string | undefined, fallback: ManagedAgentHarness): ManagedAgentHarness {
-  return value === "codex"
-    ? "codex"
-    : value === "claude"
-      ? "claude"
-      : value === "cursor"
-        ? "cursor"
-        : value === "devin"
-          ? "devin"
-          : value === "grok"
-            ? "grok"
-            : value === "grok-acp"
-              ? "grok-acp"
-              : value === "kimi"
-                ? "kimi"
-                : value === "pi"
-                  ? "pi"
-                  : value === "opencode"
-                    ? "opencode"
-                    : fallback;
+  return MANAGED_AGENT_HARNESSES.includes(value as ManagedAgentHarness)
+    ? value as ManagedAgentHarness
+    : fallback;
 }
 
 function normalizeLocalHarnessProfiles(agentId: string, record: LocalAgentRecord): RelayHarnessProfiles {
@@ -2321,18 +2323,11 @@ export async function shutdownLocalSessionEndpoint(endpoint: AgentEndpoint): Pro
     || endpoint.transport === "kimi_acp"
     || endpoint.transport === "cursor_acp"
     || endpoint.transport === "opencode_acp"
+    || endpoint.transport === "antigravity_acp"
     || endpoint.transport === "devin_acp"
   ) {
     await shutdownAcpAgentSession({
-      adapterType: endpoint.transport === "grok_acp"
-        ? "grok-acp"
-        : endpoint.transport === "kimi_acp"
-          ? "kimi-acp"
-          : endpoint.transport === "opencode_acp"
-            ? "opencode-acp"
-            : endpoint.transport === "devin_acp"
-              ? "devin-acp"
-              : "cursor-acp",
+      adapterType: acpAdapterByTransport[endpoint.transport],
       sessionId: endpointRuntimeInstanceId(endpoint),
       poolKey: endpoint.id,
     });
@@ -3099,6 +3094,7 @@ function isLocalAgentRecordOnline(agentName: string, record: LocalAgentRecord): 
     || normalizedRecord.transport === "kimi_acp"
     || normalizedRecord.transport === "cursor_acp"
     || normalizedRecord.transport === "opencode_acp"
+    || normalizedRecord.transport === "antigravity_acp"
     || normalizedRecord.transport === "devin_acp") {
     return areHarnessBinariesAvailable(normalizedRecord);
   }
@@ -3156,6 +3152,7 @@ export function isLocalAgentEndpointAlive(endpoint: AgentEndpoint): boolean {
     || endpoint.transport === "kimi_acp"
     || endpoint.transport === "cursor_acp"
     || endpoint.transport === "opencode_acp"
+    || endpoint.transport === "antigravity_acp"
     || endpoint.transport === "devin_acp"
   ) {
     return endpoint.state !== "offline";
@@ -4757,6 +4754,9 @@ export function areHarnessBinariesAvailable(record: Pick<LocalAgentRecord, "harn
   if (record.transport === "kimi_acp") binaries.add("kimi");
   if (record.transport === "cursor_acp") binaries.add("cursor-agent");
   if (record.transport === "opencode_acp") binaries.add("opencode");
+  if (record.transport === "antigravity_acp") {
+    return resolveExecutableFromSearch({ names: ["agy"], extraDirectories: ["~/.local/bin"] }) !== null;
+  }
   if (record.transport === "devin_acp") binaries.add("devin");
 
   if (record.transport === "tmux") {
@@ -4794,7 +4794,7 @@ async function ensureLocalAgentOnline(agentName: string, record: LocalAgentRecor
 async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentRecord): Promise<LocalAgentRecord> {
   const normalizedRecord = normalizeLocalAgentRecord(agentName, record);
   if (isLocalAgentRecordOnline(agentName, normalizedRecord)) {
-    if (normalizedRecord.transport === "grok_acp" || normalizedRecord.transport === "kimi_acp" || normalizedRecord.transport === "devin_acp") {
+    if (isLazyAcpTransport(normalizedRecord.transport)) {
       // ACP workers are broker-owned and lazy: keep the durable local-agent
       // record and binding, then let the first delivery create/reuse the ACP
       // process. Do not fall through to the tmux launcher below.
@@ -5122,14 +5122,10 @@ export async function restartLocalAgent(
         sessionId: sessionName,
       });
     }
-  } else if (normalizedRecord.transport === "grok_acp" || normalizedRecord.transport === "kimi_acp" || normalizedRecord.transport === "devin_acp") {
+  } else if (isLazyAcpTransport(normalizedRecord.transport)) {
     for (const sessionName of sessionsToStop) {
       await shutdownAcpAgentSession({
-        adapterType: normalizedRecord.transport === "grok_acp"
-          ? "grok-acp"
-          : normalizedRecord.transport === "devin_acp"
-            ? "devin-acp"
-            : "kimi-acp",
+        adapterType: acpAdapterByTransport[normalizedRecord.transport],
         sessionId: sessionName,
         poolKey: localAgentAcpPoolKey(agentId, normalizedRecord),
       });
@@ -5683,14 +5679,10 @@ export async function stopLocalAgent(agentId: string): Promise<ScoutLocalAgentSt
         sessionId: sessionName,
       });
     }
-  } else if (normalizedRecord.transport === "grok_acp" || normalizedRecord.transport === "kimi_acp" || normalizedRecord.transport === "devin_acp") {
+  } else if (isLazyAcpTransport(normalizedRecord.transport)) {
     for (const sessionName of sessionsToStop) {
       await shutdownAcpAgentSession({
-        adapterType: normalizedRecord.transport === "grok_acp"
-          ? "grok-acp"
-          : normalizedRecord.transport === "devin_acp"
-            ? "devin-acp"
-            : "kimi-acp",
+        adapterType: acpAdapterByTransport[normalizedRecord.transport],
         sessionId: sessionName,
         poolKey: localAgentAcpPoolKey(agentId, normalizedRecord),
       });
@@ -6640,18 +6632,20 @@ export async function invokeLocalAgentEndpoint(
     };
   }
 
-  if (!existing && endpoint.transport === "devin_acp") {
+  if (!existing && (endpoint.transport === "devin_acp" || endpoint.transport === "antigravity_acp")) {
+    const isAntigravity = endpoint.transport === "antigravity_acp";
+    const invoke = isAntigravity ? invokeAntigravityAcpAgent : invokeDevinAcpAgent;
     const cwd = endpoint.cwd ?? endpoint.projectRoot ?? process.cwd();
     const sessionId = endpointRuntimeInstanceId(endpoint);
     const model = endpointMetadataString(endpoint, "model");
-    const result = await invokeDevinAcpAgent({
+    const result = await invoke({
       sessionId,
       poolKey: endpoint.id,
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
       ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
-      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Devin ACP"),
+      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? (isAntigravity ? "Google Antigravity" : "Devin ACP")),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
       ...(model ? { adapterOptions: { model } } : {}),
@@ -6809,6 +6803,7 @@ export async function invokeLocalAgentEndpoint(
     || onlineRecord.transport === "kimi_acp"
     || onlineRecord.transport === "cursor_acp"
     || onlineRecord.transport === "opencode_acp"
+    || onlineRecord.transport === "antigravity_acp"
     || onlineRecord.transport === "devin_acp"
   ) {
     const commonOptions = {
@@ -6823,6 +6818,7 @@ export async function invokeLocalAgentEndpoint(
       hardCeilingMs: invocation.execution?.turnBudgetMs,
     };
     const endpointModel = endpointMetadataString(endpoint, "model");
+    const modelOptions = endpointModel ? { adapterOptions: { model: endpointModel } } : {};
     const grokAdapterOptions = grokAcpAdapterOptions(
       endpointModel,
       endpointMetadataString(endpoint, "reasoningEffort"),
@@ -6835,16 +6831,12 @@ export async function invokeLocalAgentEndpoint(
       : onlineRecord.transport === "kimi_acp"
         ? await invokeKimiAcpAgent(commonOptions)
         : onlineRecord.transport === "opencode_acp"
-          ? await invokeOpencodeAcpAgent({
-            ...commonOptions,
-            ...(endpointModel ? { adapterOptions: { model: endpointModel } } : {}),
-          })
-          : onlineRecord.transport === "devin_acp"
-            ? await invokeDevinAcpAgent({
-              ...commonOptions,
-              ...(endpointModel ? { adapterOptions: { model: endpointModel } } : {}),
-            })
-            : await invokeCursorAcpAgent(commonOptions);
+          ? await invokeOpencodeAcpAgent({ ...commonOptions, ...modelOptions })
+          : onlineRecord.transport === "antigravity_acp"
+            ? await invokeAntigravityAcpAgent({ ...commonOptions, ...modelOptions })
+            : onlineRecord.transport === "devin_acp"
+              ? await invokeDevinAcpAgent({ ...commonOptions, ...modelOptions })
+              : await invokeCursorAcpAgent(commonOptions);
     return {
       output: result.output,
       externalSessionId: result.sessionId,

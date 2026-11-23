@@ -2,7 +2,7 @@ import type { AgentHarness } from "./actors.js";
 
 /** Harness ids Scout can select for a new execution session. */
 export const SCOUT_LAUNCHABLE_HARNESSES = [
-  "claude", "codex", "grok", "grok-acp", "kimi", "flue", "cursor", "opencode", "pi", "devin",
+  "claude", "codex", "grok", "grok-acp", "kimi", "flue", "cursor", "opencode", "pi", "devin", "antigravity",
 ] as const satisfies readonly AgentHarness[];
 
 export type ScoutLaunchableHarness = typeof SCOUT_LAUNCHABLE_HARNESSES[number];

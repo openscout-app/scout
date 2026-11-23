@@ -51,6 +51,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/shows": "local",
   "GET /v1/posts": "local",
   "POST /v1/posts": "local",
+  "GET /v1/routines": "local",
+  "POST /v1/routines": "local",
+  "POST /v1/routines/:id/cancel": "local",
   "GET /v1/feed/work": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
@@ -97,6 +100,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   // project that exists here. Same trust as forwarding an invocation.
   "POST /v1/mesh/sessions/start": "control",
   "POST /v1/mesh/web-request": "control",
+  // Cross-host session search: one bounded query over the answering host's
+  // own index. Hits carry transcript snippets, so control, not observe.
+  "GET /v1/mesh/knowledge/search": "control",
   // Cross-machine approvals: control tier AND a per-peer share opt-in on this
   // machine (mesh-approvals.ts) — the tier alone never exposes them.
   "GET /v1/mesh/approvals/config": "local",
@@ -170,6 +176,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/invocations/:id/stream": "local",
   "GET /v1/machines": "local",
   "GET /v1/machines/:id": "local",
+  "GET /v1/manual-review/board-routines": "local",
+  "GET /v1/manual-review/board-ticket": "local",
+  "POST /v1/manual-review/board-accept": "local",
   "GET /v1/manual-review/occurrences": "local",
   "GET /v1/message-reactions": "local",
   "GET /v1/messages": "local",
@@ -246,6 +255,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/durable-actions/:id/heartbeat": "local",
   "POST /v1/manual-review/occurrences": "local",
   "POST /v1/manual-review/dispatches": "local",
+  "POST /v1/manual-review/board-routines": "local",
+  "POST /v1/manual-review/board-preview": "local",
+  "POST /v1/manual-review/board-runs": "local",
   "POST /v1/endpoints": "local",
   "POST /v1/external-sessions/ack": "local",
   "POST /v1/external-sessions/attach": "local",

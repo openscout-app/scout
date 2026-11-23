@@ -197,6 +197,45 @@ if (staleDist && !canRunTypeScriptSource()) {
   );
   process.exit(1);
 }
+// A long-lived daemon must not load code through a link that another
+// checkout's install wrote and may later delete. Repair such links before the
+// first import resolves them; Bun keeps a resolved path for the whole process.
+async function guardDependencyLinks() {
+  if (command === "service" || process.env.OPENSCOUT_DEPENDENCY_LINK_GUARD === "0") return;
+  const entry = canRunTypeScriptSource() ? resolve(sourceDir, "dependency-links.ts") : resolve(distDir, "dependency-links.js");
+  if (!existsSync(entry)) return;
+  try {
+    const links = await import(pathToFileURL(entry).href);
+    const root = links.resolveRuntimeCheckoutRoot(packageDir);
+    if (!root) return;
+    let report = links.inspectDependencyLinks(root);
+    if (report.escaped.some(item => !item.repaired)) {
+      // Another checkout's install resolved these packages to entries this
+      // checkout does not hold. Restore this checkout's own install from its
+      // lockfile, so every link lands in a store no other checkout deletes.
+      const bunPath = canRunTypeScriptSource() ? process.execPath : "bun";
+      const restored = spawnSync(bunPath, ["install", "--frozen-lockfile"], {
+        cwd: root, encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (restored.status === 0) {
+        console.warn(`[openscout-runtime] restored this checkout's install in ${root}; dependency links pointed into another checkout`);
+      } else {
+        const detail = (restored.error?.message ?? restored.stderr ?? "").trim().split("\n").slice(-1)[0] || `exit ${restored.status}`;
+        console.warn(`[openscout-runtime] could not restore this checkout's install in ${root}: ${detail}`);
+      }
+      report = links.inspectDependencyLinks(root);
+    }
+    links.recordDependencyLinkReport(report);
+    const repaired = report.escaped.filter(item => item.repaired).length;
+    if (repaired) console.warn(`[openscout-runtime] relinked ${repaired} dependency link(s) that pointed into another checkout`);
+    const open = links.describeDependencyLinkReport(report);
+    if (open) console.warn(`[openscout-runtime] ${open}`);
+  } catch (error) {
+    console.warn(`[openscout-runtime] dependency link check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+await guardDependencyLinks();
+
 if (canRunTypeScriptSource() && (shouldPreferSourceEntry() || staleDist) && existsSync(sourceEntry)) {
   await runEntrypoint(sourceEntry, args);
 } else if (existsSync(distEntry)) {

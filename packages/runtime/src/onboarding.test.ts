@@ -583,11 +583,12 @@ describe("onboarding harness choices", () => {
     cursor: "cursor_acp",
     opencode: "opencode_acp",
     pi: "pi_rpc",
+    antigravity: "antigravity_acp",
     devin: "devin_acp",
   } as const;
 
   test("the choices are the runtime catalog's enabled, listed, managed harnesses", () => {
-    expect([...ONBOARDING_HARNESS_CHOICES]).toEqual(["claude", "codex", "grok-acp", "kimi", "cursor", "opencode", "pi", "devin"]);
+    expect([...ONBOARDING_HARNESS_CHOICES]).toEqual(["claude", "codex", "grok-acp", "kimi", "cursor", "opencode", "antigravity", "pi", "devin"]);
   });
 
   test("parsing keeps supported values, resolves catalog aliases, and rejects the rest", () => {
@@ -659,7 +660,7 @@ describe("onboarding harness choices", () => {
     const home = prepareHome("settings-read");
     const repo = join(home, "dev", "alpha");
     mkdirSync(repo, { recursive: true });
-    for (const [harness, transport] of [["grok-acp", "grok_acp"], ["kimi", "kimi_acp"], ["devin", "devin_acp"], ["opencode", "opencode_acp"]] as const) {
+    for (const [harness, transport] of [["grok-acp", "grok_acp"], ["kimi", "kimi_acp"], ["devin", "devin_acp"], ["antigravity", "antigravity_acp"], ["opencode", "opencode_acp"]] as const) {
       // Transport omitted on disk: the read path must derive it from the harness.
       await writeOpenScoutSettings({ agents: { defaultHarness: harness } }, { currentDirectory: repo });
       const settings = await readOpenScoutSettings({ currentDirectory: repo });

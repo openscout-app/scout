@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import {
   MANUAL_REVIEW_ACTION_KIND,
   MANUAL_REVIEW_METADATA_KEY,
+  MANUAL_REVIEW_ROUTINE_ACTION_KIND,
   MANUAL_REVIEW_SCHEMA_VERSION,
   manualReviewOccurrenceOf,
   manualReviewPinnedDifferences,
@@ -78,9 +79,9 @@ export function manualReviewIdempotencyKey(scope: string, requestId: string): st
   return JSON.stringify([scope, requestId]);
 }
 
-/** Whether an action is one only this service may write. */
+/** Whether an action is one only the manual review services may write: an occurrence, or a saved routine. */
 export function isManualReviewAction(action: Pick<DurableAction, "kind"> | null | undefined): boolean {
-  return action?.kind === MANUAL_REVIEW_ACTION_KIND;
+  return action?.kind === MANUAL_REVIEW_ACTION_KIND || action?.kind === MANUAL_REVIEW_ROUTINE_ACTION_KIND;
 }
 
 export class ManualReviewOccurrenceService {
@@ -88,11 +89,11 @@ export class ManualReviewOccurrenceService {
 
   /**
    * Record the occurrence for a request, or return the one already recorded.
-   * A request that repeats the pinned input and artifact revision is a replay.
-   * A request that changes either is refused, and the recorded run stays as
-   * it was.
+   * A request that repeats the pinned input, artifact revision and routine
+   * version is a replay. A request that changes any of them is refused, and
+   * the recorded run stays as it was.
    */
-  readonly record = async (request: ManualReviewOccurrenceRequest): Promise<ManualReviewOccurrenceResponse> => {
+  readonly record = async (request: ManualReviewOccurrenceRequest, checkGrant?: () => void): Promise<ManualReviewOccurrenceResponse> => {
     const errors = validateManualReviewOccurrenceRequest(request);
     if (errors.length > 0) throw invalid(errors.join("; "));
     const requestedById = request.requestedById;
@@ -107,6 +108,7 @@ export class ManualReviewOccurrenceService {
       const existing = this.deps.getDurableAction(id);
       if (existing) return this.replay(existing, request);
 
+      checkGrant?.();
       const createdAt = this.deps.now?.() ?? Date.now();
       const stored: ManualReviewStoredOccurrence = {
         schemaVersion: MANUAL_REVIEW_SCHEMA_VERSION,
@@ -119,6 +121,7 @@ export class ManualReviewOccurrenceService {
           revision: request.artifact.revision,
           ...(request.artifact.observedAt !== undefined ? { observedAt: request.artifact.observedAt } : {}),
         },
+        ...(request.routine ? { routine: { id: request.routine.id, version: request.routine.version } } : {}),
         requestedById,
         state: "recorded",
       };

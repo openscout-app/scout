@@ -66,6 +66,14 @@ test("--waiting-on records a typed blocker from the reply's first line", () => {
   expect(() => parseReplyCommandOptions(["--to", "msg-1", "--waiting-on", "review", "blocked"])).toThrow("require --ref");
 });
 
+test("--point is repeatable and typed; a bad point fails before sending", () => {
+  expect(parseReplyCommandOptions(["--ref", "inv-1", "--point", "claim: A queue first", "--point=dispute[re=msg-1#2,about=sequence]: One is enough", "rebuttal"]))
+    .toMatchObject({ body: "rebuttal", points: [{ stance: "claim", text: "A queue first" },
+      { stance: "dispute", text: "One is enough", re: "msg-1#2", about: "sequence" }] });
+  expect(() => parseReplyCommandOptions(["--ref", "inv-1", "--point", "ponder: x", "body"])).toThrow("stance must be one of");
+  expect(() => parseReplyCommandOptions(["--ref", "inv-1", "--point"])).toThrow("--point needs a value");
+});
+
 test("missing values do not consume another flag and implicit asks are strict too", async () => {
   for (const flag of ["--ref", "--harness", "--project", "--request-id"]) {
     expect(() => parseAskCommandOptions([flag, "--fyi", "news"], "/repo")).toThrow("value");

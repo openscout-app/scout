@@ -1,3 +1,4 @@
+import { manualReviewDeliveryGuard } from "./manual-review-dispatch.js";
 import { sessionSenderMetadata } from "./broker-session-sender-profile.js";
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
@@ -433,6 +434,12 @@ export class BrokerDeliveryAcceptanceService {
     payload: ScoutDeliverRequest,
     options: { signal?: AbortSignal } = {},
   ): Promise<ScoutDeliverResponse> {
+    const reviewGuard = (payload as ScoutDeliverRequest & { [manualReviewDeliveryGuard]?: () => void })[manualReviewDeliveryGuard];
+    try { reviewGuard?.(); }
+    catch (error) {
+      // The reservation exists but this command has not performed any effects.
+      throw new RetryablePreEffectFailure(error instanceof Error ? error.message : "The Board review grant changed.");
+    }
     // acceptCommand runs only after the caller's original command is fingerprinted
     // and reserved. Inject native-reply policy into a private execution copy:
     // old receipts with an absent/false flag must keep replaying the same bytes.
@@ -1065,16 +1072,22 @@ export class BrokerDeliveryAcceptanceService {
       && !requestedTargetSessionId
       && ((execution?.session ?? "new") === "new" || execution?.session === "fork")
       && Boolean(this.options.createCardlessProjectSession);
+    if (reviewGuard && !shouldCreateCardlessProjectSession) {
+      throw new RetryablePreEffectFailure("A Board review requires a fresh local native session.");
+    }
     if (projectHost && !shouldCreateCardlessProjectSession) {
       throw new Error(
         `--on ${projectHost} starts a fresh session in ${projectPath}; it cannot continue or target an existing session or agent. `
         + "Drop --to/--session to start fresh there, or address the existing session as sess.<token>@<host>.",
       );
     }
+    reviewGuard?.();
     const resolved = shouldCreateCardlessProjectSession
       ? await this.options.createCardlessProjectSession!({
           projectPath: projectPath!,
-          ...(projectHost ? { host: projectHost } : {}),
+          // Explicitly name this node to prevent the project resolver from
+          // falling back to a mesh peer if the local directory disappears.
+          ...(reviewGuard ? { host: this.options.nodeId } : projectHost ? { host: projectHost } : {}),
           execution,
           projectAgent: payload.projectAgent,
           ...(askWorkspaceFromPayload(payload) === "new_worktree" ? { workspace: "new_worktree" as const } : {}),
@@ -1142,6 +1155,9 @@ export class BrokerDeliveryAcceptanceService {
           label: resolved.session.label,
           endpoint: resolved.session.endpoint as AgentEndpoint | undefined,
         };
+    if (reviewGuard && (!target.endpoint || target.endpoint.nodeId !== this.options.nodeId || isExternalSessionEndpoint(target.endpoint))) {
+      throw new Error("A Board review requires a local native session that can read its pinned source file.");
+    }
     if (payload.task) {
       const snapshot = this.options.runtimeSnapshot();
       const endpoint = target.endpoint ?? this.options.homeEndpointForAgent(snapshot, target.actorId);
@@ -1449,6 +1465,7 @@ export class BrokerDeliveryAcceptanceService {
     // The original receipt and initial flight are recoverable from the same
     // atomic journal frame, even if the process dies before receipt-file save.
     throwIfAborted(options.signal);
+    if (reviewGuard) Object.defineProperty(invocation, manualReviewDeliveryGuard, { value: reviewGuard });
     const flight = await this.acceptInvocation(invocation, message, payload, workResolution.pendingCreation);
     if (completion) invocation.metadata = { ...invocation.metadata, completionFlightId: flight.id };
     this.options.dispatchAcceptedInvocation(invocation).catch((error) => {

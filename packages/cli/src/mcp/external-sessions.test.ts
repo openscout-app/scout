@@ -51,3 +51,28 @@ test("external MCP replies without requestId derive a stable key from delivery, 
     expect(requests[3]!.requestId).toBe("caller-key");
   } finally { await client.close(); await server.close(); broker.stop(true); }
 });
+
+test("an external reply with points is refused when the runtime lacks reply-points/1", async () => {
+  const requests: string[] = [];
+  let capabilities = ["ask-reply/1"];
+  const broker = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+    const path = new URL(request.url).pathname; requests.push(`${request.method} ${path}`);
+    return Response.json(path === "/v1/node" ? { id: "node-1", capabilities } : { ok: true });
+  } });
+  const server = createScoutMcpServer({ defaultCurrentDirectory: "/tmp", env: {},
+    dependencies: { resolveSenderId: async () => "owner", resolveBrokerUrl: () => `http://127.0.0.1:${broker.port}` } });
+  const client = new Client({ name: "external-points", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(b), client.connect(a)]);
+    const args = { ref: "task", sessionId: "session", deliveryId: "delivery", body: "done",
+      points: [{ stance: "claim", text: "Keep Home on the shipped Feed" }] };
+    const refused = await client.callTool({ name: "reply", arguments: args });
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.content)).toContain("reply-points/1");
+    expect(requests).toEqual(["GET /v1/node"]);
+    capabilities = ["ask-reply/1", "reply-points/1"];
+    expect((await client.callTool({ name: "reply", arguments: args })).isError).not.toBe(true);
+    expect(requests).toEqual(["GET /v1/node", "GET /v1/node", "POST /v1/external-sessions/reply"]);
+  } finally { await client.close(); await server.close(); broker.stop(true); }
+});

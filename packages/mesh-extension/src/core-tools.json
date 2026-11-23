@@ -396,7 +396,7 @@
   {
     "name": "reply",
     "title": "Reply",
-    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. points states what the reply does: each point is a claim, agree, concede, dispute, or question for the operator, optionally answering another point by id (re) and naming the question it is about (about). While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -462,6 +462,49 @@
             "summary"
           ],
           "additionalProperties": false
+        },
+        "points": {
+          "description": "Typed points the reply makes. The result returns each point's id.",
+          "maxItems": 24,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "stance": {
+                "type": "string",
+                "enum": [
+                  "claim",
+                  "agree",
+                  "concede",
+                  "dispute",
+                  "question"
+                ],
+                "description": "claim, agree, concede, dispute, or question (a question for the operator)."
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "re": {
+                "description": "The id of the point this one answers.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "about": {
+                "description": "A short lowercase key for the question, shared with the other agents, such as home-source.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            },
+            "required": [
+              "stance",
+              "text"
+            ],
+            "additionalProperties": false
+          }
         },
         "body": {
           "type": "string",
@@ -645,8 +688,17 @@
         "decision": {
           "description": "Operator tasks only: a decision card, as a local JSON file path or the card itself. Decision cards are host-local; send them through a local Scout client.",
           "anyOf": [
-            { "type": "string", "minLength": 1 },
-            { "type": "object", "propertyNames": { "type": "string" }, "additionalProperties": {} }
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
           ]
         },
         "completion": {
@@ -833,7 +885,8 @@
             "cursor",
             "opencode",
             "pi",
-            "devin"
+            "devin",
+            "antigravity"
           ]
         },
         "model": {

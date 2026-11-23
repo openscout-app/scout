@@ -25,6 +25,7 @@ import { DevinSource } from "./devin-source.js";
 import { GrokSource } from "./grok-source.js";
 import { KimiSource } from "./kimi-source.js";
 import { OpenCodeSource } from "./opencode-source.js";
+import { ManagedAgentsSource } from "./managed-agents-source.js";
 import { PiSource } from "./pi-source.js";
 import { sessionRegistryKey } from "./registry.js";
 import type {
@@ -213,7 +214,7 @@ type Watcher = {
   pumpInFlight: Promise<void> | null;
 };
 
-const sources: TranscriptSource[] = [GrokSource, KimiSource, ClaudeSource, CodexSource, CursorSource, OpenCodeSource, PiSource, DevinSource];
+const sources: TranscriptSource[] = [GrokSource, KimiSource, ClaudeSource, CodexSource, CursorSource, OpenCodeSource, PiSource, DevinSource, ManagedAgentsSource];
 
 const watchers = new Map<string, Watcher>(); // key = `${source}:${transcriptPath}` (one watcher per file, regardless of how many processes share it)
 const aggregateBuffer = new TailReplayBuffer(AGGREGATE_BUFFER_LIMIT);
