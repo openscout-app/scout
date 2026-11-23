@@ -1924,6 +1924,8 @@ export class CodexAppServerTransport {
 }
 
 type ActiveTurn = {
+  threadId: string | null;
+  beforeAcknowledgement: CodexAppServerNotification[] | null;
   onDelta?: (delta: string) => void;
   turnId: string;
   startedAt: number;
@@ -2049,10 +2051,10 @@ export class CodexAppServerClient {
     void completion.catch(() => undefined);
     try {
       const response = await this.transport.submitExisting(prompt);
-      turn.turnId = response.turn.id;
+      this.bindAcknowledgedTurn(turn, response.turn.id);
       return { accepted: true, evidence: "codex_turn_start_accepted" };
     } catch (error) {
-      if (!isCodexAppServerControlError(error) || !error.submissionUnknown) this.clearActiveTurn(turn);
+      this.finishFailedSubmission(turn, error);
       this.attentionUnsafe = true;
       turn.reject(error instanceof Error ? error : new Error(String(error)));
       throw error;
@@ -2080,9 +2082,9 @@ export class CodexAppServerClient {
         turn = this.createActiveTurn(resolve, reject, onDelta);
       });
       const submission = this.transport.startTurn(prompt, observe).then((response) => {
-        turn.turnId = response.turn.id;
+        this.bindAcknowledgedTurn(turn, response.turn.id);
       }, (error: unknown) => {
-        if (!isCodexAppServerControlError(error) || !error.submissionUnknown) this.clearActiveTurn(turn);
+        this.finishFailedSubmission(turn, error);
         throw error;
       });
       const output = await waitForRequesterResult(
@@ -2127,13 +2129,13 @@ export class CodexAppServerClient {
 
       try {
         const response = await this.transport.startTurn(prompt);
-        turn.turnId = response.turn.id;
+        this.bindAcknowledgedTurn(turn, response.turn.id);
         return {
           threadId: this.transport.currentThreadId,
           turnId: response.turn.id,
         };
       } catch (error) {
-        if (!isCodexAppServerControlError(error) || !error.submissionUnknown) this.clearActiveTurn(turn);
+        this.finishFailedSubmission(turn, error);
         turn.reject(error instanceof Error ? error : new Error(errorMessage(error)));
         throw error;
       }
@@ -2154,8 +2156,9 @@ export class CodexAppServerClient {
     }
 
     const activeTurn = this.activeTurn;
-    if (!activeTurn?.turnId) {
-      return this.invoke(prompt, timeoutMs, observe);
+    if (!activeTurn) return this.invoke(prompt, timeoutMs, observe);
+    if (!activeTurn.turnId) {
+      throw new Error(`Codex has not confirmed the active turn for ${this.options.agentName}; inspect the original submission before steering.`);
     }
 
     let watcher!: ReturnType<CodexAppServerClient["addTurnWatcher"]>;
@@ -2307,6 +2310,8 @@ export class CodexAppServerClient {
     }
 
     const turn: ActiveTurn = {
+      threadId: this.threadId,
+      beforeAcknowledgement: [],
       onDelta,
       turnId: "",
       startedAt: Date.now(),
@@ -2365,6 +2370,24 @@ export class CodexAppServerClient {
     return watchers;
   }
 
+  private bindAcknowledgedTurn(turn: ActiveTurn, turnId: string): void {
+    if (this.activeTurn !== turn) return;
+    turn.turnId = turnId;
+    const pending = turn.beforeAcknowledgement ?? [];
+    turn.beforeAcknowledgement = null;
+    for (const notification of pending) {
+      if (this.activeTurn !== turn) break;
+      this.handleNotification(notification);
+    }
+  }
+
+  private finishFailedSubmission(turn: ActiveTurn, error: unknown): void {
+    // An ambiguous send has no authoritative turn id. Keep it unavailable
+    // for another start, and stop collecting notifications after the RPC ends.
+    turn.beforeAcknowledgement = null;
+    if (!isCodexAppServerControlError(error) || !error.submissionUnknown) this.clearActiveTurn(turn);
+  }
+
   private clearActiveTurn(turn: ActiveTurn): void {
     if (this.activeTurn === turn) {
       this.activeTurn = null;
@@ -2381,11 +2404,22 @@ export class CodexAppServerClient {
     if (method === "item/completed" && (params.item as any)?.type === "contextCompaction") { this.attentionUnsafe = false; this.liveRevision++; }
     if (method === "turn/started") {
       if (!this.activeTurn) { this.attentionUnsafe = true; this.liveRevision++; }
-      const turn = params.turn as { id?: string } | undefined;
-      if (this.activeTurn && turn?.id && !this.activeTurn.turnId) {
-        this.activeTurn.turnId = turn.id;
-      }
       return;
+    }
+
+    // The RPC response identifies our turn. A thread may emit another
+    // turn's output, or even our own completion, before the response arrives.
+    const owner = this.activeTurn;
+    if (owner && (method === "item/agentMessage/delta" || method === "item/completed"
+      || method === "turn/completed" || method === "error")) {
+      if (params.threadId && params.threadId !== owner.threadId) return;
+      const turnId = metadataString(params, "turnId") ?? metadataString(metadataRecord(params, "turn"), "id");
+      if (!turnId) return;
+      if (!owner.turnId) {
+        owner.beforeAcknowledgement?.push(message);
+        return;
+      }
+      if (turnId !== owner.turnId) return;
     }
 
     if (method === "item/agentMessage/delta") {
@@ -2393,9 +2427,6 @@ export class CodexAppServerClient {
       const itemId = typeof params.itemId === "string" ? params.itemId : null;
       const delta = typeof params.delta === "string" ? params.delta : "";
       if (!this.activeTurn || !turnId || !itemId) {
-        return;
-      }
-      if (this.activeTurn.turnId && this.activeTurn.turnId !== turnId) {
         return;
       }
       if (!this.activeTurn.messageByItemId.has(itemId)) {
@@ -2411,9 +2442,6 @@ export class CodexAppServerClient {
       const turnId = typeof params.turnId === "string" ? params.turnId : null;
       const item = params.item as { type?: string; id?: string; text?: string } | undefined;
       if (!this.activeTurn || !turnId || item?.type !== "agentMessage" || !item.id) {
-        return;
-      }
-      if (this.activeTurn.turnId && this.activeTurn.turnId !== turnId) {
         return;
       }
       if (!this.activeTurn.messageByItemId.has(item.id)) {
@@ -2457,10 +2485,6 @@ export class CodexAppServerClient {
   private completeTurn(params: TurnCompletedParams): void {
     const activeTurn = this.activeTurn;
     if (!activeTurn) {
-      return;
-    }
-
-    if (activeTurn.turnId && activeTurn.turnId !== params.turn.id) {
       return;
     }
 
