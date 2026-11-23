@@ -235,6 +235,8 @@ describe("scout install --all", () => {
     const result = await runInstallAll(context, options({ force: true }), dependencies(host));
 
     expect(statuses(result)).toEqual({ cli: "updated", runtime: "updated", app: "updated", web: "updated" });
+    expect(result.parts.find((part) => part.part === "cli")!.message).toBe("@openscout/scout 0.5.3 reinstalled");
+    expect(result.parts.find((part) => part.part === "app")!.message).toBe("Scout.app 0.5.3 reinstalled");
     const start = host.calls.find((call) => call.args.includes("start"))!;
     expect(start.env?.OPENSCOUT_ALLOW_SHARED_SERVICE_REPOINT).toBeUndefined();
     const web = host.calls.find((call) => call.args[0] === "web" && call.args[1] === "install")!;

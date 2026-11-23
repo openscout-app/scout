@@ -320,7 +320,8 @@ function installPackage(
     : before ? "updated"
     : "installed";
   const head = status === "up-to-date" ? `${SCOUT_PACKAGE_NAME} ${target} is installed`
-    : before && before !== target ? `${SCOUT_PACKAGE_NAME} ${before} → ${target}`
+    : before === target ? `${SCOUT_PACKAGE_NAME} ${target} reinstalled`
+    : before ? `${SCOUT_PACKAGE_NAME} ${before} → ${target}`
     : `${SCOUT_PACKAGE_NAME} ${target} installed`;
   return { part: "cli", status, before, after, message: [head, ...notes].join("; ") };
 }
@@ -556,7 +557,10 @@ function installApp(
     status: status === "up-to-date" ? "up-to-date" : status === "installed" ? "installed" : "updated",
     before,
     after,
-    message: typeof value?.message === "string" ? value.message : `Scout.app ${after}`,
+    // A forced reinstall of the same version reads as one, not as "0.5.3 → 0.5.3".
+    message: before === after && status !== "up-to-date"
+      ? `Scout.app ${after} reinstalled${options.restart ? "" : "; restart Scout to use it"}`
+      : typeof value?.message === "string" ? value.message : `Scout.app ${after}`,
   };
 }
 
