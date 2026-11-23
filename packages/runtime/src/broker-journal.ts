@@ -1420,6 +1420,15 @@ export class FileBackedBrokerJournal {
     return this.state.durableActions.get(actionId) ?? null;
   }
 
+  /** Every durable action of one kind, in the order they were first recorded. */
+  listDurableActionsByKind(kind: DurableAction["kind"]): DurableAction[] {
+    const found: DurableAction[] = [];
+    for (const action of this.state.durableActions.values()) {
+      if (action.kind === kind) found.push(action);
+    }
+    return found;
+  }
+
   getDurableActionByIdempotencyKey(input: {
     authorityCellId: string;
     kind: DurableAction["kind"];
