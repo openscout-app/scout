@@ -7,6 +7,7 @@ import type { HistoryRotationPlan } from "./history-rotation.js";
 import { emptyHistoryRotationPlan } from "./history-rotation.js";
 import type { RecoverableSQLiteProjection, SQLiteProjectionStatusSnapshot } from "./sqlite-projection.js";
 import type { ArchiveEventsResult } from "./control-plane-archive.js";
+import { describeRuntimeFault } from "./dependency-links.js";
 import { projectionVerificationDigest, verificationPlanKeys, type ProjectionVerificationDigest } from "./sqlite-projection-verification.js";
 
 export type WorkerSQLiteProjectionOptions = {
@@ -23,6 +24,11 @@ const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 // One accepted record may be much larger than an ordinary read/control RPC.
 // Preserve it as one bounded exception; never multiply that payload by 16.
 const MAX_QUARANTINE_REQUEST_BYTES = 64 * 1024 * 1024 + 64 * 1024;
+
+/** 1 s, 2 s, 4 s ... capped at one minute. */
+export function projectionRetryDelayMs(consecutiveFailures: number): number {
+  return Math.min(60_000, 1_000 * 2 ** Math.max(0, Math.min(6, consecutiveFailures - 1)));
+}
 
 /** One coalesced journal watermark replaces an in-memory queue of payloads. */
 export class WorkerSQLiteProjection {
@@ -44,6 +50,7 @@ export class WorkerSQLiteProjection {
   private replayStats: ReplayStats = { fullReplays: 0, tailReplays: 0, bytes: 0 };
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private workerProgress = 0;
+  private consecutiveFailures = 0;
 
   constructor(private readonly dbPath: string, private readonly journalPath: string,
     private readonly journal: FileBackedBrokerJournal, private readonly options: WorkerSQLiteProjectionOptions = {}) {
@@ -100,13 +107,19 @@ export class WorkerSQLiteProjection {
       }
     })();
     this.pumping = work;
-    void work.catch(error => {
-      this.cachedHealth = { failures: this.cachedHealth.failures + 1, unavailable: String(error) };
-      this.cachedStatus = { state: "degraded", detail: String(error) };
+    void work.then(() => { this.consecutiveFailures = 0; }, error => {
+      const detail = describeRuntimeFault(String(error));
+      this.consecutiveFailures++;
+      this.cachedHealth = { failures: this.cachedHealth.failures + 1, unavailable: detail };
+      this.cachedStatus = { state: "degraded", detail };
     }).finally(() => {
       this.pumping = null;
       if (!this.closed && this.projectedRevision < this.requestedRevision) {
-        this.retry = setTimeout(() => { this.retry = null; void this.pump().catch(() => {}); }, this.cachedStatus.state === "degraded" ? 1_000 : 0);
+        // Each attempt replays the journal tail. Under memory or disk pressure a
+        // fixed one-second retry repeats that replay without end; back off, and
+        // try again promptly once an attempt succeeds.
+        const delay = this.cachedStatus.state === "degraded" ? projectionRetryDelayMs(this.consecutiveFailures) : 0;
+        this.retry = setTimeout(() => { this.retry = null; void this.pump().catch(() => {}); }, delay);
         this.retry.unref();
       }
     });
@@ -284,8 +297,9 @@ export class WorkerSQLiteProjection {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     if (this.watchdog) { clearInterval(this.watchdog); this.watchdog = null; }
     this.worker = null; this.failRequests(error);
-    this.cachedStatus = { state: "degraded", detail: error.message };
-    this.cachedHealth = { failures: this.cachedHealth.failures + 1, unavailable: error.message };
+    const detail = describeRuntimeFault(error.message);
+    this.cachedStatus = { state: "degraded", detail };
+    this.cachedHealth = { failures: this.cachedHealth.failures + 1, unavailable: detail };
     this.terminateWorker(worker);
   }
   private postMessage(worker: Worker, packet: unknown): void {
