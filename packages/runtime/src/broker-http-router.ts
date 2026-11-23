@@ -42,6 +42,7 @@ import type { IntegrationSlackEvents } from "./integration-slack-events.js";
 import type { IntegrationSlackDeliveryService } from "./integration-slack-delivery.js";
 import { BrokerIntegrationSetupService, IntegrationSetupError } from "./broker-integration-setup.js";
 import { deckLanes } from "./deck-lanes.js";
+import { parseSessionKnowledgeSearchParams, type SessionKnowledgeSearchInput, type SessionKnowledgeSearchResult } from "./knowledge/session-search.js";
 import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } from "./host-web-request.js";
 import { ChatQuestionError } from "./chat-question-transition.js";
 import { ChatMessageCorrectionError, isManualReviewBoardScope } from "@openscout/protocol";
@@ -276,6 +277,8 @@ export type BrokerHttpRouterDeps = {
   feedWork?: FeedWorkHttpDeps;
   attachments?: AttachmentHttpDeps;
   readObservedSessionCache?: ObservedSessionReadDeps["readCache"];
+  /** One bounded query over this host's own session index (GET /v1/mesh/knowledge/search). */
+  searchSessionKnowledge?: (input: SessionKnowledgeSearchInput) => SessionKnowledgeSearchResult;
   herdrWorkspaces?: Omit<HerdrWorkspacesReadDeps, "nodeId">;
   encodedSnapshotBodies?: boolean;
   onSnapshotFlushedBytes?: (bytes: number) => void;
@@ -2778,6 +2781,21 @@ export function createBrokerHttpRouter(
       ...(url.searchParams.get("projectRoot") ? { projectRoot: url.searchParams.get("projectRoot")! } : {}),
       ...(url.searchParams.get("agentId") ? { agentId: url.searchParams.get("agentId")! } : {}),
     }));
+    return;
+  }
+
+  // Cross-host session search (control tier): a peer in this operator's mesh
+  // asks this host to run one query over its own index. Only bounded hits
+  // leave the host, never a transcript. Same trust as starting a session
+  // here, which could read the transcripts directly; guests never reach it.
+  if (method === "GET" && url.pathname === "/v1/mesh/knowledge/search") {
+    if (request.transportContext?.guest) { json(response, 403, { error: "forbidden" }); return; }
+    if (!deps.searchSessionKnowledge) { notFound(response); return; }
+    let input: SessionKnowledgeSearchInput;
+    try { input = parseSessionKnowledgeSearchParams(url.searchParams); }
+    catch (error) { json(response, 400, { error: "invalid_search_query", detail: error instanceof Error ? error.message : String(error) }); return; }
+    try { json(response, 200, { nodeId, ...deps.searchSessionKnowledge(input) }); }
+    catch (error) { json(response, 503, { error: "session_search_unavailable", detail: error instanceof Error ? error.message : String(error) }); }
     return;
   }
 

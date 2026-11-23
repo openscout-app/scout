@@ -100,6 +100,9 @@ export type ScoutDeliverRejectReason =
 /** Advertised by /v1/node before clients may request live session input. */
 export const SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY = "session-input-receipts/1";
 
+/** Advertised by /v1/node when this host answers GET /v1/mesh/knowledge/search for its own index. */
+export const SCOUT_SESSION_SEARCH_CAPABILITY = "session-search/1";
+
 /** Input submission is not an invocation or proof of execution completion. */
 export interface ScoutSessionInputReceipt {
   kind: "in_place";

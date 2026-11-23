@@ -35,7 +35,7 @@ import { meshDiagnostics } from "./mesh-diagnostics.js";
 import { tailscaleStatusProbe } from "./system-probes/tailscale-status.js";
 import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
-import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
+import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
@@ -373,6 +373,7 @@ import {
   isInactiveLocalAgent,
 } from "./broker-endpoint-selection.js";
 import { readMeshNodeState } from "./mesh-node-state.js";
+import { searchLocalSessionKnowledge } from "./knowledge/session-search.js";
 import { BrokerHomeService } from "./broker-home-service.js";
 import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 import { BrokerUnavailableTargetService, localEndpointCanReceive, localEndpointSupportsQueue } from "./broker-unavailable-target-service.js";
@@ -1552,7 +1553,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, REPLY_POINTS_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
+  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, REPLY_POINTS_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
@@ -3942,6 +3943,7 @@ const routeRequest = createBrokerHttpRouter({
   derivedRecords,
   tasks: taskService,
   shows: { store: showStore, snapshot: () => runtime.snapshot() },
+  searchSessionKnowledge: searchLocalSessionKnowledge,
   posts: { store: postStore, shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
   routines: { runner: routineRunner },
   feedWork: sqliteDisabled ? {} : { read: readFeedWork },

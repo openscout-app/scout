@@ -99,6 +99,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   // project that exists here. Same trust as forwarding an invocation.
   "POST /v1/mesh/sessions/start": "control",
   "POST /v1/mesh/web-request": "control",
+  // Cross-host session search: one bounded query over the answering host's
+  // own index. Hits carry transcript snippets, so control, not observe.
+  "GET /v1/mesh/knowledge/search": "control",
   // Cross-machine approvals: control tier AND a per-peer share opt-in on this
   // machine (mesh-approvals.ts) — the tier alone never exposes them.
   "GET /v1/mesh/approvals/config": "local",
