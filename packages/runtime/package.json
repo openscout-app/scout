@@ -633,6 +633,7 @@
     "postpublish": "node ../../scripts/restore-publish-manifest.mjs ."
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
     "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",

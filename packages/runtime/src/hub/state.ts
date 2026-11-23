@@ -3,6 +3,7 @@
  *   config.json    inbox URL and the read and write tokens (0600)
  *   identity.json  this runtime's X25519 key pair (0600)
  *   claude/projects/<label>/…  mirrored cloud transcripts, read by the Claude source
+ *   managed-agents/<label>/…   mirrored Managed Agents sessions, read by their own source
  */
 
 import { randomBytes } from "node:crypto";
@@ -30,6 +31,21 @@ export function resolveHubHome(env: NodeJS.ProcessEnv = process.env): string {
 export function resolveHubClaudeMirrorRoot(env: NodeJS.ProcessEnv = process.env): string {
   return env.OPENSCOUT_HUB_CLAUDE_MIRROR_ROOT?.trim() || join(resolveHubHome(env), "claude", "projects");
 }
+
+export function resolveManagedAgentsMirrorRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.OPENSCOUT_HUB_MANAGED_AGENTS_MIRROR_ROOT?.trim() || join(resolveHubHome(env), "managed-agents");
+}
+
+/** Sidecar beside each mirrored Managed Agents session: what Scout shows for it. */
+export type ManagedAgentsSessionMeta = {
+  id: string;
+  title: string | null;
+  status: string;
+  agent: { id: string; name: string; version: number } | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
 
 function writePrivateJson(path: string, value: unknown): void {
   const tmp = `${path}.${process.pid}.tmp`;
