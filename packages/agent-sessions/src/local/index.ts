@@ -25,6 +25,8 @@ import {
 } from "./transports/codex-app-server.js";
 import { buildLocalCodexLaunchArgs } from "./codex-launch-args.js";
 
+export { inspectLoadedCodexThread, sendToLoadedCodexThread, type LoadedCodexThread } from "./transports/codex-loaded-thread.js";
+
 export {
   existingCodexNativeSession,
   CODEX_ATTACHED_CAPABILITY_GAPS,
