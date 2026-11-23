@@ -1278,6 +1278,8 @@ const replyContextSchema = z.object({
   replyToMessageId: z.string(),
   replyPath: z.enum(["final_response", "mcp_reply"]),
   action: z.string().optional(),
+  turn: z.object({ credential: z.string(), flightId: z.string(), expiresAt: z.number() }).optional()
+    .describe("The runtime-issued turn credential. Present it with an action taken for the asker."),
 });
 
 const currentReplyContextResultSchema = z.object({

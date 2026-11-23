@@ -58,6 +58,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
   "POST /v1/access/admin": "local",
+  "POST /v1/access/turn": "local",
   "POST /v1/mcp-events": "local",
   "POST /v1/native-session-attention": "local",
   "POST /v1/surfaces/deck": "local",
