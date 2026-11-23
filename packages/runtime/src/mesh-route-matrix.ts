@@ -57,6 +57,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/routines": "local",
   "POST /v1/routines": "local",
   "POST /v1/routines/:id/cancel": "local",
+  "GET /v1/worktrees/retirement": "local",
+  "POST /v1/worktrees/retirement/sweep": "local",
   "GET /v1/feed/work": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
