@@ -92,6 +92,7 @@ export type {
 } from "./adapters/claude-code/pending-tool-call.js";
 export { createAdapter as createCodexAdapter } from "./adapters/codex/index.js";
 export { createAdapter as createCursorAcpAdapter } from "./adapters/cursor-acp/index.js";
+export { createAdapter as createAntigravityAcpAdapter } from "./adapters/antigravity-acp/adapter.js";
 export { createAdapter as createDevinAcpAdapter } from "./adapters/devin-acp/index.js";
 export {
   CodexObservedTopologyTracker,

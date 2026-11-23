@@ -20,6 +20,7 @@ Each current adapter ships an `adapter.spec.json` in its support directory:
 | Adapter | Spec | Conformance status | Normalizer |
 | --- | --- | --- | --- |
 | ACP | [../acp/adapter.spec.json](../acp/adapter.spec.json) | `grandfathered` | `acp` |
+| Google Antigravity ACP | [../antigravity-acp/adapter.spec.json](../antigravity-acp/adapter.spec.json) | `grandfathered` (shared ACP normalizer) | `acp` |
 | Claude Code | [../claude-code/adapter.spec.json](../claude-code/adapter.spec.json) | `required` | `claude-code` |
 | Codex | [../codex/adapter.spec.json](../codex/adapter.spec.json) | `required` | `codex` |
 | Cursor ACP | [../cursor-acp/adapter.spec.json](../cursor-acp/adapter.spec.json) | `grandfathered` | `acp` |

@@ -887,6 +887,19 @@ export class AcpAdapter extends BaseAdapter {
 
   private async selectRequestedModel(sessionId: string): Promise<void> {
     const { model, reasoningEffort } = this.acpOptions;
+    if (this.acpOptions.adapterType === "antigravity-acp") {
+      if (!model) return;
+      const response = await this.request<{
+        configOptions?: Array<{ id: string; currentValue?: string }>;
+      }>("session/set_config_option", {
+        sessionId, configId: "model", value: model,
+      }, this.acpOptions.startupTimeoutMs);
+      if (response?.configOptions?.find(option => option.id === "model")?.currentValue !== model) {
+        throw new Error(`Antigravity did not confirm model "${model}". Run agy models to list available IDs.`);
+      }
+      this.updateProviderMeta({ requestedModel: model });
+      return;
+    }
     // `model` is also used by adapters such as OpenCode to configure the
     // child process. Do not assume that means the ACP agent implements the
     // optional session/set_model method; Grok is the transport that exposes
@@ -1025,7 +1038,10 @@ export class AcpAdapter extends BaseAdapter {
 
     if (message.error) {
       const detail = message.error.message || "request failed";
-      pending.reject(new Error(`${pending.method} failed (${message.error.code}): ${detail}`));
+      const loginHint = this.acpOptions.adapterType === "antigravity-acp" && message.error.code === -32000
+        ? " Sign in with agy acp --login and retry."
+        : "";
+      pending.reject(new Error(`${pending.method} failed (${message.error.code}): ${detail}${loginHint}`));
       return;
     }
 
