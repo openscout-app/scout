@@ -27,7 +27,39 @@ export interface DurableCheckbackMetadata extends MetadataMap {
   recordId?: ScoutId;
   route?: unknown;
   recurrence?: unknown;
+  /**
+   * `routine` mode: the JavaScript module the runtime runs in its sandbox each
+   * time the checkback comes due. Its default export gets the routine's facts
+   * as data and `scout.post` as its one way to act.
+   */
+  code?: string;
+  /** Where a routine's posts are filed: the project they belong to. */
+  currentDirectory?: string;
 }
+
+/** A routine fires again `everyMs` after each due time. No recurrence fires once. */
+export interface DurableCheckbackRecurrence {
+  everyMs: number;
+}
+
+/** The last time a routine fired, kept on the action for readers. */
+export interface ScoutRoutineRun {
+  at: number;
+  ok: boolean;
+  posts: ScoutId[];
+  error?: string;
+  logs?: string[];
+}
+
+export const SCOUT_ROUTINE_LIMITS = {
+  /** The shortest recurrence. Routines are for minutes and hours, not polling. */
+  minEveryMs: 60_000,
+  /** Live routines one runtime holds. */
+  maxRoutines: 50,
+  /** Posts one firing may make. */
+  postsPerRun: 3,
+  codeCharacters: 16_000,
+} as const;
 
 export type DurableActionState =
   | "pending"

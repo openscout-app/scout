@@ -3,6 +3,7 @@ import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } f
 import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { handlePostRoute, type PostHttpDeps } from "./broker-posts-http.js";
+import { handleRoutineRoute, type RoutineHttpDeps } from "./broker-routines-http.js";
 import { handleFeedWorkRoute, type FeedWorkHttpDeps } from "./broker-feed-work-http.js";
 import { RoleSlotError } from "./role-slots-store.js";
 import { RolePassError } from "./role-pass-scheduler.js";
@@ -269,6 +270,8 @@ export type BrokerHttpRouterDeps = {
   readRepoDiff?: RepoDiffRead;
   shows?: ShowHttpDeps;
   posts?: PostHttpDeps;
+  /** Scheduled routines that post to the Feed (/v1/routines). */
+  routines?: RoutineHttpDeps;
   /** Work items as a feed reads them (GET /v1/feed/work). */
   feedWork?: FeedWorkHttpDeps;
   attachments?: AttachmentHttpDeps;
@@ -966,6 +969,7 @@ export function createBrokerHttpRouter(
   }
   if (await handleShowRoute(request, response, url, deps.shows ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
   if (await handlePostRoute(request, response, url, deps.posts ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
+  if (await handleRoutineRoute(request, response, url, deps.routines ?? {})) return;
   if (handleFeedWorkRoute(request, response, url, deps.feedWork ?? {})) return;
   if (await handleAttachmentRoute(request, response, url, deps.attachments ?? { nodeId, peerNode: () => undefined })) return;
   const aliasItemMatch = method === "PATCH" || method === "DELETE"
