@@ -71,6 +71,7 @@ import { openScoutNetworkServiceEnvironment } from "./open-scout-network.js";
 import { readTailscaleSelfWebHosts } from "./tailscale.js";
 import { createBaseEdgeRefresh } from "./base-edge-refresh.js";
 import { resolveOpenScoutLocalEdgeDirectory, resolveOpenScoutSupportPaths } from "./support-paths.js";
+import { OPERATOR_ATTRIBUTION_HANDOFF_ENV, resolveOperatorAttributionKeyFile } from "./mesh-access-local-auth.js";
 import { createAppsSettingsReader } from "./apps-settings.js";
 import {
   MENU_HELPER_RECONCILE_INTERVAL_MS,
@@ -863,11 +864,18 @@ function spawnPairingController(): void {
     return;
   }
 
+  // Pairing answers the operator's paired devices, so it may sign operator
+  // requests. It reads the key at startup and drops the variable. Protected
+  // ingress (local admin key) keeps its own credentials.
+  const attribution = process.env.OPENSCOUT_LOCAL_ADMIN_KEY_FILE
+    ? undefined
+    : resolveOperatorAttributionKeyFile(process.env, config.supportDirectory);
   const child = spawn(descriptor.command, descriptor.args, {
     cwd: descriptor.cwd,
     env: {
       ...process.env,
       OPENSCOUT_PARENT_PID: String(process.pid),
+      ...(attribution ? { [OPERATOR_ATTRIBUTION_HANDOFF_ENV]: attribution.file } : {}),
     },
     stdio: [
       "ignore",

@@ -137,6 +137,7 @@ export function scoutUserSpawnEnvironment(base: NodeJS.ProcessEnv = process.env)
   const keys = normalized === "prod" ? SCOUT_SPAWN_MARKER_ENV_KEYS : SCOUT_USER_SPAWN_STRIPPED_ENV_KEYS;
   for (const key of keys) delete env[key];
   delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  delete env.OPENSCOUT_OPERATOR_ATTRIBUTION_HANDOFF_FILE;
   env.OPENSCOUT_CLIENT_INSTANCE = instance;
   return env;
 }

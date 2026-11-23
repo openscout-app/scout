@@ -765,6 +765,24 @@ test("a turn that ends without a verb releases the task, and its text never read
   expect(h.store.custody("c1", row.attemptId)).toMatchObject({ state: "settled", outcome: "released", detail: "the agent ended its turn without a verb" });
 });
 
+test("a final response the runtime published as the reply completes the task with that text", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Review the change" });
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(row.flightId!, { state: "completed", output: "Five findings, most serious first.", metadata: { resultReply: { version: 1, status: "delivered" } } });
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "completed", result: "Five findings, most serious first." });
+});
+
+test("a refused result reply is not a verb: the task is released", async () => {
+  const h = custodyHarness();
+  const id = h.board.createTask({ channel: "work", text: "Review the change" });
+  const row = await h.custody.claim({ taskId: id, workId: "", agentId: "agent-1", startedBy: "operator" });
+  h.flights.set(row.flightId!, { state: "completed", output: "Five findings.", metadata: { resultReply: { version: 1, status: "superseded" } } });
+  await h.custody.tick();
+  expect(h.board.task(id)).toMatchObject({ state: "ready", result: null });
+});
+
 test("a failed reply fails the task with the agent's reason", async () => {
   const h = custodyHarness();
   const id = h.board.createTask({ channel: "work", text: "Fix the build" });

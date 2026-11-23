@@ -120,12 +120,16 @@ for await (const line of rl) {
       console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "turn-1", status: "failed", error: { message: firstTurnFailure } } } }));
       continue;
     }
-    console.log(JSON.stringify({ id, result: { turn: { id: "turn-1" } } }));
+    // A different turn on this same thread finishes while our start RPC is in flight.
+    console.log(JSON.stringify({ method: "turn/started", params: { threadId, turn: { id: "neighbor" } } }));
+    console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId, turnId: "neighbor", itemId: "neighbor-msg", delta: "Unrelated output" } }));
+    console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "neighbor", status: "completed" } } }));
     console.log(JSON.stringify({ method: "turn/started", params: { threadId, turn: { id: "turn-1", status: "inProgress", items: [] } } }));
     console.log(JSON.stringify({ method: "item/started", params: { threadId, turnId: "turn-1", item: { type: "agentMessage", id: "msg-1", text: "" } } }));
     console.log(JSON.stringify({ method: "item/agentMessage/delta", params: { threadId, turnId: "turn-1", itemId: "msg-1", delta: "Attached session reply" } }));
     console.log(JSON.stringify({ method: "item/completed", params: { threadId, turnId: "turn-1", item: { type: "agentMessage", id: "msg-1", text: "Attached session reply" } } }));
     console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: "turn-1", status: "completed", error: null } } }));
+    console.log(JSON.stringify({ id, result: { turn: { id: "turn-1" } } }));
     continue;
   }
 
@@ -1394,7 +1398,9 @@ describe("ensureCodexAppServerAgentOnline", () => {
     test(`a rejected turn leaves the same Codex process ready for its next turn: ${reason}`, async () => {
       const root = mkdtempSync(join(tmpdir(), "codex-failed-turn-")); tempPaths.add(root);
       process.env.OPENSCOUT_CODEX_BIN = writeFakeCodexExecutable(root, reason);
+      const deltas: string[] = [];
       const options = { agentName: "failed-turn", sessionId: "failed-turn", cwd: root, systemPrompt: "Fixture",
+        onDelta: (delta: string) => deltas.push(delta),
         threadId: "thread-fixture", requireExistingThread: true, runtimeDirectory: join(root, "runtime"), logsDirectory: join(root, "logs") };
       try {
         const first = await ensureCodexAppServerAgentOnline(options);
@@ -1405,6 +1411,7 @@ describe("ensureCodexAppServerAgentOnline", () => {
         expect(next.codexAppServer?.pid).toBe(first.codexAppServer?.pid);
         const result = await invokeCodexAppServerAgent({ ...options, prompt: "Deliver the next turn" });
         expect(result.output).toBe("Attached session reply");
+        expect(deltas.join("")).toBe("Attached session reply");
       } finally { await shutdownCodexAppServerAgent(options); }
     });
   }
