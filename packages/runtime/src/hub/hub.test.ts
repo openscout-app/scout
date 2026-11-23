@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createHistorySessionSnapshot } from "@openscout/agent-sessions";
+
 import { ClaudeSource } from "../tail/claude-source.js";
+import { readSessionFileScan } from "../system-probes/sessions.js";
 import { connectClaudeCode, disconnectClaudeCode, reporterCommand, reporterSha256 } from "./connect.js";
 import { applyChunkToMirror, mirrorPathForHeader } from "./mirror.js";
 import { REPORTER_SOURCE } from "./reporter-source.js";
@@ -160,11 +163,18 @@ describe("Claude source with a hub mirror", () => {
     process.env.OPENSCOUT_HUB_CLAUDE_MIRROR_ROOT = mirror;
     mkdirSync(join(mirror, "hub-spike"), { recursive: true });
     const line = JSON.stringify({ type: "user", sessionId: SESSION, cwd: "/home/user/repo", timestamp: new Date().toISOString(), message: { role: "user", content: "hi" } });
-    writeFileSync(join(mirror, "hub-spike", `${SESSION}.jsonl`), `${line}\n`);
+    const path = join(mirror, "hub-spike", `${SESSION}.jsonl`);
+    writeFileSync(path, `${line}\n`);
 
     const found = await ClaudeSource.discoverTranscripts([], "shallow");
     const cloud = found.find((transcript) => transcript.sessionId === SESSION);
-    expect(cloud).toMatchObject({ project: "hub-spike", cwd: "/home/user/repo", transcriptPath: join(mirror, "hub-spike", `${SESSION}.jsonl`) });
+    expect(cloud).toMatchObject({ project: "hub-spike", cwd: "/home/user/repo", transcriptPath: path });
     expect(ClaudeSource.findTranscript?.(SESSION)).toMatchObject({ project: "hub-spike" });
+    expect(createHistorySessionSnapshot({ path, content: `${line}\n` }).snapshot.session).toMatchObject({
+      adapterType: "claude-code", name: "hub-spike",
+    });
+    expect(await readSessionFileScan({ home: tempDir(), maxAgeDays: 1, limit: 5 })).toEqual([
+      expect.objectContaining({ path, project: "hub-spike", agent: "claude-code" }),
+    ]);
   });
 });

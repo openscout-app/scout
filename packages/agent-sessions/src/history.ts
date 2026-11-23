@@ -1,3 +1,4 @@
+import { claudeMirrorLabelForHistoryPath, isClaudeHistoryPath } from "./claude-projects.js";
 import { statSync } from "node:fs";
 import { basename, dirname } from "node:path";
 
@@ -339,7 +340,7 @@ function inferHistoryAdapterType(path: string, adapterType?: string | null): His
   }
 
   const normalizedPath = path.toLowerCase();
-  if (normalizedPath.includes("/.claude/projects/")) {
+  if (isClaudeHistoryPath(path)) {
     return "claude-code";
   }
   if (normalizedPath.includes("/.codex/") || normalizedPath.includes("/.openai-codex/")) {
@@ -358,16 +359,17 @@ export function supportsHistorySessionSnapshot(adapterType: string | null | unde
 }
 
 function buildBaseHistorySession(input: HistorySessionSnapshotInput, adapterType: HistoryAdapterType): Session {
+  const mirrorLabel = adapterType === "claude-code" ? claudeMirrorLabelForHistoryPath(input.path) : undefined;
   // Claude and pi records hold their folder; the pi parser sets it from its session record.
   const recorded = adapterType === "codex" ? null : firstRecordedCwd(input.content);
   // A recorded folder beats a decoded project folder name, even one that exists.
   const cwd = input.cwd?.trim()
-    || (adapterType === "claude-code" ? recorded ?? inferClaudeHistoryCwd(input.path) : null)
+    || (adapterType === "claude-code" ? recorded ?? (mirrorLabel ? null : inferClaudeHistoryCwd(input.path)) : null)
     || undefined;
 
   return {
     id: input.sessionId?.trim() || `history:${input.path}`,
-    name: input.name?.trim() || deriveHistoryName(input.path, cwd ?? recorded),
+    name: input.name?.trim() || mirrorLabel || deriveHistoryName(input.path, cwd ?? recorded),
     adapterType,
     status: "idle",
     ...(cwd ? { cwd } : {}),

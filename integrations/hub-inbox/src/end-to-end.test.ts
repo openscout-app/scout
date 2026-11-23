@@ -14,6 +14,7 @@ import {
   HubCollectorService,
   loadOrCreateHubIdentity,
   saveHubConfig,
+  sealHubChunk,
 } from "../../../packages/runtime/src/hub/index.ts";
 import { serveLocalInbox } from "./serve-local.ts";
 
@@ -95,3 +96,41 @@ test("a cloud transcript arrives in the mirror byte for byte", async () => {
   await runReporter(["flush", "--wait"], {}, { session_id: session, transcript_path: transcript });
   expect(inbox.bucket.objects.size).toBe(before);
 }, 30_000);
+
+test("collect reports the first waiting offset per file until the gap fills", async () => {
+  const home = mkdtempSync(join(tmpdir(), "scout-hub-gap-"));
+  const inbox = serveLocalInbox({ readToken: "shr_e2e", writeToken: "shw_e2e" });
+  cleanup.push(() => { inbox.server.stop(true); rmSync(home, { recursive: true, force: true }); });
+  const mirrorRoot = join(home, "mirror");
+  saveHubConfig({ v: 1, inbox: inbox.url, readToken: "shr_e2e", writeToken: "shw_e2e", createdAt: "" }, home);
+  const identity = loadOrCreateHubIdentity(home);
+  const label = "cloud-project";
+  const sessionId = "gap-session";
+  const file = `${sessionId}.jsonl`;
+  const send = async (offset: number) => {
+    const body = sealHubChunk({
+      v: 1, kind: "claude-code.transcript", label, sessionId, file, offset, seq: offset,
+      remoteSessionId: "cse_gap", cwd: "/home/user/repo", sentAt: new Date().toISOString(),
+    }, Buffer.from("{}\n"), identity.publicKey);
+    const response = await fetch(`${inbox.url}/v1/inbox/chunks`, {
+      method: "POST", headers: { authorization: "Bearer shw_e2e" }, body,
+    });
+    expect(response.status).toBe(201);
+  };
+  await send(0);
+  await send(6);
+  await send(9);
+  const collector = new HubCollectorService({ home, mirrorRoot });
+  const first = await collector.collectOnce();
+  expect(first.waiting).toBe(2);
+  expect(first.waitingFiles).toMatchObject([{ label, sessionId, file, mirroredBytes: 3, waitingOffset: 6 }]);
+  expect(Number.isFinite(Date.parse(first.waitingFiles[0]!.waitingSince))).toBe(true);
+  expect(JSON.parse(readFileSync(join(home, "status.json"), "utf8")).waitingFiles).toEqual(first.waitingFiles);
+  expect(inbox.bucket.objects.size).toBe(2);
+  expect((await collector.collectOnce()).waitingFiles).toEqual(first.waitingFiles);
+
+  await send(3);
+  expect(await collector.collectOnce()).toMatchObject({ appended: 3, waiting: 0, waitingFiles: [] });
+  expect(inbox.bucket.objects.size).toBe(0);
+  expect(readFileSync(join(mirrorRoot, label, file), "utf8")).toBe("{}\n".repeat(4));
+});

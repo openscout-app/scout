@@ -15,6 +15,7 @@ import {
   resolveHubHome,
   saveHubConfig,
   type HubConfig,
+  type HubCollectSummary,
 } from "@openscout/runtime/hub";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
@@ -194,13 +195,22 @@ async function runStatus(): Promise<{ value: Record<string, unknown>; text: stri
     inbox = { reachable: false, error: error instanceof Error ? error.message : String(error) };
   }
   const statusPath = join(resolveHubHome(), "status.json");
-  const lastCollect = existsSync(statusPath) ? JSON.parse(readFileSync(statusPath, "utf8")) as Record<string, unknown> : null;
+  const lastCollect = existsSync(statusPath) ? JSON.parse(readFileSync(statusPath, "utf8")) as Partial<HubCollectSummary> : null;
+  const waiting = lastCollect?.waitingFiles ?? [];
+  const now = Date.now();
   const sessions = mirroredSessions();
   const lines = [
     `Inbox: ${config.inbox} ${inbox.reachable ? `(reachable, ${inbox.pending ?? "?"} waiting)` : `(not reachable: ${inbox.error})`}`,
     lastCollect
       ? `Last collect: ${lastCollect.at}, ${lastCollect.appended} appended, ${lastCollect.waiting} waiting${lastCollect.error ? `, error: ${lastCollect.error}` : ""}`
       : "Last collect: never",
+    ...(waiting.length ? [
+      "Waiting for earlier bytes:",
+      ...waiting.map((file) => {
+        const seconds = Math.max(0, Math.floor((now - Date.parse(file.waitingSince)) / 1_000));
+        return `  ${file.label}/${file.file} (session ${file.sessionId}): ${file.mirroredBytes} bytes mirrored, waiting offset ${file.waitingOffset}, waiting ${seconds}s`;
+      }),
+    ] : []),
     `Mirror: ${resolveHubClaudeMirrorRoot()}`,
     ...(sessions.length
       ? sessions.slice(0, 20).map((s) => `  ${s.label}/${s.sessionId}  ${s.bytes} bytes  ${s.updatedAt}`)

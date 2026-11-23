@@ -5,7 +5,7 @@
  * takes effect without a restart.
  */
 
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyChunkToMirror, mirrorPathForHeader } from "./mirror.js";
@@ -56,6 +56,15 @@ export class HubInboxClient {
   }
 }
 
+export type HubWaitingFile = {
+  label: string;
+  sessionId: string;
+  file: string;
+  mirroredBytes: number;
+  waitingOffset: number;
+  waitingSince: string;
+};
+
 export type HubCollectSummary = {
   at: string;
   configured: boolean;
@@ -63,13 +72,14 @@ export type HubCollectSummary = {
   appended: number;
   duplicate: number;
   waiting: number;
+  waitingFiles: HubWaitingFile[];
   rejected: number;
   sessions: string[];
   error?: string;
   notes: string[];
 };
 
-type Opened = { key: string; header: HubChunkHeader; data: Uint8Array; target: string };
+type Opened = { key: string; uploaded: string; header: HubChunkHeader; data: Uint8Array; target: string };
 
 export type HubCollectorOptions = {
   home?: string;
@@ -125,7 +135,7 @@ export class HubCollectorService {
 
   private async pass(): Promise<HubCollectSummary> {
     const summary: HubCollectSummary = {
-      at: new Date().toISOString(), configured: false, fetched: 0, appended: 0, duplicate: 0, waiting: 0, rejected: 0, sessions: [], notes: [],
+      at: new Date().toISOString(), configured: false, fetched: 0, appended: 0, duplicate: 0, waiting: 0, waitingFiles: [], rejected: 0, sessions: [], notes: [],
     };
     let config;
     let identity: HubKeyPair | null;
@@ -154,10 +164,12 @@ export class HubCollectorService {
       this.lastError = null;
     } catch (error) {
       summary.error = error instanceof Error ? error.message : String(error);
+    }
+    try {
+      return this.finish(summary);
     } finally {
       rmSync(lock, { recursive: true, force: true });
     }
-    return this.finish(summary);
   }
 
   private async drain(client: HubInboxClient, identity: HubKeyPair, summary: HubCollectSummary): Promise<void> {
@@ -173,7 +185,7 @@ export class HubCollectorService {
           const { header, data } = openHubChunk(bytes, identity);
           const target = mirrorPathForHeader(this.mirrorRoot, header);
           if ("reason" in target) throw new Error(target.reason);
-          opened.push({ key: item.key, header, data, target: target.path });
+          opened.push({ key: item.key, uploaded: item.uploaded, header, data, target: target.path });
         } catch (error) {
           // Not sealed to this runtime, or not a chunk we accept. It can never apply.
           summary.rejected += 1;
@@ -187,11 +199,23 @@ export class HubCollectorService {
     // Within one pass, apply each file's chunks in offset order.
     opened.sort((a, b) => (a.target < b.target ? -1 : a.target > b.target ? 1 : a.header.offset - b.header.offset));
     const sessions = new Set<string>();
+    const waitingTargets = new Set<string>();
     for (const chunk of opened) {
       const result = applyChunkToMirror(this.mirrorRoot, chunk.header, chunk.data);
       if (result.outcome === "gap") {
         // An earlier chunk has not arrived yet. Leave this one in the inbox.
         summary.waiting += 1;
+        if (!waitingTargets.has(chunk.target)) {
+          waitingTargets.add(chunk.target);
+          const { label, sessionId, file } = chunk.header;
+          summary.waitingFiles.push({
+            label, sessionId, file,
+            mirroredBytes: result.have,
+            waitingOffset: result.offset,
+            // Use the inbox timestamp, not the reporter clock or this pass’s start.
+            waitingSince: Number.isFinite(Date.parse(chunk.uploaded)) ? chunk.uploaded : summary.at,
+          });
+        }
         continue;
       }
       if (result.outcome === "appended") { summary.appended += 1; sessions.add(`${chunk.header.label}/${chunk.header.sessionId}`); }
@@ -207,7 +231,10 @@ export class HubCollectorService {
     this.lastError = summary.error ?? null;
     if (summary.configured || summary.error) {
       try {
-        writeFileSync(join(this.home, "status.json"), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
+        const status = join(this.home, "status.json");
+        const temp = `${status}.${process.pid}.tmp`;
+        writeFileSync(temp, `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
+        renameSync(temp, status);
       } catch { /* status is best effort */ }
     }
     return summary;

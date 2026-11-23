@@ -1,3 +1,4 @@
+import { isClaudeHistoryPath } from "./claude-projects.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   closeSync,
@@ -387,6 +388,7 @@ function decodeCursor(cursor: string): ParsedCursor {
 }
 
 function inferAdapterType(path: string): TaskTailAdapterType | null {
+  if (isClaudeHistoryPath(path)) return "claude-code";
   const normalized = path.toLowerCase();
   if (
     normalized.includes("/.codex/")
@@ -394,9 +396,6 @@ function inferAdapterType(path: string): TaskTailAdapterType | null {
     || /^rollout-.*\.jsonl$/u.test(basename(normalized))
   ) {
     return "codex";
-  }
-  if (normalized.includes("/.claude/projects/")) {
-    return "claude-code";
   }
   return null;
 }
