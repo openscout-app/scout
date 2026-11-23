@@ -51,7 +51,7 @@ import { isRequesterWaitTimeoutError } from "./requester-timeout.js";
 import { isDispatchStalledError } from "./dispatch-stalled.js";
 import { isDeliveryBlockedError } from "./delivery-blocked.js";
 import { IN_PLACE_CHECKPOINT_KEY, readInPlaceCheckpoint, type InPlaceCheckpoint } from "./in-place/checkpoint.js";
-import { isCodexAppServerExitError, isCodexThreadHeldExternallyError } from "./codex-app-server.js";
+import { invokeCodexAppServerAgent, isCodexAppServerExitError, isCodexThreadHeldExternallyError } from "./codex-app-server.js";
 import { sessionAliasAckSummary } from "./session-alias.js";
 import { createInvocationResultReplyIntent, invocationResultMessageId } from "./broker-invocation-result-delivery-service.js";
 
@@ -98,6 +98,7 @@ type LocalAgentInvocationResult = {
 type LocalAgentInvocationHooks = {
   onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
   onProgress?: (summary: string) => Promise<void> | void;
+  onCodexSubmission?: Parameters<typeof invokeCodexAppServerAgent>[0]["onSubmission"];
   shouldContinue?: () => boolean;
   inPlaceCheckpoint?: () => InPlaceCheckpoint | null;
   saveInPlaceCheckpoint?: (checkpoint: InPlaceCheckpoint | null) => Promise<void> | void;
@@ -545,6 +546,7 @@ export class BrokerLocalInvocationService {
       return;
     }
 
+    let codexDispatch: { sessionId: string; refinesSessionId?: string; nativeTurnId?: string } | undefined;
     const dispatchAck = {
       strategy: dispatchAckStrategyForEndpoint({
         invocation,
@@ -584,6 +586,9 @@ export class BrokerLocalInvocationService {
       completedAt: undefined,
       metadata: {
         ...clearedTransientStatusMetadata(),
+        ...(runningEndpoint.transport === "codex_app_server" ? {
+          dispatchOutcome: { status: "not_submitted", reason: "before_codex_send", checkedAt: this.now() },
+        } : {}),
         dispatchAck,
       },
     });
@@ -619,6 +624,33 @@ export class BrokerLocalInvocationService {
         runningEndpoint,
         invocationWithAttachments,
         {
+          onCodexSubmission: async ({ threadId, method, turnId }) => {
+            if (this.currentFlightIsTerminal(invocation.id)) {
+              if (!turnId) throw new Error("Flight closed before Codex submission.");
+              return;
+            }
+            codexDispatch = {
+              sessionId: threadId,
+              ...(dispatchAck.sessionId && dispatchAck.sessionId !== threadId
+                && !localEndpointProviderSessionId(runningEndpoint)
+                ? { refinesSessionId: dispatchAck.sessionId } : {}),
+              ...(turnId ? { nativeTurnId: turnId } : {}),
+            };
+            const flight = await this.options.transitionInvocation(invocation.id, {
+              metadata: {
+                dispatchAck: { ...dispatchAck, ...codexDispatch },
+                dispatchOutcome: {
+                  status: turnId ? "submitted" : "submission_unknown",
+                  reason: turnId ? "codex_rpc_acknowledged" : "codex_send_boundary",
+                  method,
+                  checkedAt: this.now(),
+                },
+              },
+            });
+            if (!turnId && (isTerminalFlightState(flight.state) || this.currentFlightIsTerminal(invocation.id))) {
+              throw new Error("Flight closed before Codex submission.");
+            }
+          },
           onSessionObserved: async (metadata) => {
             liveEndpoint = promoteLocalEndpointProviderSession(liveEndpoint, { metadata });
             await this.options.persistEndpoint(liveEndpoint);
@@ -663,6 +695,7 @@ export class BrokerLocalInvocationService {
       ) ? dispatchAck.sessionId : null;
       const completedDispatchAck = {
         ...dispatchAck,
+        ...codexDispatch,
         sessionId: completedSessionId,
         ...(refinesSessionId ? { refinesSessionId } : {}),
         executionResolution: executionResolutionWithObservedEndpoint(
@@ -894,9 +927,11 @@ export class BrokerLocalInvocationService {
       // The prompt may already have been accepted. Keep that uncertainty
       // durable and never turn a missing control reply into a replay decision.
       if (!this.currentFlightIsTerminal(invocation.id)) {
+        const ack = this.options.runtime.flightForInvocation(invocation.id)?.metadata?.dispatchAck as { sessionId?: string } | undefined;
+        const inspect = ack?.sessionId ? ` Inspect the original dispatch for session ${ack.sessionId}.` : "";
         await this.options.transitionInvocation(invocation.id, {
           state: "waiting",
-          summary: `${target.displayName}'s submission is awaiting provider confirmation.`,
+          summary: `${target.displayName}'s submission is awaiting provider confirmation.${inspect}`,
           error: message,
           completedAt: undefined,
           metadata: {

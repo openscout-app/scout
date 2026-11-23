@@ -26,6 +26,7 @@ import {
 import {
   closedAsSupersededTwin,
   isSupersededTwinCopy,
+  interruptedCodexFlight,
   isTerminalFlightState,
   staleLocalEndpointReason,
   staleWorkingFlightFailure,
@@ -549,6 +550,15 @@ export class BrokerFlightLifecycleService {
         if (await this.recordFlight(closedAsSupersededTwin(flight, twin, now))) {
           this.options.warn?.(`[openscout-runtime] closed flight ${flight.id}: superseded by ${twin.state} flight ${twin.id}`);
         }
+        continue;
+      }
+      const interrupted = interruptedCodexFlight(flight, this.options.bootedAt);
+      if (interrupted && !this.options.isInvocationActive(flight.invocationId)) {
+        await this.recordFlight(interrupted, () => {
+          const current = this.options.journal.getFlight?.(flight.id)
+            ?? this.options.runtime.snapshot().flights[flight.id];
+          return !this.options.isInvocationActive(flight.invocationId) && isDeepStrictEqual(current, flight);
+        });
         continue;
       }
       const failure = staleWorkingFlightFailure(snapshot, flight, {

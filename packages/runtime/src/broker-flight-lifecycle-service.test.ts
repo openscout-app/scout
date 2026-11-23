@@ -159,6 +159,7 @@ function createHarness(input: {
   invocation?: InvocationRequest;
   activeInvocationIds?: string[];
   now?: number;
+  bootedAt?: number;
   onTerminalFlight?: (input: {
     flight: FlightRecord;
     invocation?: InvocationRequest;
@@ -229,6 +230,7 @@ function createHarness(input: {
       forwardedFlights.push(flight);
     },
     isInvocationActive: (invocationId) => activeInvocationIds.has(invocationId),
+    bootedAt: input.bootedAt,
     onTerminalFlight: input.onTerminalFlight,
     prepareTerminalReport: input.prepareTerminalReport,
     warn: (message) => warnings.push(message),
@@ -908,4 +910,39 @@ test("stale supersession records a typed cause and the successor without prose m
   const h = createHarness({ snapshot: testSnapshot({ flights: { older, newer } }), now: 40 });
   await h.service.reconcileStaleWorkingFlights();
   expect(h.committedFlights[0]).toMatchObject({ state: "failed", metadata: { failureCause: "superseded", supersededByFlightId: "newer" } });
+});
+
+
+test.each([
+  { status: "submission_unknown", reason: "codex_send_boundary", turnId: undefined, state: "waiting" },
+  { status: "submitted", reason: "codex_rpc_acknowledged", turnId: "turn-original", state: "waiting" },
+  { status: "not_submitted", reason: "before_codex_send", turnId: undefined, state: "failed" },
+])("restart reconciles Codex dispatch evidence ($reason) without adopting a neighboring reply", async ({ status, reason, turnId, state }) => {
+  const ack = { endpointId: "endpoint-1", transport: "codex_app_server", sessionId: "native-thread" };
+  const flight = testFlight({ metadata: {
+    dispatchAck: { ...ack, ...(turnId ? { nativeTurnId: turnId } : {}) },
+    dispatchOutcome: { status, reason, method: "turn/start", checkedAt: 1_100 },
+  } });
+  const neighbor = testFlight({
+    id: "neighbor", invocationId: "other-ask", startedAt: 1_200, completedAt: 1_300,
+    state: "completed", output: "Answer to another ask.", metadata: { dispatchAck: ack },
+  });
+  const h = createHarness({
+    bootedAt: 2_000,
+    snapshot: testSnapshot({ flights: { [flight.id]: flight, [neighbor.id]: neighbor } }),
+  });
+
+  await h.service.reconcileStaleWorkingFlights();
+  await h.service.reconcileStaleWorkingFlights();
+
+  const current = h.snapshot.flights[flight.id];
+  expect(current.state).toBe(state);
+  expect(current.invocationId).toBe(flight.invocationId);
+  expect(current.output).toBeUndefined();
+  if (state === "waiting") {
+    expect(current.completedAt).toBeUndefined();
+    expect(current.summary).toContain("Inspect Codex session native-thread.");
+    expect(current.metadata).toEqual(flight.metadata);
+    expect(h.committedFlights).toHaveLength(1);
+  }
 });

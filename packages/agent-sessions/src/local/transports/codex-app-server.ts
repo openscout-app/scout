@@ -219,9 +219,17 @@ export function buildCodexAppServerIdentity(input: {
   };
 }
 
+type CodexSubmissionObserver = (evidence: {
+  threadId: string;
+  method: "turn/start" | "turn/steer";
+  // Set only when the JSON-RPC response acknowledges this request.
+  turnId?: string;
+}) => Promise<void>;
+
 export type CodexAppServerInvocationOptions = CodexAppServerSessionOptions & {
   prompt: string;
   timeoutMs?: number;
+  onSubmission?: CodexSubmissionObserver;
 };
 
 export type CodexAppServerSteerOptions = CodexAppServerSessionOptions & {
@@ -1084,18 +1092,21 @@ export class CodexAppServerTransport {
     };
   }
 
-  async startTurn(prompt: string): Promise<TurnStartResult> {
+  async startTurn(prompt: string, observe?: CodexSubmissionObserver): Promise<TurnStartResult> {
     await this.ensureStarted();
     if (!this.threadId) {
       throw new Error(`Codex app-server session for ${this.options.agentName} has no active thread.`);
     }
 
+    const evidence = { threadId: this.threadId, method: "turn/start" as const };
+    if (observe) await observe(evidence);
     const response = await this.request<TurnStartResult>("turn/start", {
-      threadId: this.threadId,
+      threadId: evidence.threadId,
       cwd: this.options.cwd,
       input: this.textInput(prompt),
       ...this.attachedRuntimeParams({ includeEffort: true }),
     });
+    if (observe) await observe({ ...evidence, turnId: response.turn.id });
     await this.persistThreadId();
     return response;
   }
@@ -1130,17 +1141,20 @@ export class CodexAppServerTransport {
     return true;
   }
 
-  async steerTurn(prompt: string, expectedTurnId: string): Promise<void> {
+  async steerTurn(prompt: string, expectedTurnId: string, observe?: CodexSubmissionObserver): Promise<void> {
     await this.ensureStarted();
     if (!this.threadId) {
       throw new Error(`Codex app-server session for ${this.options.agentName} has no active thread.`);
     }
 
+    const evidence = { threadId: this.threadId, method: "turn/steer" as const };
+    if (observe) await observe(evidence);
     await this.request("turn/steer", {
-      threadId: this.threadId,
+      threadId: evidence.threadId,
       expectedTurnId,
       input: this.textInput(prompt),
     });
+    if (observe) await observe({ ...evidence, turnId: expectedTurnId });
   }
 
   async interruptTurn(turnId: string): Promise<void> {
@@ -2050,7 +2064,7 @@ export class CodexAppServerClient {
     return this.transport.ensureOnline().finally(() => this.settleIdle());
   }
 
-  async invoke(prompt: string, timeoutMs?: number): Promise<CodexAppServerTurnResult> {
+  async invoke(prompt: string, timeoutMs?: number, observe?: CodexSubmissionObserver): Promise<CodexAppServerTurnResult> {
     const onDelta = this.options.onDelta;
     const signal = this.options.signal;
     return this.enqueue(async () => {
@@ -2061,16 +2075,20 @@ export class CodexAppServerClient {
         throw new Error(`Codex app-server session for ${this.options.agentName} has no active thread.`);
       }
 
+      let turn!: ActiveTurn;
       const outputPromise = new Promise<string>((resolve, reject) => {
-        const turn = this.createActiveTurn(resolve, reject, onDelta);
-        void this.transport.startTurn(prompt).then((response) => {
-          turn.turnId = response.turn.id;
-        }, (error: unknown) => {
-          if (!isCodexAppServerControlError(error) || !error.submissionUnknown) this.clearActiveTurn(turn);
-          reject(error instanceof Error ? error : new Error(errorMessage(error)));
-        });
+        turn = this.createActiveTurn(resolve, reject, onDelta);
       });
-      const output = await waitForRequesterResult(outputPromise, timeoutMs, this.options.agentName);
+      const submission = this.transport.startTurn(prompt, observe).then((response) => {
+        turn.turnId = response.turn.id;
+      }, (error: unknown) => {
+        if (!isCodexAppServerControlError(error) || !error.submissionUnknown) this.clearActiveTurn(turn);
+        throw error;
+      });
+      const output = await waitForRequesterResult(
+        Promise.all([submission, outputPromise]).then(([, output]) => output),
+        timeoutMs, this.options.agentName,
+      );
 
       return {
         output,
@@ -2122,14 +2140,14 @@ export class CodexAppServerClient {
     });
   }
 
-  async send(prompt: string, timeoutMs?: number): Promise<CodexAppServerTurnResult> {
+  async send(prompt: string, timeoutMs?: number, observe?: CodexSubmissionObserver): Promise<CodexAppServerTurnResult> {
     if (this.hasActiveTurn()) {
-      return this.steerAndWait(prompt, timeoutMs);
+      return this.steerAndWait(prompt, timeoutMs, observe);
     }
-    return this.invoke(prompt, timeoutMs);
+    return this.invoke(prompt, timeoutMs, observe);
   }
 
-  async steerAndWait(prompt: string, timeoutMs?: number): Promise<CodexAppServerTurnResult> {
+  async steerAndWait(prompt: string, timeoutMs?: number, observe?: CodexSubmissionObserver): Promise<CodexAppServerTurnResult> {
     await this.transport.ensureOnline();
     if (!this.transport.currentThreadId) {
       throw new Error(`Codex app-server session for ${this.options.agentName} has no active thread.`);
@@ -2137,16 +2155,18 @@ export class CodexAppServerClient {
 
     const activeTurn = this.activeTurn;
     if (!activeTurn?.turnId) {
-      return this.invoke(prompt, timeoutMs);
+      return this.invoke(prompt, timeoutMs, observe);
     }
 
-    const output = await new Promise<string>((resolve, reject) => {
-      const watcher = this.addTurnWatcher(activeTurn, resolve, reject, timeoutMs);
-      void this.transport.steerTurn(prompt, activeTurn.turnId).catch((error: unknown) => {
-        this.removeTurnWatcher(activeTurn, watcher);
-        reject(error instanceof Error ? error : new Error(errorMessage(error)));
-      });
+    let watcher!: ReturnType<CodexAppServerClient["addTurnWatcher"]>;
+    const completion = new Promise<string>((resolve, reject) => {
+      watcher = this.addTurnWatcher(activeTurn, resolve, reject, timeoutMs);
     });
+    const submission = this.transport.steerTurn(prompt, activeTurn.turnId, observe).catch((error: unknown) => {
+      this.removeTurnWatcher(activeTurn, watcher);
+      throw error;
+    });
+    const [, output] = await Promise.all([submission, completion]);
 
     return {
       output,
@@ -2548,7 +2568,7 @@ export async function invokeCodexAppServerLocalAgent(
 ): Promise<CodexAppServerTurnResult> {
   const session = getOrCreateCodexAppServerClient(options);
   session.update(options);
-  return session.invoke(options.prompt, options.timeoutMs);
+  return session.invoke(options.prompt, options.timeoutMs, options.onSubmission);
 }
 
 export async function startCodexAppServerLocalAgent(
@@ -2564,7 +2584,7 @@ export async function sendCodexAppServerLocalAgent(
 ): Promise<CodexAppServerTurnResult> {
   const session = getOrCreateCodexAppServerClient(options);
   session.update(options);
-  return session.send(options.prompt, options.timeoutMs);
+  return session.send(options.prompt, options.timeoutMs, options.onSubmission);
 }
 
 export async function steerCodexAppServerLocalAgent(options: CodexAppServerSteerOptions): Promise<void> {
