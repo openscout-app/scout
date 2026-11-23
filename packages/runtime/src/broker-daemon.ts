@@ -126,6 +126,8 @@ import { BrokerDeliveryHttpService } from "./broker-delivery-http-service.js";
 import { BrokerDurableActionHttpService } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import { ManualReviewBoardService } from "./manual-review-board.js";
+import { ManualReviewBoardRoutineStore } from "./manual-review-board-routines.js";
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
 import { bootstrapSecretRedaction } from "./secret-redaction-bootstrap.js";
 import { applyRoleLifecycleForTerminalFlight } from "./role-lifecycle.js";
@@ -1080,6 +1082,21 @@ const manualReviewDispatch = new ManualReviewDispatchService({
   getDurableAction: (actionId) => journal.getDurableAction(actionId),
   deliver: request => deliveryAcceptanceService.accept(request),
   readAskReceipt: (requesterId, requestId) => requestReceipts.get(requesterId, requestId, "deliver"),
+});
+// A Board review routine is a saved reviewer for one Board channel. A run
+// reads the board through the adapter below and then goes through the two
+// services above, like every other manual review.
+const manualReviewBoard = new ManualReviewBoardService({
+  routines: new ManualReviewBoardRoutineStore({
+    authorityCellId: nodeId,
+    runDurableWrite,
+    commitEntries: commitDurableEntries,
+    getDurableAction: (actionId) => journal.getDurableAction(actionId),
+    listDurableActions: (kind) => journal.listDurableActionsByKind(kind),
+  }),
+  occurrences: manualReviewOccurrences,
+  dispatch: manualReviewDispatch,
+  board: () => vercelBoardService,
 });
 const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
 const workLifecycles = new BrokerWorkLifecycleService({
@@ -3954,6 +3971,7 @@ const routeRequest = createBrokerHttpRouter({
   durableActionHttpService,
   manualReviewOccurrences,
   manualReviewDispatch,
+  manualReviewBoard,
   controlStreams,
   managedSessionHttpService,
   meshDiscoveryService,

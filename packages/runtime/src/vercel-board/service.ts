@@ -994,6 +994,72 @@ export class BrokerVercelBoardService {
     }
   }
 
+  // ---- manual review ----------------------------------------------------
+
+  /**
+   * Whether a review routine may name this connection and channel: the
+   * connection is configured on this host, and the channel is one it is
+   * configured for and mirrors. Reads local configuration only.
+   */
+  async reviewChannel(request: { connectionId: string; channel: string }): Promise<void> {
+    const config = this.live.get(request.connectionId)?.config ?? (await this.file.list()).find(entry => entry.id === request.connectionId);
+    if (!config) throw new VercelBoardServiceError(404, "not_found", `No board connection ${request.connectionId} on this host.`, "Run: scout integration status vercel-board");
+    this.requireReviewChannel(config, request.channel);
+  }
+
+  private requireReviewChannel(config: VercelBoardConnectionConfig, channel: string): void {
+    if (!config.channels.includes(channel) || !vercelBoardMirroredChannels(config).includes(channel)) {
+      throw new VercelBoardServiceError(403, "review_channel_not_permitted", `Connection ${config.id} is not configured to mirror channel ${channel}.`, "Run: scout integration status vercel-board");
+    }
+  }
+
+  /**
+   * The version one item has on the board now, for a manual review to pin.
+   *
+   * Every check that needs no credential runs first: the connection is live
+   * and following on this host, the channel is one it is configured for and
+   * mirrors, and the mirror already holds the item, in that channel. Only then
+   * is the board asked, with one read of that one message. Board is not
+   * written: nothing is claimed, labelled or posted, and the mirror is not
+   * updated from the answer.
+   *
+   * The answer is trusted only when it names the same message, in the same
+   * channel, not deleted. It carries the item's identity and version and none
+   * of its text.
+   */
+  async reviewItem(request: { connectionId: string; channel: string; itemId: string }): Promise<{ id: string; channel: string; version: number }> {
+    const live = this.requireLive(request.connectionId);
+    if (live.state !== "following") {
+      throw new VercelBoardServiceError(409, "review_connection_not_live", live.detail ?? `Board connection ${request.connectionId} is ${live.state}, not following.`, live.fix ?? "Run: scout integration status vercel-board");
+    }
+    if (live.readsBlockedUntil > this.now()) {
+      throw new VercelBoardServiceError(429, "rate_limited", "The board is rate limiting this connection. Try again shortly.");
+    }
+    this.requireReviewChannel(live.config, request.channel);
+    const moved = () => new VercelBoardServiceError(409, "review_item_moved", `Board item ${request.itemId} is not in channel ${request.channel}.`);
+    const deleted = () => new VercelBoardServiceError(409, "review_item_deleted", `Board item ${request.itemId} is deleted, or no longer on the board.`);
+    const known = live.mirror.message(live.config.id, request.itemId);
+    if (!known) throw new VercelBoardServiceError(404, "review_item_unknown", `This host has not mirrored a Board item ${request.itemId} on connection ${request.connectionId}.`);
+    if (known.channel !== request.channel) throw moved();
+    if (known.deleted) throw deleted();
+
+    let fresh: VercelBoardWireMessage | null;
+    try {
+      fresh = await live.transport.message(request.itemId);
+    } catch (error) {
+      if (error instanceof VercelBoardHttpError && error.status === 403) {
+        throw new VercelBoardServiceError(403, "review_item_forbidden", `The board refused to show item ${request.itemId} to this connection.`);
+      }
+      this.classify(live, error);
+      throw new VercelBoardServiceError(502, "review_read_failed", `The board did not answer the read of item ${request.itemId}. Nothing was started.`, live.fix);
+    }
+    if (!fresh) throw deleted();
+    if (fresh.id !== request.itemId) throw new VercelBoardServiceError(502, "review_item_mismatch", `The board answered the read of item ${request.itemId} with a different item.`);
+    if (fresh.channel !== request.channel) throw moved();
+    if (fresh.deleted) throw deleted();
+    return { id: fresh.id, channel: fresh.channel, version: fresh.version };
+  }
+
   private requireLive(connectionId: string): LiveConnection {
     const live = this.live.get(connectionId);
     if (!live) throw new VercelBoardServiceError(409, "not_custodian", `This host is not connected to board connection ${connectionId}.`, "Connect this host too: scout integration connect vercel-board --team <team> --board <board> --credential secret_cli:<entry>. Each host connects on its own.");
