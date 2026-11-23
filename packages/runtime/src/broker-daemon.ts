@@ -3,6 +3,7 @@ import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./
 import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { HubCollectorService } from "./hub/collector.js";
+import { ManagedAgentsPuller } from "./hub/managed-agents.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
 import { RoutineRunner } from "./routine-runner.js";
@@ -2568,6 +2569,11 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
 const hubCollector = process.env.OPENSCOUT_HUB_COLLECTOR === "0"
   ? null
   : new HubCollectorService({ log: (message) => console.warn(message) });
+// Claude Managed Agents: pull recent sessions with an API key. Idle until
+// `scout hub connect managed-agents`.
+const managedAgentsPuller = process.env.OPENSCOUT_HUB_MANAGED_AGENTS === "0"
+  ? null
+  : new ManagedAgentsPuller({ log: (message) => console.warn(message) });
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
@@ -4775,6 +4781,7 @@ function startBrokerCoordination(): void {
   slackWorkerSupervisor?.start();
   void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
   hubCollector?.start();
+  managedAgentsPuller?.start();
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4805,6 +4812,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   await slackWorkerSupervisor?.stop();
   await vercelBoardService?.stop();
   await hubCollector?.stop();
+  await managedAgentsPuller?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });
