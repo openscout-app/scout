@@ -212,6 +212,7 @@ const expectedRouteInventory = [
   "POST /v1/local-sessions/detach",
   "POST /v1/local-sessions/ensure",
   "POST /v1/machines/scan",
+  "POST /v1/manual-review/dispatches",
   "POST /v1/manual-review/occurrences",
   "POST /v1/mcp-events",
   "POST /v1/mesh/aliases/resolve",

@@ -29,6 +29,7 @@ import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
 import { VercelBoardServiceError } from "./vercel-board/service.js";
 import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
+import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
 import { createRuntimeRegistrySnapshot, queryRuntimeNotificationRouting } from "./registry.js";
 import {
   TrustEndpointRateLimiter,
@@ -2338,4 +2339,107 @@ test("manual review occurrences record, replay, refuse a conflict and read back 
   expect(invalid.response.status).toBe(400);
   expect(invalid.body).toMatchObject({ error: "invalid_manual_review_request" });
   expect(actions.size).toBe(1);
+});
+
+test("a manual review dispatch is local only, starts one ask as the attributed caller and replays its ticket", async () => {
+  const actions = new Map<string, import("@openscout/protocol").DurableAction>();
+  const stores = {
+    authorityCellId: "node-local",
+    runDurableWrite: <T>(work: () => Promise<T>) => work(),
+    commitEntries: async (entries: import("./broker-journal.js").BrokerJournalEntry | import("./broker-journal.js").BrokerJournalEntry[]) => {
+      const committed = Array.isArray(entries) ? entries : [entries];
+      for (const entry of committed) if (entry.kind === "durable.action.record") actions.set(entry.action.id, entry.action);
+      return committed;
+    },
+    getDurableAction: (actionId: string) => actions.get(actionId),
+    now: () => 1_000,
+  };
+  const asks: import("@openscout/protocol").ScoutDeliverRequest[] = [];
+  const guarded: string[] = [];
+  const harness = createHarness({
+    manualReviewOccurrences: new ManualReviewOccurrenceService(stores),
+    manualReviewDispatch: new ManualReviewDispatchService({
+      ...stores,
+      deliver: async (ask) => {
+        asks.push(ask);
+        return {
+          kind: "delivery", accepted: true, routeKind: "dm", targetAgentId: "reviewer",
+          conversation: { id: "dm-1" }, message: { id: "msg-1" },
+          flight: { id: "flight-1", invocationId: "inv-1", targetAgentId: "reviewer" },
+          workItem: { id: ask.workItem?.id },
+          receipt: { acceptedAt: 1_000 },
+        } as unknown as import("@openscout/protocol").ScoutDeliverResponse;
+      },
+    }),
+  });
+  // The real guard, protecting one identity that the test never holds a claim for.
+  const claims = new BrokerAssistantClaims(["scoutbot"]);
+  const admit = claims.admit.bind(claims);
+  claims.admit = (agentId, action) => { guarded.push(agentId ?? ""); return admit(agentId, action); };
+  harness.deps.brokerService.assistantClaims = claims;
+  const path = "/v1/manual-review/dispatches";
+  const local = { transport: "loopback" as const };
+  const run = { scope: "review", requestId: "run-1" };
+  const body = { ...run, target: { kind: "agent_id", agentId: "reviewer" } };
+
+  // Nothing is dispatched for a run that was never recorded, and dispatch does not record one.
+  expect((await requestRouter(harness, "POST", path, { transportContext: local, body })).response.status).toBe(404);
+  expect(actions.size).toBe(0);
+
+  await requestRouter(harness, "POST", "/v1/manual-review/occurrences", { transportContext: local, body: {
+    ...run,
+    input: { source: "board:connection-1", id: "message-42", version: "3" },
+    artifact: { kind: "pull_request", ref: "example/repo#12", revision: "1f2e3d4c" },
+  } });
+  expect(asks).toEqual([]);
+
+  for (const options of [
+    {},
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { ...local, guest: true } },
+    { transportContext: { ...local, scoped: true } },
+    { transportContext: local, headers: { origin: "https://example.test" } },
+    { transportContext: local, headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    const refused = await requestRouter(harness, "POST", path, { ...options, body });
+    expect(refused.response.status).toBe(403);
+    expect(refused.body).not.toHaveProperty("ticket");
+  }
+  expect((await requestRouter(harness, "GET", path, { transportContext: local })).response.status).toBe(404);
+  expect(asks).toEqual([]);
+  expect([...actions.values()][0]?.metadata?.manualReview).toMatchObject({ state: "recorded" });
+
+  const invalid = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...run, target: { kind: "channel", channel: "reviews" } } });
+  expect(invalid.response.status).toBe(400);
+  expect(invalid.body).toMatchObject({ error: "invalid_manual_review_request" });
+
+  // A protected identity cannot be pinned as the asking principal without its claim.
+  const unclaimed = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, requestedById: "scoutbot" } });
+  expect(unclaimed.response.status).toBe(409);
+  expect(unclaimed.body).toMatchObject({ error: "assistant_claim_required" });
+  expect([...actions.values()][0]?.metadata?.manualReview).toMatchObject({ state: "recorded" });
+  expect(asks).toEqual([]);
+  guarded.length = 0;
+
+  // An unverified loopback caller cannot dispatch as the operator: the claim is kept, the principal is not.
+  const attribution = { actorId: "local-unverified", rootActorId: "local-unverified", source: "unverified", claimedActorId: "operator" };
+  const started = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, requestedById: "operator" } });
+  expect(started.response.status).toBe(200);
+  expect(started.body).toMatchObject({
+    replayed: false,
+    ticket: { workId: asks[0]?.workItem?.id, flightId: "flight-1", invocationId: "inv-1", messageId: "msg-1", conversationId: "dm-1", targetAgentId: "reviewer" },
+    occurrence: { state: "dispatched", dispatch: { target: body.target, requestedById: "local-unverified", attribution } },
+  });
+  expect(asks).toHaveLength(1);
+  expect(asks[0]).toMatchObject({ task: { version: 1 }, caller: { actorId: "local-unverified" }, target: body.target, messageMetadata: { attribution } });
+  // Guarded once for the caller, and once for the pinned principal at delivery.
+  expect(guarded).toEqual(["local-unverified", "local-unverified"]);
+
+  const { ticket } = started.body as { ticket: unknown };
+  const replay = await requestRouter(harness, "POST", path, { transportContext: local, body });
+  expect(replay.body).toMatchObject({ replayed: true, ticket });
+  const retarget = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...run, target: { kind: "agent_id", agentId: "other" } } });
+  expect(retarget.response.status).toBe(409);
+  expect(retarget.body).toMatchObject({ error: "manual_review_dispatch_conflict", differs: ["target.agentId"] });
+  expect(asks).toHaveLength(1);
 });
