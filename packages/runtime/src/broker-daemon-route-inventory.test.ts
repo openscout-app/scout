@@ -153,6 +153,7 @@ const expectedRouteInventory = [
   "POST /v1/access/admin",
   "POST /v1/access/policy",
   "POST /v1/access/rpc",
+  "POST /v1/access/turn",
   "POST /v1/actors",
   "POST /v1/agent-cards",
   "POST /v1/agents",
