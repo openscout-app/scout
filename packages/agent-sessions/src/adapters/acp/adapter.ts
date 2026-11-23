@@ -894,7 +894,12 @@ export class AcpAdapter extends BaseAdapter {
       }>("session/set_config_option", {
         sessionId, configId: "model", value: model,
       }, this.acpOptions.startupTimeoutMs);
-      if (response?.configOptions?.find(option => option.id === "model")?.currentValue !== model) {
+      const options = response?.configOptions;
+      const selected = options?.find(option => option.id === "model")?.currentValue;
+      const level = options?.find(option => option.id === "thought_level")?.currentValue;
+      // The CLI lists Gemini variants with one ID, but ACP reports the family and thinking level separately.
+      const matchesVariant = selected && level && `${selected}-${level}` === model;
+      if (selected !== model && !matchesVariant) {
         throw new Error(`Antigravity did not confirm model "${model}". Run agy models to list available IDs.`);
       }
       this.updateProviderMeta({ requestedModel: model });
