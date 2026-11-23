@@ -3257,28 +3257,37 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  if (url.pathname === "/v1/manual-review/occurrences" && (method === "GET" || method === "POST")) {
+  if (url.pathname === "/v1/manual-review/occurrences") {
     const context = request.transportContext;
     if (!context || !["loopback", "unix-socket"].includes(context.transport) || context.guest
       || request.headers.origin !== undefined || request.headers["x-openscout-forwarded-node-id"] !== undefined) {
       json(response, 403, { error: "local_only" });
       return;
     }
+  }
+
+  if (method === "GET" && url.pathname === "/v1/manual-review/occurrences") {
     try {
-      if (method === "GET") {
-        const occurrence = manualReviewOccurrences.lookup({
-          scope: url.searchParams.get("scope") ?? "",
-          requestId: url.searchParams.get("requestId") ?? "",
-        });
-        if (occurrence) json(response, 200, { occurrence });
-        else json(response, 404, { error: "not_found", detail: "no manual review occurrence is recorded for this scope and request ID" });
-      } else {
-        const body = await readRequestBody<ManualReviewOccurrenceRequest>(request, { maxBytes: 16 * 1024 });
-        json(response, 200, await manualReviewOccurrences.record({
-          ...body,
-          requestedById: attributedActorId(body?.requestedById ?? "operator"),
-        }));
-      }
+      const occurrence = manualReviewOccurrences.lookup({
+        scope: url.searchParams.get("scope") ?? "",
+        requestId: url.searchParams.get("requestId") ?? "",
+      });
+      if (occurrence) json(response, 200, { occurrence });
+      else json(response, 404, { error: "not_found", detail: "no manual review occurrence is recorded for this scope and request ID" });
+    } catch (error) {
+      if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/manual-review/occurrences") {
+    try {
+      const body = await readRequestBody<ManualReviewOccurrenceRequest>(request, { maxBytes: 16 * 1024 });
+      json(response, 200, await manualReviewOccurrences.record({
+        ...body,
+        requestedById: attributedActorId(body?.requestedById ?? "operator"),
+      }));
     } catch (error) {
       if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
       else badRequest(response, error);
