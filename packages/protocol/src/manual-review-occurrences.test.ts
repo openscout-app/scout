@@ -5,7 +5,10 @@ import {
   MANUAL_REVIEW_FIELD_MAX_LENGTH,
   manualReviewOccurrenceOf,
   manualReviewPinnedDifferences,
+  manualReviewTargetDifferences,
+  validateManualReviewDispatchRequest,
   validateManualReviewOccurrenceRequest,
+  type ManualReviewDispatch,
   type ManualReviewOccurrenceRequest,
 } from "./manual-review-occurrences.js";
 
@@ -78,5 +81,79 @@ describe("manual review occurrences", () => {
     expect(manualReviewOccurrenceOf(storedAction({ ...stored, schemaVersion: 2 }))).toBeNull();
     expect(manualReviewOccurrenceOf(storedAction({ ...stored, state: "dispatched" }))).toBeNull();
     expect(manualReviewOccurrenceOf(storedAction({ ...stored, artifact: { kind: "pull_request", ref: "example/repo#12" } }))).toBeNull();
+  });
+
+  test("a dispatch request names one run and one explicit recipient", () => {
+    const run = { scope: "review", requestId: "run-1" };
+    for (const target of [
+      { kind: "agent_id", agentId: "reviewer" },
+      { kind: "session_id", sessionId: "sess.abc" },
+      { kind: "project_path", projectPath: "/work/example" },
+      { kind: "project_path", projectPath: "/work/example", harness: "codex" },
+    ]) {
+      expect(validateManualReviewDispatchRequest({ ...run, target, requestedById: "operator" })).toEqual([]);
+    }
+    expect(validateManualReviewDispatchRequest(null)).toEqual(["request must be an object"]);
+    expect(validateManualReviewDispatchRequest({ target: { kind: "agent_id", agentId: "reviewer" } })).toHaveLength(2);
+    expect(validateManualReviewDispatchRequest({ ...run })).toEqual(["target must be an object"]);
+    for (const target of [
+      { kind: "channel", channel: "reviews" },
+      { kind: "broadcast" },
+      { kind: "agent_label", label: "reviewer" },
+      { kind: "agent_id" },
+      { kind: "agent_id", agentId: "reviewer", harness: "codex" },
+      { kind: "session_id", sessionId: "s".repeat(MANUAL_REVIEW_FIELD_MAX_LENGTH + 1) },
+      { kind: "project_path", projectPath: "relative/path" },
+      { kind: "project_path", projectPath: "/work/example", host: "elsewhere" },
+      { kind: "project_path", projectPath: "/work/example", harness: "unknown" },
+    ]) {
+      expect(validateManualReviewDispatchRequest({ ...run, target })).toHaveLength(1);
+    }
+  });
+
+  test("a requested target is compared with the pinned one field by field", () => {
+    const project = { kind: "project_path", projectPath: "/work/example", harness: "codex" } as const;
+    expect(manualReviewTargetDifferences(project, { ...project })).toEqual([]);
+    expect(manualReviewTargetDifferences(project, { kind: "project_path", projectPath: "/work/example" })).toEqual(["target.harness"]);
+    expect(manualReviewTargetDifferences(project, { kind: "project_path", projectPath: "/work/other", harness: "claude" }))
+      .toEqual(["target.projectPath", "target.harness"]);
+    expect(manualReviewTargetDifferences({ kind: "agent_id", agentId: "a" }, { kind: "agent_id", agentId: "b" })).toEqual(["target.agentId"]);
+    expect(manualReviewTargetDifferences({ kind: "session_id", sessionId: "a" }, { kind: "session_id", sessionId: "b" })).toEqual(["target.sessionId"]);
+    expect(manualReviewTargetDifferences({ kind: "agent_id", agentId: "a" }, { kind: "session_id", sessionId: "a" })).toEqual(["target.kind"]);
+  });
+
+  test("a stored state reads only with the dispatch that state requires", () => {
+    const stored = { schemaVersion: 1, ...request };
+    const dispatch: ManualReviewDispatch = {
+      target: { kind: "agent_id", agentId: "reviewer" },
+      askRequestId: "manual-review-1.ask",
+      askVersion: 1,
+      requestedById: "operator",
+      attribution: { actorId: "operator", rootActorId: "operator", source: "local-admin" },
+      admittedAt: 1_100,
+    };
+    const ticket = { workId: "work-1", flightId: "flight-1", invocationId: "inv-1", messageId: "msg-1", conversationId: "dm-1", targetAgentId: "reviewer", acceptedAt: 1_200 };
+    const refusal = { kind: "rejected", reason: "unknown_target", detail: "no such agent", refusedAt: 1_200 };
+    const read = (state: string, value: unknown) => manualReviewOccurrenceOf(storedAction({ ...stored, state, dispatch: value }));
+
+    expect(read("admitted", dispatch)).toMatchObject({ state: "admitted", dispatch });
+    expect(read("dispatched", { ...dispatch, ticket })).toMatchObject({ state: "dispatched", dispatch: { ...dispatch, ticket } });
+    expect(read("refused", { ...dispatch, refusal })).toMatchObject({ state: "refused", dispatch: { ...dispatch, refusal } });
+
+    // A state never claims more or less than what is stored with it.
+    expect(read("recorded", dispatch)).toBeNull();
+    expect(read("admitted", undefined)).toBeNull();
+    expect(read("admitted", { ...dispatch, ticket })).toBeNull();
+    expect(read("dispatched", dispatch)).toBeNull();
+    expect(read("dispatched", { ...dispatch, ticket: { ...ticket, flightId: "" } })).toBeNull();
+    expect(read("refused", { ...dispatch, ticket })).toBeNull();
+    expect(read("dispatched", { ...dispatch, ticket, refusal })).toBeNull();
+    expect(read("running", dispatch)).toBeNull();
+    // The pin is whole or the occurrence is unreadable: no target, version or principal is guessed.
+    expect(read("admitted", { ...dispatch, target: { kind: "channel", channel: "reviews" } })).toBeNull();
+    expect(read("admitted", { ...dispatch, askVersion: 2 })).toBeNull();
+    expect(read("admitted", { ...dispatch, askRequestId: "" })).toBeNull();
+    expect(read("admitted", { ...dispatch, attribution: { ...dispatch.attribution, actorId: "someone-else" } })).toBeNull();
+    expect(read("admitted", { ...dispatch, attribution: undefined })).toBeNull();
   });
 });

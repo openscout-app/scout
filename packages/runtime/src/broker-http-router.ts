@@ -67,6 +67,7 @@ import type {
   InboxClaimRequest,
   InboxNackRequest,
   InvocationRequest,
+  ManualReviewDispatchRequest,
   ManualReviewOccurrenceRequest,
   MessageRecord,
   ScoutRendezvousRequest,
@@ -116,6 +117,7 @@ import type {
   DurableActionHeartbeatBody,
 } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceError, type ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
+import { ManualReviewDispatchError, type ManualReviewDispatchService } from "./manual-review-dispatch.js";
 import {
   a2aJson,
   badRequest as writeBadRequest,
@@ -297,6 +299,7 @@ export type BrokerHttpRouterDeps = {
   deliveryHttpService: BrokerDeliveryHttpService;
   durableActionHttpService: BrokerDurableActionHttpService;
   manualReviewOccurrences: ManualReviewOccurrenceService;
+  manualReviewDispatch: ManualReviewDispatchService;
   controlStreams: BrokerControlStreamService;
   managedSessionHttpService: BrokerManagedSessionHttpService;
   meshDiscoveryService: BrokerMeshDiscoveryService;
@@ -583,6 +586,7 @@ export function createBrokerHttpRouter(
     deliveryHttpService,
     durableActionHttpService,
     manualReviewOccurrences,
+    manualReviewDispatch,
     controlStreams,
     managedSessionHttpService,
     meshDiscoveryService,
@@ -3257,7 +3261,8 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  if (url.pathname === "/v1/manual-review/occurrences") {
+  // Recording, lookup and dispatch share one boundary: a verified caller on this machine.
+  if (url.pathname === "/v1/manual-review/occurrences" || url.pathname === "/v1/manual-review/dispatches") {
     const context = request.transportContext;
     if (!context || !["loopback", "unix-socket"].includes(context.transport) || context.guest
       || request.headers.origin !== undefined || request.headers["x-openscout-forwarded-node-id"] !== undefined) {
@@ -3290,6 +3295,29 @@ export function createBrokerHttpRouter(
       }));
     } catch (error) {
       if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/manual-review/dispatches") {
+    try {
+      const body = await readRequestBody<ManualReviewDispatchRequest>(request, { maxBytes: 16 * 1024 });
+      // The same attribution as an ask sent through /v1/deliver. The first
+      // admitted caller's is pinned, and the ask is sent as that principal.
+      const attribution = brokerAttributionFor({ claimedActorId: body?.requestedById ?? "operator",
+        context: request.transportContext, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()) });
+      // A protected identity is written as only by its claim holder. That holds
+      // for the caller before a target is pinned, and for the pinned principal
+      // when a later caller's retry delivers the ask.
+      const claims = brokerService.assistantClaims;
+      const dispatch = () => manualReviewDispatch.dispatch(
+        { scope: body?.scope, requestId: body?.requestId, target: body?.target, attribution },
+        claims ? { admitAsk: (actorId, deliver) => claims.admit(actorId, deliver) } : {},
+      );
+      json(response, 200, await (claims ? claims.admit(attribution.actorId, dispatch) : dispatch()));
+    } catch (error) {
+      if (error instanceof ManualReviewDispatchError) json(response, error.status, error.body);
       else badRequest(response, error);
     }
     return;

@@ -125,6 +125,7 @@ import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-se
 import { BrokerDeliveryHttpService } from "./broker-delivery-http-service.js";
 import { BrokerDurableActionHttpService } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
+import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
 import { bootstrapSecretRedaction } from "./secret-redaction-bootstrap.js";
 import { applyRoleLifecycleForTerminalFlight } from "./role-lifecycle.js";
@@ -1069,6 +1070,16 @@ const manualReviewOccurrences = new ManualReviewOccurrenceService({
   runDurableWrite,
   commitEntries: commitDurableEntries,
   getDurableAction: (actionId) => journal.getDurableAction(actionId),
+});
+// A dispatch starts one ordinary ask. The acceptance service and its receipt
+// ledger decide whether a repeated request ID may run.
+const manualReviewDispatch = new ManualReviewDispatchService({
+  authorityCellId: nodeId,
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
+  getDurableAction: (actionId) => journal.getDurableAction(actionId),
+  deliver: request => deliveryAcceptanceService.accept(request),
+  readAskReceipt: (requesterId, requestId) => requestReceipts.get(requesterId, requestId, "deliver"),
 });
 const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
 const workLifecycles = new BrokerWorkLifecycleService({
@@ -3942,6 +3953,7 @@ const routeRequest = createBrokerHttpRouter({
   deliveryHttpService,
   durableActionHttpService,
   manualReviewOccurrences,
+  manualReviewDispatch,
   controlStreams,
   managedSessionHttpService,
   meshDiscoveryService,

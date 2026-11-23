@@ -61,6 +61,7 @@ export const scoutBrokerPaths = {
     workRetry: "/v1/work/retry",
     workClaim: "/v1/work/claim",
     manualReviewOccurrences: "/v1/manual-review/occurrences",
+    manualReviewDispatches: "/v1/manual-review/dispatches",
     derived: "/v1/derived",
     derivedPending: "/v1/derived/pending",
     taskNotify: "/v1/tasks/notify",

@@ -244,6 +244,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/durable-actions": "local",
   "POST /v1/durable-actions/:id/heartbeat": "local",
   "POST /v1/manual-review/occurrences": "local",
+  "POST /v1/manual-review/dispatches": "local",
   "POST /v1/endpoints": "local",
   "POST /v1/external-sessions/ack": "local",
   "POST /v1/external-sessions/attach": "local",

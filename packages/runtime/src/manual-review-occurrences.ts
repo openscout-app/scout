@@ -7,7 +7,8 @@
  *
  * This service only records and looks up. It starts no agent turn, takes no
  * claim, and schedules nothing: the action carries no due time and no lease,
- * so no worker picks it up. Dispatch is a separate slice.
+ * so no worker picks it up. An ask starts only through the separate dispatch
+ * service (manual-review-dispatch.ts), on an explicit request.
  */
 import { createHash } from "node:crypto";
 
