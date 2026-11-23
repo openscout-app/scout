@@ -65,7 +65,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "restart": node("--context-root="),
   "app": node("--apps-only --now --timeout=", { "status": node(), "stop": node(), "down": node(), "quit": node(), "start": node(), "up": node(), "restart": node() }),
   "menu": node("", { "launch": node(), "open": node(), "start": node(), "restart": node(), "quit": node(), "stop": node(), "status": node(), "build": node(), "dmg": node() }),
-  "install": node("-f --candidate= --check --dmg= --force --no-restart --tag= --version="),
+  "install": node("-f --all --candidate= --check --dmg= --force --no-restart --tag= --version="),
   "uninstall": node("-y --delete-data --dry-run --yes"),
   "update": node("--candidate= --check --dmg= --force --ssh-user= --version="),
   "settings": node("--dry-run", { "list": node(), "get": node(), "set": node(), "unset": node(), "apply": node() }),

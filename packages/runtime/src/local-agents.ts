@@ -6212,6 +6212,7 @@ export type LocalAgentInvocationHooks = {
   onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
   /** What the delivery is waiting on, in one sentence, for the task's record. */
   onProgress?: (summary: string) => Promise<void> | void;
+  onCodexSubmission?: CodexAppServerInvocationOptions["onSubmission"];
   /** False once the task was cancelled or finished another way; delivery stops. */
   shouldContinue?: () => boolean;
   /** Where an earlier runtime left a delivery into an open session, if one started it. */
@@ -6519,6 +6520,7 @@ export async function invokeLocalAgentEndpoint(
       ...buildCodexEndpointSessionOptions(endpoint),
       prompt,
       replyContext,
+      onSubmission: hooks.onCodexSubmission,
     });
 
     return {
@@ -6749,6 +6751,7 @@ export async function invokeLocalAgentEndpoint(
       ),
       prompt,
       replyContext,
+      onSubmission: hooks.onCodexSubmission,
     });
 
     return {

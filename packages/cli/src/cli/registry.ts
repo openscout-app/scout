@@ -77,7 +77,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "restart", summary: "Restart configured local agents" },
   { name: "app", summary: "Start, stop, restart, or inspect the OpenScout app and its services" },
   { name: "menu", summary: "Launch the OpenScout macOS menu bar app" },
-  { name: "install", summary: "Download and install the Scout Mac app" },
+  { name: "install", summary: "Install the Scout Mac app, or every part of Scout with --all" },
   { name: "update", summary: "Update this machine, or report on named machines" },
   { name: "uninstall", summary: "Remove Scout from this machine; keeps collected data unless --delete-data" },
   { name: "settings", summary: "List, read and change Scout settings through one checked, logged entry point" },
