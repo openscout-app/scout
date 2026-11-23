@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import type { CollaborationEvent, CollaborationRecord, ConversationDefinition, FlightRecord, ScoutDeliverRequest, ScoutDeliverResponse, VercelBoardHandoffEvent, WorkItemRecord } from "@openscout/protocol";
 import { vercelBoardCanHeader, validateVercelBoardConnectionConfig } from "@openscout/protocol";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteTransactionalDatabase } from "../sqlite-adapter.js";
@@ -440,7 +440,7 @@ test("a lapsed lock nobody took is still this runtime's: a stall past the TTL re
 
 // ---- service ------------------------------------------------------------------
 
-function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void) {
+function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void, options: { dispatchOnEvents?: boolean } = {}) {
   const cancelled: { id: string; reason: string }[] = [];
   const time = clock();
   const board = new FakeVercelBoard({ now: time.now });
@@ -454,7 +454,8 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   const rooms = new Map<string, ConversationDefinition>();
   const live: VercelBoardHandoffEvent[] = [];
   const service = new BrokerVercelBoardService({
-    nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now, fetch: (url, init) => {
+    nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now,
+    ...(options.dispatchOnEvents ? { dispatchOnEvents: true } : {}), fetch: (url, init) => {
       beforeFetch?.(String(url), board);
       return board.fetch(url, init);
     },
@@ -487,7 +488,7 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   cleanup.push(() => { void service.stop(); });
   const connect = (extra: Record<string, unknown> = {}) => service.connect({ url: URL_, id: "c1", channels: ["work"], credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" }, ...extra });
   const workItems = () => [...records.values()].filter(record => record.kind === "work_item");
-  return { time, board, service, db, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
+  return { time, board, service, db, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled, dir };
 }
 
 test("connect reads the principal, makes the channels and a room for each, and is verified only after the probe task completes", async () => {
@@ -1033,4 +1034,244 @@ test("only sync-enabled channels publish plans and one attributed settlement rep
   expect(local.noSync).toBe(true);
   expect(local.tasks.every(task => task.noSync === true)).toBe(true);
   expect((await h.service.status("c1"))[0]).toMatchObject({ syncChannels: ["work"] });
+});
+
+// ---- dispatch policies ----------------------------------------------------
+
+async function dispatchHarness(extra: Record<string, unknown>, options: { dispatchOnEvents?: boolean } = {}) {
+  const h = serviceHarness(undefined, options);
+  await h.connect(extra);
+  await h.service.pump("c1");
+  const actor = (role: string) => `${h.board.principal}+${role}`;
+  const claimed = (id: string) => h.board.task(id)!.state === "claimed";
+  return { ...h, actor, claimed, reviewer: actor("reviewer"), builder: actor("builder") };
+}
+
+test("by default a channel is manual and a self-serve channel is role-only, with every guard on", async () => {
+  const h = await dispatchHarness({ channels: ["work", "ops"], selfServe: ["work"] });
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status).toMatchObject({ enabled: true, policy: "manual", wakes: { events: true, sweepMs: 5_000 } });
+  expect(status.channels).toEqual([
+    { channel: "work", policy: "role-only", steps: ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role", "pick:first"], guardsRemoved: [], mirrored: true },
+    { channel: "ops", policy: "manual", steps: ["manual"], guardsRemoved: [], mirrored: true },
+  ]);
+  expect((await h.service.status("c1"))[0]!.dispatcher).toEqual({ enabled: true, channels: [
+    { channel: "work", policy: "role-only", guardsRemoved: [], relaxed: false },
+    { channel: "ops", policy: "manual", guardsRemoved: [], relaxed: false },
+  ] });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const ops = h.board.createTask({ channel: "ops", text: "Review ops", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  expect(h.board.task(ops)!.state).toBe("ready");
+  const why = (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: ops })).decisions[0]!;
+  expect(why).toMatchObject({ outcome: "skip", policy: "manual", step: "manual" });
+});
+
+test("manual on a self-serve channel turns the role match off", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"], dispatch: { channels: { work: { policy: "manual" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const task = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(task)!.state).toBe("ready");
+  expect(h.deliveries).toEqual([]);
+});
+
+test("role-only as the connection default claims a role-kept operator task, and names nothing else", async () => {
+  const h = await dispatchHarness({ dispatch: { policy: "role-only" } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const open = h.board.createTask({ channel: "work", text: "Anyone", as: null });
+  const review = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.task(open)!.state).toBe("ready");
+  expect(h.deliveries.at(-1)!.body).toContain(`because the task is kept for that role and you declared it`);
+  const why = (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: open })).decisions[0]!;
+  expect(why).toMatchObject({ outcome: "skip", step: "match:role", reason: "kept for no role" });
+});
+
+test("label-matched claims only a labelled task, for the agent its capability maps to", async () => {
+  const h = await dispatchHarness({ dispatch: {
+    channels: { work: { policy: "label-matched", labels: ["area"] } },
+    capabilities: { "area=docs": ["agent-docs"], "area=api": ["agent-api"] },
+  } });
+  const plain = h.board.createTask({ channel: "work", text: "No label", as: null });
+  const docs = h.board.createTask({ channel: "work", text: "Fix the guide", as: null, labels: { area: "docs" } });
+  const css = h.board.createTask({ channel: "work", text: "Fix the colours", as: null, labels: { area: "css" } });
+  await h.service.pump("c1");
+  expect(h.board.task(docs)!.claim!.actor).toBe(h.actor("scout"));
+  expect(h.board.message(docs)!.labels["scout.agent"]).toBe("agent-docs");
+  expect([plain, css].map(id => h.board.task(id)!.state)).toEqual(["ready", "ready"]);
+  expect(h.deliveries.at(-1)!.body).toContain("under the label-matched dispatch policy the operator set for channel work");
+  const why = (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: css })).decisions[0]!;
+  expect(why).toMatchObject({ outcome: "skip", step: "match:capability" });
+});
+
+test("trusted-channel gives an open operator task to any free agent, and a role task to that role", async () => {
+  const h = await dispatchHarness({ dispatch: { channels: { work: { policy: "trusted-channel" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const review = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  const open = h.board.createTask({ channel: "work", text: "Anyone", as: null });
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.message(review)!.labels["scout.agent"]).toBe("agent-review");
+  expect(h.board.task(open)!.claim!.actor).toBe(h.actor("scout"));
+  expect(h.board.message(open)!.labels["scout.agent"]).toBe("agent-build");
+});
+
+test("without an opt-in, no policy takes synced text, another owner's task, or one the board has seen claimed", async () => {
+  const h = await dispatchHarness({ syncChannels: ["work"], dispatch: { channels: { work: { policy: "trusted-channel" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  // Board text from Slack, GitHub or Linear: by a platform user, and even under the operator's own principal.
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", owner: "slack:user:U1", by: "slack:user:U1", from: "slack" });
+  const linkedSlack = h.board.createTask({ channel: "work", text: "Operator's own Slack message", as: null, from: "slack" });
+  const github = h.board.createTask({ channel: "work", text: "From GitHub", as: null, from: "github" });
+  const linear = h.board.createTask({ channel: "work", text: "From Linear", as: null, from: "linear" });
+  const stranger = h.board.createTask({ channel: "work", text: "Mine", owner: "local:user:stranger" });
+  const released = h.board.createTask({ channel: "work", text: "Let go", as: null });
+  h.board.claimAs(released, "local:user:stranger", 1);
+  h.time.advance(2_000);
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  for (const id of [slack, linkedSlack, github, linear, stranger, released]) expect(h.board.task(id)!.state).toBe("ready");
+  expect(h.deliveries).toEqual([]);
+  const reason = async (id: string) => (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: id })).decisions[0]!;
+  expect(await reason(linkedSlack)).toMatchObject({ step: "guard:not-synced" });
+  expect(await reason(github)).toMatchObject({ step: "guard:not-synced" });
+  expect(await reason(stranger)).toMatchObject({ step: "guard:operator-authored" });
+  expect(await reason(released)).toMatchObject({ step: "guard:first-claim" });
+});
+
+test("trusting any author still leaves synced text alone: each sync key needs its own opt-in", async () => {
+  const h = await dispatchHarness({ dispatch: { channels: { work: { policy: "trusted-channel", trust: { authors: "any", anyEpoch: true } } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", owner: "slack:user:U1", by: "slack:user:U1", from: "slack" });
+  await h.service.pump("c1");
+  expect(h.board.task(slack)!.state).toBe("ready");
+  expect((await h.service.dispatcherStatus("c1")).recent.find(decision => decision.taskId === slack)).toMatchObject({ outcome: "skip", step: "guard:not-synced" });
+});
+
+test("each guard relaxes only by an explicit setting, per channel or per label, and status shows it", async () => {
+  const h = await dispatchHarness({ dispatch: { channels: { work: { policy: "trusted-channel" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-b", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-c", role: "builder", actorId: "operator" });
+  const stranger = h.board.createTask({ channel: "work", text: "Mine", owner: "local:user:stranger" });
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", as: null, from: "slack" });
+  const released = h.board.createTask({ channel: "work", text: "Let go", as: null, labels: { "retry-ok": "yes" } });
+  const releasedPlain = h.board.createTask({ channel: "work", text: "Let go too", as: null });
+  for (const id of [released, releasedPlain]) h.board.claimAs(id, "local:user:stranger", 1);
+  h.time.advance(2_000);
+  await h.service.pump("c1");
+  expect(h.deliveries).toEqual([]);
+  const status = await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { work: {
+    policy: "trusted-channel", trust: { authors: "any", synced: ["slack"] }, labelTrust: [{ label: "retry-ok", trust: { anyEpoch: true } }],
+  } } } });
+  expect(status.channels[0]).toMatchObject({ trust: { authors: "any", synced: ["slack"] }, labelTrust: [{ label: "retry-ok", trust: { anyEpoch: true } }], guardsRemoved: [] });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.channels[0]).toMatchObject({ relaxed: true });
+  await h.service.pump("c1");
+  expect([stranger, slack, released].every(h.claimed)).toBe(true);
+  expect(h.board.task(releasedPlain)!.state).toBe("ready"); // no label, no epoch opt-in
+});
+
+test("dispatch settings are the operator's, are checked before they are saved, and persist", async () => {
+  const h = await dispatchHarness({});
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "agent-a", dispatch: { policy: "trusted-channel" } })).rejects.toMatchObject({ status: 403 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { work: { steps: ["guard:not-synced", "pick:frist"] } } } }))
+    .rejects.toMatchObject({ status: 400, code: "invalid_dispatch" });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { elsewhere: { policy: "role-only" } } } })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { policy: "eager" } })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { work: { trust: { authors: "everyone" } } } } as never })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.runDispatcher({ connectionId: "c1", actorId: "agent-a" })).rejects.toMatchObject({ status: 403 });
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { policy: "role-only" } });
+  const saved = JSON.parse(readFileSync(join(h.dir, "connections.json"), "utf8")) as { connections?: { id: string; dispatch?: unknown }[] } | { id: string; dispatch?: unknown }[];
+  const list = Array.isArray(saved) ? saved : saved.connections ?? [];
+  expect(list.find(entry => entry.id === "c1")?.dispatch).toEqual({ policy: "role-only" });
+});
+
+test("a custom chain may drop a default guard, and status names the guard it dropped", async () => {
+  const h = await dispatchHarness({ dispatch: {
+    policies: { "any-author": ["guard:not-synced", "guard:first-claim", "resolve:for", "match:role-or-any", "pick:first"] },
+    channels: { work: { policy: "any-author" } },
+  } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status.channels[0]).toMatchObject({ policy: "any-author", guardsRemoved: ["guard:operator-authored"] });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.channels[0]).toMatchObject({ relaxed: true, guardsRemoved: ["guard:operator-authored"] });
+  const stranger = h.board.createTask({ channel: "work", text: "Mine", owner: "local:user:stranger" });
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", owner: "slack:user:U1", by: "slack:user:U1", from: "slack" });
+  await h.service.pump("c1");
+  expect(h.claimed(stranger)).toBe(true);
+  expect(h.board.task(slack)!.state).toBe("ready");
+});
+
+test("the dispatcher claims and starts an agent on the task.ready event, without waiting for the sweep", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] }, { dispatchOnEvents: true });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const build = h.board.createTask({ channel: "work", text: "Build", as: null });
+  const review = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null, needs: [build] });
+  await h.service.pump("c1", { dispatch: false });
+  expect(h.board.task(review)!.state).toBe("waiting");
+  h.board.completeAs(build, "local:user:teammate", "Built.");
+  // Only the follower's read runs: the task.ready event wakes the dispatcher.
+  await h.service.pump("c1", { dispatch: false });
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.deliveries.at(-1)).toMatchObject({ target: { kind: "agent_id", agentId: "agent-review" } });
+  expect(h.deliveries.at(-1)!.body).toContain(`Scout's runtime matched you to Board task ${review} as reviewer`);
+
+  const quiet = await dispatchHarness({ selfServe: ["work"] });
+  await quiet.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const idle = quiet.board.createTask({ channel: "work", text: "Review", for: quiet.reviewer, as: null });
+  await quiet.service.pump("c1", { dispatch: false });
+  expect(quiet.board.task(idle)!.state).toBe("ready"); // events off: only a pass claims
+});
+
+test("a claim that ends frees its agent, and the same sweep hands it the next ready task", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] }, { dispatchOnEvents: true });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const first = h.board.createTask({ channel: "work", text: "Review A", for: h.reviewer, as: null });
+  const second = h.board.createTask({ channel: "work", text: "Review B", for: h.reviewer, as: null });
+  await h.service.pump("c1", { dispatch: false });
+  expect([first, second].map(id => h.board.task(id)!.state)).toEqual(["claimed", "ready"]);
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Done.", metadata: { completedByBrokerReply: true } } as FlightRecord);
+  await h.service.pump("c1"); // the custody tick settles the first; the pass after it claims the second
+  expect(h.board.task(first)!.state).toBe("completed");
+  expect(h.board.task(second)!.claim!.actor).toBe(h.reviewer);
+});
+
+test("pausing the dispatcher stops new claims and keeps the held claim renewing", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "reviewer", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-b", role: "reviewer", actorId: "operator" });
+  const held = h.board.createTask({ channel: "work", text: "Review A", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  expect(h.claimed(held)).toBe(true);
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { enabled: false } });
+  const next = h.board.createTask({ channel: "work", text: "Review B", for: h.reviewer, as: null });
+  const until = h.board.task(held)!.claim!.until;
+  h.time.advance(30_000);
+  await h.service.pump("c1");
+  expect(h.board.task(next)!.state).toBe("ready");
+  expect(h.board.task(held)!.claim!.until).toBeGreaterThan(until);
+  expect((await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: next })).decisions[0]).toMatchObject({ reason: "the dispatcher is paused for this connection" });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.enabled).toBe(false);
+});
+
+test("status shows each held claim's lease, when it was renewed and when the next renewal is due, never its token", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const task = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  const claimedAt = h.time.now();
+  let [claim] = (await h.service.status("c1"))[0]!.claims!;
+  expect(claim).toMatchObject({ taskId: task, agentId: "agent-review", profile: "reviewer", state: "held", epoch: 1, leaseSeconds: 60, renewedAt: claimedAt, renewDueAt: claimedAt + 20_000, startedBy: "scout:vercel-board-matcher", flightId: "flight-1" });
+  h.time.advance(25_000);
+  await h.service.pump("c1");
+  [claim] = (await h.service.status("c1"))[0]!.claims!;
+  expect(claim).toMatchObject({ leaseSeconds: 300, renewedAt: claimedAt + 25_000, renewDueAt: claimedAt + 25_000 + 100_000 });
+  const token = h.board.message(task)!.task!.claim!.token;
+  const shown = JSON.stringify([await h.service.status("c1"), await h.service.dispatcherStatus("c1")]);
+  expect(shown).not.toContain(token);
+  expect((await h.service.dispatcherStatus("c1")).claims).toEqual((await h.service.status("c1"))[0]!.claims!);
 });

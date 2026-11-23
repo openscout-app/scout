@@ -25,7 +25,7 @@ export const INTEGRATION_HELP = [
   "scout integration resume <operation> --if-revision <n> --workspace <team-id>",
   "scout integration resume <operation> --if-revision <n> --confirm-workspace-authority",
   "scout integration resume <operation> --if-revision <n> --app <app-id>",
-  "scout integration connect|status|claim|promote|role|messages|handoffs vercel-board ...   (see scout integration vercel-board --help)",
+  "scout integration connect|status|claim|promote|role|messages|handoffs|dispatcher vercel-board ...   (see scout integration vercel-board --help)",
   "",
   "Local pilot setup. Uses an existing registered project agent; does not create or install a Slack app.",
   "Authority confirmation records the human operator's confirmation; agents must not infer it.",
@@ -151,7 +151,7 @@ export function parseIntegrationCommand(args: string[], cwd: string, env = proce
   throw new ScoutCliError("Unknown integration command. Use scout integration --help.");
 }
 
-export const VERCEL_BOARD_VERBS = new Set(["connect", "status", "claim", "promote", "role", "messages", "handoffs"]);
+export const VERCEL_BOARD_VERBS = new Set(["connect", "status", "claim", "promote", "role", "messages", "handoffs", "dispatcher"]);
 
 export async function runIntegrationCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
   if (args[0] === "vercel-board") { context.output.writeText(VERCEL_BOARD_HELP); return; }

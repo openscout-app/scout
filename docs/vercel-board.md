@@ -52,7 +52,7 @@ Two existing parts of core set the pattern:
 | Scout creates Board tasks, for planned work only. | This reverses an earlier cut. Planning needs a write path, and outside workers can only claim what is on the board. |
 | No standing lead agent. | Planning is an ordinary Scout task. Claim, renew, settle and retry are runtime code. |
 | Runtime code claims; agents only declare a role. | Claim tokens stay with the runtime that claimed. An agent never calls claim, so it cannot pick its own work off a board that teammates and synced platforms write to. |
-| Only a role-kept task the operator or Scout wrote starts on its own, and only in a self-serve channel. | Board text can come from teammates and from systems that sync into the board. Elsewhere, and for any other task, the operator starts the claim. The runtime matches only a task the board has never seen claimed (`epoch` 0), so every connected host agrees; after any claim, then a release, a failure or a lost lease, the operator decides. |
+| By default, only a role-kept task the operator or Scout wrote starts on its own, and only in a self-serve channel. | Board text can come from teammates and from systems that sync into the board. Elsewhere, and for any other task, the operator starts the claim. The runtime matches only a task the board has never seen claimed (`epoch` 0), so every connected host agrees; after any claim, then a release, a failure or a lost lease, the operator decides. The operator can choose another [dispatch policy](#dispatch-policy) per channel. Each relaxation is explicit and shows in status. |
 | Roles are a closed list in the connection: `scout`, `builder`, `reviewer`. | Each is a Board profile of the operator's principal. `scout` plans; the others work. A task kept for a role (`for`) can be claimed only as that role. |
 | A task settles only on a verb. | A final `reply --ref` completes it and `--failed` fails it. A turn that ends without a verb releases it, so a refusal never reads as completed. `--waiting-on` holds it on the board as `blocked` and stops renewing; the answer lifts the hold and Scout claims again as the same role. |
 | Scout's writes are `noSync` by default. Only `syncChannels` may publish them through Board's sync. | One outbound writer per Slack channel: a Board-linked channel uses Board sync, never an independent Scout bridge writer. |
@@ -86,14 +86,18 @@ stays `noSync`.
 1. The operator, with `scout integration claim vercel-board`. The claim goes
    as the role the task is kept for, or as `scout` for an open task. It checks
    the root's author as well as the task's owner against the allowlist.
-2. The matcher, on each custody tick. It reads demand from the mirror, with no
-   Board call, and claims a task when all of these hold:
-   - the channel is in the connection's `selfServe` list;
+2. The dispatcher, by the channel's [dispatch policy](#dispatch-policy). It
+   reads demand from the mirror, with no Board call. The default policy in a
+   `selfServe` channel is `role-only`, and it claims a task when all of these
+   hold:
    - the task is `ready` and kept for a role other than `scout`;
    - the operator made it, and wrote it as themselves or as `scout`;
-   - Scout has never claimed it;
+   - no sync provider imported it;
+   - the board has never seen it claimed, and Scout has never claimed it;
    - an agent that declared the role holds no other Board task.
-   It reads the task from the board again before it claims.
+   It reads the task from the board again and decides again before it claims.
+   Every other channel is `manual` by default: the dispatcher claims nothing
+   there.
 
 A dependency's result reaches the next agent only when Scout wrote it, or the
 mirror's event chain shows an allowlisted principal completed the task.
@@ -107,6 +111,123 @@ because an agent judged it important.
 The planning tool must not create a Scout work item. Planned tasks show in the
 channel's room. A planned task becomes a work item only when the operator
 promotes it, under a deterministic ID.
+
+## Dispatch policy
+
+The dispatcher is the part of each connection that claims ready tasks. It
+wakes when a feed read leaves a task root `ready` (created ready, readied by a
+dependency, released, expired, unblocked), when the operator changes the
+settings, and on the 5-second custody sweep. The sweep settles finished claims
+first, so an agent whose claim ended is free for the pass right after it. One pass runs at a time; a wake
+during a pass runs one more pass after it. A pass reads each mirrored
+channel's ready tasks from the copy and runs each one through the channel's
+policy. A claim the policy makes goes through the same path as the operator's
+claim: the board's own copy is read again and decided again, Scout claims as
+the profile the policy chose, labels the task with the agent, and asks the
+agent with the task text as quoted source material.
+
+### One interface
+
+A policy is an ordered chain of named steps. Each step reads one candidate and
+answers one of:
+
+- `pass`, optionally with fewer agents, a profile or a role for the next step;
+- `skip` with a reason;
+- `claim` for one of the current agents, optionally as a profile.
+
+A candidate is the task's metadata (ID, channel, labels, author, origin,
+owner, `for`, `needs`, epoch), the connection (principal, profile, allowlist,
+roles), the free agents (declared roles and mapped capabilities, oldest
+declaration first; an agent that holds a Board task on the connection is not
+free) and Scout's history on the task (attempts, last epoch, whether the last
+attempt got a claim, whether Scout holds it now). Task text is not in the
+candidate: a step decides from metadata, never from what the text says.
+
+Steps are registered by name in one registry (`policy.ts`). The built-in
+policies are chains of the built-in steps, and nothing else decides a claim.
+A step may only narrow the agents. A step that throws, answers anything else,
+claims for an agent that is not free, or names a profile outside the
+connection's roles skips the task. Reaching the end of the chain without a
+claim is a skip.
+
+| Step | Does |
+| --- | --- |
+| `guard:not-synced` | Skips a task a sync provider imported (`from` is `slack`, `github`, `linear` or another key), unless `trust.synced` names the key. |
+| `guard:operator-authored` | Skips a task the operator did not make and write, as themselves or as `scout`. `trust.authors` widens it to `allowlist` (owner and author on the allowlist) or `any`. |
+| `guard:first-claim` | Skips a task the board has seen claimed (epoch above 0), or Scout has tried. With `trust.anyEpoch`, a task another worker let go qualifies, but never one Scout itself let go or failed to claim. |
+| `resolve:for` | Claims as the role the task is kept for, or as `scout` for an open task. Skips a task kept for an actor Scout does not write as. |
+| `match:role` | Keeps a task kept for a working role, and the free agents that declared it. |
+| `match:role-or-any` | As `match:role` for a role-kept task; an open task goes to any free agent. |
+| `match:label` | Keeps a task with one of the channel's `labels` (`key` matches any value, `key=value` one value). |
+| `match:capability` | Keeps the free agents that `capabilities` maps to a label the task carries. |
+| `pick:first` | Claims for the first free agent left: the longest-declared. |
+| `manual` | Skips every task. |
+
+| Policy | Chain |
+| --- | --- |
+| `manual` | `manual` |
+| `role-only` | the three guards, `resolve:for`, `match:role`, `pick:first` |
+| `label-matched` | the three guards, `resolve:for`, `match:label`, `match:capability`, `pick:first` |
+| `trusted-channel` | the three guards, `resolve:for`, `match:role-or-any`, `pick:first` |
+
+### Defaults
+
+- A channel's policy is its own `policy`; else `role-only` if it is in
+  `selfServe`; else the connection's `dispatch.policy`; else `manual`. With
+  no `dispatch` block, every connection claims exactly what it claimed before
+  policies.
+- The three guards are in every built-in claiming policy. Removing one takes a
+  chain the operator wrote (`steps`, or a policy under `policies`). Relaxing
+  one takes `trust` on the channel or `labelTrust` on a label. Status lists
+  removed guards for each channel, and marks the channel `relaxed`.
+- Board text synced from Slack, GitHub or Linear never starts work unless the
+  operator names that sync key in `trust.synced`. Trusting any author does not
+  trust a sync key.
+
+### Settings
+
+The settings are the `dispatch` block of the connection, saved with it in
+`connections.json`:
+
+```json
+{
+  "enabled": true,
+  "policy": "manual",
+  "policies": { "docs-any-author": ["guard:not-synced", "guard:first-claim", "resolve:for", "match:label", "pick:first"] },
+  "channels": {
+    "scout/work": { "policy": "trusted-channel", "trust": { "authors": "allowlist" } },
+    "scout/docs": { "policy": "label-matched", "labels": ["area=docs"], "labelTrust": [{ "label": "retry-ok", "trust": { "anyEpoch": true } }] }
+  },
+  "capabilities": { "area=docs": ["agent-docs"] }
+}
+```
+
+`enabled: false` pauses new claims; held claims keep renewing and settling.
+The runtime refuses a block that names an unknown step, policy or channel, or
+redefines a built-in policy, before it saves it.
+
+- API: `GET /v1/integrations/vercel-board/dispatcher?connection=<id>` returns
+  the settings, each channel's chain, recent decisions and each held claim's
+  lease. `&explain=<task>` decides one task without claiming.
+  `POST /v1/integrations/vercel-board/dispatcher` with
+  `{ connectionId, actorId, dispatch }` replaces the block; only the operator
+  may. `POST /v1/integrations/vercel-board/dispatcher/run` runs a pass now.
+- CLI: `scout integration dispatcher vercel-board --connection <id>` shows it.
+  `--channel <channel> --policy <name>`, `--labels`, `--trust-authors`,
+  `--trust-any-epoch`, `--trust-synced`, `--default`, `--pause` and `--resume`
+  change the saved block; `--file <rules.json>` replaces it. `--explain <task>`
+  and `--run` as in the API.
+- MCP: `vercel_board_dispatcher` reads the status or explains a task. It is
+  read-only: an agent must not relax the rules that decide which board text
+  starts it.
+- `scout integration status vercel-board` shows each channel's policy, whether
+  it is relaxed, and each held claim's lease, last renewal and next renewal.
+
+### Wake-ups and work requests
+
+The dispatcher runs inside the runtime and claims for agents. An agent does
+not poll the board for work. A "you have work" callback or a long-poll wait
+endpoint for agents outside Scout is not built; see open question 9.
 
 ## Setup
 
@@ -406,8 +527,13 @@ main risk of this adapter.
   the task's owner principal is on the connection's allowlist. The default is
   the operator's own principal. Other tasks are projected and need an operator
   decision.
-- **No automatic claim in v1.** A claim starts from the operator, or from an
-  agent the operator asked.
+- **Automatic claims only by the operator's policy.** A claim starts from the
+  operator, or from the dispatcher under the channel's
+  [dispatch policy](#dispatch-policy). The default is `manual`, and `role-only`
+  in a self-serve channel. Every built-in policy keeps the guards: the operator
+  or Scout wrote the task, no sync provider imported it, and the board has
+  never seen it claimed. Only the operator relaxes a guard, per channel or
+  label, and status shows it.
 - **Mentions.** A mention of the `scout` profile wakes no agent. It shows in
   the room like any other message.
 - **Quoted text.** The runtime delivers task and reply text to an agent as
@@ -447,6 +573,7 @@ Phases 1 and 2 ship together.
 ```text
 packages/protocol/src/
   vercel-board.ts     connection, mirror, hand-off and request types
+  vercel-board-dispatch.ts  dispatch settings, decisions and status types
 packages/runtime/src/vercel-board/
   connection.ts       config, validation, allowlist
   client.ts           HTTP: events, messages, tasks, posts, claims
@@ -454,6 +581,8 @@ packages/runtime/src/vercel-board/
   mirror.ts           the copy and the task events; hand-off records
   projection.ts       promoted task to work item; pure
   custody.ts          claim, renew, settle
+  policy.ts           dispatch steps, the built-in policies, the decision runner; pure
+  dispatcher.ts       wakes, passes over ready tasks, claims by policy
   outbox.ts           client IDs, serial lanes
   service.ts          wiring, rooms, dispatch, promote, views
   schema.ts           cursor, message, task event, promotion, custody, outbox tables
@@ -501,7 +630,8 @@ pending. A write that starts a claim or queues a post clears the flag.
 - Every Scout task on Board.
 - Reactions, schedules, schemas, grants and attachment bytes.
 - A Board profile for each agent.
-- Automatic claims and pool rules.
+- Pool rules beyond the dispatch policies: priorities, quotas and fairness
+  between agents.
 - Acting as a Board sync provider. A sync provider would publish Scout
   conversations into the team's log, and it cannot register outside a Vercel
   deployment.
@@ -561,3 +691,12 @@ that were made after the architecture review.
    should set acceptance to reopened and create a Scout follow-up item, and
    must not move `state`. This needs a rule in the lifecycle code.
 8. **Mention matching.** Moot for now: a mention wakes no agent.
+9. **Telling a worker it has work.** Scout's dispatcher claims for its own
+   agents, so a Scout agent needs no signal. A worker that is not a Scout
+   agent but asks Scout for work would need one. The proposal is a long-poll
+   endpoint, `GET /v1/integrations/vercel-board/work/wait?connection=&agent=&after=`,
+   that answers when the dispatcher has claimed for that agent (or after
+   `wait` seconds with nothing), keyed by a decision cursor so a claim made
+   between two polls is not missed. A webhook callback is the alternative; it
+   needs a registered URL per agent and a retry queue, so the long poll comes
+   first.

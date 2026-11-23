@@ -36,6 +36,8 @@ type ClaimInput = {
   taskId: string; workId: string; agentId: string; startedBy: string;
   /** The role profile to claim as. Absent means the connection's own profile. */
   profile?: string;
+  /** The dispatch policy that chose this claim, when the runtime did. */
+  policy?: string;
   dependencyContext?: { channel: string; owner: string; needs: string[]; lines: string[] };
 };
 

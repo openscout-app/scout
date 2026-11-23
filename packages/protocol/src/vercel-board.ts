@@ -4,6 +4,8 @@
  * docs/vercel-board.md for the plan these types serve.
  */
 
+import { validateVercelBoardDispatchConfig, type VercelBoardClaimStatus, type VercelBoardDispatchConfig } from "./vercel-board-dispatch.js";
+
 export const VERCEL_BOARD_ADAPTER_ID = "vercel-board";
 
 /** Board's seven task states, in Board's spelling. */
@@ -94,6 +96,13 @@ export interface VercelBoardConnectionConfig {
   selfServe?: string[];
   /** Board channels whose Scout writes may be mirrored by Board's sync providers. */
   syncChannels?: string[];
+  /**
+   * The dispatcher's settings: which policy claims ready tasks in each
+   * channel, the guards it relaxes, and the capability map. Absent keeps the
+   * behavior from before policies: `role-only` in `selfServe` channels,
+   * `manual` elsewhere.
+   */
+  dispatch?: VercelBoardDispatchConfig;
   /** The host that made this connection. A record only; the field keeps its old name so saved connections still load. */
   custodianNodeId: string;
   credential: VercelBoardCredentialReference;
@@ -232,6 +241,7 @@ export function validateVercelBoardConnectionConfig(value: unknown): string[] {
     || new Set(c.selfServe).size !== c.selfServe.length)) errors.push("selfServe must list distinct channels from channels");
   if (c.syncChannels !== undefined && (!Array.isArray(c.syncChannels) || !c.syncChannels.every(channel => Array.isArray(c.channels) && c.channels.includes(channel))
     || new Set(c.syncChannels).size !== c.syncChannels.length)) errors.push("syncChannels must list distinct channels from channels");
+  if (c.dispatch !== undefined) errors.push(...validateVercelBoardDispatchConfig(c.dispatch, Array.isArray(c.channels) ? c.channels as string[] : []));
   if (typeof c.custodianNodeId !== "string" || !c.custodianNodeId.trim()) errors.push("custodianNodeId is required");
   errors.push(...validateVercelBoardCredentialReference(c.credential));
   if (typeof c.connectedAt !== "number" || !Number.isFinite(c.connectedAt)) errors.push("connectedAt must be a timestamp");
@@ -288,6 +298,13 @@ export interface VercelBoardConnectionStatus {
   syncChannels?: string[];
   /** The agents that declared a role, oldest first. */
   declared?: { agentId: string; role: string }[];
+  /**
+   * The dispatcher, in short: whether it runs, and each channel's policy.
+   * `scout integration dispatcher vercel-board` shows the full view.
+   */
+  dispatcher?: { enabled: boolean; channels: { channel: string; policy: string; guardsRemoved: string[]; relaxed: boolean }[] };
+  /** Claims the runtime holds or is settling, with their leases. Never a token. */
+  claims?: VercelBoardClaimStatus[];
   outbox: { pending: number; unknown: number; failed: number };
   /** The local lease. It fences processes on this node only. */
   localLease?: { generation: number; expiresAt: number; heldHere: boolean };
@@ -313,6 +330,8 @@ export interface VercelBoardConnectRequest {
   selfServe?: string[];
   /** Board channels whose Scout writes may be mirrored by Board's sync providers. */
   syncChannels?: string[];
+  /** The dispatcher's settings. Default: role-only in selfServe channels, manual elsewhere. */
+  dispatch?: VercelBoardDispatchConfig;
   /** Run the setup probe: create, claim and complete one task. Default true. */
   probe?: boolean;
 }

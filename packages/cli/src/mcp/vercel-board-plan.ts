@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import type { VercelBoardPlanRequest, VercelBoardPlanResponse } from "@openscout/protocol";
+import type { VercelBoardDispatcherStatus, VercelBoardDispatchRunResponse, VercelBoardPlanRequest, VercelBoardPlanResponse } from "@openscout/protocol";
 
 export type VercelBoardPlanToolDeps = {
   plan: (request: VercelBoardPlanRequest) => Promise<VercelBoardPlanResponse>;
@@ -53,6 +53,38 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
       const result = await deps.plan({ connectionId, channel, planningTaskId, requestId, actorId: resolvedSenderId, tasks });
       const structuredContent = { senderId: resolvedSenderId, ...result };
       return { content: createTextContent(structuredContent), structuredContent };
+    },
+  );
+}
+
+export type VercelBoardDispatcherToolDeps = {
+  status: (connectionId: string) => Promise<VercelBoardDispatcherStatus>;
+  explain: (connectionId: string, taskId: string) => Promise<VercelBoardDispatchRunResponse>;
+};
+
+/**
+ * The dispatcher, read-only. An agent may see why a task was or was not
+ * claimed; it never changes the policy. The settings decide which board text
+ * starts an agent, so only the operator sets them, through the CLI or the API.
+ */
+export function registerVercelBoardDispatcherTool(server: McpServer, deps: VercelBoardDispatcherToolDeps): void {
+  server.registerTool(
+    "vercel_board_dispatcher",
+    {
+      title: "Read the Vercel Board Dispatcher",
+      description:
+        "Read how Scout's runtime claims ready tasks on a connected Vercel Board: each channel's dispatch policy and its steps, guards an operator relaxed or removed, "
+        + "recent decisions, and each held claim's lease and next renewal. Pass taskId to see why one task would or would not be claimed now; that runs the policy without claiming. "
+        + "Read-only: the operator changes dispatch settings with scout integration dispatcher vercel-board.",
+      inputSchema: z.object({
+        connectionId: z.string().describe("The board connection, as scout integration status vercel-board names it."),
+        taskId: z.string().optional().describe("A Board task to explain."),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ connectionId, taskId }) => {
+      const structuredContent = taskId ? await deps.explain(connectionId, taskId) : await deps.status(connectionId);
+      return { content: createTextContent(structuredContent), structuredContent: structuredContent as unknown as Record<string, unknown> };
     },
   );
 }

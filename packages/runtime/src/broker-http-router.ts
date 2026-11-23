@@ -1083,6 +1083,13 @@ export function createBrokerHttpRouter(
         json(response, 200, { connections: await board.status(url.searchParams.get("connection") ?? undefined) });
         return;
       }
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/dispatcher") {
+        const connectionId = url.searchParams.get("connection") ?? "";
+        const explain = url.searchParams.get("explain");
+        // Explaining reads one task from the board and decides it; it never claims.
+        json(response, 200, explain !== null ? await board.runDispatcher({ connectionId, actorId: "", explain }) : await board.dispatcherStatus(connectionId));
+        return;
+      }
       const number = (name: string) => { const raw = url.searchParams.get(name); return raw === null || !/^\d+$/.test(raw) ? undefined : Number(raw); };
       if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/messages") {
         json(response, 200, await board.messages({ connectionId: url.searchParams.get("connection") ?? "", channel: url.searchParams.get("channel") ?? "", limit: number("limit") }));
@@ -1101,6 +1108,8 @@ export function createBrokerHttpRouter(
       const input = await readRequestBody<Record<string, any>>(request, { maxBytes: 256 * 1024 });
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/connect") { json(response, 200, await board.connect(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/claim") { json(response, 200, await board.claim(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/dispatcher") { json(response, 200, await board.setDispatch(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/dispatcher/run") { json(response, 200, await board.runDispatcher(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/plan") { json(response, 200, await board.plan(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/promote") { json(response, 200, await board.promote(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/roles") { json(response, 200, await board.declareRole(input as any)); return; }

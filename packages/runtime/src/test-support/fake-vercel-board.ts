@@ -11,7 +11,7 @@ type Task = {
   blocked: { kind: string | null; reason: string } | null; result: string | null; reason: string | null;
 };
 type Message = {
-  id: string; channel: string; text: string; re: string | null; labels: Record<string, string>; deleted: boolean;
+  id: string; channel: string; text: string; re: string | null; labels: Record<string, string>; deleted: boolean; from?: string;
   createdAt: string; editedAt?: string; version: number; revision: number; by: { actor: string; principal: string; profile: string | null }; task?: Task;
 };
 type Event = { seq: number; type: string; channel: string; payload: Record<string, unknown>; messageId?: string; snapshot?: unknown };
@@ -43,12 +43,16 @@ export class FakeVercelBoard {
 
   fault(fault: FakeVercelBoardFault): void { this.faults.push(fault); }
 
-  /** Write as someone else, outside Scout. */
-  createTask(input: { channel: string; text: string; owner?: string; needs?: string[]; for?: string; as?: string | null }): string {
+  /**
+   * Write as someone else, outside Scout. `from` marks a sync import (the
+   * provider's key, as Board sets it), and `by` names the author outright.
+   */
+  createTask(input: { channel: string; text: string; owner?: string; needs?: string[]; for?: string; as?: string | null; labels?: Record<string, string>; from?: string; by?: string }): string {
     const previous = this.profile;
     this.profile = input.as === undefined ? "scout" : input.as;
     try {
-      return this.makeTask(input.channel, input.text, {}, input.needs ?? [], input.owner ?? this.principal, null, input.for ?? null).id;
+      const message = this.makeTask(input.channel, input.text, { ...input.labels }, input.needs ?? [], input.owner ?? this.principal, null, input.for ?? null, { from: input.from, by: input.by });
+      return message.id;
     } finally { this.profile = previous; }
   }
   /** Another worker claims a task. */
@@ -146,13 +150,14 @@ export class FakeVercelBoard {
     this.events.push({ seq: message.version, type, channel: message.channel, payload, messageId: message.id, snapshot: this.view(message) });
   }
 
-  private makeTask(channel: string, text: string, labels: Record<string, string>, needs: string[], owner: string, clientId: string | null, forActor: string | null = null): Message {
+  private makeTask(channel: string, text: string, labels: Record<string, string>, needs: string[], owner: string, clientId: string | null, forActor: string | null = null, extra: { from?: string; by?: string } = {}): Message {
     this.channels.add(channel);
     const id = this.nextId();
     const open = needs.filter(need => this.messages.get(need)?.task?.state !== "completed");
     const message: Message = {
       id, channel, text, re: null, labels, deleted: false, createdAt: new Date(this.now()).toISOString(), version: Number(id), revision: 1,
-      by: owner === this.principal ? this.actor() : { actor: owner, principal: owner, profile: null },
+      ...(extra.from ? { from: extra.from } : {}),
+      by: extra.by ? this.author(extra.by) : owner === this.principal ? this.actor() : { actor: owner, principal: owner, profile: null },
       task: { state: open.length ? "waiting" : "ready", owner, by: owner, for: forActor, needs, epoch: 0, claim: null, blocked: null, result: null, reason: null },
     };
     this.messages.set(id, message);

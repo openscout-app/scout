@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { VERCEL_BOARD_VERBS } from "./integration.ts";
-import { parseVercelBoardCommand, VERCEL_BOARD_HELP } from "./vercel-board.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseVercelBoardCommand, readVercelBoardDispatchFile, VERCEL_BOARD_HELP } from "./vercel-board.ts";
 
 test("connect names a team board by team and board, and the credential by reference", () => {
   const parsed = parseVercelBoardCommand(["connect", "--team", "team_abc", "--board", "scout", "--credential", "secret_cli:scout-vercel"]);
@@ -48,5 +51,47 @@ test("role declares the calling agent, or another agent as the operator", () => 
 test("the integration command dispatches every verb the Board help names", () => {
   const named = [...VERCEL_BOARD_HELP.matchAll(/^scout integration (\w+) vercel-board/gm)].map(match => match[1]);
   expect(named).toContain("role");
+  expect(named).toContain("dispatcher");
   expect(named.filter(verb => !VERCEL_BOARD_VERBS.has(verb))).toEqual([]);
+});
+
+test("dispatcher shows the policy, explains one task, or runs a pass", () => {
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1"])).toMatchObject({ kind: "dispatcher", method: "GET", path: "/v1/integrations/vercel-board/dispatcher?connection=c1" });
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--explain", "42"]).path).toBe("/v1/integrations/vercel-board/dispatcher?connection=c1&explain=42");
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--run"])).toMatchObject({ kind: "dispatcher-run", method: "POST", path: "/v1/integrations/vercel-board/dispatcher/run", body: { connectionId: "c1", actorId: "operator" } });
+  expect(() => parseVercelBoardCommand(["dispatcher"])).toThrow(/--connection/);
+  expect(() => parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--run", "--explain", "42"])).toThrow(/one of/);
+});
+
+test("dispatcher changes one channel's settings on top of the saved block, and relaxing a guard names a channel", () => {
+  const current = { policy: "manual", capabilities: { "area=docs": ["agent-docs"] }, channels: { "scout/ops": { policy: "role-only" } } };
+  const set = parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--channel", "scout/work", "--policy", "trusted-channel", "--trust-authors", "allowlist", "--trust-synced", "github", "--trust-any-epoch"]);
+  expect(set).toMatchObject({ kind: "dispatcher-set", method: "POST", path: "/v1/integrations/vercel-board/dispatcher", body: { connectionId: "c1", actorId: "operator" } });
+  expect(set.change!(current)).toEqual({ policy: "manual", capabilities: { "area=docs": ["agent-docs"] }, channels: {
+    "scout/ops": { policy: "role-only" },
+    "scout/work": { policy: "trusted-channel", trust: { authors: "allowlist", anyEpoch: true, synced: ["github"] } },
+  } });
+  expect(current.channels).toEqual({ "scout/ops": { policy: "role-only" } }); // the saved block is not changed in place
+  const reset = parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--channel", "scout/ops", "--default"]);
+  expect(reset.change!(current)).toEqual({ policy: "manual", capabilities: { "area=docs": ["agent-docs"] } });
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--policy", "role-only"]).change!({})).toEqual({ policy: "role-only" });
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--pause"]).change!({ policy: "role-only" })).toEqual({ policy: "role-only", enabled: false });
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--resume"]).change!({ enabled: false })).toEqual({});
+  expect(() => parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--trust-authors", "any"])).toThrow(/add --channel/);
+  expect(() => parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--channel", "w", "--trust-authors", "everyone"])).toThrow(/operator, allowlist or any/);
+  expect(parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--file", "rules.json"])).toMatchObject({ kind: "dispatcher-set", file: "rules.json" });
+  expect(() => parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--file", "rules.json", "--pause"])).toThrow(/alone/);
+});
+
+test("a dispatch settings file holds the block or wraps it in dispatch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "scout-dispatch-"));
+  try {
+    writeFileSync(join(dir, "a.json"), JSON.stringify({ dispatch: { policy: "role-only" } }));
+    writeFileSync(join(dir, "b.json"), JSON.stringify({ channels: { "scout/work": { policy: "manual" } } }));
+    writeFileSync(join(dir, "c.json"), "[1]");
+    expect(readVercelBoardDispatchFile("a.json", dir)).toEqual({ policy: "role-only" });
+    expect(readVercelBoardDispatchFile(join(dir, "b.json"))).toEqual({ channels: { "scout/work": { policy: "manual" } } });
+    expect(() => readVercelBoardDispatchFile("c.json", dir)).toThrow(/JSON object/);
+    expect(() => readVercelBoardDispatchFile("missing.json", dir)).toThrow(/Could not read/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -7,7 +7,7 @@ import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decisio
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
-import { registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
+import { registerVercelBoardDispatcherTool, registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
 import { registerDiffTools } from "./diff-tools.ts";
@@ -92,6 +92,8 @@ import {
   moveScoutWorkItem,
   retryScoutWorkItem,
   planScoutBoardTasks,
+  readScoutBoardDispatcher,
+  explainScoutBoardDispatch,
   reviewScoutWorkMove,
   readScoutWorkLifecycles,
   readScoutDerivedRecord,
@@ -5863,6 +5865,7 @@ export function createScoutMcpServer(options: {
     plan: deps.planBoardTasks ?? planScoutBoardTasks,
     resolveSender: async (senderId, currentDirectory) => resolveMcpSenderId(deps, senderId, resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory), env),
   });
+  registerVercelBoardDispatcherTool(server, { status: readScoutBoardDispatcher, explain: explainScoutBoardDispatch });
 
   server.registerTool(
     "work_review",
