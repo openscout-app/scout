@@ -12,9 +12,9 @@
 // docs/eng/isolation-cow-vs-worktrees.md for the design and the review blockers
 // that gate them.
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execSystemFile } from "./system-probes/exec.js";
 
 /** Directory (under the project root) that holds every Scout-created workspace. */
@@ -25,6 +25,44 @@ export interface CreateAgentWorkspaceResult {
   path: string;
   /** Branch the worktree tracks (`scout/<agent>` unless one was requested). */
   branch: string;
+}
+
+/**
+ * In-process handshake with the retirement sweep. A workspace handed to a
+ * session counts as activity, so the sweep will not retire it in the window
+ * before that session's endpoint is recorded. A workspace that the sweep is
+ * retiring is not handed out until the retirement settles.
+ */
+const workspaceClaimedAt = new Map<string, number>();
+const workspaceRetirements = new Map<string, Promise<unknown>>();
+
+export function agentWorkspaceKey(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/** When this process last handed the workspace at `path` to a session. */
+export function agentWorkspaceClaimedAt(path: string): number | undefined {
+  return workspaceClaimedAt.get(agentWorkspaceKey(path));
+}
+
+/** Hold new sessions off `path` until `retirement` settles. */
+export async function withAgentWorkspaceRetirement<T>(path: string, retirement: () => Promise<T>): Promise<T> {
+  const key = agentWorkspaceKey(path);
+  const pending = retirement();
+  workspaceRetirements.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (workspaceRetirements.get(key) === pending) workspaceRetirements.delete(key);
+  }
+}
+
+function claimAgentWorkspace(path: string): void {
+  workspaceClaimedAt.set(agentWorkspaceKey(path), Date.now());
 }
 
 async function isGitRepo(projectRoot: string): Promise<boolean> {
@@ -66,8 +104,12 @@ export async function createAgentWorkspace(
   const workspaceDir = join(projectRoot, SCOUT_WORKSPACES_DIRNAME);
   const workspacePath = join(workspaceDir, agentName);
 
+  // A retirement in flight decides whether the path still exists.
+  await workspaceRetirements.get(agentWorkspaceKey(workspacePath))?.catch(() => undefined);
+
   // Reuse an existing worktree rather than recreate it.
   if (existsSync(workspacePath)) {
+    claimAgentWorkspace(workspacePath);
     return { path: workspacePath, branch };
   }
 
@@ -76,11 +118,13 @@ export async function createAgentWorkspace(
   try {
     // Create the worktree on a new branch based on current HEAD.
     await execSystemFile("git", ["worktree", "add", "-b", branch, "--", workspacePath], { cwd: projectRoot, timeoutMs: 10_000 });
+    claimAgentWorkspace(workspacePath);
     return { path: workspacePath, branch };
   } catch {
     // Branch might already exist — retry attaching to it without -b.
     try {
       await execSystemFile("git", ["worktree", "add", workspacePath, "--", branch], { cwd: projectRoot, timeoutMs: 10_000 });
+      claimAgentWorkspace(workspacePath);
       return { path: workspacePath, branch };
     } catch {
       // If both fail, fall back to no worktree.

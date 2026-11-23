@@ -21,6 +21,7 @@ import {
   type ProvisionalAgentNamesMode,
   type RuntimePresetConfig,
   type TailThinkingMode,
+  type WorktreeRetireMode,
 } from "./user-config.js";
 
 export type UserConfigFieldKind = "string" | "number" | "enum" | "string-list";
@@ -64,6 +65,7 @@ const COMMS_VERBOSITIES = ["terse", "normal", "detailed"] as const;
 const COMMS_TONES = ["direct", "warm", "formal"] as const;
 const AGENT_NAME_MODES = ["replace", "extend"] as const;
 const TAIL_THINKING_MODES = ["hide", "tag"] as const;
+const WORKTREE_RETIRE_MODES = ["on", "off"] as const;
 
 function parseStringValue(args: string[]): string | undefined {
   const value = args.join(" ").trim();
@@ -471,6 +473,39 @@ export const USER_CONFIG_FIELDS: readonly UserConfigFieldDefinition[] = [
       }
     },
     clear: (config) => clearConfigValue(config, "runtimePresets"),
+  },
+  {
+    id: "worktree-retire",
+    key: "worktreeRetire",
+    label: "Retire idle agent worktrees",
+    kind: "enum",
+    enumValues: WORKTREE_RETIRE_MODES,
+    summary: "Remove idle, clean, merged .scout-worktrees on a schedule (on | off)",
+    showInSummary: true,
+    parse: (args) => parseEnumValue(args, WORKTREE_RETIRE_MODES),
+    resolveGet: (config) => formatStoredEnum(config.worktreeRetire),
+    formatSummary: (config) => {
+      const mode = formatStoredEnum(config.worktreeRetire) || "on (default)";
+      const hours = formatStoredNumber(config.worktreeRetireIdleHours) || "24";
+      return `${mode}, after ${hours}h idle`;
+    },
+    apply: (config, value) => {
+      if (value === undefined) clearConfigValue(config, "worktreeRetire");
+      else setConfigValue(config, "worktreeRetire", value as WorktreeRetireMode);
+    },
+  },
+  {
+    id: "worktree-retire-idle-hours",
+    key: "worktreeRetireIdleHours",
+    label: "Worktree idle hours",
+    kind: "number",
+    parse: (args) => {
+      const value = parseNumberValue(args);
+      if (value !== undefined && value < 1) throw new Error("expected at least 1 hour");
+      return value;
+    },
+    resolveGet: (config) => formatStoredNumber(config.worktreeRetireIdleHours),
+    formatSummary: (config) => formatStoredNumber(config.worktreeRetireIdleHours) || "24 (default)",
   },
 ] as const;
 
