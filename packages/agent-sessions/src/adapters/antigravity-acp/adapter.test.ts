@@ -9,7 +9,9 @@ afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function fixture(model?: string, selected?: string, nativeSessionId?: string, signedOut = false) {
+type ModelSelection = Array<{ id: string; currentValue: string }>;
+
+function fixture(model?: string, selected?: ModelSelection, nativeSessionId?: string, signedOut = false) {
   const dir = mkdtempSync(join(tmpdir(), "scout-antigravity-"));
   roots.push(dir);
   const log = join(dir, "methods");
@@ -27,14 +29,14 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = method === "initialize"
     ? { protocolVersion: 1, agentCapabilities: {loadSession:true}, authMethods: [{ id: "oauth-personal" }] }
     : method === "session/set_config_option"
-      ? { configOptions: [{ id: params.configId, currentValue: process.env.SELECTED || params.value }] }
+      ? { configOptions: process.env.SELECTION ? JSON.parse(process.env.SELECTION) : [{ id: params.configId, currentValue: params.value }] }
       : { sessionId: "native-session" };
   if (id !== undefined) console.log(JSON.stringify({ jsonrpc: "2.0", id, result }));
 }`, { mode: 0o700 });
   return {
     adapter: createAdapter({
       sessionId: "scout-session", name: "Antigravity", cwd: dir,
-      env: { METHOD_LOG: log, ...(signedOut ? { SIGNED_OUT: "1" } : {}), ...(selected ? { SELECTED: selected } : {}) },
+      env: { METHOD_LOG: log, ...(signedOut ? { SIGNED_OUT: "1" } : {}), ...(selected ? { SELECTION: JSON.stringify(selected) } : {}) },
       options: { command, model, sessionId: nativeSessionId, startupTimeoutMs: 3000 },
     }),
     calls: () => readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)),
@@ -60,9 +62,25 @@ test("selects the exact native model after loading a saved session", async () =>
 });
 
 test("rejects an unconfirmed model before sending any prompt", async () => {
-  const { adapter, calls } = fixture("gemini-fixture", "other-model");
+  const { adapter, calls } = fixture("gemini-fixture", [{ id: "model", currentValue: "other-model" }]);
   try {
     await expect(adapter.start()).rejects.toThrow("did not confirm model");
+    expect(calls().map(call => call.method)).toEqual(["initialize", "session/new", "session/set_config_option"]);
+  } finally { await adapter.shutdown(); }
+});
+
+test.each([
+  ["gemini-4-neon", "medium", true],
+  ["gemini-4-neon", "high", false],
+  ["gemini-4-argon", "medium", false],
+] as const)("checks the native model family %s and thought level %s", async (family, level, matches) => {
+  const { adapter, calls } = fixture("gemini-4-neon-medium", [
+    { id: "model", currentValue: family },
+    { id: "thought_level", currentValue: level },
+  ]);
+  try {
+    if (matches) await adapter.start();
+    else await expect(adapter.start()).rejects.toThrow("did not confirm model");
     expect(calls().map(call => call.method)).toEqual(["initialize", "session/new", "session/set_config_option"]);
   } finally { await adapter.shutdown(); }
 });
