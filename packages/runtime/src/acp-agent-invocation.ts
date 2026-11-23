@@ -12,7 +12,7 @@ import { bindManagedPermissionRequester } from "./managed-permission.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
 export interface AcpAgentInvocationOptions {
-  adapterType: "grok-acp" | "kimi-acp" | "cursor-acp" | "opencode-acp" | "devin-acp";
+  adapterType: "grok-acp" | "kimi-acp" | "cursor-acp" | "opencode-acp" | "devin-acp" | "antigravity-acp";
   label: string;
   /** Stable broker/runtime session id. It is not an ACP provider session id. */
   sessionId: string;
@@ -102,6 +102,7 @@ function harnessForAdapter(adapterType: AcpAgentInvocationOptions["adapterType"]
   if (adapterType === "grok-acp") return "grok";
   if (adapterType === "kimi-acp") return "kimi";
   if (adapterType === "opencode-acp") return "opencode";
+  if (adapterType === "antigravity-acp") return "antigravity";
   if (adapterType === "devin-acp") return "devin";
   return "cursor";
 }
@@ -110,6 +111,7 @@ function transportForAdapter(adapterType: AcpAgentInvocationOptions["adapterType
   if (adapterType === "grok-acp") return "grok_acp";
   if (adapterType === "kimi-acp") return "kimi_acp";
   if (adapterType === "opencode-acp") return "opencode_acp";
+  if (adapterType === "antigravity-acp") return "antigravity_acp";
   if (adapterType === "devin-acp") return "devin_acp";
   return "cursor_acp";
 }
@@ -326,4 +328,8 @@ export async function existingAcpNativeSession(poolKey: string) {
   const entry = await pending.catch(() => null);
   if (!entry || activeAcpSessions.get(poolKey) !== pending) return undefined;
   return entry.client.nativeAttention;
+}
+
+export function invokeAntigravityAcpAgent(options: Omit<AcpAgentInvocationOptions, "adapterType" | "label">) {
+  return invokeAcpAgent({ ...options, adapterType: "antigravity-acp", label: "Google Antigravity" });
 }

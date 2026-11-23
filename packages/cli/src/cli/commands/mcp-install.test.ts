@@ -50,6 +50,29 @@ describe("shared Scout MCP install", () => {
     ]);
   });
 
+  test("preserves native Antigravity entries and only upserts Scout on request", () => {
+    const calls: string[][] = [];
+    let listing = "scout-alt stdio /somewhere";
+    const install = (force = false, dryRun = false) => installScoutMcpForHosts({
+      env: {}, hosts: ["antigravity"], force, dryRun,
+      resolveHostPath: () => "agy",
+      resolveLaunchCommand: () => ({ command: "/bin/scout", args: ["mcp"] }),
+      run: (_command, args) => {
+        calls.push(args);
+        return { status: 0, stdout: args[1] === "list" ? listing : "", stderr: "" };
+      },
+    })[0]?.status;
+    expect(install(false, true)).toBe("installed");
+    expect(calls).toEqual([["mcp", "list"]]);
+    expect(install()).toBe("installed");
+    expect(calls.at(-1)).toEqual(["mcp", "add", "--type", "stdio", "scout", "/bin/scout", "mcp"]);
+    listing = "scout   stdio   /custom/scout";
+    expect(install()).toBe("already_installed");
+    expect(calls.at(-1)).toEqual(["mcp", "list"]);
+    expect(install(true)).toBe("installed");
+    expect(calls.filter(args => args[1] === "remove")).toEqual([]);
+  });
+
   test("adds without removing when a host has no scout entry", () => {
     const calls: Call[] = [];
     installScoutMcpForHosts({
@@ -167,10 +190,11 @@ describe("parseMcpInstallCommandOptions", () => {
     expect(parseMcpInstallCommandOptions(["--shared", "--host", "codex"], process.env).shared).toBe(true);
   });
 
-  test("accepts zed and rejects unknown hosts", () => {
+  test("accepts Antigravity and Zed and rejects unknown hosts", () => {
+    expect(parseMcpInstallCommandOptions(["--host", "antigravity"], process.env).hosts).toEqual(["antigravity"]);
     expect(parseMcpInstallCommandOptions(["--host", "zed"], process.env).hosts).toEqual(["zed"]);
     expect(() => parseMcpInstallCommandOptions(["--host", "vim"], process.env))
-      .toThrow("expected codex, claude, or zed");
+      .toThrow("expected codex, claude, zed, or antigravity");
   });
 });
 
