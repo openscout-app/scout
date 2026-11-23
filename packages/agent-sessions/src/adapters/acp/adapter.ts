@@ -1038,7 +1038,10 @@ export class AcpAdapter extends BaseAdapter {
 
     if (message.error) {
       const detail = message.error.message || "request failed";
-      pending.reject(new Error(`${pending.method} failed (${message.error.code}): ${detail}`));
+      const loginHint = this.acpOptions.adapterType === "antigravity-acp" && message.error.code === -32000
+        ? " Sign in with agy acp --login and retry."
+        : "";
+      pending.reject(new Error(`${pending.method} failed (${message.error.code}): ${detail}${loginHint}`));
       return;
     }
 

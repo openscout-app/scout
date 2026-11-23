@@ -380,8 +380,7 @@ function buildAdapterOptions(options: {
     ...(options.transport === "opencode_acp" && options.model ? { model: options.model } : {}),
     // V2 takes `provider/model#variant` and sets it on the new native session.
     ...(options.transport === "opencode_v2" && options.model ? { model: options.model } : {}),
-    // Devin selects the model at process launch; its adapter turns this into
-    // a `devin acp --model <id>` argument.
+    // Devin applies this model at launch. Antigravity confirms it on the ACP session.
     ...((options.transport === "devin_acp" || options.transport === "antigravity_acp") && options.model ? { model: options.model } : {}),
   };
 }

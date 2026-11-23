@@ -120,11 +120,24 @@ sweep interval to `0` disables the runtime sweep for debugging.
 ## Adapter Registry (pairing/runtime)
 
 Built-in Pairing adapter keys include: `claude-code`, `codex`, `acp`,
-`grok-acp`, `kimi-acp`, `pi`, `opencode`, `opencode-v2`, `opencode-acp`, and
+`antigravity-acp`, `grok-acp`, `kimi-acp`, `pi`, `opencode`, `opencode-v2`, `opencode-acp`, and
 `openai`. `opencode` preserves the legacy V1 server contract; `opencode-v2`
 uses the breaking product-V2 shared-service API. Runtime-created OpenCode work
 continues to default to `opencode_acp`; V2 server use is explicit until its
 beta contract and routing policy are promoted separately.
+
+Google Antigravity uses the native `agy acp --stdio` server. Install Google's
+CLI, sign in with `agy acp --login`, and run `agy models` to list the IDs your
+account can use. To give Antigravity access to Scout tools, run
+`scout mcp install --host antigravity`. To send work in the other direction:
+
+```sh
+scout ask --project . --harness antigravity --model <model-id> "Review this change"
+```
+
+Replace `<model-id>` with an ID from `agy models`, or omit the model flag to
+keep the native default. Scout checks the model returned by the ACP session
+before sending a prompt. [Google's ACP guide](https://antigravity.google/docs/ide/extensions/acp)
 
 Kimi Code is a first-class cardless harness target: `--harness kimi` resolves
 through the catalog to the `kimi_acp` transport, which launches `kimi acp` and

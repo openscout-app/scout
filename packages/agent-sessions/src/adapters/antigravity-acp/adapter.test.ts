@@ -9,7 +9,7 @@ afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function fixture(model?: string, selected?: string, nativeSessionId?: string) {
+function fixture(model?: string, selected?: string, nativeSessionId?: string, signedOut = false) {
   const dir = mkdtempSync(join(tmpdir(), "scout-antigravity-"));
   roots.push(dir);
   const log = join(dir, "methods");
@@ -20,6 +20,10 @@ import { createInterface } from "node:readline";
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, method, params } = JSON.parse(line);
   appendFileSync(process.env.METHOD_LOG, JSON.stringify({ method, params, args: process.argv.slice(2) }) + "\\n");
+  if (process.env.SIGNED_OUT && method === "session/new") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: "Authentication required" } }));
+    continue;
+  }
   const result = method === "initialize"
     ? { protocolVersion: 1, agentCapabilities: {loadSession:true}, authMethods: [{ id: "oauth-personal" }] }
     : method === "session/set_config_option"
@@ -30,7 +34,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   return {
     adapter: createAdapter({
       sessionId: "scout-session", name: "Antigravity", cwd: dir,
-      env: { METHOD_LOG: log, ...(selected ? { SELECTED: selected } : {}) },
+      env: { METHOD_LOG: log, ...(signedOut ? { SIGNED_OUT: "1" } : {}), ...(selected ? { SELECTED: selected } : {}) },
       options: { command, model, sessionId: nativeSessionId, startupTimeoutMs: 3000 },
     }),
     calls: () => readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)),
@@ -60,5 +64,13 @@ test("rejects an unconfirmed model before sending any prompt", async () => {
   try {
     await expect(adapter.start()).rejects.toThrow("did not confirm model");
     expect(calls().map(call => call.method)).toEqual(["initialize", "session/new", "session/set_config_option"]);
+  } finally { await adapter.shutdown(); }
+});
+
+test("returns the native login command when Google requires sign-in", async () => {
+  const { adapter, calls } = fixture(undefined, undefined, undefined, true);
+  try {
+    await expect(adapter.start()).rejects.toThrow("agy acp --login");
+    expect(calls().map(call => call.method)).toEqual(["initialize", "session/new"]);
   } finally { await adapter.shutdown(); }
 });
