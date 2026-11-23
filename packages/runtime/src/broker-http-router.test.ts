@@ -2300,25 +2300,41 @@ test("manual review occurrences record, replay, refuse a conflict and read back 
     artifact: { kind: "pull_request", ref: "example/repo#12", revision: "1f2e3d4c" },
   };
 
-  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`)).response.status).toBe(404);
-  expect((await requestRouter(harness, "GET", `${path}?scope=review`)).response.status).toBe(400);
+  const local = { transport: "loopback" as const };
+  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`, { transportContext: local })).response.status).toBe(404);
+  expect((await requestRouter(harness, "GET", `${path}?scope=review`, { transportContext: local })).response.status).toBe(400);
 
-  const created = await requestRouter(harness, "POST", path, { body });
+  const created = await requestRouter(harness, "POST", path, { transportContext: local, body });
   expect(created.response.status).toBe(200);
   expect(created.body).toMatchObject({
     created: true,
-    occurrence: { scope: "review", requestId: "run-1", input: body.input, artifact: body.artifact, requestedById: "operator", state: "recorded" },
+    occurrence: { scope: "review", requestId: "run-1", input: body.input, artifact: body.artifact, requestedById: "local-unverified", state: "recorded" },
   });
   const { occurrence } = created.body as { occurrence: unknown };
 
-  expect((await requestRouter(harness, "POST", path, { body })).body).toEqual({ created: false, occurrence });
-  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`)).body).toEqual({ occurrence });
+  expect((await requestRouter(harness, "POST", path, { transportContext: local, body })).body).toEqual({ created: false, occurrence });
+  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`, { transportContext: local })).body).toEqual({ occurrence });
 
-  const conflict = await requestRouter(harness, "POST", path, { body: { ...body, artifact: { ...body.artifact, revision: "89abcdef" } } });
+  for (const options of [
+    {},
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { ...local, guest: true } },
+    { transportContext: { ...local, scoped: true } },
+    { transportContext: local, headers: { origin: "https://example.test" } },
+    { transportContext: local, headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    const read = await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`, options);
+    expect(read.response.status).toBe(403);
+    expect(read.body).not.toHaveProperty("occurrence");
+    const write = await requestRouter(harness, "POST", path, { ...options, body: { ...body, requestId: "other" } });
+    expect(write.response.status).toBe(403);
+  }
+
+  const conflict = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, artifact: { ...body.artifact, revision: "89abcdef" } } });
   expect(conflict.response.status).toBe(409);
   expect(conflict.body).toMatchObject({ error: "manual_review_conflict", differs: ["artifact.revision"], occurrence });
 
-  const invalid = await requestRouter(harness, "POST", path, { body: { ...body, artifact: { kind: "pull_request", ref: "example/repo#12" } } });
+  const invalid = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, artifact: { kind: "pull_request", ref: "example/repo#12" } } });
   expect(invalid.response.status).toBe(400);
   expect(invalid.body).toMatchObject({ error: "invalid_manual_review_request" });
   expect(actions.size).toBe(1);
