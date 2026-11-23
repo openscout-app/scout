@@ -231,6 +231,7 @@ import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
 import { BrokerDerivedRecordService } from "./broker-derived-records.js";
+import { BrokerBoardService } from "./broker-boards.js";
 import { ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths, controlPlaneArchiveDirectory } from "./support-paths.js";
 import { expandHomePath } from "./tool-resolution.js";
 import {
@@ -1153,6 +1154,13 @@ const workLifecycles = new BrokerWorkLifecycleService({
   listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
   createId: createRuntimeId,
   operatorActorId,
+});
+// Boards: the lifecycle board with each card's content, for clients that read only the runtime.
+const boards = new BrokerBoardService({
+  work: workLifecycles,
+  defaultLifecycleId: workLifecycleRegistry.defaultId,
+  registry: () => runtime.peek(),
+  latestEvents: recordIds => journal.latestCollaborationEvents(recordIds),
 });
 // Derived records: written only through this service; asks for pending ones
 // start only when a lifecycle station names where its agent runs.
@@ -3952,6 +3960,7 @@ const routineRunner = new RoutineRunner({
 
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
+  boards,
   workRetry,
   derivedRecords,
   tasks: taskService,

@@ -149,6 +149,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/collaboration/records": "local",
   "GET /v1/derived": "local",
   "GET /v1/derived/pending": "local",
+  "GET /v1/boards": "local",
+  "GET /v1/boards/:id": "local",
   "GET /v1/work/board": "local",
   "GET /v1/work/lifecycles": "local",
   "GET /v1/work/moves": "local",

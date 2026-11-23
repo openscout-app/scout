@@ -2302,6 +2302,40 @@ describe("derived record routes", () => {
   });
 });
 
+test("board routes list boards, read one with the work board's query, 404 an unknown id, and stay local", async () => {
+  const { WorkLifecycleError } = await import("./broker-work-lifecycles.js");
+  const { meshRouteTierFor } = await import("./mesh-route-matrix.js");
+  const reads: Array<{ id: string; query: unknown }> = [];
+  const board = { board: { id: "scout.default", name: "Default", version: 1, hash: "h", description: null }, columns: [], transitions: [], cards: [] };
+  const h = createHarness({
+    boards: {
+      list: () => ({ boards: [{ id: "scout.default", name: "Default", version: 1, isDefault: true }] }),
+      read: (id: string, query: unknown) => {
+        reads.push({ id, query });
+        if (id === "nope") throw new WorkLifecycleError(404, "No lifecycle nope.");
+        return board;
+      },
+    } as never,
+  });
+  const listed = await requestRouter(h, "GET", "/v1/boards");
+  expect(listed.response.status).toBe(200);
+  expect(listed.body).toEqual({ boards: [{ id: "scout.default", name: "Default", version: 1, isDefault: true }] });
+  const read = await requestRouter(h, "GET", "/v1/boards/default?closedSince=500&limit=20");
+  expect(read.response.status).toBe(200);
+  expect(read.body).toEqual(board);
+  await requestRouter(h, "GET", "/v1/boards/scout.default?closedSince=nope");
+  expect(reads).toEqual([
+    { id: "default", query: { closedSince: 500, limit: 20 } },
+    { id: "scout.default", query: { closedSince: undefined, limit: 100 } },
+  ]);
+  const missing = await requestRouter(h, "GET", "/v1/boards/nope");
+  expect(missing.response.status).toBe(404);
+  expect(missing.body).toEqual({ error: "No lifecycle nope." });
+  expect(meshRouteTierFor("GET", "/v1/boards")).toBe("local");
+  expect(meshRouteTierFor("GET", "/v1/boards/scout.default")).toBe("local");
+  expect(meshRouteTierFor("GET", "/v1/work/board")).toBe("local");
+});
+
 test("manual review occurrences record, replay, refuse a conflict and read back over HTTP", async () => {
   const actions = new Map<string, import("@openscout/protocol").DurableAction>();
   const harness = createHarness({
