@@ -61,6 +61,8 @@ export const scoutBrokerPaths = {
     workReview: "/v1/work/review",
     workRetry: "/v1/work/retry",
     workClaim: "/v1/work/claim",
+    worktreeRetirement: "/v1/worktrees/retirement",
+    worktreeRetirementSweep: "/v1/worktrees/retirement/sweep",
     manualReviewOccurrences: "/v1/manual-review/occurrences",
     manualReviewDispatches: "/v1/manual-review/dispatches",
     manualReviewBoardRoutines: "/v1/manual-review/board-routines",
