@@ -170,6 +170,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/machines": "local",
   "GET /v1/machines/:id": "local",
   "GET /v1/manual-review/board-routines": "local",
+  "GET /v1/manual-review/board-ticket": "local",
+  "POST /v1/manual-review/board-accept": "local",
   "GET /v1/manual-review/occurrences": "local",
   "GET /v1/message-reactions": "local",
   "GET /v1/messages": "local",

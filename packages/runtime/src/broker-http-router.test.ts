@@ -2498,6 +2498,9 @@ test("Board review routes serve only the verified operator on this machine, and 
     ["POST", "/v1/manual-review/board-routines", routine],
     ["POST", "/v1/manual-review/board-preview", { routineId: "nightly-review", itemId: "42" }],
     ["POST", "/v1/manual-review/board-runs", { routineId: "nightly-review", itemId: "42", requestId: "run-1", routineVersion: 1, inputVersion: "7", revision: "1f2e3d4c5b6a79880123456789abcdef01234567" }],
+    ["GET", "/v1/manual-review/board-ticket?workId=sample", undefined],
+    ["POST", "/v1/manual-review/board-accept", { workId: "sample" }],
+    ["GET", "/v1/manual-review/occurrences?scope=board-review%3Anightly-review&requestId=test", undefined],
   ] as const;
 
   // Refused at the door: nothing is saved, and nothing is read on the caller's behalf.

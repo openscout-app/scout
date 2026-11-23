@@ -64,6 +64,8 @@ export const scoutBrokerPaths = {
     manualReviewDispatches: "/v1/manual-review/dispatches",
     manualReviewBoardRoutines: "/v1/manual-review/board-routines",
     manualReviewBoardPreview: "/v1/manual-review/board-preview",
+    manualReviewBoardTicket: "/v1/manual-review/board-ticket",
+    manualReviewBoardAccept: "/v1/manual-review/board-accept",
     manualReviewBoardRuns: "/v1/manual-review/board-runs",
     derived: "/v1/derived",
     derivedPending: "/v1/derived/pending",

@@ -126,6 +126,8 @@ import { BrokerDeliveryHttpService } from "./broker-delivery-http-service.js";
 import { BrokerDurableActionHttpService } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import { manualReviewOccurrenceOf } from "@openscout/protocol";
+import { ManualReviewBoardTickets } from "./manual-review-board-ticket.js";
 import { ManualReviewBoardService } from "./manual-review-board.js";
 import { ManualReviewBoardRoutineStore } from "./manual-review-board-routines.js";
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
@@ -1099,6 +1101,25 @@ const manualReviewBoard = new ManualReviewBoardService({
   board: () => vercelBoardService,
 });
 const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
+const manualReviewBoardTickets = new ManualReviewBoardTickets({
+  work: id => journal.getCollaborationRecord(id),
+  occurrence: id => manualReviewOccurrenceOf(journal.getDurableAction(id)),
+  latestFlight: id => journal.newestFlightForWork(id),
+  lifecycle: work => workLifecycleRegistry.forRecord(work),
+  children: id => Object.values(runtime.peek().collaborationRecords).filter(
+    (record): record is import("@openscout/protocol").WorkItemRecord => record.kind === "work_item" && record.parentId === id,
+  ),
+  write: runDurableWrite,
+  commit: async (record, events) => {
+    await commitDurableEntries([
+      { kind: "collaboration.record", record },
+      ...events.map(event => ({ kind: "collaboration.event.record" as const, event })),
+    ], async () => {
+      await runtime.upsertCollaboration(record);
+      for (const event of events) await runtime.appendCollaborationEvent(event);
+    });
+  },
+});
 const workLifecycles = new BrokerWorkLifecycleService({
   registry: workLifecycleRegistry,
   durableStore,
@@ -3972,6 +3993,7 @@ const routeRequest = createBrokerHttpRouter({
   manualReviewOccurrences,
   manualReviewDispatch,
   manualReviewBoard,
+  manualReviewBoardTickets,
   controlStreams,
   managedSessionHttpService,
   meshDiscoveryService,

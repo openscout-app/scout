@@ -121,6 +121,7 @@ import type {
 } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceError, type ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { ManualReviewDispatchError, type ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import type { ManualReviewBoardTickets } from "./manual-review-board-ticket.js";
 import type { ManualReviewBoardService } from "./manual-review-board.js";
 import { ManualReviewBoardError } from "./manual-review-board-routines.js";
 import {
@@ -198,11 +199,6 @@ import { normalizeConversationTitle } from "./conversation-title.js";
 
 const ACTIVE_FLIGHT_LIST_STATES = new Set(["queued", "waking", "running", "waiting"]);
 
-/**
- * The caller a Board review serves: on this machine, with the local operator
- * proof on the request, and neither a guest, a scoped grant, a mesh peer, a
- * browser origin nor a request another node forwarded.
- */
 function isLocalReviewOperator(request: RuntimeHttpRequestLike): boolean {
   const context = request.transportContext;
   return !!context && ["loopback", "unix-socket"].includes(context.transport) && context.operator === true
@@ -324,6 +320,7 @@ export type BrokerHttpRouterDeps = {
   manualReviewDispatch: ManualReviewDispatchService;
   /** Saved Board review routines, their preview and their runs. Absent in hosts that do not serve them; the routes then answer 503. */
   manualReviewBoard?: ManualReviewBoardService;
+  manualReviewBoardTickets?: ManualReviewBoardTickets;
   controlStreams: BrokerControlStreamService;
   managedSessionHttpService: BrokerManagedSessionHttpService;
   meshDiscoveryService: BrokerMeshDiscoveryService;
@@ -612,6 +609,7 @@ export function createBrokerHttpRouter(
     manualReviewOccurrences,
     manualReviewDispatch,
     manualReviewBoard,
+    manualReviewBoardTickets,
     controlStreams,
     managedSessionHttpService,
     meshDiscoveryService,
@@ -3298,7 +3296,7 @@ export function createBrokerHttpRouter(
 
   if (method === "GET" && url.pathname === "/v1/manual-review/occurrences") {
     if (isManualReviewBoardScope(url.searchParams.get("scope")) && !isLocalReviewOperator(request)) {
-      json(response, 403, { error: "operator_only", detail: "A Board review run is read back by the verified operator on this machine." });
+      json(response, 403, { error: "operator_only", detail: "Open Board review runs as the local operator." });
       return;
     }
     try {
@@ -3365,7 +3363,8 @@ export function createBrokerHttpRouter(
   }
 
   if (url.pathname === "/v1/manual-review/board-routines" || url.pathname === "/v1/manual-review/board-preview"
-    || url.pathname === "/v1/manual-review/board-runs") {
+    || url.pathname === "/v1/manual-review/board-runs" || url.pathname === "/v1/manual-review/board-ticket"
+    || url.pathname === "/v1/manual-review/board-accept") {
     // A routine grants a read of the board and a reviewer to start, so every
     // one of these routes is the operator's: a caller on this machine whose
     // request carried the local operator proof. This is decided before the
@@ -3380,6 +3379,11 @@ export function createBrokerHttpRouter(
       return;
     }
     try {
+      if (method === "GET" && url.pathname === "/v1/manual-review/board-ticket") {
+        if (!manualReviewBoardTickets) { notFound(response); return; }
+        json(response, 200, manualReviewBoardTickets.read(url.searchParams.get("workId") ?? ""));
+        return;
+      }
       if (method === "GET" && url.pathname === "/v1/manual-review/board-routines") {
         json(response, 200, { routines: manualReviewBoard.list({
           connectionId: url.searchParams.get("connectionId") || undefined,
@@ -3391,6 +3395,12 @@ export function createBrokerHttpRouter(
       const body = await readRequestBody<Record<string, unknown>>(request, { maxBytes: 16 * 1024 });
       const attribution = brokerAttributionFor({ claimedActorId: "operator",
         context, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()) });
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-accept") {
+        if (!manualReviewBoardTickets) { notFound(response); return; }
+        json(response, 200, await manualReviewBoardTickets.accept(typeof body?.workId === "string" ? body.workId : "", attribution));
+        return;
+      }
+      if (url.pathname === "/v1/manual-review/board-ticket") { notFound(response); return; }
       if (method === "POST" && url.pathname === "/v1/manual-review/board-routines") {
         json(response, 200, await manualReviewBoard.save(body as unknown as ManualReviewBoardRoutineSaveRequest, attribution));
         return;
@@ -3400,7 +3410,6 @@ export function createBrokerHttpRouter(
         return;
       }
       if (method === "POST" && url.pathname === "/v1/manual-review/board-runs") {
-        // The same write guard as a dispatch: the ask is sent as the admitted principal.
         const claims = brokerService.assistantClaims;
         const run = () => manualReviewBoard.run(
           body as unknown as ManualReviewBoardRunRequest,
