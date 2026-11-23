@@ -80,6 +80,8 @@ export const scoutBrokerPaths = {
     vercelBoardMessages: "/v1/integrations/vercel-board/messages",
     vercelBoardHandoffs: "/v1/integrations/vercel-board/handoffs",
     vercelBoardRoles: "/v1/integrations/vercel-board/roles",
+    vercelBoardDispatcher: "/v1/integrations/vercel-board/dispatcher",
+    vercelBoardDispatcherRun: "/v1/integrations/vercel-board/dispatcher/run",
     pairingAttach: "/v1/pairing/attach",
     pairingDetach: "/v1/pairing/detach",
     localSessionsAttach: "/v1/local-sessions/attach",

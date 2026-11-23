@@ -22,6 +22,12 @@ const HANDOFF_KINDS: Record<string, VercelBoardHandoffKind> = {
 const TERMINAL: VercelBoardTaskState[] = ["completed", "failed", "canceled"];
 const DETAIL_MAX = 4000;
 
+/** A plan's task event, with its place in the connection's event order and the task's title. */
+export interface VercelBoardPlanEventRow extends VercelBoardTaskEventRow {
+  seq: number;
+  title: string;
+}
+
 export interface VercelBoardTaskEventRow {
   connectionId: string;
   cursor: string;
@@ -207,6 +213,38 @@ export class VercelBoardMirror {
   chain(connectionId: string, taskId: string): VercelBoardTaskEventRow[] {
     return this.database.query<EventSql>("SELECT * FROM vercel_board_task_events WHERE connection_id = ?1 AND task_id = ?2 ORDER BY at, rowid")
       .all(connectionId, taskId).map(eventRow);
+  }
+
+  /** The sequence of the newest task event on a connection: where a new plan's lead starts reading. */
+  lastEventSeq(connectionId: string): number {
+    return this.database.query<{ seq: number | null }>("SELECT MAX(rowid) AS seq FROM vercel_board_task_events WHERE connection_id = ?1").get(connectionId)?.seq ?? 0;
+  }
+
+  /**
+   * A plan's task events after `after`, oldest first: the events of task roots
+   * Scout wrote with the plan's label. One query.
+   */
+  planEvents(connectionId: string, planId: string, after: number, limit: number): VercelBoardPlanEventRow[] {
+    return this.database.query<EventSql & { seq: number; text: string }>(`SELECT e.rowid AS seq, e.*, m.text AS text FROM vercel_board_task_events e
+      JOIN vercel_board_messages m ON m.connection_id = e.connection_id AND m.message_id = e.task_id
+      WHERE e.connection_id = ?1 AND e.rowid > ?2 AND m.origin = 'scout' AND json_extract(m.labels_json, '$."${VERCEL_BOARD_LABELS.plan}"') = ?3
+      ORDER BY e.rowid LIMIT ?4`).all(connectionId, after, planId, Math.max(1, Math.min(limit, 500)))
+      .map(row => ({ ...eventRow(row), seq: row.seq, title: (row.text.split("\n")[0] ?? "").slice(0, 200) }));
+  }
+
+  /** How a plan's tasks stand. `failed` counts canceled tasks too. */
+  planCounts(connectionId: string, planId: string): { open: number; completed: number; failed: number; blocked: number } {
+    const rows = this.database.query<{ task_state: string; n: number }>(`SELECT task_state, COUNT(*) AS n FROM vercel_board_messages
+      WHERE connection_id = ?1 AND root_id IS NULL AND task_state IS NOT NULL AND deleted = 0 AND origin = 'scout'
+      AND json_extract(labels_json, '$."${VERCEL_BOARD_LABELS.plan}"') = ?2 GROUP BY task_state`).all(connectionId, planId);
+    const counts = { open: 0, completed: 0, failed: 0, blocked: 0 };
+    for (const row of rows) {
+      if (row.task_state === "completed") counts.completed += row.n;
+      else if (row.task_state === "failed" || row.task_state === "canceled") counts.failed += row.n;
+      else if (row.task_state === "blocked") counts.blocked += row.n;
+      else counts.open += row.n;
+    }
+    return counts;
   }
 
   /** The newest `limit` hand-offs, oldest first, optionally since a time. One query. */

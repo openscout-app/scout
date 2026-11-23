@@ -80,6 +80,8 @@ import type {
   WorkReviewRequest,
   VercelBoardPlanRequest,
   VercelBoardPlanResponse,
+  VercelBoardDispatcherStatus,
+  VercelBoardDispatchRunResponse,
   WorkReviewResponse,
 } from "@openscout/protocol";
 import {
@@ -5943,6 +5945,16 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   } catch (error) {
     throw workClaimConflictFrom(error) ?? error;
   }
+}
+
+/** The Board dispatcher's settings, decisions and held claims. Read-only. */
+export async function readScoutBoardDispatcher(connectionId: string): Promise<VercelBoardDispatcherStatus> {
+  return brokerReadJson<VercelBoardDispatcherStatus>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${new URLSearchParams({ connection: connectionId })}`);
+}
+
+/** Why the dispatcher would or would not claim one Board task now. Claims nothing. */
+export async function explainScoutBoardDispatch(connectionId: string, taskId: string): Promise<VercelBoardDispatchRunResponse> {
+  return brokerReadJson<VercelBoardDispatchRunResponse>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${new URLSearchParams({ connection: connectionId, explain: taskId })}`);
 }
 
 /** The Board planning path: creates Board tasks only. Work items appear when the connected runtime projects them. */

@@ -77,6 +77,18 @@ const ACTIVE_CUSTODY: VercelBoardCustodyState[] = ["claiming", "claim_unknown", 
 
 export type VercelBoardDeclaredRole = { agentId: string; role: string; declaredBy: string; declaredAt: number };
 
+/** A plan the lead loop follows. */
+export interface VercelBoardLeadRow {
+  planId: string;
+  channel: string;
+  lead: string | null;
+  cursor: number;
+  done: boolean;
+  lastNoticeAt: number | null;
+  lastError: string | null;
+  createdAt: number;
+}
+
 export class VercelBoardStore {
   /*
    * Connections known to have no active custody or no queued writes. The
@@ -163,6 +175,32 @@ export class VercelBoardStore {
   }
 
   /** Record that an agent takes a role on a connection. Declaring twice keeps the first time. */
+  /** Follow a plan. A plan followed already keeps its cursor; a named lead replaces the old one. */
+  followPlan(row: { connectionId: string; planId: string; channel: string; lead: string | null; cursor: number }): void {
+    const at = this.now();
+    this.database.query(`INSERT INTO vercel_board_leads (connection_id, plan_id, channel, lead, cursor, done, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+      ON CONFLICT (connection_id, plan_id) DO UPDATE SET lead = COALESCE(excluded.lead, vercel_board_leads.lead), done = 0, updated_at = excluded.updated_at`)
+      .run(row.connectionId, row.planId, row.channel, row.lead, row.cursor, at);
+  }
+
+  /** The plans a connection follows, newest first. */
+  plans(connectionId: string): VercelBoardLeadRow[] {
+    return this.database.query<{ plan_id: string; channel: string; lead: string | null; cursor: number; done: number; last_notice_at: number | null; last_error: string | null; created_at: number }>(
+      "SELECT * FROM vercel_board_leads WHERE connection_id = ?1 ORDER BY created_at DESC, rowid DESC").all(connectionId)
+      .map(row => ({ planId: row.plan_id, channel: row.channel, lead: row.lead, cursor: row.cursor, done: row.done === 1, lastNoticeAt: row.last_notice_at, lastError: row.last_error, createdAt: row.created_at }));
+  }
+
+  updatePlan(connectionId: string, planId: string, patch: { cursor?: number; done?: boolean; lastNoticeAt?: number; lastError?: string | null }): void {
+    const sets: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (patch.cursor !== undefined) { sets.push(`cursor = ?${values.length + 3}`); values.push(patch.cursor); }
+    if (patch.done !== undefined) { sets.push(`done = ?${values.length + 3}`); values.push(patch.done ? 1 : 0); }
+    if (patch.lastNoticeAt !== undefined) { sets.push(`last_notice_at = ?${values.length + 3}`); values.push(patch.lastNoticeAt); }
+    if (patch.lastError !== undefined) { sets.push(`last_error = ?${values.length + 3}`); values.push(patch.lastError); }
+    sets.push(`updated_at = ?${values.length + 3}`); values.push(this.now());
+    this.database.query(`UPDATE vercel_board_leads SET ${sets.join(", ")} WHERE connection_id = ?1 AND plan_id = ?2`).run(connectionId, planId, ...values);
+  }
+
   declareRole(connectionId: string, agentId: string, role: string, declaredBy: string): void {
     this.database.query(`INSERT INTO vercel_board_roles (connection_id, agent_id, role, declared_by, declared_at) VALUES (?1, ?2, ?3, ?4, ?5)
       ON CONFLICT (connection_id, agent_id, role) DO NOTHING`).run(connectionId, agentId, role, declaredBy, this.now());
