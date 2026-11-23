@@ -137,6 +137,16 @@ export class FakeVercelBoard {
     task.state = "canceled"; task.claim = null; task.reason = reason ?? null;
     this.bump(message, "task.canceled", { id, epoch: task.epoch, ...(reason ? { reason } : {}) });
   }
+  /** The operator lifts a hold on the board, as the principal: the task is ready again, or waiting on its needs. */
+  liftHold(id: string): void {
+    const message = this.messages.get(id)!;
+    const task = message.task!;
+    if (task.state !== "blocked") throw new Error("fake: not blocked");
+    const open = task.needs.filter(need => this.messages.get(need)?.task?.state !== "completed");
+    task.state = open.length ? "waiting" : "ready"; task.blocked = null;
+    this.profile = null;
+    this.bump(message, "task.unblocked", { id, epoch: task.epoch, by: this.actor() });
+  }
   /** Reserve a task for one of its owner's actors, as `assign` does. */
   assign(id: string, actor: string | null): void { this.messages.get(id)!.task!.for = actor; }
   private author(actor: string): { actor: string; principal: string; profile: string | null } {

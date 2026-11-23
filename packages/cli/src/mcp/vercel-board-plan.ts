@@ -21,7 +21,8 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
         "Submit planned tasks as the operator to a connected Vercel Board, with needs between them. This is the only way Scout puts work on a Board; use it for planned work only, never for ordinary tasks between agents (use ask for those). "
         + "OUTWARD-FACING: each task is posted on the team's board as the operator, and Board's own sync can carry it to Slack or GitHub. "
         + "A planned task is open to any worker under the operator's principal from the moment it is written, unless `for` keeps it for one role (scout, builder or reviewer by default). "
-        + "In a channel the operator made self-serve, Scout's runtime starts a role-kept task for an idle agent that declared the role; elsewhere it waits for the operator's claim. "
+        + "The agent swarm is on unless the operator turned it off: in a channel with no dispatch policy of its own, Scout's runtime starts each planned task for a free agent once its needs complete (a role-kept task for an agent that declared the role, an open task for any free agent). Off, a planned task waits for the channel's policy or the operator's claim. The response says which (swarm). "
+        + "Name a lead (a Scout agent) to be told when the plan's tasks complete, fail, or wait on the operator. The lead coordinates; the operator answers the decisions. "
         + "The tool creates Board tasks only. They show in the channel's Scout room (conversationId); none becomes a Scout work item unless the operator promotes it. "
         + "Pass the Scout task you are planning for as planningTaskId (it is written on each task as a label) and a stable requestId: the same requestId returns the same tasks.",
       inputSchema: z.object({
@@ -31,6 +32,7 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
         channel: z.string().describe("A followed Board channel, for example scout/work."),
         planningTaskId: z.string().describe("The Scout task or work item this plan serves."),
         requestId: z.string().describe("Idempotency key for the whole plan."),
+        lead: z.string().optional().describe("A Scout agent ID to tell when this plan's tasks complete, fail, or wait on the operator."),
         tasks: z.array(z.object({
           key: z.string().optional().describe("A name for this task inside the plan, so later tasks can need it."),
           text: z.string().describe("The task as the board shows it. First line is the title."),
@@ -45,12 +47,14 @@ export function registerVercelBoardPlanTool(server: McpServer, deps: VercelBoard
         channel: z.string(),
         conversationId: z.string(),
         tasks: z.array(z.object({ taskId: z.string(), key: z.string().optional(), state: z.string() })),
+        swarm: z.boolean(),
+        lead: z.string().optional(),
       }),
       annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: true },
     },
-    async ({ currentDirectory, senderId, connectionId, channel, planningTaskId, requestId, tasks }) => {
+    async ({ currentDirectory, senderId, connectionId, channel, planningTaskId, requestId, lead, tasks }) => {
       const resolvedSenderId = await deps.resolveSender(senderId, currentDirectory);
-      const result = await deps.plan({ connectionId, channel, planningTaskId, requestId, actorId: resolvedSenderId, tasks });
+      const result = await deps.plan({ connectionId, channel, planningTaskId, requestId, actorId: resolvedSenderId, tasks, ...(lead ? { lead } : {}) });
       const structuredContent = { senderId: resolvedSenderId, ...result };
       return { content: createTextContent(structuredContent), structuredContent };
     },

@@ -22,6 +22,23 @@ CREATE TABLE IF NOT EXISTS vercel_board_roles (
 );
 `;
 
+/** The plans the lead loop follows: one row per plan, with the last task event its lead was told about. */
+export const VERCEL_BOARD_LEADS_SQL = `
+CREATE TABLE IF NOT EXISTS vercel_board_leads (
+  connection_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  lead TEXT,
+  cursor INTEGER NOT NULL DEFAULT 0,
+  done INTEGER NOT NULL DEFAULT 0,
+  last_notice_at INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (connection_id, plan_id)
+);
+`;
+
 export const VERCEL_BOARD_SQLITE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS vercel_board_cursors (
   connection_id TEXT NOT NULL,

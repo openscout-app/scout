@@ -302,7 +302,7 @@ export interface VercelBoardConnectionStatus {
    * The dispatcher, in short: whether it runs, and each channel's policy.
    * `scout integration dispatcher vercel-board` shows the full view.
    */
-  dispatcher?: { enabled: boolean; channels: { channel: string; policy: string; guardsRemoved: string[]; relaxed: boolean }[] };
+  dispatcher?: { enabled: boolean; channels: { channel: string; policy: string; guardsRemoved: string[]; relaxed: boolean; swarm: boolean }[] };
   /** Claims the runtime holds or is settling, with their leases. Never a token. */
   claims?: VercelBoardClaimStatus[];
   outbox: { pending: number; unknown: number; failed: number };
@@ -386,6 +386,12 @@ export interface VercelBoardPlanRequest {
   requestId: string;
   /** The acting Scout agent, written as a label. */
   actorId: string;
+  /**
+   * The Scout agent that leads the plan: told when its tasks complete, fail,
+   * or wait on the operator, and when the operator answers. It coordinates; the
+   * operator answers the decisions. Omit it and nobody is told.
+   */
+  lead?: string;
 }
 
 export interface VercelBoardPlanResponse {
@@ -394,6 +400,9 @@ export interface VercelBoardPlanResponse {
   /** The channel's Scout room. */
   conversationId: string;
   tasks: { taskId: string; key?: string; state: VercelBoardTaskState }[];
+  /** Whether the swarm claims these tasks: on unless the operator turned it off, and the channel sets no policy of its own. */
+  swarm: boolean;
+  lead?: string;
 }
 
 /** The operator starts each claim in v1. */

@@ -1,5 +1,5 @@
 import {
-  VERCEL_BOARD_BUILTIN_POLICY_STEPS, VERCEL_BOARD_DEFAULT_GUARDS, VERCEL_BOARD_DISPATCH_POLICIES, vercelBoardLabelMatches, vercelBoardRoleActor, vercelBoardRoles,
+  VERCEL_BOARD_BUILTIN_POLICY_STEPS, VERCEL_BOARD_LABELS, VERCEL_BOARD_DEFAULT_GUARDS, VERCEL_BOARD_DISPATCH_POLICIES, vercelBoardLabelMatches, vercelBoardRoleActor, vercelBoardRoles,
   validateVercelBoardDispatchConfig,
   type VercelBoardChannelDispatchStatus, type VercelBoardConnectionConfig, type VercelBoardDispatchConfig, type VercelBoardDispatchDecision, type VercelBoardDispatchTrust,
 } from "@openscout/protocol";
@@ -45,7 +45,7 @@ export interface VercelBoardDispatchCandidate {
   /** Free agents, oldest declaration first. An agent that holds a Board task on this connection is not free. */
   agents: VercelBoardDispatchAgent[];
   /** Scout's own attempts on this task, from custody. */
-  history: { attempts: number; lastEpoch: number | null; lastGotClaim: boolean; active: boolean };
+  history: { attempts: number; lastEpoch: number | null; lastGotClaim: boolean; active: boolean; returned?: boolean };
 }
 
 /** A channel's settings, resolved for one candidate. */
@@ -137,6 +137,8 @@ export const VERCEL_BOARD_BUILTIN_STEPS: Record<string, VercelBoardDispatchStep>
     kind: "guard", summary: "Skip a task the board has seen claimed (epoch above 0) or Scout has tried. trust.anyEpoch admits a task another worker let go.",
     run: ({ task, history }, _state, { trust }) => {
       if (history.active) return skip("Scout already holds or is settling it");
+      // The swarm returned it to the pool when the operator answered on the board, and nobody claimed it since.
+      if (history.returned && history.lastEpoch === task.epoch) return pass({ note: "back in the pool after the operator answered" });
       if (!trust.anyEpoch) {
         if (task.epoch !== 0) return skip(`the board has seen it claimed (epoch ${task.epoch}); after any claim the operator decides`);
         if (history.attempts) return skip("Scout tried it before; the operator decides now");
@@ -145,6 +147,13 @@ export const VERCEL_BOARD_BUILTIN_STEPS: Record<string, VercelBoardDispatchStep>
       if (history.attempts && !history.lastGotClaim) return skip("Scout's last attempt got no claim; the operator decides now");
       if (history.lastEpoch !== null && task.epoch <= history.lastEpoch) return skip(`Scout last held it at epoch ${history.lastEpoch}; only another worker's claim since lets Scout take it again`);
       return pass({ note: task.epoch ? `claimed before (epoch ${task.epoch}); trusted here` : undefined });
+    },
+  },
+  "match:plan": {
+    kind: "match", summary: "Keep only a task the operator planned through Scout: Scout wrote it, with the plan label.",
+    run: ({ task }) => {
+      const plan = task.labels[VERCEL_BOARD_LABELS.plan];
+      return task.origin === "scout" && plan ? pass({ note: `plan ${plan}` }) : skip("not a task the operator planned through Scout");
     },
   },
   "resolve:for": {
@@ -263,11 +272,30 @@ export function vercelBoardMergeTrust(...sources: (VercelBoardDispatchTrust | un
 
 const relaxes = (trust: VercelBoardDispatchTrust | undefined) => !!trust && ((trust.authors !== undefined && trust.authors !== "operator") || trust.anyEpoch === true || !!trust.synced?.length);
 
+/** Whether the swarm is on for a connection: the default, unless the operator turned it off. */
+export function vercelBoardSwarmEnabled(config: Pick<VercelBoardConnectionConfig, "dispatch">): boolean {
+  return config.dispatch?.swarm?.enabled !== false;
+}
+
+/** Whether the swarm is on for a channel. A channel that sets its own policy or steps keeps them. */
+export function vercelBoardChannelSwarm(config: Pick<VercelBoardConnectionConfig, "dispatch">, channel: string): boolean {
+  const own = config.dispatch?.channels?.[channel];
+  if (own?.policy || own?.steps) return false;
+  return config.dispatch?.swarm?.channels?.[channel] ?? vercelBoardSwarmEnabled(config);
+}
+
+/** Whether a task is one the operator planned through Scout: it carries the plan label. Authorship is the chain's to check. */
+export function vercelBoardPlanned(labels: Record<string, string>): boolean {
+  return !!labels[VERCEL_BOARD_LABELS.plan];
+}
+
 /** The settings for one candidate in a channel: the chain, and the trust its labels add. */
 export function vercelBoardDispatchSettings(config: Pick<VercelBoardConnectionConfig, "dispatch" | "selfServe">, channel: string, labels: Record<string, string>, registry = vercelBoardDispatchRegistry): VercelBoardDispatchSettings | { error: string; policy: string } {
   const own = config.dispatch?.channels?.[channel];
-  const policy = own?.steps ? "custom" : vercelBoardChannelPolicy(config, channel);
-  const steps = vercelBoardChannelSteps(config, channel, registry);
+  const swarm = vercelBoardChannelSwarm(config, channel) && vercelBoardPlanned(labels);
+  const policy = own?.steps ? "custom" : swarm ? "swarm" : vercelBoardChannelPolicy(config, channel);
+  const found = swarm ? registry.policy("swarm") : vercelBoardChannelSteps(config, channel, registry);
+  const steps = found ? [...found] : undefined;
   if (!steps) return { policy, error: `policy ${policy} is not registered or defined` };
   const labelTrust = (own?.labelTrust ?? []).filter(entry => vercelBoardLabelMatches(labels, entry.label)).map(entry => entry.trust);
   return { policy, steps, trust: vercelBoardMergeTrust(own?.trust, ...labelTrust), labels: own?.labels ?? [], capabilities: config.dispatch?.capabilities ?? {} };
@@ -284,7 +312,7 @@ export function vercelBoardChannelDispatchStatus(config: Pick<VercelBoardConnect
     ...(relaxes(own?.trust) ? { trust: own!.trust } : {}),
     ...(own?.labelTrust?.length ? { labelTrust: own.labelTrust } : {}),
     ...(own?.labels?.length ? { labels: own.labels } : {}),
-    mirrored,
+    mirrored, swarm: vercelBoardChannelSwarm(config, channel),
   };
 }
 

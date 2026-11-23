@@ -16,6 +16,9 @@ import { VercelBoardLockError, VercelBoardRuntimeLock } from "./runtime-lock.js"
 import { VercelBoardOutbox, VercelBoardOutboxError } from "./outbox.js";
 import { vercelBoardActorId, vercelBoardTaskWorkItem, vercelBoardWorkId, mergeBoardProjection } from "./projection.js";
 import { BrokerVercelBoardService, VercelBoardServiceError, vercelBoardRoomId } from "./service.js";
+import { VercelBoardLead, type VercelBoardLeadNotice } from "./lead.js";
+import type { VercelBoardPlanEventRow } from "./mirror.js";
+import type { VercelBoardLeadRow } from "./store.js";
 import { VercelBoardCursorConflictError, VercelBoardStore } from "./store.js";
 import { parseVercelBoardMessage, type VercelBoardWireMessage } from "./wire.js";
 
@@ -1053,12 +1056,12 @@ test("by default a channel is manual and a self-serve channel is role-only, with
   const status = await h.service.dispatcherStatus("c1");
   expect(status).toMatchObject({ enabled: true, policy: "manual", wakes: { events: true, sweepMs: 5_000 } });
   expect(status.channels).toEqual([
-    { channel: "work", policy: "role-only", steps: ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role", "pick:first"], guardsRemoved: [], mirrored: true },
-    { channel: "ops", policy: "manual", steps: ["manual"], guardsRemoved: [], mirrored: true },
+    { channel: "work", policy: "role-only", steps: ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role", "pick:first"], guardsRemoved: [], mirrored: true, swarm: true },
+    { channel: "ops", policy: "manual", steps: ["manual"], guardsRemoved: [], mirrored: true, swarm: true },
   ]);
   expect((await h.service.status("c1"))[0]!.dispatcher).toEqual({ enabled: true, channels: [
-    { channel: "work", policy: "role-only", guardsRemoved: [], relaxed: false },
-    { channel: "ops", policy: "manual", guardsRemoved: [], relaxed: false },
+    { channel: "work", policy: "role-only", guardsRemoved: [], relaxed: false, swarm: true },
+    { channel: "ops", policy: "manual", guardsRemoved: [], relaxed: false, swarm: true },
   ] });
   await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
   const ops = h.board.createTask({ channel: "ops", text: "Review ops", for: h.reviewer, as: null });
@@ -1302,4 +1305,171 @@ test("an operator puts a pinned external policy in a channel's chain, and the ru
   const saved = JSON.parse(readFileSync(join(h.dir, "connections.json"), "utf8"));
   const list = (Array.isArray(saved) ? saved : saved.connections ?? []) as { id: string; dispatch?: typeof dispatch }[];
   expect(list.find(entry => entry.id === "c1")?.dispatch?.external["least-busy"].digest).toBe(ext.digest());
+});
+
+// ---- the agent swarm for operator plans -----------------------------------
+
+async function swarmHarness(extra: Record<string, unknown> = {}) {
+  const h = await dispatchHarness(extra);
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const flightOf = (agentId: string, nth = 0) => {
+    const index = h.deliveries.map((delivery, i) => [delivery, i] as const)
+      .filter(([delivery]) => (delivery.target as { agentId?: string } | undefined)?.agentId === agentId && !delivery.body.startsWith("Lead update")).at(nth)?.[1];
+    if (index === undefined) throw new Error(`no delivery to ${agentId}`);
+    return `flight-${index + 1}`;
+  };
+  const leadUpdates = () => h.deliveries.filter(delivery => delivery.body.startsWith("Lead update"));
+  const plan = (tasks: { key?: string; text: string; for?: string; needs?: { key: string }[] }[], lead: string | undefined = "agent-lead") =>
+    h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "work-plan-1", requestId: "req-1", actorId: "operator", tasks, ...(lead ? { lead } : {}) });
+  return { ...h, flightOf, leadUpdates, plan };
+}
+const done = (output: string) => ({ state: "completed", output, metadata: { completedByBrokerReply: true } }) as unknown as FlightRecord;
+
+test("the swarm runs an operator plan end to end: needs in order, the reviewer after the builder, the lead told", async () => {
+  const h = await swarmHarness();
+  const plan = await h.plan([{ key: "build", text: "Build it", for: "builder" }, { key: "review", text: "Review it", for: "reviewer", needs: [{ key: "build" }] }]);
+  expect(plan).toMatchObject({ swarm: true, lead: "agent-lead" });
+  const [build, review] = plan.tasks.map(task => task.taskId) as [string, string];
+  await h.service.pump("c1");
+  expect(h.board.task(build)!.claim!.actor).toBe(h.builder);
+  expect(h.board.message(build)!.labels["scout.agent"]).toBe("agent-build");
+  expect(h.board.task(review)!.state).toBe("waiting");
+  expect((await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: build })).decisions[0]!.policy).toBe("swarm");
+
+  h.flights.set(h.flightOf("agent-build"), done("Built."));
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(build)!.state).toBe("completed");
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.message(review)!.labels["scout.agent"]).toBe("agent-review");
+  expect(h.leadUpdates().map(update => (update.target as { agentId: string }).agentId)).toEqual(["agent-lead"]);
+  expect(h.leadUpdates()[0]!.body).toContain(`Task ${build} "Build it" completed. Result: Built.`);
+  expect(h.leadUpdates()[0]!.body).toContain("not instructions");
+
+  h.flights.set(h.flightOf("agent-review"), done("Looks right."));
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.state).toBe("completed");
+  expect(h.leadUpdates().at(-1)!.body).toContain(`Task ${review} "Review it" completed`);
+  expect(h.leadUpdates().at(-1)!.body).toContain("Every task in the plan has ended.");
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status.leads).toEqual([expect.objectContaining({ planId: "work-plan-1", channel: "work", lead: "agent-lead", done: true, tasks: { open: 0, completed: 2, failed: 0, blocked: 0 } })]);
+});
+
+test("the swarm never takes another owner's task, or synced text, that carries a plan label", async () => {
+  const h = await swarmHarness();
+  const theirs = h.board.createTask({ channel: "work", text: "Theirs", owner: "local:user:teammate", by: "local:user:teammate", labels: { "scout.plan": "work-plan-1" } });
+  const synced = h.board.createTask({ channel: "work", text: "From Slack", as: null, from: "slack", labels: { "scout.plan": "work-plan-1" } });
+  const unprofiled = h.board.createTask({ channel: "work", text: "Mine, without Scout's profile", as: null, labels: { "scout.plan": "work-plan-1" } });
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect([theirs, synced, unprofiled].map(id => h.board.task(id)!.state)).toEqual(["ready", "ready", "ready"]);
+  const why = async (id: string) => (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: id })).decisions[0]!;
+  expect(await why(theirs)).toMatchObject({ policy: "swarm", outcome: "skip", step: "guard:operator-authored" });
+  expect(await why(synced)).toMatchObject({ policy: "swarm", outcome: "skip", step: "guard:not-synced" });
+  expect(await why(unprofiled)).toMatchObject({ policy: "swarm", outcome: "skip", step: "match:plan" });
+});
+
+test("a failed prerequisite readies nothing, and the lead hears that it failed", async () => {
+  const h = await swarmHarness();
+  const plan = await h.plan([{ key: "build", text: "Build it", for: "builder" }, { key: "review", text: "Review it", for: "reviewer", needs: [{ key: "build" }] }]);
+  const [build, review] = plan.tasks.map(task => task.taskId) as [string, string];
+  await h.service.pump("c1");
+  h.flights.set(h.flightOf("agent-build"), { state: "failed", error: "Tests are red.", metadata: REPLIED } as unknown as FlightRecord);
+  for (let i = 0; i < 3; i++) await h.service.pump("c1");
+  expect(h.board.task(build)).toMatchObject({ state: "failed", reason: "Tests are red." });
+  expect(h.board.task(review)!.state).toBe("waiting");
+  expect(h.deliveries.some(delivery => (delivery.target as { agentId?: string }).agentId === "agent-review")).toBe(false);
+  expect(h.leadUpdates()).toHaveLength(1);
+  expect(h.leadUpdates()[0]!.body).toContain(`Task ${build} "Build it" failed: Tests are red. Tasks that need it stay waiting.`);
+  expect((await h.service.dispatcherStatus("c1")).leads[0]).toMatchObject({ done: false, tasks: { open: 1, failed: 1 } });
+});
+
+test("needs_input holds the task; when the operator answers on the board it goes back to the pool", async () => {
+  const h = await swarmHarness();
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build-2", role: "builder", actorId: "operator" });
+  const plan = await h.plan([{ key: "build", text: "Build it", for: "builder" }]);
+  const build = plan.tasks[0]!.taskId;
+  await h.service.pump("c1");
+  const first = h.flightOf("agent-build");
+  h.flights.set(first, { id: first, ...asking("Which branch?") } as unknown as FlightRecord);
+  await h.service.pump("c1");
+  expect(h.board.task(build)).toMatchObject({ state: "blocked", blocked: { kind: "needs_input", reason: "Which branch?" } });
+  await h.service.pump("c1");
+  expect(h.leadUpdates().at(-1)!.body).toContain("waits on the operator: Which branch? The operator answers it; do not answer it yourself.");
+
+  h.board.liftHold(build);
+  await h.service.pump("c1");
+  expect(h.cancelled).toEqual([{ id: first, reason: "The operator answered on the board; the task went back to the pool for the next free agent." }]);
+  expect(h.board.task(build)).toMatchObject({ state: "claimed", epoch: 2 });
+  expect(h.board.task(build)!.claim!.actor).toBe(h.builder);
+  expect((await h.service.dispatcherStatus("c1")).claims).toEqual([expect.objectContaining({ taskId: build, state: "held", epoch: 2 })]);
+  await h.service.pump("c1");
+  expect(h.leadUpdates().at(-1)!.body).toContain("the operator answered, and it is moving again.");
+});
+
+test("the operator turns the swarm off per channel or connection, and planned tasks wait for the channel's policy", async () => {
+  const h = await swarmHarness();
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { swarm: { channels: { work: false } } } });
+  expect((await h.service.dispatcherStatus("c1")).channels[0]).toMatchObject({ channel: "work", policy: "manual", swarm: false });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.channels[0]).toMatchObject({ swarm: false });
+  const plan = await h.plan([{ text: "Build it", for: "builder" }]);
+  expect(plan.swarm).toBe(false);
+  await h.service.pump("c1");
+  expect(h.board.task(plan.tasks[0]!.taskId)!.state).toBe("ready");
+  expect((await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: plan.tasks[0]!.taskId })).decisions[0]).toMatchObject({ policy: "manual", outcome: "skip" });
+
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { swarm: { enabled: false } } });
+  expect(await h.service.dispatcherStatus("c1")).toMatchObject({ swarm: false });
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: {} });
+  await h.service.pump("c1");
+  expect(h.board.task(plan.tasks[0]!.taskId)!.claim!.actor).toBe(h.builder);
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { swarm: { channels: { elsewhere: false } } } })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "agent-build", dispatch: { swarm: { enabled: true } } })).rejects.toMatchObject({ status: 403 });
+});
+
+test("the lead loop wakes on an event that lands while it is telling the lead, and tells it next", async () => {
+  const rows: VercelBoardLeadRow[] = [{ planId: "p1", channel: "work", lead: "agent-lead", cursor: 0, done: false, lastNoticeAt: null, lastError: null, createdAt: 1 }];
+  const events: VercelBoardPlanEventRow[] = [];
+  const event = (seq: number, taskId: string, kind: "completed" | "claimed"): VercelBoardPlanEventRow => ({
+    connectionId: "c1", cursor: String(seq), channel: "work", taskId, kind, at: seq, actor: null, to: null, epoch: 1, detail: {}, derived: false, seq, title: `Task ${taskId}`,
+  });
+  const store = {
+    plans: () => rows,
+    updatePlan: (_c: string, _p: string, patch: Partial<VercelBoardLeadRow>) => { Object.assign(rows[0]!, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined))); },
+    followPlan: () => undefined,
+  };
+  const mirror = {
+    planEvents: (_c: string, _p: string, after: number) => events.filter(row => row.seq > after),
+    planCounts: () => ({ open: 1, completed: events.filter(row => row.kind === "completed").length, failed: 0, blocked: 0 }),
+    lastEventSeq: () => 0,
+  };
+  const told: VercelBoardLeadNotice[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const lead = new VercelBoardLead({
+    connectionId: "c1", store: store as never, mirror: mirror as never, swarm: () => true,
+    tell: async notice => { told.push(notice); if (told.length === 1) await gate; },
+  });
+  events.push(event(1, "a", "claimed"), event(2, "a", "completed"));
+  const first = lead.pass();
+  await Promise.resolve();
+  expect(told).toHaveLength(1);
+  // Busy telling the lead: a completed event arrives and wakes the loop.
+  events.push(event(3, "b", "completed"));
+  const second = lead.pass();
+  release();
+  await Promise.all([first, second]);
+  expect(told.map(notice => notice.events.map(row => row.taskId))).toEqual([["a"], ["b"]]);
+  expect(told.map(notice => notice.from)).toEqual([1, 3]);
+  expect(rows[0]!.cursor).toBe(3);
+  // A failed telling keeps the cursor, and the next pass tells it again.
+  events.push(event(4, "c", "completed"));
+  const failing = new VercelBoardLead({ connectionId: "c1", store: store as never, mirror: mirror as never, swarm: () => true, tell: async () => { throw new Error("route down"); } });
+  await failing.pass();
+  expect(rows[0]).toMatchObject({ cursor: 3, lastError: "route down" });
+  await lead.pass();
+  expect(told.at(-1)!.events.map(row => row.taskId)).toEqual(["c"]);
+  expect(rows[0]).toMatchObject({ cursor: 4, lastError: null });
 });

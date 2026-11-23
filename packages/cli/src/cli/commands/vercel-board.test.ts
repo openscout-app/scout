@@ -83,6 +83,16 @@ test("dispatcher changes one channel's settings on top of the saved block, and r
   expect(() => parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--file", "rules.json", "--pause"])).toThrow(/alone/);
 });
 
+test("--swarm turns the swarm for operator plans off or on, for the connection or one channel", () => {
+  const swarm = (...args: string[]) => parseVercelBoardCommand(["dispatcher", "--connection", "c1", "--swarm", ...args]);
+  expect(swarm("off").change!({ policy: "role-only" })).toEqual({ policy: "role-only", swarm: { enabled: false } });
+  expect(swarm("on").change!({ swarm: { enabled: false, channels: { work: false } } })).toEqual({});
+  expect(swarm("off", "--channel", "work").change!({})).toEqual({ swarm: { channels: { work: false } } });
+  expect(swarm("on", "--channel", "work").change!({ swarm: { enabled: false } })).toEqual({ swarm: { enabled: false, channels: { work: true } } });
+  expect(() => swarm("maybe")).toThrow(/on or off/);
+  expect(() => swarm("off", "--file", "rules.json")).toThrow(/alone/);
+});
+
 test("a dispatch settings file holds the block or wraps it in dispatch", () => {
   const dir = mkdtempSync(join(tmpdir(), "scout-dispatch-"));
   try {

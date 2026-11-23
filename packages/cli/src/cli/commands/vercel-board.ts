@@ -19,7 +19,7 @@ export const VERCEL_BOARD_HELP = [
   "scout integration handoffs vercel-board --connection <id> [--task <board task id>] [--limit 200]",
   "scout integration dispatcher vercel-board --connection <id> [--explain <board task id>] [--run]",
   "    [--policy manual|role-only|label-matched|trusted-channel|<defined>] [--channel <channel> [--labels <label>,...] [--trust-authors operator|allowlist|any]",
-  "    [--trust-any-epoch] [--trust-synced <sync key>,...] [--default]] [--pause|--resume] [--file <rules.json>]",
+  "    [--trust-any-epoch] [--trust-synced <sync key>,...] [--default]] [--swarm on|off] [--pause|--resume] [--file <rules.json>]",
   "",
   "Connects this host to one Vercel Board, as the operator's principal with the `scout` profile. Each host connects on its own; the board's claims decide which host does a task.",
   "Vercel Board is a team's messaging-speed coordination surface, not Scout's work board. Each followed channel",
@@ -52,6 +52,11 @@ export const VERCEL_BOARD_HELP = [
   "open task to any free agent. Every policy keeps three guards unless you relax them: the operator or Scout wrote",
   "the task, it was not imported from Slack, GitHub or Linear, and the board has never seen it claimed.",
   "--trust-authors, --trust-any-epoch and --trust-synced relax them for one --channel; status marks the channel relaxed.",
+  "The agent swarm is on by default: a task the operator planned through Scout (vercel_board_plan, the plan route)",
+  "runs under the swarm policy in a channel with no policy of its own. A role-kept task goes to that role, an open one",
+  "to any free agent, each after its needs complete; the guards stay on. A task held for the operator goes back to",
+  "the pool when the operator answers on the board. The plan's lead hears when its tasks end or wait on the operator.",
+  "--swarm off turns it off for the connection, or for one --channel; --swarm on turns it back on.",
   "--explain runs one task through the policy without claiming. --run starts a pass now. --pause stops new claims;",
   "held claims keep renewing. --default drops --channel's own settings. --file replaces the whole settings block",
   "(capabilities, defined policies, per-label trust) with a JSON file; see docs/vercel-board.md.",
@@ -76,7 +81,7 @@ const VALUE_FLAGS: Record<string, string[]> = {
   role: ["--connection", "--role", "--agent"],
   messages: ["--connection", "--channel", "--limit"],
   handoffs: ["--connection", "--task", "--limit"],
-  dispatcher: ["--connection", "--explain", "--policy", "--channel", "--labels", "--trust-authors", "--trust-synced", "--file"],
+  dispatcher: ["--connection", "--explain", "--policy", "--channel", "--labels", "--trust-authors", "--trust-synced", "--file", "--swarm"],
 };
 const BOOLEAN_FLAGS: Record<string, string[]> = {
   connect: ["--no-probe"],
@@ -188,11 +193,12 @@ function parseDispatcher(flags: Record<string, string>, switches: Set<string>): 
   if (channelOnly.length && !channel) throw new ScoutCliError(`${channelOnly[0]} sets one channel's dispatch: add --channel.`);
   if (switches.has("--pause") && switches.has("--resume")) throw new ScoutCliError("Use --pause or --resume, not both.");
   if (flags["--trust-authors"] && !TRUST_AUTHORS.includes(flags["--trust-authors"])) throw new ScoutCliError("--trust-authors takes operator, allowlist or any.");
+  if (flags["--swarm"] !== undefined && !["on", "off"].includes(flags["--swarm"])) throw new ScoutCliError("--swarm takes on or off.");
   if (switches.has("--default") && (flags["--policy"] || channelOnly.length > 1)) throw new ScoutCliError("--default drops the channel's own settings; give it alone with --channel.");
-  const setting = Boolean(flags["--policy"] || channel || switches.has("--pause") || switches.has("--resume") || flags["--file"]);
+  const setting = Boolean(flags["--policy"] || channel || flags["--swarm"] || switches.has("--pause") || switches.has("--resume") || flags["--file"]);
   const modes = [flags["--explain"] !== undefined, switches.has("--run"), setting].filter(Boolean).length;
   if (modes > 1) throw new ScoutCliError("Use one of --explain, --run, or a settings change at a time.");
-  if (flags["--file"] && (flags["--policy"] || channel || switches.has("--pause") || switches.has("--resume"))) throw new ScoutCliError("--file replaces the whole settings block; give it alone.");
+  if (flags["--file"] && (flags["--policy"] || channel || flags["--swarm"] || switches.has("--pause") || switches.has("--resume"))) throw new ScoutCliError("--file replaces the whole settings block; give it alone.");
   if (flags["--explain"] !== undefined) {
     const query = new URLSearchParams({ connection: connectionId, explain: flags["--explain"] });
     return { kind: "dispatcher-explain", method: "GET", path: `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${query}` };
@@ -205,6 +211,19 @@ function parseDispatcher(flags: Record<string, string>, switches: Set<string>): 
     const next: VercelBoardDispatchConfig = structuredClone(current);
     if (switches.has("--pause")) next.enabled = false;
     if (switches.has("--resume")) delete next.enabled;
+    if (flags["--swarm"]) {
+      const on = flags["--swarm"] === "on";
+      const swarm = { ...next.swarm, ...(next.swarm?.channels ? { channels: { ...next.swarm.channels } } : {}) };
+      if (channel) {
+        swarm.channels = { ...swarm.channels, [channel]: on };
+      } else {
+        if (on) delete swarm.enabled; else swarm.enabled = false;
+        delete swarm.channels;
+      }
+      if (swarm.channels && !Object.keys(swarm.channels).length) delete swarm.channels;
+      if (Object.keys(swarm).length) next.swarm = swarm; else delete next.swarm;
+      if (!flags["--policy"] && !channelOnly.length) return next;
+    }
     if (!channel) {
       if (flags["--policy"]) next.policy = flags["--policy"];
       return next;
@@ -263,7 +282,7 @@ function formatClaim(claim: VercelBoardClaimStatus, now = Date.now()): string {
 
 function formatDispatcher(status: VercelBoardDispatcherStatus): string {
   return [
-    `${status.connectionId}: dispatcher ${status.enabled ? "on" : "paused (held claims keep renewing)"}; default policy ${status.policy}`,
+    `${status.connectionId}: dispatcher ${status.enabled ? "on" : "paused (held claims keep renewing)"}; default policy ${status.policy}; swarm for operator plans ${status.swarm ? "on" : "off"}`,
     `  Wakes on feed events that leave a task ready, and every ${Math.round(status.wakes.sweepMs / 1000)}s${status.lastPassAt ? `; last pass ${new Date(status.lastPassAt).toISOString()}` : ""}`,
     "  Channels:",
     ...status.channels.map(channel => {
@@ -273,11 +292,14 @@ function formatDispatcher(status: VercelBoardDispatcherStatus): string {
         ...(channel.labelTrust?.length ? [`label trust: ${channel.labelTrust.map(entry => `${entry.label} ${JSON.stringify(entry.trust)}`).join("; ")}`] : []),
         ...(channel.labels?.length ? [`labels: ${channel.labels.join(", ")}`] : []),
         ...(channel.mirrored ? [] : ["not mirrored, so never dispatched"]),
+        ...(channel.swarm ? ["operator plans run under swarm"] : []),
       ];
       return `    ${channel.channel}: ${channel.policy} (${channel.steps.join(" > ")})${extra.length ? `\n      ${extra.join("\n      ")}` : ""}`;
     }),
     ...(Object.keys(status.capabilities).length ? [`  Capabilities: ${Object.entries(status.capabilities).map(([selector, agents]) => `${selector} -> ${agents.join(", ")}`).join("; ")}`] : []),
     ...(Object.keys(status.policies).length ? [`  Defined policies: ${Object.entries(status.policies).map(([name, steps]) => `${name} (${steps.join(" > ")})`).join("; ")}`] : []),
+    ...(status.leads.length ? ["  Plans:", ...status.leads.slice(0, 10).map(plan =>
+      `    ${plan.planId} in ${plan.channel}: lead ${plan.lead ?? "none"}; ${plan.tasks.open} open, ${plan.tasks.completed} completed, ${plan.tasks.failed} failed, ${plan.tasks.blocked} waiting on the operator${plan.done ? "; ended" : ""}${plan.lastError ? `; last notice failed: ${plan.lastError}` : ""}`)] : []),
     `  Claims:${status.claims.length ? "" : " none held"}`,
     ...status.claims.map(claim => formatClaim(claim)),
     ...(status.recent.length ? ["  Recent decisions:", ...status.recent.slice(-10).map(decision => `    ${formatDecision(decision)}`)] : []),
@@ -302,7 +324,7 @@ function formatStatus(status: VercelBoardConnectionStatus): string {
     ...(status.roles ? [`  Roles: ${status.roles.join(", ")}; self-serve: ${status.selfServe?.length ? status.selfServe.join(", ") : "none"}`] : []),
     `  Board sync: ${status.syncChannels?.length ? status.syncChannels.join(", ") : "off"}`,
     ...(status.declared?.length ? [`  Declared: ${status.declared.map(entry => `${entry.agentId} (${entry.role})`).join(", ")}`] : []),
-    ...(status.dispatcher ? [`  Dispatch${status.dispatcher.enabled ? "" : " (paused)"}: ${status.dispatcher.channels.map(entry => `${entry.channel} ${entry.policy}${entry.relaxed ? " (relaxed)" : ""}`).join(", ")}`] : []),
+    ...(status.dispatcher ? [`  Dispatch${status.dispatcher.enabled ? "" : " (paused)"}: ${status.dispatcher.channels.map(entry => `${entry.channel} ${entry.policy}${entry.relaxed ? " (relaxed)" : ""}${entry.swarm ? " + swarm" : ""}`).join(", ")}`] : []),
     `  Claims: ${status.custody.held} held, ${status.custody.blocked ?? 0} held for a person, ${status.custody.settling} settling, ${status.custody.lost} lost; outbox: ${status.outbox.pending} pending, ${status.outbox.unknown} unknown, ${status.outbox.failed} failed`,
     ...(status.claims?.length ? ["  Leases:", ...status.claims.map(claim => formatClaim(claim))] : []),
     ...(status.lastGoodReadAt ? [`  Last good read: ${new Date(status.lastGoodReadAt).toISOString()}`] : []),

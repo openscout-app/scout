@@ -11,7 +11,7 @@ test("board_plan sends the plan as the resolved sender and says it is outward-fa
   const sent: VercelBoardPlanRequest[] = [];
   registerVercelBoardPlanTool(server, {
     resolveSender: async senderId => senderId ?? "agent.planner",
-    plan: async request => { sent.push(request); return { connectionId: request.connectionId, channel: request.channel, conversationId: "conv-room", tasks: [{ taskId: "11", key: "a", state: "ready" }] }; },
+    plan: async request => { sent.push(request); return { connectionId: request.connectionId, channel: request.channel, conversationId: "conv-room", tasks: [{ taskId: "11", key: "a", state: "ready" }], swarm: true }; },
   });
   const client = new Client({ name: "test", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -44,7 +44,7 @@ test("the dispatcher tool is read-only: it shows status or explains one task, an
   const server = new McpServer({ name: "test", version: "1" });
   const asked: string[] = [];
   registerVercelBoardDispatcherTool(server, {
-    status: async connectionId => { asked.push(`status:${connectionId}`); return { connectionId, enabled: true, policy: "manual", channels: [], capabilities: {}, policies: {}, steps: [], wakes: { events: true, sweepMs: 5000 }, recent: [], claims: [], config: {} }; },
+    status: async connectionId => { asked.push(`status:${connectionId}`); return { connectionId, enabled: true, policy: "manual", channels: [], capabilities: {}, policies: {}, steps: [], wakes: { events: true, sweepMs: 5000 }, recent: [], claims: [], config: {}, swarm: true, leads: [] }; },
     explain: async (connectionId, taskId) => { asked.push(`explain:${connectionId}:${taskId}`); return { connectionId, decisions: [{ taskId, channel: "work", policy: "manual", outcome: "skip", step: "manual", reason: "manual", trail: [], at: 1 }] }; },
   });
   const client = new Client({ name: "test", version: "1" });

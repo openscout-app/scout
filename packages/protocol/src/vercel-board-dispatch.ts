@@ -11,7 +11,7 @@
  */
 
 /** The policies the runtime ships. A connection can define more in `policies`. */
-export const VERCEL_BOARD_DISPATCH_POLICIES = ["manual", "role-only", "label-matched", "trusted-channel"] as const;
+export const VERCEL_BOARD_DISPATCH_POLICIES = ["manual", "role-only", "label-matched", "trusted-channel", "swarm"] as const;
 export type VercelBoardBuiltinDispatchPolicy = typeof VERCEL_BOARD_DISPATCH_POLICIES[number];
 
 /**
@@ -27,7 +27,23 @@ export const VERCEL_BOARD_BUILTIN_POLICY_STEPS: Record<VercelBoardBuiltinDispatc
   "role-only": [...VERCEL_BOARD_DEFAULT_GUARDS, "resolve:for", "match:role", "pick:first"],
   "label-matched": [...VERCEL_BOARD_DEFAULT_GUARDS, "resolve:for", "match:label", "match:capability", "pick:first"],
   "trusted-channel": [...VERCEL_BOARD_DEFAULT_GUARDS, "resolve:for", "match:role-or-any", "pick:first"],
+  /** A plan the operator made through Scout: a role-kept task to that role, an open one to any free agent. */
+  swarm: [...VERCEL_BOARD_DEFAULT_GUARDS, "match:plan", "resolve:for", "match:role-or-any", "pick:first"],
 };
+
+/**
+ * The agent swarm for operator plans. On by default: a task the operator
+ * planned through Scout (`vercel_board_plan` or the plan route) runs under
+ * the `swarm` policy in a channel that sets no policy of its own, and the
+ * plan's lead hears when its tasks finish. Off for a connection or a channel,
+ * planned tasks wait for the channel's own policy, as before.
+ */
+export interface VercelBoardSwarmConfig {
+  /** Default true. */
+  enabled?: boolean;
+  /** Per followed channel; overrides `enabled`. */
+  channels?: Record<string, boolean>;
+}
 
 /**
  * How far a channel, or a label in it, relaxes the default guards. Every
@@ -101,6 +117,8 @@ export interface VercelBoardDispatchConfig {
   capabilities?: Record<string, string[]>;
   /** Out-of-process steps by name; a chain names one as `external:<name>`. */
   external?: Record<string, VercelBoardExternalStepConfig>;
+  /** The agent swarm for operator plans. On unless set off. */
+  swarm?: VercelBoardSwarmConfig;
 }
 
 /** What a policy decided for one task. */
@@ -140,6 +158,24 @@ export interface VercelBoardChannelDispatchStatus {
   labels?: string[];
   /** Whether the channel is mirrored. The dispatcher reads demand from the mirror only. */
   mirrored: boolean;
+  /** Whether the operator's planned tasks here run under `swarm` (a channel with its own policy keeps it). */
+  swarm: boolean;
+}
+
+/** One plan the lead loop follows. */
+export interface VercelBoardLeadStatus {
+  /** The Scout task that planned it: the `scout.plan` label. */
+  planId: string;
+  channel: string;
+  /** The Scout agent told when the plan's tasks finish, fail or wait on the operator. Null: nobody is told. */
+  lead: string | null;
+  /** The last task event the lead has been told about. */
+  cursor: number;
+  tasks: { open: number; completed: number; failed: number; blocked: number };
+  /** Every task is completed, failed or canceled; the loop has stopped following it. */
+  done: boolean;
+  lastNoticeAt?: number;
+  lastError?: string;
 }
 
 /** A held claim as status shows it. Never the claim token. */
@@ -179,6 +215,10 @@ export interface VercelBoardDispatcherStatus {
   claims: VercelBoardClaimStatus[];
   /** The saved settings block, as set: what a change starts from. */
   config: VercelBoardDispatchConfig;
+  /** Whether the swarm is on for the connection; each channel says for itself. */
+  swarm: boolean;
+  /** The plans the lead loop follows, newest first. */
+  leads: VercelBoardLeadStatus[];
 }
 
 /** Replace a connection's dispatch settings. Only the operator does this. */
@@ -244,7 +284,7 @@ export function validateVercelBoardDispatchConfig(value: unknown, channels: read
   if (!value || typeof value !== "object" || Array.isArray(value)) return ["dispatch must be an object"];
   const d = value as Record<string, unknown>;
   const errors: string[] = [];
-  for (const key of Object.keys(d)) if (!["enabled", "policy", "policies", "channels", "capabilities", "external"].includes(key)) errors.push(`dispatch.${key} is not a dispatch field`);
+  for (const key of Object.keys(d)) if (!["enabled", "policy", "policies", "channels", "capabilities", "external", "swarm"].includes(key)) errors.push(`dispatch.${key} is not a dispatch field`);
   if (d.enabled !== undefined && typeof d.enabled !== "boolean") errors.push("dispatch.enabled must be true or false");
   if (d.policy !== undefined && !isVercelBoardDispatchName(d.policy)) errors.push("dispatch.policy must be a policy name");
   const chain = (steps: unknown, where: string) => {
@@ -286,6 +326,21 @@ export function validateVercelBoardDispatchConfig(value: unknown, channels: read
       if (!isVercelBoardLabelSelector(selector)) errors.push(`dispatch.capabilities: ${selector} is not a label selector`);
       if (!Array.isArray(agents) || agents.length > 64 || !agents.every(agent => typeof agent === "string" && AGENT.test(agent) && agent.trim() === agent)) {
         errors.push(`dispatch.capabilities.${selector} must list Scout agent IDs`);
+      }
+    }
+  }
+  if (d.swarm !== undefined) {
+    const s = d.swarm as Record<string, unknown> | null;
+    if (!s || typeof s !== "object" || Array.isArray(s)) errors.push("dispatch.swarm must be an object");
+    else {
+      for (const key of Object.keys(s)) if (!["enabled", "channels"].includes(key)) errors.push(`dispatch.swarm.${key} is not a swarm field`);
+      if (s.enabled !== undefined && typeof s.enabled !== "boolean") errors.push("dispatch.swarm.enabled must be true or false");
+      if (s.channels !== undefined) {
+        if (!s.channels || typeof s.channels !== "object" || Array.isArray(s.channels)) errors.push("dispatch.swarm.channels must map followed channels to true or false");
+        else for (const [channel, on] of Object.entries(s.channels)) {
+          if (!channels.includes(channel)) errors.push(`dispatch.swarm.channels: ${channel} is not a followed channel`);
+          else if (typeof on !== "boolean") errors.push(`dispatch.swarm.channels.${channel} must be true or false`);
+        }
       }
     }
   }

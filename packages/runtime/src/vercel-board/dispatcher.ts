@@ -2,10 +2,11 @@ import type { VercelBoardConnectionConfig, VercelBoardDispatchDecision, VercelBo
 import type { VercelBoardMirror } from "./mirror.js";
 import { vercelBoardOriginOf } from "./mirror.js";
 import {
-  vercelBoardDecide, vercelBoardDispatchRegistry, vercelBoardDispatchSettings, vercelBoardChannelSteps,
+  vercelBoardDecide, vercelBoardDispatchRegistry, vercelBoardDispatchSettings, vercelBoardChannelSteps, vercelBoardChannelSwarm,
   type VercelBoardDispatchAgent, type VercelBoardDispatchCandidate, type VercelBoardDispatchRegistry,
 } from "./policy.js";
 import type { VercelBoardStore } from "./store.js";
+import { VERCEL_BOARD_RETURNED_DETAIL } from "./custody.js";
 import type { VercelBoardWireMessage } from "./wire.js";
 
 /** How many changed decisions status keeps. */
@@ -99,7 +100,8 @@ export class VercelBoardDispatcher {
       task: { id: view.id, labels: view.labels, by: view.by ? { principal: view.by.principal, profile: view.by.profile } : null, origin: view.origin,
         owner: view.task!.owner, for: view.task!.for, needs: view.task!.needs, epoch: view.task!.epoch },
       agents,
-      history: { attempts: latest ? 1 : 0, lastEpoch: latest?.epoch ?? null, lastGotClaim: latest ? latest.epoch !== null : false, active },
+      history: { attempts: latest ? 1 : 0, lastEpoch: latest?.epoch ?? null, lastGotClaim: latest ? latest.epoch !== null : false, active,
+        returned: !!latest && latest.state === "settled" && latest.outcome === "blocked" && !!latest.detail?.startsWith(VERCEL_BOARD_RETURNED_DETAIL) },
     };
   }
 
@@ -144,7 +146,8 @@ export class VercelBoardDispatcher {
     for (const channel of this.deps.channels()) {
       const steps = vercelBoardChannelSteps(config, channel, this.registry);
       // A chain that skips everything whatever the task (manual) needs no reads.
-      if (steps?.length && this.registry.step(steps[0]!)?.skipsAll) continue;
+      // The swarm still reads a manual channel: the operator's planned tasks run under its own chain.
+      if (steps?.length && this.registry.step(steps[0]!)?.skipsAll && !vercelBoardChannelSwarm(config, channel)) continue;
       for (const id of this.deps.mirror.openTasks(config.id, channel)) {
         if (held.has(id)) continue;
         const copy = this.deps.mirror.message(config.id, id);
