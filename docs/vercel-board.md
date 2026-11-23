@@ -144,7 +144,9 @@ attempt got a claim, whether Scout holds it now). Task text is not in the
 candidate: a step decides from metadata, never from what the text says.
 
 Steps are registered by name in one registry (`policy.ts`). The built-in
-policies are chains of the built-in steps, and nothing else decides a claim.
+policies are chains of the built-in steps. The only other steps are the
+`external:<name>` steps an operator defines (see
+[An external policy](#an-external-policy)); nothing else decides a claim.
 A step may only narrow the agents. A step that throws, answers anything else,
 claims for an agent that is not free, or names a profile outside the
 connection's roles skips the task. Reaching the end of the chain without a
@@ -222,6 +224,80 @@ redefines a built-in policy, before it saves it.
   starts it.
 - `scout integration status vercel-board` shows each channel's policy, whether
   it is relaxed, and each held claim's lease, last renewal and next renewal.
+
+### An external policy
+
+A step that the built-ins cannot express can run out of process. The runtime
+never loads policy code. The operator installs the policy as a trusted local
+artifact with `scout extensions install`, pins its digest, and names it in a
+chain:
+
+```json
+{
+  "external": { "least-busy": { "extension": "board-policy", "digest": "<sha256 of the artifact>", "timeoutMs": 2000 } },
+  "policies": { "balanced": ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role-or-any", "external:least-busy"] },
+  "channels": { "scout/work": { "policy": "balanced" } }
+}
+```
+
+The digest is the one `scoutExtensionDigest` computes over the manifest and
+the command. When the digest is missing or wrong, the runtime refuses to save
+the settings and names the installed digest, so the operator pins what they
+installed and read. The runtime checks the digest again before every call: an
+artifact that changed after it was pinned skips every task until the operator
+pins it again.
+
+For each candidate, the runtime runs the extension's command once, with the
+argument `vercel-board-dispatch` and one JSON request on stdin:
+
+```json
+{
+  "protocol": 1,
+  "step": "external:least-busy",
+  "candidate": {
+    "connection": { "id": "c1", "principal": "vercel:user:u_1", "profile": "scout", "roles": ["scout", "builder", "reviewer"] },
+    "channel": "scout/work",
+    "task": { "id": "42", "labels": { "area": "docs" }, "by": { "principal": "vercel:user:u_1", "profile": "scout" }, "origin": "scout", "owner": "vercel:user:u_1+scout", "for": null, "needs": [], "epoch": 0 },
+    "agents": [{ "agentId": "agent-a", "roles": ["builder"], "capabilities": [] }],
+    "history": { "attempts": 0, "lastEpoch": null, "lastGotClaim": false, "active": false }
+  },
+  "state": { "agents": [{ "agentId": "agent-a", "roles": ["builder"], "capabilities": [] }], "profile": "scout", "role": null },
+  "settings": { "policy": "balanced", "trust": {}, "labels": [] }
+}
+```
+
+The request carries no task text, no credentials and no runtime URL. The
+child's environment holds `PATH`, `HOME`, `SCOUT_EXTENSION_API`,
+`SCOUT_EXTENSION_NAME` and `SCOUT_EXTENSION_HOOK=vercel-board-dispatch`, and
+nothing else.
+
+The command writes one JSON object to stdout and exits 0:
+
+| Answer | Meaning |
+| --- | --- |
+| `{ "result": "pass", "agents": ["agent-a"], "profile": "builder", "note": "..." }` | Go on to the next step. `agents` (optional) keeps only those of the current agents; `profile` (optional) sets the profile to claim as. |
+| `{ "result": "skip", "reason": "..." }` | Skip the task, with the reason status shows. |
+| `{ "result": "claim", "agentId": "agent-a", "profile": "builder", "note": "..." }` | Claim for one of the current agents, as a profile in the connection's roles (optional; default the chain's). |
+
+The step skips the task, with the cause as the reason, when the extension is
+missing or refused, its digest changed, the command does not finish within
+`timeoutMs` (default 2000, at most 10000; the child is killed), it exits
+non-zero, it writes more than 64 KiB, or the answer is not one of the above.
+A claim for an agent that is not free, or as a profile outside the
+connection's roles, also skips. A skip is never retried within the pass.
+
+A small example that prefers the agent with the fewest recent claims, in a
+file the extension's manifest names as its command:
+
+```js
+#!/usr/bin/env bun
+const request = JSON.parse(await Bun.stdin.text());
+const counts = JSON.parse(await Bun.file(`${import.meta.dir}/counts.json`).text().catch(() => "{}"));
+const [agent] = [...request.state.agents].sort((a, b) => (counts[a.agentId] ?? 0) - (counts[b.agentId] ?? 0));
+console.log(JSON.stringify(agent
+  ? { result: "claim", agentId: agent.agentId, note: `fewest recent claims: ${counts[agent.agentId] ?? 0}` }
+  : { result: "skip", reason: "no free agent" }));
+```
 
 ### Wake-ups and work requests
 

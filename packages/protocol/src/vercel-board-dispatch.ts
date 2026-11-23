@@ -65,6 +65,19 @@ export interface VercelBoardChannelDispatchConfig {
   labelTrust?: { label: string; trust: VercelBoardDispatchTrust }[];
 }
 
+/**
+ * An out-of-process step, `external:<name>` in a chain: an extension the
+ * operator installed with `scout extensions install`, pinned by digest.
+ */
+export interface VercelBoardExternalStepConfig {
+  /** The extension's name, as `scout extensions` lists it. */
+  extension: string;
+  /** The sha256 of the extension's manifest and command, as Scout computes it. A changed artifact skips every task. */
+  digest: string;
+  /** How long one answer may take. Default 2000, at most 10000. */
+  timeoutMs?: number;
+}
+
 /** Per-connection dispatch settings, kept in the connection file. Every field is optional. */
 export interface VercelBoardDispatchConfig {
   /**
@@ -86,6 +99,8 @@ export interface VercelBoardDispatchConfig {
    * Scout agents that can do tasks carrying it. `{ "area=web": ["agent-a"] }`.
    */
   capabilities?: Record<string, string[]>;
+  /** Out-of-process steps by name; a chain names one as `external:<name>`. */
+  external?: Record<string, VercelBoardExternalStepConfig>;
 }
 
 /** What a policy decided for one task. */
@@ -229,7 +244,7 @@ export function validateVercelBoardDispatchConfig(value: unknown, channels: read
   if (!value || typeof value !== "object" || Array.isArray(value)) return ["dispatch must be an object"];
   const d = value as Record<string, unknown>;
   const errors: string[] = [];
-  for (const key of Object.keys(d)) if (!["enabled", "policy", "policies", "channels", "capabilities"].includes(key)) errors.push(`dispatch.${key} is not a dispatch field`);
+  for (const key of Object.keys(d)) if (!["enabled", "policy", "policies", "channels", "capabilities", "external"].includes(key)) errors.push(`dispatch.${key} is not a dispatch field`);
   if (d.enabled !== undefined && typeof d.enabled !== "boolean") errors.push("dispatch.enabled must be true or false");
   if (d.policy !== undefined && !isVercelBoardDispatchName(d.policy)) errors.push("dispatch.policy must be a policy name");
   const chain = (steps: unknown, where: string) => {
@@ -272,6 +287,19 @@ export function validateVercelBoardDispatchConfig(value: unknown, channels: read
       if (!Array.isArray(agents) || agents.length > 64 || !agents.every(agent => typeof agent === "string" && AGENT.test(agent) && agent.trim() === agent)) {
         errors.push(`dispatch.capabilities.${selector} must list Scout agent IDs`);
       }
+    }
+  }
+  if (d.external !== undefined) {
+    if (!d.external || typeof d.external !== "object" || Array.isArray(d.external)) errors.push("dispatch.external must map names to extensions");
+    else for (const [name, raw] of Object.entries(d.external)) {
+      const where = `dispatch.external.${name}`;
+      if (!/^[a-z][a-z0-9-]{0,39}$/.test(name)) errors.push(`dispatch.external: ${name} is not a step name`);
+      const e = raw as Record<string, unknown> | null;
+      if (!e || typeof e !== "object" || Array.isArray(e)) { errors.push(`${where} must be an object`); continue; }
+      for (const key of Object.keys(e)) if (!["extension", "digest", "timeoutMs"].includes(key)) errors.push(`${where}.${key} is not an external step field`);
+      if (typeof e.extension !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(e.extension)) errors.push(`${where}.extension must name an installed extension`);
+      if (typeof e.digest !== "string" || !/^[a-f0-9]{64}$/.test(e.digest)) errors.push(`${where}.digest must be the extension's sha256 digest`);
+      if (e.timeoutMs !== undefined && (!Number.isInteger(e.timeoutMs) || (e.timeoutMs as number) < 100 || (e.timeoutMs as number) > 10_000)) errors.push(`${where}.timeoutMs must be 100 to 10000`);
     }
   }
   return errors;

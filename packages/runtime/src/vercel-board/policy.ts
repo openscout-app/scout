@@ -221,6 +221,20 @@ export class VercelBoardDispatchRegistry {
 
 export const vercelBoardDispatchRegistry = new VercelBoardDispatchRegistry();
 
+/**
+ * A registry over another that adds steps read at each lookup: a connection's
+ * `external:<name>` steps over the built-ins, following its saved settings.
+ */
+export class VercelBoardDispatchOverlay extends VercelBoardDispatchRegistry {
+  constructor(private readonly base: VercelBoardDispatchRegistry, private readonly extra: () => Record<string, VercelBoardDispatchStep>) {
+    super({ builtins: false });
+  }
+  override step(name: string): VercelBoardDispatchStep | undefined { return super.step(name) ?? this.base.step(name) ?? this.extra()[name]; }
+  override stepNames(): string[] { return [...new Set([...this.base.stepNames(), ...super.stepNames(), ...Object.keys(this.extra())])]; }
+  override policy(name: string, defined?: Record<string, string[]>): readonly string[] | undefined { return super.policy(name) ?? this.base.policy(name, defined); }
+  override policyNames(): string[] { return [...new Set([...this.base.policyNames(), ...super.policyNames()])]; }
+}
+
 /** The policy name a channel runs. A `selfServe` channel defaults to role-only, as before policies. */
 export function vercelBoardChannelPolicy(config: Pick<VercelBoardConnectionConfig, "dispatch" | "selfServe">, channel: string): string {
   return config.dispatch?.channels?.[channel]?.policy ?? (config.selfServe?.includes(channel) ? "role-only" : config.dispatch?.policy ?? "manual");

@@ -24,7 +24,8 @@ import { VercelBoardOutbox } from "./outbox.js";
 import { vercelBoardActorId, vercelBoardPrincipalOf, vercelBoardScopedId, vercelBoardTaskWorkItem, vercelBoardWorkId, mergeBoardProjection } from "./projection.js";
 import { VercelBoardCursorConflictError, VercelBoardStore, type VercelBoardCustodyRow } from "./store.js";
 import { VercelBoardDispatcher } from "./dispatcher.js";
-import { vercelBoardChannelDispatchStatus, vercelBoardChannelRelaxed, vercelBoardDispatchProblems, vercelBoardDispatchRegistry, vercelBoardRoleOf } from "./policy.js";
+import { VercelBoardDispatchOverlay, vercelBoardChannelDispatchStatus, vercelBoardChannelRelaxed, vercelBoardDispatchProblems, vercelBoardDispatchRegistry, vercelBoardRoleOf, type VercelBoardDispatchRegistry } from "./policy.js";
+import { vercelBoardExternalProblems, vercelBoardExternalSteps } from "./external-policy.js";
 import type { VercelBoardWireMessage } from "./wire.js";
 import { VercelBoardWorkerError, VercelBoardWorkerSupervisor, VercelBoardWorkerTransport, type VercelBoardWorkerOptions } from "./worker.js";
 
@@ -65,6 +66,8 @@ export interface BrokerVercelBoardServiceOptions {
   autoStart?: boolean;
   /** Run a dispatcher pass on each feed event that leaves a task ready. Default: on when autoStart is. */
   dispatchOnEvents?: boolean;
+  /** Where `external:<name>` dispatch steps find their extensions. Default: the runtime's environment. */
+  extensionEnv?: NodeJS.ProcessEnv;
   now?: () => number;
   warn?(message: string, error?: unknown): void;
 }
@@ -201,6 +204,7 @@ export class BrokerVercelBoardService {
       // board. The task is read from the board again before any claim, so only an error state stops it.
       canRun: () => !!live.grant && (live.state === "following" || live.state === "connecting"),
       claim: async (root, input) => { await this.startClaim(live, root, { agentId: input.agentId, startedBy: VERCEL_BOARD_MATCHER_ID, profile: input.profile, policy: input.policy }); },
+      registry: this.registryFor(() => live.config.dispatch),
     });
     return live;
   }
@@ -706,14 +710,27 @@ export class BrokerVercelBoardService {
 
   // ---- the dispatcher ----------------------------------------------------
 
+  /** The built-in steps plus the external steps the settings define, read at each lookup. */
+  private registryFor(dispatch: () => VercelBoardDispatchConfig | undefined): VercelBoardDispatchRegistry {
+    const deps = { env: this.options.extensionEnv ?? process.env };
+    return new VercelBoardDispatchOverlay(vercelBoardDispatchRegistry, () => vercelBoardExternalSteps(dispatch(), deps));
+  }
+
+  /** What is wrong with a dispatch block, including an external step that is not installed or not the pinned artifact. */
+  private dispatchProblems(dispatch: VercelBoardDispatchConfig, channels: readonly string[]): string[] {
+    const problems = vercelBoardDispatchProblems(dispatch, channels, this.registryFor(() => dispatch));
+    return problems.length ? problems : vercelBoardExternalProblems(dispatch, { env: this.options.extensionEnv ?? process.env });
+  }
+
   private dispatcherStatusOf(live: LiveConnection): VercelBoardDispatcherStatus {
     const { config } = live;
     const mirrored = vercelBoardMirroredChannels(config);
+    const registry = this.registryFor(() => config.dispatch);
     return {
       connectionId: config.id, enabled: config.dispatch?.enabled !== false, policy: config.dispatch?.policy ?? "manual",
-      channels: config.channels.map(channel => vercelBoardChannelDispatchStatus(config, channel, mirrored.includes(channel))),
+      channels: config.channels.map(channel => vercelBoardChannelDispatchStatus(config, channel, mirrored.includes(channel), registry)),
       capabilities: config.dispatch?.capabilities ?? {}, policies: config.dispatch?.policies ?? {},
-      steps: vercelBoardDispatchRegistry.stepNames(), wakes: { events: true, sweepMs: TICK_MS },
+      steps: registry.stepNames(), wakes: { events: true, sweepMs: TICK_MS },
       ...(live.dispatcher.lastPassAt ? { lastPassAt: live.dispatcher.lastPassAt } : {}),
       recent: live.dispatcher.recent(), claims: this.claimsOf(live), config: config.dispatch ?? {},
     };
@@ -733,7 +750,7 @@ export class BrokerVercelBoardService {
     if (request?.actorId !== this.options.operatorId) throw new VercelBoardServiceError(403, "operator_required", "Only the operator changes dispatch settings.");
     const live = this.requireLive(request.connectionId);
     const dispatch: VercelBoardDispatchConfig = request.dispatch;
-    const problems = vercelBoardDispatchProblems(dispatch, live.config.channels);
+    const problems = this.dispatchProblems(dispatch, live.config.channels);
     if (problems.length) throw new VercelBoardServiceError(400, "invalid_dispatch", problems.join("; "), "Run: scout integration dispatcher vercel-board --help");
     const next: VercelBoardConnectionConfig = { ...live.config, dispatch };
     await this.file.put(next);
@@ -958,7 +975,7 @@ export class BrokerVercelBoardService {
       throw new VercelBoardServiceError(400, "invalid_request", `syncChannels must name channels from: ${channels.join(", ")}.`);
     }
     if (request.dispatch !== undefined) {
-      const problems = vercelBoardDispatchProblems(request.dispatch, channels);
+      const problems = this.dispatchProblems(request.dispatch, channels);
       if (problems.length) throw new VercelBoardServiceError(400, "invalid_dispatch", problems.join("; "));
     }
     const id = request.id ?? `vercel-board-${createHash("sha256").update(target.url).digest("hex").slice(0, 12)}`;
@@ -1176,10 +1193,11 @@ export class BrokerVercelBoardService {
   /** Each followed channel's policy, and whether its guards are weaker than the defaults. */
   private dispatcherSummary(config: VercelBoardConnectionConfig): NonNullable<VercelBoardConnectionStatus["dispatcher"]> {
     const mirrored = vercelBoardMirroredChannels(config);
+    const registry = this.registryFor(() => config.dispatch);
     return {
       enabled: config.dispatch?.enabled !== false,
       channels: config.channels.map(channel => {
-        const status = vercelBoardChannelDispatchStatus(config, channel, mirrored.includes(channel));
+        const status = vercelBoardChannelDispatchStatus(config, channel, mirrored.includes(channel), registry);
         return { channel, policy: status.policy, guardsRemoved: status.guardsRemoved, relaxed: vercelBoardChannelRelaxed(status) };
       }),
     };

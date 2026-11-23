@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteTransactionalDatabase } from "../sqlite-adapter.js";
 import { migrateControlPlaneDatabaseSchema } from "../control-plane-migrations.js";
 import { FakeVercelBoard } from "../test-support/fake-vercel-board.js";
+import { LEAST_BUSY_POLICY, installPolicyExtension } from "../test-support/vercel-board-policy-extension.js";
 import { VercelBoardHttpTransport } from "./client.js";
 import { VercelBoardCustody } from "./custody.js";
 import { VercelBoardFollower } from "./follower.js";
@@ -440,7 +441,7 @@ test("a lapsed lock nobody took is still this runtime's: a stall past the TTL re
 
 // ---- service ------------------------------------------------------------------
 
-function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void, options: { dispatchOnEvents?: boolean } = {}) {
+function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void, options: { dispatchOnEvents?: boolean; extensionEnv?: NodeJS.ProcessEnv } = {}) {
   const cancelled: { id: string; reason: string }[] = [];
   const time = clock();
   const board = new FakeVercelBoard({ now: time.now });
@@ -455,7 +456,7 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   const live: VercelBoardHandoffEvent[] = [];
   const service = new BrokerVercelBoardService({
     nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now,
-    ...(options.dispatchOnEvents ? { dispatchOnEvents: true } : {}), fetch: (url, init) => {
+    ...(options.dispatchOnEvents ? { dispatchOnEvents: true } : {}), ...(options.extensionEnv ? { extensionEnv: options.extensionEnv } : {}), fetch: (url, init) => {
       beforeFetch?.(String(url), board);
       return board.fetch(url, init);
     },
@@ -1038,7 +1039,7 @@ test("only sync-enabled channels publish plans and one attributed settlement rep
 
 // ---- dispatch policies ----------------------------------------------------
 
-async function dispatchHarness(extra: Record<string, unknown>, options: { dispatchOnEvents?: boolean } = {}) {
+async function dispatchHarness(extra: Record<string, unknown>, options: { dispatchOnEvents?: boolean; extensionEnv?: NodeJS.ProcessEnv } = {}) {
   const h = serviceHarness(undefined, options);
   await h.connect(extra);
   await h.service.pump("c1");
@@ -1274,4 +1275,31 @@ test("status shows each held claim's lease, when it was renewed and when the nex
   const shown = JSON.stringify([await h.service.status("c1"), await h.service.dispatcherStatus("c1")]);
   expect(shown).not.toContain(token);
   expect((await h.service.dispatcherStatus("c1")).claims).toEqual((await h.service.status("c1"))[0]!.claims!);
+});
+
+test("an operator puts a pinned external policy in a channel's chain, and the runtime refuses an unpinned one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scout-board-ext-"));
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  const ext = installPolicyExtension(root, "board-policy", LEAST_BUSY_POLICY, { "counts.json": JSON.stringify({ "agent-a": 4, "agent-b": 0 }) });
+  const dispatch = {
+    external: { "least-busy": { extension: "board-policy", digest: ext.digest() } },
+    policies: { balanced: ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role-or-any", "external:least-busy"] },
+    channels: { work: { policy: "balanced" } },
+  };
+  const h = await dispatchHarness({ dispatch }, { extensionEnv: ext.env });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-b", role: "builder", actorId: "operator" });
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status.steps).toContain("external:least-busy");
+  expect(status.channels[0]).toMatchObject({ channel: "work", policy: "balanced", guardsRemoved: [] });
+  const task = h.board.createTask({ channel: "work", text: "Anyone", as: null });
+  await h.service.pump("c1");
+  expect(h.board.message(task)!.labels["scout.agent"]).toBe("agent-b");
+  expect(h.deliveries.at(-1)!.body).toContain("under the balanced dispatch policy");
+
+  const unpinned = { ...dispatch, external: { "least-busy": { extension: "board-policy", digest: "f".repeat(64) } } };
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: unpinned })).rejects.toMatchObject({ status: 400, code: "invalid_dispatch" });
+  const saved = JSON.parse(readFileSync(join(h.dir, "connections.json"), "utf8"));
+  const list = (Array.isArray(saved) ? saved : saved.connections ?? []) as { id: string; dispatch?: typeof dispatch }[];
+  expect(list.find(entry => entry.id === "c1")?.dispatch?.external["least-busy"].digest).toBe(ext.digest());
 });
