@@ -1895,6 +1895,29 @@ test("request dismissal is machine-local; a settled request is ended and a waite
   expect(dismissed).toEqual(["permission-1"]);
 });
 
+test("answering an operator ask requires operator proof", async () => {
+  const answers: unknown[] = [];
+  const decisionCards = {
+    answer: async (input: unknown) => { answers.push(input); return { id: "ask-1", state: "answered" }; },
+  } as unknown as NonNullable<BrokerHttpRouterDeps["decisionCards"]>;
+  const harness = createHarness({ decisionCards });
+  const body = { id: "ask-1", requestId: "decision-1", answer: { kind: "choice", option: "Merge now" } };
+
+  for (const transportContext of [{ transport: "loopback" }, { transport: "unix-socket" }]) {
+    const unproven = await requestRouter(harness, "POST", "/v1/decisions/answer", { body, transportContext: transportContext as never });
+    expect(unproven.response.status).toBe(403);
+    expect(unproven.body).toEqual({ error: "operator_attribution_required" });
+  }
+  const remote = await requestRouter(harness, "POST", "/v1/decisions/answer", { body, transportContext: { transport: "remote", operator: true } as never });
+  expect(remote.response.status).toBe(403);
+  expect(answers).toEqual([]);
+
+  const proven = await requestRouter(harness, "POST", "/v1/decisions/answer", { body, transportContext: { transport: "loopback", operator: true } as never });
+  expect(proven.response.status).toBe(200);
+  expect(proven.body).toEqual({ ok: true, decision: { id: "ask-1", state: "answered" } });
+  expect(answers).toEqual([body]);
+});
+
 test("explicit asks cannot forward an alias payload after wire normalization", async () => {
   let forwarded = 0;
   const h = createHarness({ forwardRouteAliasRequest: async () => { forwarded++; return { status: 202, body: {} }; } });
