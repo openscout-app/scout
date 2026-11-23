@@ -311,6 +311,7 @@ import { json } from "./broker-http-helpers.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
 import { BrokerRequestReceipts, ProvenRequestFailure, RetryablePreEffectFailure } from "./broker-request-receipts.js";
 import { resolveSessionWorkspace } from "./agent-workspace.js";
+import { WorktreeRetirementService } from "./agent-workspace-retirement.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
   closeServer,
@@ -3950,6 +3951,34 @@ const routineRunner = new RoutineRunner({
   log: line => console.log(line),
 });
 
+// Retires dispatched-agent worktrees once they are idle, clean and merged.
+// Releasing a dead cardless session stamps its endpoint stopped first, so
+// nothing relaunches into the folder after it is gone.
+const worktreeRetirement = new WorktreeRetirementService({
+  nodeId,
+  snapshot: () => runtime.snapshot(),
+  isEndpointAlive: isLocalAgentEndpointAliveAsync,
+  ready: () => startupTrafficGate.snapshot().mutationsAdmitted,
+  intervalMs: Number.parseInt(process.env.OPENSCOUT_WORKTREE_RETIRE_INTERVAL_MS ?? "3600000", 10) || 3_600_000,
+  releaseEndpoints: async (endpoints, worktree) => {
+    const retiredAt = Date.now();
+    for (const endpoint of endpoints) {
+      await persistEndpoint({
+        ...endpoint,
+        state: "stopped",
+        metadata: {
+          ...(endpoint.metadata ?? {}),
+          staleLocalRegistration: true,
+          retiredAt,
+          worktreeRetiredAt: retiredAt,
+          worktreeRetiredPath: worktree.path,
+        },
+      });
+    }
+  },
+  log: (line) => console.log(line),
+});
+
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   workRetry,
@@ -3960,6 +3989,7 @@ const routeRequest = createBrokerHttpRouter({
   searchSessionKnowledge: searchLocalSessionKnowledge,
   posts: { store: postStore, shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
   routines: { runner: routineRunner },
+  worktreeRetirement: { service: worktreeRetirement },
   feedWork: sqliteDisabled ? {} : { read: readFeedWork },
   attachments: {
     service: attachmentService, nodeId,
@@ -4727,6 +4757,7 @@ function startBrokerCoordination(): void {
   registerActiveScoutBrokerService(brokerService);
   peerDelivery.start();
   routineRunner.start();
+  worktreeRetirement.start();
   setTimeout(recoverStartupWork, 0).unref();
 
   if (!meshInstanceRefusal) {
@@ -4818,6 +4849,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   shuttingDown = true;
   clearTimeout(projectionRetryTimer);
   routineRunner.stop();
+  worktreeRetirement.stop();
   hostKeepAwake?.stop();
   capabilityMatrixService.stop();
   tailscaleListenerGuard.stop();

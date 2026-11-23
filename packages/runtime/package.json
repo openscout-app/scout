@@ -79,6 +79,12 @@
       "import": "./dist/agent-workspace.js",
       "default": "./dist/agent-workspace.js"
     },
+    "./agent-workspace-retirement": {
+      "bun": "./src/agent-workspace-retirement.ts",
+      "types": "./dist/agent-workspace-retirement.d.ts",
+      "import": "./dist/agent-workspace-retirement.js",
+      "default": "./dist/agent-workspace-retirement.js"
+    },
     "./control-plane-agents": {
       "bun": "./src/control-plane-agents.ts",
       "types": "./dist/control-plane-agents.d.ts",
