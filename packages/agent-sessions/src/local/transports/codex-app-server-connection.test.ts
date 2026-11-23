@@ -13,6 +13,7 @@ import {
   resolveCodexAppServerConnectionConfig,
   defaultCodexAppServerControlSocketPath,
 } from "./codex-app-server-connection.ts";
+import { inspectLoadedCodexThread, sendToLoadedCodexThread } from "./codex-loaded-thread.ts";
 import { CodexAppServerClient, CodexAppServerTransport, type CodexAppServerSessionOptions } from "./codex-app-server.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -87,6 +88,42 @@ function clientOptions(dir: string, extra: Partial<CodexAppServerSessionOptions>
     ...extra,
   };
 }
+
+test("another client continues the loaded Codex thread and steers only its observed turn", async () => {
+  const socket = join(await tempDir(), "control.sock");
+  let status: { type: string; activeFlags?: string[] } = { type: "idle" };
+  let activeTurn = "first", historyMode = "paginated";
+  const fake = await startFakeAppServer(socket, ({ id, method, params }, reply) => {
+    if (!id) return;
+    const responses: Record<string, unknown> = {
+      initialize: {}, "thread/read": { thread: { id: "thread", status, historyMode,
+        turns: params?.includeTurns ? [{ id: activeTurn, status: "inProgress" }] : [] } },
+      "thread/turns/list": { data: [{ id: activeTurn, status: "inProgress" }] },
+      "turn/start": { turn: { id: activeTurn } }, "turn/steer": { turnId: params?.expectedTurnId },
+    };
+    reply({ id, result: responses[method!] });
+  });
+  expect(await sendToLoadedCodexThread("thread", { state: "idle" }, "continue", socket)).toBe("accepted");
+  status = { type: "active", activeFlags: [] };
+  const active = await inspectLoadedCodexThread("thread", socket);
+  if (active?.state !== "active") throw new Error("expected the running turn");
+  expect(await sendToLoadedCodexThread("thread", active, "steer", socket)).toBe("accepted");
+  historyMode = "legacy";
+  expect(await inspectLoadedCodexThread("thread", socket)).toEqual(active);
+  activeTurn = "replacement";
+  expect(await sendToLoadedCodexThread("thread", active, "stale", socket)).toBe("changed");
+  status.activeFlags = ["waitingOnApproval"];
+  expect(await inspectLoadedCodexThread("thread", socket)).toEqual({ state: "blocked", reason: "approval" });
+  expect(await sendToLoadedCodexThread("thread", active, "blocked", socket)).toBe("changed");
+  status = { type: "notLoaded" };
+  expect(await inspectLoadedCodexThread("thread", socket)).toBeNull();
+  expect(await sendToLoadedCodexThread("other-thread", { state: "idle" }, "wrong", socket)).toBe("changed");
+  expect(fake.received.filter(r => ["turn/start", "turn/steer", "thread/start", "thread/resume"].includes(r.method!))
+    .map(({ method, params }) => [method, params])).toEqual([
+    ["turn/start", { threadId: "thread", input: [{ type: "text", text: "continue", text_elements: [] }] }],
+    ["turn/steer", { threadId: "thread", expectedTurnId: "first", input: [{ type: "text", text: "steer", text_elements: [] }] }],
+  ]);
+});
 
 test("in-flight control abort removes the RPC and its abort listener", async () => {
   const dir = await tempDir();
