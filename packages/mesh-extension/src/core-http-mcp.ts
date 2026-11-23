@@ -164,6 +164,8 @@ export class CoreHttpAdapter {
       if (a.sessionId || a.deliveryId || a.replyToken) {
         if (!a.ref || !a.sessionId || !a.deliveryId || a.image)
           throw new Error('external reply requires its exact task and correlated return address');
+        if (a.points?.length && !(await request('/v1/node')).capabilities?.includes(REPLY_POINTS_CAPABILITY))
+          throw new Error(`runtime requires ${REPLY_POINTS_CAPABILITY} for reply points`);
         return request('/v1/external-sessions/reply', { ...pick(a, ['sessionId','deliveryId','replyToken','body','ref','progress','failed','points','attachments']), requestId: a.requestId ?? `external-${createHash("sha256").update(JSON.stringify([a.deliveryId, a.progress ? ["progress", a.body] : ["final"]])).digest("hex")}`, ownerId: senderId });
       }
       const node = await request('/v1/node');

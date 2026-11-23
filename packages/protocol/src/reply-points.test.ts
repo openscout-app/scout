@@ -30,6 +30,13 @@ test("the runtime record numbers points from the message id and trims them", () 
   expect(replyPointsOf({})).toBeNull();
 });
 
+test("a malformed stored entry reads as no points instead of throwing", () => {
+  const good = { id: "msg-9#1", stance: "claim", text: "x" };
+  expect(replyPointsOf({ replyPoints: { version: 1, points: [good, null] } })).toBeNull();
+  expect(replyPointsOf({ replyPoints: { version: 1, points: ["claim"] } })).toBeNull();
+  expect(replyPointsOf({ replyPoints: { version: 1, points: [[good]] } })).toBeNull();
+});
+
 test("the CLI form reads a stance, optional attributes and the text", () => {
   expect(parseReplyPointArg("claim: Keep Home on the shipped Feed")).toEqual({ stance: "claim", text: "Keep Home on the shipped Feed" });
   expect(parseReplyPointArg("dispute[re=msg.request.ab#2, about=sequence]: One sequence: is enough"))

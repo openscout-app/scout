@@ -1,6 +1,6 @@
 import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
-import { parseRosterAddress, REPLY_POINT_LIMITS, REPLY_POINT_STANCES, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
+import { parseRosterAddress, REPLY_POINTS_CAPABILITY, REPLY_POINT_LIMITS,REPLY_POINT_STANCES, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
 import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
 import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
@@ -4193,6 +4193,12 @@ export function createScoutMcpServer(options: {
       if (waitingOn) throw new Error("waitingOn is not available on external mailbox replies");
       if (!ref || !sessionId || !deliveryId)
         throw new Error("external reply requires the task ref and its exact sessionId/deliveryId return address");
+      if (points?.length) {
+        const node = await aliasBrokerRequest<{ capabilities?: string[] }>("/v1/node");
+        if (!node.capabilities?.includes(REPLY_POINTS_CAPABILITY)) {
+          throw new Error(`Broker does not advertise ${REPLY_POINTS_CAPABILITY}; send the reply without points or upgrade the runtime`);
+        }
+      }
       const ownerId = await resolveMcpSenderId(deps, undefined, options.defaultCurrentDirectory, env);
       const result = await aliasBrokerRequest("/v1/external-sessions/reply", {
         method: "POST", body: JSON.stringify({ ownerId, sessionId, deliveryId, replyToken, body, ref, ...(points ? { points } : {}),

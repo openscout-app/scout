@@ -81,6 +81,8 @@ export function replyPointsRecord(messageId: string, points: readonly ReplyPoint
 export function replyPointsOf(metadata: Record<string, unknown> | undefined): ReplyPoints | null {
   const value = metadata?.replyPoints as ReplyPoints | undefined;
   if (!value || value.version !== 1 || !Array.isArray(value.points)) return null;
+  // Metadata is read back from storage; a malformed entry must not throw on destructure.
+  if (value.points.some(point => !point || typeof point !== "object" || Array.isArray(point))) return null;
   const inputs = value.points.map(({ id: _id, ...rest }) => rest);
   if (replyPointProblems(inputs).length || value.points.some(point => typeof point.id !== "string" || !point.id)) return null;
   return value;
