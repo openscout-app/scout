@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,7 +7,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import { ManagedAgentsSource } from "../tail/managed-agents-source.js";
 import type { DiscoveredTranscript, TailContext } from "../tail/types.js";
-import { ManagedAgentsPuller, saveManagedAgentsConfig, type ManagedAgentsConfig } from "./managed-agents.js";
+import { connectManagedAgents, loadManagedAgentsConfig, ManagedAgentsPuller, saveManagedAgentsConfig, type ManagedAgentsConfig } from "./managed-agents.js";
 
 const KEY = "sk-ant-test-key";
 type FakeEvent = { id: string; type: string; processed_at: string | null; [key: string]: unknown };
@@ -167,6 +167,61 @@ describe("Managed Agents puller", () => {
     dirs.push(home);
     expect(await new ManagedAgentsPuller({ home, mirrorRoot: home }).pullOnce()).toMatchObject({ configured: false, listed: 0 });
     expect(fake.requests).toEqual([]);
+  });
+});
+
+describe("Managed Agents connect", () => {
+  const options = (home: string, mirror: string) => ({
+    home, mirrorRoot: mirror, now: () => NOW,
+    client: (c: ManagedAgentsConfig) => new Anthropic({ apiKey: c.apiKey, baseURL: c.baseURL, maxRetries: 0 }),
+  });
+  const withKey = (apiKey: string, label = "acme"): ManagedAgentsConfig =>
+    ({ v: 1, label, apiKey, baseURL: server.url.origin, lookbackDays: 7, createdAt: "" });
+
+  test("reconnecting with a bad key leaves the previous config and status intact", async () => {
+    const { home, mirror, puller } = setup();
+    fake.sessions = [session("sesn_a", 1, [])];
+    await puller.pullOnce();
+    const configBefore = readFileSync(join(home, "managed-agents.json"), "utf8");
+    const statusBefore = readFileSync(join(home, "managed-agents.status.json"), "utf8");
+
+    const result = await connectManagedAgents(withKey("sk-ant-wrong", "other"), options(home, mirror));
+    expect(result).toEqual({ status: "failed", error: "the API key was rejected (401)", restoredPrevious: true });
+    expect(readFileSync(join(home, "managed-agents.json"), "utf8")).toBe(configBefore);
+    expect(loadManagedAgentsConfig(home)).toMatchObject({ apiKey: KEY, label: "acme" });
+    expect(statSync(join(home, "managed-agents.json")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(home, "managed-agents.status.json"), "utf8")).toBe(statusBefore);
+  });
+
+  test("a first connect with a bad key saves nothing", async () => {
+    const home = mkdtempSync(join(tmpdir(), "scout-ma-home-"));
+    dirs.push(home);
+    const result = await connectManagedAgents(withKey("sk-ant-wrong"), options(home, home));
+    expect(result).toMatchObject({ status: "failed", restoredPrevious: false });
+    expect(loadManagedAgentsConfig(home)).toBeNull();
+  });
+
+  test("while another pull holds the lock, the key is checked directly instead of reported as proven", async () => {
+    const { home, mirror } = setup();
+    const before = readFileSync(join(home, "managed-agents.json"), "utf8");
+    mkdirSync(join(home, "managed-agents.lock"));
+    const bad = await connectManagedAgents(withKey("sk-ant-wrong"), options(home, mirror));
+    expect(bad).toMatchObject({ status: "failed", error: "the API key was rejected (401)", restoredPrevious: true });
+    expect(readFileSync(join(home, "managed-agents.json"), "utf8")).toBe(before);
+
+    fake.requests = [];
+    const good = await connectManagedAgents(withKey(KEY, "renamed"), options(home, mirror));
+    expect(good).toMatchObject({ status: "verified", summary: { busy: true, listed: 0 } });
+    expect(fake.requests).toEqual(["/v1/sessions?limit=1"]);
+    expect(loadManagedAgentsConfig(home)).toMatchObject({ label: "renamed" });
+  });
+
+  test("a good key pulls at once", async () => {
+    const home = mkdtempSync(join(tmpdir(), "scout-ma-home-"));
+    const mirror = mkdtempSync(join(tmpdir(), "scout-ma-mirror-"));
+    dirs.push(home, mirror);
+    fake.sessions = [session("sesn_a", 1, [{ id: "e1", type: "agent.message", processed_at: at(2) }])];
+    expect(await connectManagedAgents(withKey(KEY), options(home, mirror))).toMatchObject({ status: "pulled", summary: { listed: 1, appended: 1 } });
   });
 });
 

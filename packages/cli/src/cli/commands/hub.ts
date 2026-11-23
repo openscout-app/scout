@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 
 import {
   connectClaudeCode,
+  connectManagedAgents,
   disconnectClaudeCode,
   HubCollectorService,
   HubInboxClient,
@@ -12,7 +13,6 @@ import {
   readManagedAgentsStatus,
   removeManagedAgentsConfig,
   resolveManagedAgentsMirrorRoot,
-  saveManagedAgentsConfig,
   loadHubConfig,
   loadHubIdentity,
   loadOrCreateHubIdentity,
@@ -69,6 +69,8 @@ export function renderHubCommandHelp(): string {
     "            The key is read from $ANTHROPIC_API_KEY (or --api-key-env) and kept in",
     "            the hub folder, readable only by you. No inbox is needed; the runtime",
     "            pulls each workspace's recent sessions and their events every 15 seconds.",
+    "            Only sessions created in the last --since-days (default 7) are listed;",
+    "            older sessions stop syncing.",
     "disconnect  Take Scout's hooks and files out of a repo, or forget the API key.",
     "collect     Collect waiting chunks and pull Managed Agents sessions now.",
     "status      Show the inbox, what is waiting, and the mirrored sessions.",
@@ -197,19 +199,25 @@ async function runConnectManagedAgents(options: HubOptions): Promise<{ value: Re
     ...(options.baseUrl ? { baseURL: options.baseUrl } : previous?.baseURL ? { baseURL: previous.baseURL } : {}),
     createdAt: previous?.createdAt || new Date().toISOString(),
   };
-  saveManagedAgentsConfig(config);
   // Pull once now: it proves the key can read sessions, and fills the mirror.
-  const summary = await new ManagedAgentsPuller().pullOnce();
-  if (summary.error) {
-    if (!previous) removeManagedAgentsConfig();
-    throw new ScoutCliError(`Could not read Managed Agents sessions: ${summary.error}${previous ? "" : ". Nothing was saved."}`);
+  // On failure the previous config, if any, is put back unchanged.
+  const result = await connectManagedAgents(config);
+  if (result.status === "failed") {
+    throw new ScoutCliError(`Could not read Managed Agents sessions: ${result.error}. ${result.restoredPrevious
+      ? `The new key was not saved; the previous key (label "${previous?.label ?? label}") is still in use.`
+      : "Nothing was saved."}`);
   }
+  const { summary } = result;
+  const days = `${lookbackDays} day${lookbackDays === 1 ? "" : "s"}`;
   const text = [
     `Connected Claude Managed Agents as "${label}". The key is kept in ${resolveHubHome()} (only you can read it).`,
-    `Found ${summary.listed} session${summary.listed === 1 ? "" : "s"} from the last ${lookbackDays} day${lookbackDays === 1 ? "" : "s"}; mirrored ${summary.appended} event${summary.appended === 1 ? "" : "s"}.`,
+    result.status === "pulled"
+      ? `Found ${summary.listed} session${summary.listed === 1 ? "" : "s"} from the last ${days}; mirrored ${summary.appended} event${summary.appended === 1 ? "" : "s"}.`
+      : "The key can read sessions. Another pull was already running, so the first pull with this key happens on the next pass.",
     "The runtime keeps pulling every 15 seconds. Scout lists these sessions under their agent's name.",
+    `Sessions created more than ${days} ago stop syncing; widen the window with --since-days (at most 90).`,
   ].join("\n");
-  return { value: { label, lookbackDays, ...summary }, text };
+  return { value: { label, lookbackDays, status: result.status, ...summary }, text };
 }
 
 type MirrorSession = { label: string; sessionId: string; bytes: number; updatedAt: string };

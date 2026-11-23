@@ -13,6 +13,12 @@
  *   managed-agents/<label>/<session>.session.json  title, status and agent of the session
  *
  * The connector only reads. It never sends events, archives or deletes.
+ *
+ * Each pass lists only sessions created inside the look-back window
+ * (lookbackDays, 7 by default). A session created before the window is no
+ * longer listed, so it stops syncing: its mirror keeps what was pulled, and new
+ * events on it are not fetched. Widen the window with
+ * `scout hub connect managed-agents --since-days <n>` (at most 90).
  */
 
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -37,7 +43,7 @@ export type ManagedAgentsConfig = {
   apiKey: string;
   /** Only for tests and proxies; the SDK default otherwise. */
   baseURL?: string;
-  /** How far back to list sessions. */
+  /** How far back to list sessions, by creation time. Older sessions stop syncing. */
   lookbackDays: number;
   createdAt: string;
 };
@@ -62,6 +68,8 @@ export type ManagedAgentsPullSummary = {
   appended: number;
   sessions: string[];
   error?: string;
+  /** True when this pass did nothing because another pass held the lock. */
+  busy?: boolean;
   notes: string[];
 };
 
@@ -215,14 +223,13 @@ export class ManagedAgentsPuller {
       mkdirSync(lock);
     } catch {
       try {
-        if (Date.now() - statSync(lock).mtimeMs < 5 * 60_000) { summary.notes.push("another pull is running"); return summary; }
+        if (Date.now() - statSync(lock).mtimeMs < 5 * 60_000) { summary.busy = true; summary.notes.push("another pull is running"); return summary; }
       } catch { /* gone already */ }
       rmSync(lock, { recursive: true, force: true });
       mkdirSync(lock);
     }
     try {
-      const client = this.options.client?.(config)
-        ?? new Anthropic({ apiKey: config.apiKey, ...(config.baseURL ? { baseURL: config.baseURL } : {}), maxRetries: 2, timeout: 60_000 });
+      const client = managedAgentsClient(config, this.options);
       await this.pull(client, config, now, summary);
       this.lastError = null;
     } catch (error) {
@@ -320,6 +327,68 @@ export class ManagedAgentsPuller {
     }
     return summary;
   }
+}
+
+function managedAgentsClient(config: ManagedAgentsConfig, options: ManagedAgentsPullerOptions): Anthropic {
+  return options.client?.(config)
+    ?? new Anthropic({ apiKey: config.apiKey, ...(config.baseURL ? { baseURL: config.baseURL } : {}), maxRetries: 2, timeout: 60_000 });
+}
+
+export type ManagedAgentsConnectResult =
+  /** The first pull ran with the new key. */
+  | { status: "pulled"; summary: ManagedAgentsPullSummary }
+  /** Another pull held the lock; one listing call proved the key, and the next pass pulls. */
+  | { status: "verified"; summary: ManagedAgentsPullSummary }
+  /** The key could not read sessions; the config on disk is what it was before. */
+  | { status: "failed"; error: string; restoredPrevious: boolean };
+
+/**
+ * Saves the config and proves it with a first pull. When the pull fails, the
+ * config file is put back exactly as it was: the previous key when there was
+ * one, otherwise nothing.
+ */
+export async function connectManagedAgents(config: ManagedAgentsConfig, options: ManagedAgentsPullerOptions = {}): Promise<ManagedAgentsConnectResult> {
+  const home = options.home ?? resolveHubHome();
+  const configPath = join(home, CONFIG_FILE);
+  const statusPath = join(home, STATUS_FILE);
+  const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8") : null;
+  const before = read(configPath);
+  const statusBefore = read(statusPath);
+  const putBack = (path: string, content: string) => {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, content, { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  };
+  const restore = () => {
+    if (before === null) { removeManagedAgentsConfig(home); return; }
+    putBack(configPath, before);
+    // The failed test pull is not the state of the key that stays in use.
+    if (statusBefore === null) rmSync(statusPath, { force: true });
+    else putBack(statusPath, statusBefore);
+  };
+  saveManagedAgentsConfig(config, home);
+  let summary: ManagedAgentsPullSummary;
+  try {
+    summary = await new ManagedAgentsPuller({ ...options, home }).pullOnce();
+    if (!summary.error && summary.busy) {
+      // The pass in progress may still be using the previous key: check this one directly.
+      try {
+        await managedAgentsClient(config, options).beta.sessions.list({ limit: 1 });
+      } catch (error) {
+        summary = { ...summary, error: describeError(error) };
+      }
+      if (!summary.error) return { status: "verified", summary };
+    }
+  } catch (error) {
+    restore();
+    throw error;
+  }
+  if (summary.error) {
+    restore();
+    return { status: "failed", error: summary.error, restoredPrevious: before !== null };
+  }
+  return { status: "pulled", summary };
 }
 
 function describeError(error: unknown): string {
