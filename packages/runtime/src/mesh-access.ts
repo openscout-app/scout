@@ -4,6 +4,7 @@
  * resource enrollment are separate local acts; an imported key grants nothing.
  */
 import { createHash, createPublicKey } from "node:crypto";
+import { HOST_ACTIONS, type HostAction, type HostRole } from "@openscout/protocol";
 import { canonicalJson, nodeKeyId, signNodePayload, verifyNodeSignature, type NodeIdentity } from "./node-identity-wire.js";
 
 export const ACCESS_PROTOCOL = "scout-access/1" as const;
@@ -14,9 +15,10 @@ export const accessRevocationTarget = (issuerId: string, id: string): string => 
 export const accessRequestHash = (request: object): string => createHash("sha256").update(canonicalJson(request)).digest("hex");
 const keyIds = new Map<string, string>();
 const verifiedSignatures = new Set<string>();
-export const ACCESS_ACTIONS = ["discover", "message", "request", "read-own", "read-history", "admin"] as const;
-export type AccessAction = typeof ACCESS_ACTIONS[number];
-export type AccessRole = "owner" | "admin" | "member" | "service";
+/** The host verbs and host roles of the shared evaluator (@openscout/protocol access-evaluator.ts). */
+export const ACCESS_ACTIONS = HOST_ACTIONS;
+export type AccessAction = HostAction;
+export type AccessRole = HostRole;
 export type AccessPrincipal = { id: string; publicKey: string; kind: "person" | "service"; label: string };
 /** Agent and project selectors are a union. Empty is always no access. */
 export type AccessScope = { all: boolean; agentIds: string[]; projectIds: string[] };

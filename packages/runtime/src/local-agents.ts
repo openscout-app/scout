@@ -3,6 +3,7 @@ import { macHostLaunchAdmission, warmWorkerContinuation } from "./host-launch-ad
 import { FailedRunError, failureCauseForError } from "./failed-run-error.js";
 import { receiveTransportLiveness } from "./local-endpoint-liveness.js";
 import { hasExplicitCompletion } from "@openscout/protocol";
+import { turnCredentialForInvocation } from "./turn-credentials.js";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { isA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { hasManagedPermissionContext, type ManagedPermissionPrompt } from "./managed-permission.js";
@@ -3411,6 +3412,7 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
   if (!invocation.conversationId || !invocation.messageId) {
     return null;
   }
+  const turn = turnCredentialForInvocation(invocation);
 
   return {
     mode: "broker_reply",
@@ -3424,6 +3426,7 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
       completion: { invocationId: invocation.id, flightId: invocation.metadata.completionFlightId, revision: 0 },
     } : {}),
     action: invocation.action,
+    ...(turn ? { turn } : {}),
   };
 }
 
