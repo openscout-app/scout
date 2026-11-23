@@ -498,14 +498,15 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   return { time, board, service, db, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled, dir };
 }
 
-test("connect reads the principal, makes the channels and a room for each, and is verified only after the probe task completes", async () => {
+test("connect reads the principal, makes a room for each channel but no channel on the board, and is verified only after the probe task completes", async () => {
   const h = serviceHarness();
   const response = await h.connect();
   expect(response.connection).toMatchObject({ principal: "local:user:operator", ownerAllowlist: ["local:user:operator"], custodianNodeId: "node-a", profile: "scout" });
   expect(response.probe?.state).toBe("completed");
   expect(response.status.verified).toBe(true);
   expect(JSON.stringify(response)).not.toContain(h.board.token);
-  expect(h.board.count("POST", "/channels")).toBe(2);
+  // Board makes a channel on its first post: the probe's task makes the probe channel, and nothing makes an empty one.
+  expect(h.board.count("POST", "/channels")).toBe(0);
   expect(h.rooms.get(vercelBoardRoomId("c1", "work"))).toMatchObject({ kind: "channel", participantIds: ["operator"], metadata: { vercelBoardChannel: "work" } });
 });
 
@@ -743,6 +744,47 @@ test("a mirrored channel's view is one query on the copy; an unmirrored one is o
   expect(status!.mirror.map(entry => [entry.channel, entry.state])).toEqual([["work", "mirrored"], ["notes", "not_mirrored"]]);
   expect(status!.mirror[0]).toMatchObject({ cursor: expect.any(String), messages: 1 });
   expect(h.live.every(event => event.payload.handoff.channel === "work")).toBe(true);
+});
+
+test("the board list names each board's channels and counts, no content, and is held briefly", async () => {
+  const h = serviceHarness();
+  await h.connect({ channels: ["work", "later"], mirror: ["work"] });
+  h.board.createTask({ channel: "work", text: "w" });
+  h.board.createTask({ channel: "team/other", text: "not followed" });
+  await h.service.pump("c1");
+  const list = await h.service.boards({ connectionId: "c1" });
+  expect(list.boards).toHaveLength(1);
+  const [only] = list.boards;
+  expect(only).toMatchObject({ id: "board", isDefault: true, connected: true, more: false });
+  expect(only!.channels).toEqual([
+    { channel: "scout/probe", messages: 1, followed: false, scratch: true },
+    { channel: "team/other", messages: 1, followed: false, scratch: false },
+    { channel: "work", messages: 1, followed: true, scratch: false, mirror: "mirrored", conversationId: vercelBoardRoomId("c1", "work") },
+    // Followed, but nothing has posted to it, so it is not on the board yet.
+    { channel: "later", followed: true, scratch: false, mirror: "not_mirrored", conversationId: vercelBoardRoomId("c1", "later") },
+  ]);
+  expect(JSON.stringify(list)).not.toContain("not followed");
+  const lists = () => h.board.requests.filter(request => request.method === "GET" && request.path === "/channels");
+  expect(lists()).toHaveLength(1);
+  expect(lists()[0]!.headers["x-board-can"]).toBe("*=read");
+  await h.service.boards({ connectionId: "c1" });
+  expect(lists()).toHaveLength(1);
+  h.time.advance(31_000);
+  await h.service.boards({ connectionId: "c1" });
+  expect(lists()).toHaveLength(2);
+});
+
+test("a channel the connection does not follow reads through Board, narrowed to read, when the caller names its board", async () => {
+  const h = serviceHarness();
+  await h.connect({ channels: ["work"] });
+  h.board.createTask({ channel: "team/other", text: "elsewhere" });
+  await expect(h.service.messages({ connectionId: "c1", channel: "team/other" })).rejects.toMatchObject({ code: "channel_not_followed" });
+  const view = await h.service.messages({ connectionId: "c1", board: "board", channel: "team/other" });
+  expect(view).toMatchObject({ board: "board", channel: "team/other", conversationId: null, state: "not_mirrored" });
+  expect(view.messages.map(message => [message.text, message.trust])).toEqual([["elsewhere", "board_source"]]);
+  const read = h.board.requests.filter(request => request.method === "GET" && request.path === "/messages").at(-1);
+  expect(read!.headers["x-board-can"]).toBe("*=read");
+  await expect(h.service.messages({ connectionId: "c1", board: "brd_elsewhere", channel: "team/other" })).rejects.toMatchObject({ code: "board_not_found" });
 });
 
 test("a refused credential while following moves the connection to auth_expired with the fix", async () => {
