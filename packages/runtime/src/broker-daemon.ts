@@ -2,8 +2,12 @@
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
 import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
+import { HubCollectorService } from "./hub/collector.js";
+import { ManagedAgentsPuller } from "./hub/managed-agents.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
+import { RoutineRunner } from "./routine-runner.js";
+import type { DurableCheckbackMetadata } from "@openscout/protocol";
 import type { PostAuthorNamer } from "./broker-posts-http.js";
 import { queryFeedWork } from "./feed-work.js";
 import { configuredOperatorActorIds } from "./conversations/legacy-ids.js";
@@ -13,7 +17,7 @@ import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
+import { REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -70,7 +74,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import { statSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 
@@ -126,6 +130,10 @@ import { BrokerDeliveryHttpService } from "./broker-delivery-http-service.js";
 import { BrokerDurableActionHttpService } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import { manualReviewOccurrenceOf } from "@openscout/protocol";
+import { ManualReviewBoardTickets } from "./manual-review-board-ticket.js";
+import { ManualReviewBoardService } from "./manual-review-board.js";
+import { ManualReviewBoardRoutineStore } from "./manual-review-board-routines.js";
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
 import { bootstrapSecretRedaction } from "./secret-redaction-bootstrap.js";
 import { applyRoleLifecycleForTerminalFlight } from "./role-lifecycle.js";
@@ -210,6 +218,7 @@ import {
 } from "./mesh-approvals.js";
 import { normalizeCodexAppServerLaunchArgs } from "./codex-app-server.js";
 import { WorkerSQLiteProjection } from "./sqlite-projection-worker.js";
+import { describeDependencyLinkReport, describeRuntimeFault, inspectDependencyLinks, lastDependencyLinkReport, recordDependencyLinkReport, runtimeCheckoutRoot } from "./dependency-links.js";
 import {
   ObservedSessionReducer,
   subscribeObservedSessionReducer,
@@ -431,6 +440,11 @@ const dbPath = join(controlHome, "control-plane.sqlite");
 const journalPath = join(controlHome, "broker-journal.jsonl");
 const historyDirectory = join(controlHome, "history");
 const historicalReader = new ControlPlaneHistoryReader(historyDirectory);
+/** Free space kept for durable writes; 256 MB unless `OPENSCOUT_STORAGE_MIN_FREE_MB` says otherwise. */
+function configuredStorageReserveBytes(value: string | undefined): number | undefined {
+  const megabytes = Number(value?.trim());
+  return value?.trim() && Number.isFinite(megabytes) && megabytes >= 0 ? megabytes * 1024 * 1024 : undefined;
+}
 const storageMonitor = new BrokerStorageMonitor(controlHome, {
   journal: { path: journalPath, warningBytes: 64 * 1024 * 1024 },
   database: { path: dbPath, warningBytes: 512 * 1024 * 1024 },
@@ -438,7 +452,7 @@ const storageMonitor = new BrokerStorageMonitor(controlHome, {
   historicalIndex: { path: join(historyDirectory, "catalog.sqlite"), warningBytes: 256 * 1024 * 1024 },
   quarantine: { path: `${journalPath}.quarantine.sqlite`, warningBytes: 64 * 1024 * 1024 },
   quarantineWal: { path: `${journalPath}.quarantine.sqlite-wal`, warningBytes: 64 * 1024 * 1024 },
-});
+}, { minimumFreeDiskBytes: configuredStorageReserveBytes(process.env.OPENSCOUT_STORAGE_MIN_FREE_MB) });
 const commandAdmission = new BrokerCommandAdmission({ pressure: () => storageMonitor.admissionPressure() });
 const port = Number.parseInt(
   process.env.OPENSCOUT_BROKER_PORT?.trim() || String(openScoutInstanceBootstrap.layout.ports.broker),
@@ -1082,7 +1096,41 @@ const manualReviewDispatch = new ManualReviewDispatchService({
   deliver: request => deliveryAcceptanceService.accept(request),
   readAskReceipt: (requesterId, requestId) => requestReceipts.get(requesterId, requestId, "deliver"),
 });
+// A Board review routine is a saved reviewer for one Board channel. A run
+// reads the board through the adapter below and then goes through the two
+// services above, like every other manual review.
+const manualReviewBoard = new ManualReviewBoardService({
+  routines: new ManualReviewBoardRoutineStore({
+    authorityCellId: nodeId,
+    runDurableWrite,
+    commitEntries: commitDurableEntries,
+    getDurableAction: (actionId) => journal.getDurableAction(actionId),
+    listDurableActions: (kind) => journal.listDurableActionsByKind(kind),
+  }),
+  occurrences: manualReviewOccurrences,
+  dispatch: manualReviewDispatch,
+  board: () => vercelBoardService,
+});
 const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
+const manualReviewBoardTickets = new ManualReviewBoardTickets({
+  work: id => journal.getCollaborationRecord(id),
+  occurrence: id => manualReviewOccurrenceOf(journal.getDurableAction(id)),
+  latestFlight: id => journal.newestFlightForWork(id),
+  lifecycle: work => workLifecycleRegistry.forRecord(work),
+  children: id => Object.values(runtime.peek().collaborationRecords).filter(
+    (record): record is import("@openscout/protocol").WorkItemRecord => record.kind === "work_item" && record.parentId === id,
+  ),
+  write: runDurableWrite,
+  commit: async (record, events) => {
+    await commitDurableEntries([
+      { kind: "collaboration.record", record },
+      ...events.map(event => ({ kind: "collaboration.event.record" as const, event })),
+    ], async () => {
+      await runtime.upsertCollaboration(record);
+      for (const event of events) await runtime.appendCollaborationEvent(event);
+    });
+  },
+});
 const workLifecycles = new BrokerWorkLifecycleService({
   registry: workLifecycleRegistry,
   durableStore,
@@ -1505,7 +1553,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY],
+  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, REPLY_POINTS_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
@@ -2518,6 +2566,15 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
 
 // The Vercel Board adapter. It runs every connection this host made; the
 // credential and claim tokens never leave this host.
+// Scout Hub: mirror cloud sessions sealed to this runtime. Idle until `scout hub init`.
+const hubCollector = process.env.OPENSCOUT_HUB_COLLECTOR === "0"
+  ? null
+  : new HubCollectorService({ log: (message) => console.warn(message) });
+// Claude Managed Agents: pull recent sessions with an API key. Idle until
+// `scout hub connect managed-agents`.
+const managedAgentsPuller = process.env.OPENSCOUT_HUB_MANAGED_AGENTS === "0"
+  ? null
+  : new ManagedAgentsPuller({ log: (message) => console.warn(message) });
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
@@ -3852,6 +3909,34 @@ function readFeedWork(read: Parameters<typeof queryFeedWork>[1]) {
   return queryFeedWork(feedWorkDb, read, configuredOperatorActorIds());
 }
 
+const postStore = new BrokerPostStore(join(supportDirectory, "posts"), nodeId);
+// Routines post as their owner, under the routine's title.
+const routineRunner = new RoutineRunner({
+  nodeId,
+  listActions: () => journal.listDurableActions(),
+  getAction: actionId => journal.getDurableAction(actionId),
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
+  post: ({ routine, text, links }) => {
+    const metadata = (routine.metadata ?? {}) as DurableCheckbackMetadata;
+    return postStore.post({
+      text, links,
+      currentDirectory: typeof metadata.currentDirectory === "string" ? metadata.currentDirectory : homedir(),
+      author: { agentId: typeof metadata.ownerId === "string" ? metadata.ownerId : operatorActorId, name: String(metadata.title ?? "Routine") },
+    });
+  },
+  facts: () => {
+    const snapshot = runtime.snapshot();
+    const flights = Object.values(snapshot.flights ?? {});
+    return {
+      nodeId,
+      agents: Object.keys(snapshot.agents ?? {}).length,
+      runningFlights: flights.filter(flight => flight.state === "running" || flight.state === "waiting").length,
+    };
+  },
+  log: line => console.log(line),
+});
+
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   workRetry,
@@ -3859,7 +3944,8 @@ const routeRequest = createBrokerHttpRouter({
   tasks: taskService,
   shows: { store: showStore, snapshot: () => runtime.snapshot() },
   searchSessionKnowledge: searchLocalSessionKnowledge,
-  posts: { store: new BrokerPostStore(join(supportDirectory, "posts"), nodeId), shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
+  posts: { store: postStore, shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
+  routines: { runner: routineRunner },
   feedWork: sqliteDisabled ? {} : { read: readFeedWork },
   attachments: {
     service: attachmentService, nodeId,
@@ -3956,6 +4042,8 @@ const routeRequest = createBrokerHttpRouter({
   durableActionHttpService,
   manualReviewOccurrences,
   manualReviewDispatch,
+  manualReviewBoard,
+  manualReviewBoardTickets,
   controlStreams,
   managedSessionHttpService,
   meshDiscoveryService,
@@ -4507,7 +4595,27 @@ function reportStorageHealthFlags(): void {
     ? `stopped at its scan budget after ${compaction.durationMs} ms; ${Math.round(compaction.sourceBytes / MB)} MB journal not compacted`
     : null);
   const maintenance = storageMaintenance.status();
-  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? maintenance.lastError ?? "failed" : null);
+  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? describeRuntimeFault(maintenance.lastError ?? "failed") : null);
+  reportDependencyLinks();
+}
+let dependencyLinksCheckedAt = 0;
+/** Another checkout's install can relink this checkout's packages while the runtime runs. */
+function reportDependencyLinks(): void {
+  const root = runtimeCheckoutRoot();
+  if (!root || process.env.OPENSCOUT_DEPENDENCY_LINK_GUARD === "0") return;
+  if (Date.now() - dependencyLinksCheckedAt >= 60_000) {
+    dependencyLinksCheckedAt = Date.now();
+    try {
+      const report = inspectDependencyLinks(root);
+      const repaired = report.escaped.filter(item => item.repaired).length;
+      if (repaired) console.warn(`[openscout-runtime] relinked ${repaired} dependency link(s) that pointed into another checkout`);
+      recordDependencyLinkReport(report);
+    } catch (error) {
+      console.warn("[openscout-runtime] dependency link check failed:", error);
+    }
+  }
+  const report = lastDependencyLinkReport();
+  healthResponder.report("dependencies", report ? describeDependencyLinkReport(report) : null);
 }
 const refreshStorageStatus = () => storageMonitor.refresh().then(reportStorageHealthFlags, (error) => {
   console.warn("[openscout-runtime] storage status refresh failed:", error);
@@ -4604,6 +4712,7 @@ function startBrokerCoordination(): void {
   startPresenceSampling();
   registerActiveScoutBrokerService(brokerService);
   peerDelivery.start();
+  routineRunner.start();
   setTimeout(recoverStartupWork, 0).unref();
 
   if (!meshInstanceRefusal) {
@@ -4673,6 +4782,8 @@ function startBrokerCoordination(): void {
 
   slackWorkerSupervisor?.start();
   void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
+  hubCollector?.start();
+  managedAgentsPuller?.start();
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4692,6 +4803,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   }
   shuttingDown = true;
   clearTimeout(projectionRetryTimer);
+  routineRunner.stop();
   hostKeepAwake?.stop();
   capabilityMatrixService.stop();
   tailscaleListenerGuard.stop();
@@ -4701,6 +4813,8 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
   await vercelBoardService?.stop();
+  await hubCollector?.stop();
+  await managedAgentsPuller?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });

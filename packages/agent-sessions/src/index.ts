@@ -147,3 +147,5 @@ export { createAdapter as createOpenclawAcpAdapter } from "./adapters/openclaw-a
 
 export { shapeAttentionContext, attentionContextBeforeBlock } from "./attention-context.js";
 export type { AttentionContext } from "./attention-context.js";
+
+export { claudeMirrorRoot, claudeProjectFolder, claudeProjectsRoot } from "./claude-projects.js";
