@@ -216,6 +216,7 @@ import {
 } from "./mesh-approvals.js";
 import { normalizeCodexAppServerLaunchArgs } from "./codex-app-server.js";
 import { WorkerSQLiteProjection } from "./sqlite-projection-worker.js";
+import { describeDependencyLinkReport, describeRuntimeFault, inspectDependencyLinks, lastDependencyLinkReport, recordDependencyLinkReport, runtimeCheckoutRoot } from "./dependency-links.js";
 import {
   ObservedSessionReducer,
   subscribeObservedSessionReducer,
@@ -436,6 +437,11 @@ const dbPath = join(controlHome, "control-plane.sqlite");
 const journalPath = join(controlHome, "broker-journal.jsonl");
 const historyDirectory = join(controlHome, "history");
 const historicalReader = new ControlPlaneHistoryReader(historyDirectory);
+/** Free space kept for durable writes; 256 MB unless `OPENSCOUT_STORAGE_MIN_FREE_MB` says otherwise. */
+function configuredStorageReserveBytes(value: string | undefined): number | undefined {
+  const megabytes = Number(value?.trim());
+  return value?.trim() && Number.isFinite(megabytes) && megabytes >= 0 ? megabytes * 1024 * 1024 : undefined;
+}
 const storageMonitor = new BrokerStorageMonitor(controlHome, {
   journal: { path: journalPath, warningBytes: 64 * 1024 * 1024 },
   database: { path: dbPath, warningBytes: 512 * 1024 * 1024 },
@@ -443,7 +449,7 @@ const storageMonitor = new BrokerStorageMonitor(controlHome, {
   historicalIndex: { path: join(historyDirectory, "catalog.sqlite"), warningBytes: 256 * 1024 * 1024 },
   quarantine: { path: `${journalPath}.quarantine.sqlite`, warningBytes: 64 * 1024 * 1024 },
   quarantineWal: { path: `${journalPath}.quarantine.sqlite-wal`, warningBytes: 64 * 1024 * 1024 },
-});
+}, { minimumFreeDiskBytes: configuredStorageReserveBytes(process.env.OPENSCOUT_STORAGE_MIN_FREE_MB) });
 const commandAdmission = new BrokerCommandAdmission({ pressure: () => storageMonitor.admissionPressure() });
 const port = Number.parseInt(
   process.env.OPENSCOUT_BROKER_PORT?.trim() || String(openScoutInstanceBootstrap.layout.ports.broker),
@@ -4576,7 +4582,27 @@ function reportStorageHealthFlags(): void {
     ? `stopped at its scan budget after ${compaction.durationMs} ms; ${Math.round(compaction.sourceBytes / MB)} MB journal not compacted`
     : null);
   const maintenance = storageMaintenance.status();
-  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? maintenance.lastError ?? "failed" : null);
+  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? describeRuntimeFault(maintenance.lastError ?? "failed") : null);
+  reportDependencyLinks();
+}
+let dependencyLinksCheckedAt = 0;
+/** Another checkout's install can relink this checkout's packages while the runtime runs. */
+function reportDependencyLinks(): void {
+  const root = runtimeCheckoutRoot();
+  if (!root || process.env.OPENSCOUT_DEPENDENCY_LINK_GUARD === "0") return;
+  if (Date.now() - dependencyLinksCheckedAt >= 60_000) {
+    dependencyLinksCheckedAt = Date.now();
+    try {
+      const report = inspectDependencyLinks(root);
+      const repaired = report.escaped.filter(item => item.repaired).length;
+      if (repaired) console.warn(`[openscout-runtime] relinked ${repaired} dependency link(s) that pointed into another checkout`);
+      recordDependencyLinkReport(report);
+    } catch (error) {
+      console.warn("[openscout-runtime] dependency link check failed:", error);
+    }
+  }
+  const report = lastDependencyLinkReport();
+  healthResponder.report("dependencies", report ? describeDependencyLinkReport(report) : null);
 }
 const refreshStorageStatus = () => storageMonitor.refresh().then(reportStorageHealthFlags, (error) => {
   console.warn("[openscout-runtime] storage status refresh failed:", error);

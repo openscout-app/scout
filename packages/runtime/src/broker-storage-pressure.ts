@@ -36,7 +36,12 @@ type StorageStatus = {
 export class BrokerStorageMonitor {
   private current: StorageStatus = { checkedAt: null, files: {}, freeDiskBytes: null, minimumFreeDiskBytes: 256 * 1024 * 1024, state: "unknown" };
   private refreshing: Promise<void> | null = null;
-  constructor(private readonly directory: string, private readonly paths: Record<string, { path: string; warningBytes: number }>) {}
+  constructor(private readonly directory: string, private readonly paths: Record<string, { path: string; warningBytes: number }>,
+    options: { minimumFreeDiskBytes?: number } = {}) {
+    if (options.minimumFreeDiskBytes !== undefined && Number.isFinite(options.minimumFreeDiskBytes) && options.minimumFreeDiskBytes >= 0) {
+      this.current = { ...this.current, minimumFreeDiskBytes: options.minimumFreeDiskBytes };
+    }
+  }
   status(): StorageStatus { return this.current; }
   admissionPressure(): string | null { return this.current.state === "critical" ? "available disk space is below the durable-write reserve" : null; }
   refresh(): Promise<void> {
