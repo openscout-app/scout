@@ -31,6 +31,7 @@ export * from "./agent-runs.js";
 export * from "./budget.js";
 export * from "./agent-broker-feed.js";
 export * from "./durable-actions.js";
+export * from "./manual-review-occurrences.js";
 export * from "./observed-status.js";
 export * from "./presence.js";
 export * from "./activity.js";
