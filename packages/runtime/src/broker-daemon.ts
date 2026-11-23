@@ -2,6 +2,8 @@
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
 import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
+import { HubCollectorService } from "./hub/collector.js";
+import { ManagedAgentsPuller } from "./hub/managed-agents.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
 import { RoutineRunner } from "./routine-runner.js";
@@ -15,7 +17,7 @@ import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
+import { REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -33,7 +35,7 @@ import { meshDiagnostics } from "./mesh-diagnostics.js";
 import { tailscaleStatusProbe } from "./system-probes/tailscale-status.js";
 import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
-import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
+import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
@@ -371,6 +373,7 @@ import {
   isInactiveLocalAgent,
 } from "./broker-endpoint-selection.js";
 import { readMeshNodeState } from "./mesh-node-state.js";
+import { searchLocalSessionKnowledge } from "./knowledge/session-search.js";
 import { BrokerHomeService } from "./broker-home-service.js";
 import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 import { BrokerUnavailableTargetService, localEndpointCanReceive, localEndpointSupportsQueue } from "./broker-unavailable-target-service.js";
@@ -1550,7 +1553,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
+  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, REPLY_POINTS_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
@@ -2563,6 +2566,15 @@ async function cancelBoardFlight(flightId: string, reason: string): Promise<void
 
 // The Vercel Board adapter. It runs every connection this host made; the
 // credential and claim tokens never leave this host.
+// Scout Hub: mirror cloud sessions sealed to this runtime. Idle until `scout hub init`.
+const hubCollector = process.env.OPENSCOUT_HUB_COLLECTOR === "0"
+  ? null
+  : new HubCollectorService({ log: (message) => console.warn(message) });
+// Claude Managed Agents: pull recent sessions with an API key. Idle until
+// `scout hub connect managed-agents`.
+const managedAgentsPuller = process.env.OPENSCOUT_HUB_MANAGED_AGENTS === "0"
+  ? null
+  : new ManagedAgentsPuller({ log: (message) => console.warn(message) });
 const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   nodeId,
   operatorId: operatorActorId,
@@ -3931,6 +3943,7 @@ const routeRequest = createBrokerHttpRouter({
   derivedRecords,
   tasks: taskService,
   shows: { store: showStore, snapshot: () => runtime.snapshot() },
+  searchSessionKnowledge: searchLocalSessionKnowledge,
   posts: { store: postStore, shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
   routines: { runner: routineRunner },
   feedWork: sqliteDisabled ? {} : { read: readFeedWork },
@@ -4769,6 +4782,8 @@ function startBrokerCoordination(): void {
 
   slackWorkerSupervisor?.start();
   void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
+  hubCollector?.start();
+  managedAgentsPuller?.start();
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4798,6 +4813,8 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
   await vercelBoardService?.stop();
+  await hubCollector?.stop();
+  await managedAgentsPuller?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });

@@ -1,4 +1,4 @@
-import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, SCOUT_TASKS_CAPABILITY, agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
+import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY,agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -5986,6 +5986,10 @@ export async function replyToScoutTask(input: ScoutTaskReply): Promise<unknown> 
   const baseUrl = resolveScoutBrokerUrl();
   const node = await brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node);
   if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before replying`);
+  // An older runtime accepts the reply but drops points it does not know.
+  if (input.points?.length && !node.capabilities.includes(REPLY_POINTS_CAPABILITY)) {
+    throw new Error(`Broker does not advertise ${REPLY_POINTS_CAPABILITY}; send the reply without points or upgrade the runtime`);
+  }
   return brokerPostJson(baseUrl, "/v1/messages/reply", input);
 }
 

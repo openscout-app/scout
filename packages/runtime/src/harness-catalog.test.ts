@@ -22,7 +22,7 @@ describe("harness catalog", () => {
   test("built-in catalog contains the current supported external harnesses", () => {
     const entries = createBuiltInHarnessCatalog();
 
-    expect(entries.map((entry) => entry.name)).toEqual(["claude", "grok", "codex", "grok-acp", "kimi", "opencode", "cursor", "devin", "flue", "pi"]);
+    expect(entries.map((entry) => entry.name)).toEqual(["claude", "grok", "codex", "grok-acp", "kimi", "opencode", "cursor", "antigravity", "devin", "flue", "pi"]);
     expect(entries.find((entry) => entry.name === "claude")?.support.collaboration).toBe(true);
     expect(entries.find((entry) => entry.name === "codex")?.support.workspace).toBe(true);
     expect(entries.find((entry) => entry.name === "claude")?.sessionDefaults).toEqual({
@@ -35,6 +35,12 @@ describe("harness catalog", () => {
     expect(entries.find((entry) => entry.name === "opencode")?.metadata?.adapterType).toBe("opencode-acp");
     expect(entries.find((entry) => entry.name === "opencode")?.sessionDefaults).toEqual({
       defaultTransport: "opencode_acp",
+    });
+    expect(findHarnessEntry("agy")).toMatchObject({
+      harness: "antigravity",
+      install: { binary: "agy" },
+      sessionDefaults: { defaultTransport: "antigravity_acp" },
+      readiness: { healthcheckCommand: "agy models", loginCommand: "agy acp --login" },
     });
     expect(entries.find((entry) => entry.name === "devin")?.metadata?.adapterType).toBe("devin-acp");
     expect(entries.find((entry) => entry.name === "devin")?.sessionDefaults).toEqual({

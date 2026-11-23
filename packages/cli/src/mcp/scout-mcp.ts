@@ -1,6 +1,6 @@
 import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
-import { parseRosterAddress, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
+import { parseRosterAddress, REPLY_POINTS_CAPABILITY, REPLY_POINT_LIMITS,REPLY_POINT_STANCES, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
 import { readTaskImage } from "../cli/task-image.ts";
 import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
 import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
@@ -2192,7 +2192,7 @@ function parseStartTargetLabel(
   }
 
   const label = rawLabel.replace(/^@+/, "");
-  const harnessMatch = label.match(/(?:#|harness:)(claude|codex|cursor|devin|grok|kimi|opencode|pi)\b/i);
+  const harnessMatch = label.match(/(?:#|harness:)(claude|codex|cursor|antigravity|devin|grok|kimi|opencode|pi)\b/i);
   const shorthandModelMatch = label.match(/\?([^#\s.]+)/);
   const qualifiedModelMatch = label.match(/(?:^|\.)model:([^#?\s.]+)/i);
   const base = label
@@ -4166,7 +4166,7 @@ export function createScoutMcpServer(options: {
 
   server.registerTool("reply", {
     title: "Reply",
-    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    description: "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. points states what the reply does: each point is a claim, agree, concede, dispute, or question for the operator, optionally answering another point by id (re) and naming the question it is about (about). While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     inputSchema: z.object({
       requestId: z.string().min(1).max(256).optional().describe("Reuse after an uncertain receipt."),
       ref: z.string().min(1).optional(), to: z.string().min(1).optional(),
@@ -4176,20 +4176,32 @@ export function createScoutMcpServer(options: {
       waitingOn: z.object({ kind: z.enum(["permission", "question", "review"]), summary: z.string().trim().min(1).max(500),
         requestRef: z.string().min(1).optional().describe("The request that unblocks the work: a permission request, question, or task ref.") })
         .strict().optional().describe("Blocked: the task stays open, its flight waits on this."),
+      points: z.array(z.object({
+        stance: z.enum(REPLY_POINT_STANCES).describe("claim, agree, concede, dispute, or question (a question for the operator)."),
+        text: z.string().trim().min(1).max(REPLY_POINT_LIMITS.text),
+        re: z.string().min(1).max(REPLY_POINT_LIMITS.re).optional().describe("The id of the point this one answers."),
+        about: z.string().min(1).max(REPLY_POINT_LIMITS.about).optional().describe("A short lowercase key for the question, shared with the other agents, such as home-source."),
+      }).strict()).max(REPLY_POINT_LIMITS.count).optional().describe("Typed points the reply makes. The result returns each point's id."),
       body: z.string().trim().min(1),
       senderId: z.string().optional(), currentDirectory: z.string().optional(),
       image: z.string().optional().describe("Local image path."), attachments: attachmentsInputSchema,
     }).strict(),
     annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false },
-  }, async ({ requestId, ref, to, progress, failed, waitingOn, body, senderId, currentDirectory, image, attachments, sessionId, deliveryId, replyToken }) => {
-    validateTaskReply({ ref, to, progress, failed, waitingOn });
+  }, async ({ requestId, ref, to, progress, failed, waitingOn, points, body, senderId, currentDirectory, image, attachments, sessionId, deliveryId, replyToken }) => {
+    validateTaskReply({ ref, to, progress, failed, waitingOn, points });
     if (sessionId || deliveryId || replyToken) {
       if (waitingOn) throw new Error("waitingOn is not available on external mailbox replies");
       if (!ref || !sessionId || !deliveryId)
         throw new Error("external reply requires the task ref and its exact sessionId/deliveryId return address");
+      if (points?.length) {
+        const node = await aliasBrokerRequest<{ capabilities?: string[] }>("/v1/node");
+        if (!node.capabilities?.includes(REPLY_POINTS_CAPABILITY)) {
+          throw new Error(`Broker does not advertise ${REPLY_POINTS_CAPABILITY}; send the reply without points or upgrade the runtime`);
+        }
+      }
       const ownerId = await resolveMcpSenderId(deps, undefined, options.defaultCurrentDirectory, env);
       const result = await aliasBrokerRequest("/v1/external-sessions/reply", {
-        method: "POST", body: JSON.stringify({ ownerId, sessionId, deliveryId, replyToken, body, ref,
+        method: "POST", body: JSON.stringify({ ownerId, sessionId, deliveryId, replyToken, body, ref, ...(points ? { points } : {}),
           requestId: requestId ?? `external-${createHash("sha256").update(JSON.stringify([deliveryId, progress ? ["progress", body] : ["final"]])).digest("hex")}`, progress, failed,
           ...(image ? { image: await readTaskImage(resolve(options.defaultCurrentDirectory ?? process.cwd(), image)) } : {}),
           ...(attachments ? { attachments: attachments.map((a, index) => ({ ...a, id: `attachment-${index}` })) } : {}) }),
@@ -4199,7 +4211,7 @@ export function createScoutMcpServer(options: {
     const directory = resolveToolCurrentDirectory(currentDirectory, options.defaultCurrentDirectory);
     const actor = await resolveMcpSenderId(deps, senderId, directory, env);
     const result = await deps.replyTask({ requestId: requestId ?? `reply-${randomUUID()}`, senderId: actor,
-      ref, to, progress, failed, body, ...(waitingOn ? { waitingOn } : {}),
+      ref, to, progress, failed, body, ...(waitingOn ? { waitingOn } : {}), ...(points ? { points } : {}),
       ...(image ? { image: await readTaskImage(resolve(directory, image)) } : {}),
       ...(attachments ? { attachments: attachments.map((attachment, index) => ({ ...attachment, id: `attachment-${index}` })) } : {}) });
     return { content: createTextContent(result) };

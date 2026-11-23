@@ -59,6 +59,7 @@ work item. The runtime is the only writer.
 | Progress | `reply --ref <task> --progress "update"` | `reply({ref, progress: true, body})` |
 | Failure | `reply --ref <task> --failed "reason"` | `reply({ref, failed: true, body})` |
 | Conversation reply only | `reply --to <message> "answer"` | `reply({to: message, body})` |
+| Typed points on any reply | `reply --ref <task> --point "dispute[re=<id>,about=<key>]: text" "answer"` | `reply({ref, body, points: [{stance, text, re?, about?}]})` |
 
 Routing modes are exclusive. CLI `--to` can repeat for independent tasks and
 per-target receipts. Unknown flags are errors, not body text. `--image`
@@ -77,6 +78,18 @@ a successor; conversation participants may add context. Only the current
 recipient may answer. The first final wins; progress updates the work record
 without closing it. If the ask requires a task reply, only a final reply by ref completes it;
 otherwise the harness final is already the answer: never answer twice.
+
+A reply may carry typed points, so a reader sees what it does to the discussion
+without reading the prose. A point's stance is `claim`, `agree`, `concede`,
+`dispute`, or `question` (a question for the operator). `re` names the point it
+answers, by the id an earlier reply printed; `about` is a short lowercase key
+for the question, shared by the agents in the discussion. The runtime stores
+points on the reply message as `metadata.replyPoints` (`version: 1`), numbers
+them `<messageId>#<n>`, and returns them in the receipt. Only the runtime
+writes that key. A retry with the same request ID must carry the same points.
+A question point does not block the task; use `--waiting-on question` to
+block. Points need `reply-points/1` on the task home; an older home refuses
+them. Up to 24 points per reply, 500 characters each.
 
 `--continue-for` and `--join-to` remain active-parent completion obligations.
 Neither combines with successor `--continue`. `work_update` is for work that

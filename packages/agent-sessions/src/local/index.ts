@@ -10,6 +10,7 @@ import { createAdapter as createOpencodeAcpAdapter } from "../adapters/opencode-
 import { createAdapter as createOpencodeV2Adapter } from "../adapters/opencode-v2/index.js";
 import { findOpenCodeV2Binary } from "../adapters/opencode-v2/binary.js";
 import { createAdapter as createOpenclawAcpAdapter } from "../adapters/openclaw-acp/index.js";
+import { createAdapter as createAntigravityAcpAdapter } from "../adapters/antigravity-acp/adapter.js";
 import { createAdapter as createDevinAcpAdapter } from "../adapters/devin-acp/index.js";
 import { createAdapter as createPiAdapter } from "../adapters/pi/index.js";
 import type { SequencedEvent } from "../buffer.js";
@@ -75,8 +76,8 @@ export type {
 } from "./transports/codex-app-server.js";
 import { scoutStateHome } from "../scout-state-paths.js";
 
-export type LocalAgentHarness = "codex" | "pi" | "grok" | "grok-acp" | "kimi" | "cursor" | "opencode" | "devin" | "openclaw";
-export type LocalAgentResolvedHarness = "codex" | "pi" | "grok" | "kimi" | "cursor" | "opencode" | "devin" | "openclaw";
+export type LocalAgentHarness = "codex" | "pi" | "grok" | "grok-acp" | "kimi" | "cursor" | "opencode" | "devin" | "antigravity" | "openclaw";
+export type LocalAgentResolvedHarness = "codex" | "pi" | "grok" | "kimi" | "cursor" | "opencode" | "devin" | "antigravity" | "openclaw";
 export type LocalAgentTransport =
   | "codex_app_server"
   | "pi_rpc"
@@ -85,6 +86,7 @@ export type LocalAgentTransport =
   | "cursor_acp"
   | "opencode_acp"
   | "opencode_v2"
+  | "antigravity_acp"
   | "devin_acp"
   | "openclaw_acp";
 export type LocalAgentWarmth = "warm" | "lazy";
@@ -218,6 +220,10 @@ function resolveLocalTransport(
   harness: LocalAgentResolvedHarness,
   requested: LocalAgentTransport | undefined,
 ): LocalAgentTransport {
+  if (harness === "antigravity") {
+    if (requested && requested !== "antigravity_acp") throw new Error(`Local harness antigravity does not support transport ${requested}.`);
+    return "antigravity_acp";
+  }
   const defaultTransport: LocalAgentTransport = harness === "codex"
     ? "codex_app_server"
     : harness === "pi"
@@ -319,6 +325,8 @@ function adapterSpecForTransport(transport: LocalAgentTransport): LocalAdapterSp
     };
   }
 
+  if (transport === "antigravity_acp") return { adapterType: "antigravity-acp", createAdapter: createAntigravityAcpAdapter };
+
   if (transport === "devin_acp") {
     return {
       adapterType: "devin-acp",
@@ -337,6 +345,7 @@ function localSessionName(harness: LocalAgentResolvedHarness): string {
   if (harness === "pi") return "Local Pi";
   if (harness === "grok") return "Local Grok ACP";
   if (harness === "kimi") return "Local Kimi Code ACP";
+  if (harness === "antigravity") return "Google Antigravity";
   if (harness === "devin") return "Local Devin ACP";
   return harness === "opencode" ? "Local OpenCode" : "Local Cursor ACP";
 }
@@ -371,9 +380,8 @@ function buildAdapterOptions(options: {
     ...(options.transport === "opencode_acp" && options.model ? { model: options.model } : {}),
     // V2 takes `provider/model#variant` and sets it on the new native session.
     ...(options.transport === "opencode_v2" && options.model ? { model: options.model } : {}),
-    // Devin selects the model at process launch; its adapter turns this into
-    // a `devin acp --model <id>` argument.
-    ...(options.transport === "devin_acp" && options.model ? { model: options.model } : {}),
+    // Devin applies this model at launch. Antigravity confirms it on the ACP session.
+    ...((options.transport === "devin_acp" || options.transport === "antigravity_acp") && options.model ? { model: options.model } : {}),
   };
 }
 
