@@ -263,6 +263,23 @@ describe("Scoutbot read-only session tools", () => {
     await client.callTool({ name: "sessions_search", arguments: { query: "build", project: "openscout", harness: "codex", hours: 12, limit: 3 } });
     expect(requested).toMatchObject({ q: "build", facets: { project: "openscout", harness: "codex" }, limit: 3, sourceKinds: ["sessions"], sourceUpdatedAfterMs: expect.any(Number) });
   });
+  test("on runs the query on another host and labels hits with that host, never local liveness", async () => {
+    const asked: unknown[] = [];
+    const client = await clientFor(dependencies({
+      openStore: () => { throw new Error("must not open the local index"); },
+      readInventory: async () => { throw new Error("must not load local inventory"); },
+      searchOnHost: async (machine, input) => {
+        asked.push([machine, input]);
+        return { nodeId: "mini-openscout", nodeName: "mini", local: false, query: input.query, mode: "lexical", coverage: warmed, searchedHours: 72, hitCount: 1, hits: [hit] };
+      },
+    }));
+    const result = await client.callTool({ name: "sessions_search", arguments: { query: "build", harness: "codex", on: "mini-openscout" } });
+    expect(asked).toEqual([["mini-openscout", { query: "build", harness: ["codex"], hours: 72, limit: 8, narrowToWarmed: true }]]);
+    expect(result.structuredContent).toMatchObject({ host: { nodeId: "mini-openscout", local: false }, results: [{ nodeId: "mini-openscout", identity: null, state: "unknown", actions: [] }] });
+    const failed = await (await clientFor(dependencies({ searchOnHost: async () => { throw new Error("HTTP 404"); } })))
+      .callTool({ name: "sessions_search", arguments: { query: "build", on: "mini" } });
+    expect(failed.isError).toBe(true);
+  });
   test("inventory keeps unknown surfaces non-attachable and applies literal query bounds", async () => {
     const client = await clientFor(dependencies({ readInventory: async () => ({ sessions: [], terminals: [
       { id: "ts-unknown", harness: "codex", sourceSessionId: "native-2", cwd: "/wanted", resumeCommand: "", createdAt: 1, updatedAt: 2, surfaces: [{ backend: "tmux", sessionName: "worker", paneId: null, attachCommand: [], observeCommand: null, relay: { backend: "tmux", sessionName: "worker" } }] },

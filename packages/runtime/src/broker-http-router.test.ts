@@ -295,6 +295,28 @@ describe("createBrokerHttpRouter", () => {
     expect(queries[1]).toEqual({});
   });
 
+  test("mesh session search answers one bounded query over this host's index and refuses guests", async () => {
+    const inputs: unknown[] = [];
+    const harness = createHarness({
+      searchSessionKnowledge: (input) => {
+        inputs.push(input);
+        return { query: input.query, mode: "lexical", coverage: { kind: "bounded", suggestion: "" }, searchedHours: input.hours ?? null, hitCount: 0, hits: [] };
+      },
+    });
+    const ok = await requestRouter(harness, "GET", "/v1/mesh/knowledge/search?q=release%20notes&harness=codex&hours=48&limit=5&narrow=1",
+      { transportContext: { transport: "remote" } });
+    expect(ok.response.status).toBe(200);
+    expect(ok.body).toMatchObject({ nodeId: "node-1", query: "release notes", mode: "lexical" });
+    expect(inputs[0]).toEqual({ query: "release notes", harness: ["codex"], hours: 48, limit: 5, narrowToWarmed: true });
+    const bad = await requestRouter(harness, "GET", "/v1/mesh/knowledge/search?q=x&limit=500");
+    expect(bad.response.status).toBe(400);
+    const guest = await requestRouter(harness, "GET", "/v1/mesh/knowledge/search?q=x", { transportContext: { transport: "remote", guest: true } });
+    expect(guest.response.status).toBe(403);
+    expect(inputs).toHaveLength(1);
+    const absent = await requestRouter(createHarness(), "GET", "/v1/mesh/knowledge/search?q=x");
+    expect(absent.response.status).toBe(404);
+  });
+
   test("requestId dedupes ask/send acceptance at the broker and exposes the original receipt", async () => {
     const directory = mkdtempSync(join(tmpdir(), "broker-keyed-deliver-"));
     const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory) });

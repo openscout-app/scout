@@ -92,6 +92,7 @@ const expectedRouteInventory = [
   "GET /v1/mesh/bridge",
   "GET /v1/mesh/diagnostics",
   "GET /v1/mesh/invocations/:id/stream",
+  "GET /v1/mesh/knowledge/search",
   "GET /v1/mesh/node-state",
   "GET /v1/mesh/nodes",
   "GET /v1/mesh/snapshot",

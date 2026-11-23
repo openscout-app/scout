@@ -8,6 +8,7 @@ import {
   type KnowledgeWarmSpan,
 } from "@openscout/runtime";
 
+import { searchSessionsOnMachine } from "../../lib/core/mesh/session-search.ts";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 
@@ -20,7 +21,7 @@ Indexing is explicit (not ambient). Warm a span, then query the built FTS index.
 Usage:
   scout search status
   scout search index [--source sessions] [--days N | --hours N] [--harness <id>] [--limit N] [--force]
-  scout search query <text> [--harness <id>] [--project <name>] [--limit N] [--hours N | --days N]
+  scout search query <text> [--harness <id>] [--project <name>] [--limit N] [--hours N | --days N] [--on <host>]
 
 Options:
   --source sessions     Only sessions is implemented for the first product slice
@@ -29,6 +30,9 @@ Options:
   --harness <id>        Filter by harness (codex, claude, kimi). Repeatable.
   --project <name>      Query facet filter on project basename
   --limit N             Index discovery cap or query hit limit
+  --on <host>           Run the query on another host in this mesh, over that
+                        host's own index (scout hosts lists them; use the node
+                        id when a name matches more than one)
   --force               Re-index even when content hash matches
 
 Examples:
@@ -36,6 +40,7 @@ Examples:
   scout search status
   scout search query "iOS build steps" --harness kimi --hours 12
   scout search query xcodebuild --harness kimi --project openscout --json
+  scout search query "release notes" --on build-host-openscout --days 7
 `;
 
 function takeFlagValue(args: string[], index: number, flag: string): { value: string; nextIndex: number } {
@@ -307,9 +312,16 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
   let limit = 20;
   let hours: number | undefined;
   let days: number | undefined;
+  let on: string | undefined;
 
   for (let i = 0; i < rest.length; i += 1) {
     const current = rest[i]!;
+    if (current === "--on" || current.startsWith("--on=")) {
+      const taken = takeFlagValue(rest, i, "--on");
+      on = taken.value;
+      i = taken.nextIndex;
+      continue;
+    }
     if (current === "--project" || current.startsWith("--project=")) {
       const taken = takeFlagValue(rest, i, "--project");
       project = taken.value;
@@ -343,6 +355,11 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
   const q = queryParts.join(" ").trim();
   if (!q) {
     throw new ScoutCliError("search query requires text (try: scout search query \"…\")");
+  }
+
+  if (on) {
+    await runRemoteQuery(context, on, { q, harness, project, limit, hours: hours ?? (days != null ? days * 24 : undefined) });
+    return;
   }
 
   const facets: Record<string, string | string[]> = {};
@@ -435,6 +452,39 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
   } finally {
     store.close();
   }
+}
+
+async function runRemoteQuery(
+  context: ScoutCommandContext,
+  machine: string,
+  input: { q: string; harness: string[]; project?: string; limit: number; hours?: number },
+): Promise<void> {
+  if (input.hours !== undefined && input.hours > 720) throw new ScoutCliError("--on searches at most 720 hours (30 days)");
+  let result: Awaited<ReturnType<typeof searchSessionsOnMachine>>;
+  try {
+    result = await searchSessionsOnMachine(machine, {
+      query: input.q,
+      ...(input.harness.length ? { harness: input.harness } : {}),
+      ...(input.project ? { project: input.project } : {}),
+      ...(input.hours !== undefined ? { hours: input.hours } : {}),
+      limit: Math.min(input.limit, 20),
+    });
+  } catch (error) {
+    throw new ScoutCliError(`search on ${machine} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const host = `${result.nodeName ?? result.nodeId} (${result.nodeId})`;
+  context.output.writeValue(result, (value) => {
+    const covered = value.coverage.kind === "warmed" || value.coverage.kind === "bounded";
+    if (!covered) {
+      return [
+        `No search run for ${JSON.stringify(value.query)} on ${host}: that host's index does not cover this query.`,
+        ...formatCoverageNote(value.coverage),
+      ].join("\n");
+    }
+    const header = [`${value.hitCount} hit(s) for ${JSON.stringify(value.query)} on ${host}`, ...formatCoverageNote(value.coverage)];
+    if (value.hits.length === 0) return [...header, "", "Warmed on that host, but no matching chunks."].join("\n");
+    return [...header, "", ...value.hits.map((hit, index) => formatHit(hit, index))].join("\n");
+  });
 }
 
 export function renderSearchCommandHelp(): string {
