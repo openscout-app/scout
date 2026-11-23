@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -23,7 +23,7 @@ import { FileBackedBrokerJournal } from "./broker-journal.js";
 import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
 import { ManualReviewBoardService } from "./manual-review-board.js";
 import { ManualReviewBoardError, ManualReviewBoardRoutineStore, manualReviewBoardRoutineActionId } from "./manual-review-board-routines.js";
-import { ManualReviewDispatchError, ManualReviewDispatchService, manualReviewAskRequestId, manualReviewWorkId } from "./manual-review-dispatch.js";
+import { ManualReviewDispatchError, ManualReviewDispatchService, manualReviewAskRequestId, manualReviewDeliveryGuard, manualReviewWorkId } from "./manual-review-dispatch.js";
 import { ManualReviewOccurrenceService, manualReviewOccurrenceId } from "./manual-review-occurrences.js";
 import { ManualReviewProjectError, canonicalManualReviewProject, readManualReviewProjectHead } from "./manual-review-project.js";
 import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteTransactionalDatabase } from "./sqlite-adapter.js";
@@ -58,6 +58,8 @@ type World = {
   deliverAttempts: number;
   /** Stops the ask path once: before it accepts the ask, or after. */
   failDelivery?: "before_accept" | "after_accept";
+  pauseItemRead?: () => Promise<void>;
+  protectItemRead?: boolean;
 };
 
 async function createWorld(channels = ["work", "ops"]): Promise<World> {
@@ -66,9 +68,17 @@ async function createWorld(channels = ["work", "ops"]): Promise<World> {
   migrateControlPlaneDatabaseSchema(database);
   cleanup.push(() => database.close?.());
   const records = new Map<string, CollaborationRecord>();
+  const controls: Pick<World, "pauseItemRead" | "protectItemRead"> = {};
   const boardService = new BrokerVercelBoardService({
     nodeId: NODE, operatorId: "operator", database, connectionsDirectory: createRoot(), autoStart: false,
-    fetch: (url, init) => board.fetch(String(url), init),
+    fetch: async (url, init) => {
+      const response = await board.fetch(String(url), init);
+      if (!/\/messages\/[^/]+$/.test(new URL(String(url)).pathname)) return response;
+      if (controls.pauseItemRead) await controls.pauseItemRead();
+      if (!controls.protectItemRead || !response.ok) return response;
+      const body = await response.json();
+      return Response.json({ ...body, message: { ...body.message, noSync: true } });
+    },
     vercelBoardWorker: { node: "/nonexistent/node" },
     credentialOptions: { env: { VERCEL_BOARD_TEST_TOKEN: board.token } },
     recordWork: async (record, options) => { records.set(record.id, options?.reconcile ? options.reconcile(records.get(record.id), record) : record); },
@@ -85,7 +95,7 @@ async function createWorld(channels = ["work", "ops"]): Promise<World> {
   });
   cleanup.push(() => { void boardService.stop(); });
   await boardService.connect({ url: BOARD_URL, id: "c1", channels, credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" } });
-  return { board, boardService, heads: new Map([[PROJECT, HEAD]]), asks: new Map(), deliverAttempts: 0 };
+  return Object.assign(controls, { board, boardService, heads: new Map([[PROJECT, HEAD]]), asks: new Map(), deliverAttempts: 0 });
 }
 
 /** The journal and writer as the broker wires them, in front of the real occurrence and dispatch services. */
@@ -117,6 +127,7 @@ async function openRuntime(root: string, world: World) {
       if (failure === "before_accept") throw new Error("the broker stopped before acceptance");
       let accepted = world.asks.get(request.requestId!);
       if (!accepted) {
+        (request as ScoutDeliverRequest & { [manualReviewDeliveryGuard]?: () => void })[manualReviewDeliveryGuard]?.();
         const flightId = `flight-${world.asks.size + 1}`;
         accepted = {
           request,
@@ -402,14 +413,25 @@ describe("Board review run", () => {
       caller: { actorId: "operator" },
       target: { kind: "project_path", projectPath: PROJECT },
       execution: { harness: "codex", session: "new" },
-      workItem: { id: manualReviewWorkId(occurrenceId) },
+      workItem: { id: manualReviewWorkId(occurrenceId), acceptanceState: "pending" },
     });
+    const ask = world.asks.get(manualReviewAskRequestId(occurrenceId))!.request;
+    const path = JSON.parse(ask.body.match(/this local file: (".*")\./)![1]!) as string;
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, "utf8")).toBe("> Please review the release branch\n");
+    for (const value of [ask, first, runtime.journal.getDurableAction(occurrenceId)]) {
+      expect(JSON.stringify(value)).not.toContain("Please review the release branch");
+      expect(JSON.stringify(value)).not.toContain(world.board.token);
+    }
     // The stable scope reads the run back through the ordinary occurrence lookup.
     expect(runtime.occurrences.lookup({ scope: "board-review:nightly-review", requestId: "run-1" })).toEqual(first.occurrence);
 
-    // A retry is answered from the record, even after the routine is disabled and the connection stops.
-    await runtime.review.save(routineSave({ enabled: false, expectedVersion: 1 }), OPERATOR);
+    // A retry is answered from the record, even if we disable the routine
+    // after losing both its connection and its project.
+    world.heads.delete(PROJECT);
     await world.boardService.stop();
+    expect(await runtime.review.save(routineSave({ enabled: false, expectedVersion: 1 }), OPERATOR))
+      .toMatchObject({ routine: { enabled: false, version: 2, projectPath: PROJECT } });
     const retries = await boardRequestsDuring(world, async () => {
       expect(await runtime.review.run(run, OPERATOR)).toEqual({ occurrence: first.occurrence, ticket: first.ticket, replayed: true });
     });
@@ -511,10 +533,9 @@ describe("Board review run", () => {
     await runtime.close();
   });
 
-  test("a restart recovers the admitted run with its own ticket and reads the board no further", async () => {
+  test("an admitted retry recovers an accepted ask while disabled but cannot start fresh work under a changed grant", async () => {
     for (const failure of ["after_accept", "before_accept"] as const) {
       const world = await createWorld();
-      world.heads.set("/projects/other", NEXT_HEAD);
       const root = createRoot();
       const before = await openRuntime(root, world);
       await before.review.save(routineSave(), OPERATOR);
@@ -528,37 +549,85 @@ describe("Board review run", () => {
       expect(before.occurrences.lookup({ scope: "board-review:nightly-review", requestId: "run-1" })?.state).toBe("admitted");
       await before.close();
 
-      // While the runtime was down the item changed, the commit moved, and the routine was saved for another reviewer.
-      world.board.editAsOther(itemId, "Edited after the run was admitted");
-      world.heads.set(PROJECT, NEXT_HEAD);
       const after = await openRuntime(root, world);
-      await after.review.save(routineSave({ projectPath: "/projects/other", harness: "claude", expectedVersion: 1 }), OPERATOR);
-
-      let recovered!: Awaited<ReturnType<typeof after.review.run>>;
       const requests = await boardRequestsDuring(world, async () => {
-        // A disabled routine finishes nothing, and reads nothing.
-        await after.review.save(routineSave({ projectPath: "/projects/other", harness: "claude", enabled: false, expectedVersion: 2 }), OPERATOR);
-        expect((await refusalOf(after.review.run(run, OPERATOR))).body.error).toBe("manual_review_routine_disabled");
-        await after.review.save(routineSave({ projectPath: "/projects/other", harness: "claude", expectedVersion: 3 }), OPERATOR);
-
-        recovered = await after.review.run(run, OPERATOR);
-        expect(await after.review.run(run, OPERATOR)).toEqual({ occurrence: recovered.occurrence, ticket: recovered.ticket, replayed: true });
+        await after.review.save(routineSave({ enabled: false, expectedVersion: 1 }), OPERATOR);
+        if (failure === "before_accept") {
+          expect((await refusalOf(after.review.run(run, OPERATOR))).body.error).toBe("manual_review_routine_disabled");
+          await after.review.save(routineSave({ channel: "ops", expectedVersion: 2 }), OPERATOR);
+          expect((await refusalOf(after.review.run(run, OPERATOR))).body).toMatchObject({ differs: ["routine.version"] });
+          expect(world.asks.size).toBe(0);
+          expect(world.deliverAttempts).toBe(1);
+        } else {
+          await world.boardService.stop();
+          const recovered = await after.review.run(run, OPERATOR);
+          expect(recovered.ticket).toMatchObject({ workId: manualReviewWorkId(occurrenceId), flightId: "flight-1" });
+          expect(await after.review.run(run, OPERATOR)).toEqual({ ...recovered, replayed: true });
+          expect(world.asks.size).toBe(1);
+        }
       });
-
       expect(requests).toEqual([]);
-      expect(recovered.ticket).toMatchObject({ workId: manualReviewWorkId(occurrenceId), flightId: "flight-1" });
-      expect(recovered.occurrence).toMatchObject({
-        state: "dispatched",
-        routine: { id: "nightly-review", version: 1 },
-        input: { id: itemId, version: run.inputVersion },
-        artifact: { ref: PROJECT, revision: HEAD },
-        dispatch: { target: { kind: "project_path", projectPath: PROJECT, harness: "codex" } },
-      });
-      // One review started, for the reviewer the run was admitted with.
-      expect(world.asks.size).toBe(1);
-      expect([...world.asks.values()][0]!.request).toMatchObject({ target: { projectPath: PROJECT }, execution: { harness: "codex" } });
       await after.close();
     }
+  });
+
+  test.each(["disable", "stop", "replace"] as const)("%s during a Board read invalidates the pending run", async (change) => {
+    const world = await createWorld();
+    const runtime = await openRuntime(createRoot(), world);
+    await runtime.review.save(routineSave(), OPERATOR);
+    const itemId = await mirroredItem(world);
+    const run = await previewedRun(runtime, itemId);
+    const reading = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    world.pauseItemRead = () => { reading.resolve(); return release.promise; };
+    const outcome = refusalOf(runtime.review.run(run, OPERATOR));
+    await reading.promise;
+    if (change === "disable") {
+      world.heads.delete(PROJECT);
+      const disabled = await runtime.review.save(routineSave({ enabled: false, expectedVersion: 1 }), OPERATOR);
+      expect(disabled.routine).toMatchObject({ enabled: false, version: 2, projectPath: PROJECT });
+      expect((await refusalOf(runtime.review.save(routineSave({ enabled: false, expectedVersion: 1 }), OPERATOR))).body.error)
+        .toBe("manual_review_routine_version_conflict");
+    } else {
+      await world.boardService.stop();
+      if (change === "replace") await world.boardService.start();
+    }
+    release.resolve();
+    expect((await outcome).body.error).toBe({
+      disable: "manual_review_routine_disabled", stop: "not_custodian", replace: "review_connection_not_live",
+    }[change]);
+    expect(runtime.journal.listDurableActionsByKind("manual_review")).toEqual([]);
+    expect(world.deliverAttempts).toBe(0);
+    await runtime.close();
+  });
+
+  test("revoking after admission but before entering delivery does not start the reviewer", async () => {
+    const world = await createWorld();
+    const runtime = await openRuntime(createRoot(), world);
+    await runtime.review.save(routineSave(), OPERATOR);
+    const run = await previewedRun(runtime, await mirroredItem(world));
+    const outcome = await refusalOf(runtime.review.run(run, OPERATOR, {
+      admitAsk: async (_actorId, deliver) => {
+        await runtime.review.save(routineSave({ enabled: false, expectedVersion: 1 }), OPERATOR);
+        return deliver();
+      },
+    }));
+    expect(outcome.body.error).toBe("manual_review_routine_disabled");
+    expect(runtime.occurrences.lookup({ scope: "board-review:nightly-review", requestId: "run-1" })?.state).toBe("admitted");
+    expect(world.deliverAttempts).toBe(0);
+    await runtime.close();
+  });
+
+  test("a task newly marked noSync is not pinned or dispatched", async () => {
+    const world = await createWorld();
+    const runtime = await openRuntime(createRoot(), world);
+    await runtime.review.save(routineSave(), OPERATOR);
+    const run = await previewedRun(runtime, await mirroredItem(world));
+    world.protectItemRead = true;
+    expect((await refusalOf(runtime.review.run(run, OPERATOR))).body.error).toBe("review_item_protected");
+    expect(runtime.journal.listDurableActionsByKind("manual_review")).toEqual([]);
+    expect(world.deliverAttempts).toBe(0);
+    await runtime.close();
   });
 });
 

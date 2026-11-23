@@ -1,3 +1,4 @@
+import { manualReviewDeliveryGuard } from "./manual-review-dispatch.js";
 import { completionReply, flightCompletion, flightSessionTrace } from "@openscout/protocol";
 import { taskTerminal, finishedTaskError, followupAudience, taskCompletionMessage, isRequesterSession, type FollowupSession } from "./broker-tasks.js";
 import { assertExplicitReplyAdmission, prepareCompletionAdmission } from "./broker-explicit-completion.js";
@@ -888,6 +889,8 @@ export class BrokerDurableRecordStore {
         ...(dispatchJob ? [{ kind: "invocation.dispatch_job.record" as const, job: dispatchJob }] : []),
         { kind: "flight.record", flight },
       ];
+      // Recheck after the writer queue and cold message read, at acceptance.
+      (invocation as InvocationRequest & { [manualReviewDeliveryGuard]?: () => void })[manualReviewDeliveryGuard]?.();
       const entries = await this.options.durableStore.commitEntries(
         entriesToCommit,
         async (committed) => {

@@ -93,7 +93,7 @@ export class ManualReviewOccurrenceService {
    * version is a replay. A request that changes any of them is refused, and
    * the recorded run stays as it was.
    */
-  readonly record = async (request: ManualReviewOccurrenceRequest): Promise<ManualReviewOccurrenceResponse> => {
+  readonly record = async (request: ManualReviewOccurrenceRequest, checkGrant?: () => void): Promise<ManualReviewOccurrenceResponse> => {
     const errors = validateManualReviewOccurrenceRequest(request);
     if (errors.length > 0) throw invalid(errors.join("; "));
     const requestedById = request.requestedById;
@@ -108,6 +108,7 @@ export class ManualReviewOccurrenceService {
       const existing = this.deps.getDurableAction(id);
       if (existing) return this.replay(existing, request);
 
+      checkGrant?.();
       const createdAt = this.deps.now?.() ?? Date.now();
       const stored: ManualReviewStoredOccurrence = {
         schemaVersion: MANUAL_REVIEW_SCHEMA_VERSION,

@@ -1,3 +1,4 @@
+import { manualReviewDeliveryGuard } from "./manual-review-dispatch.js";
 import { deliveryRequestMessageId, deliveryRequestInvocationId, recoverAcceptedInvocation, recoverAcceptedDelivery } from "./broker-delivery-receipt-recovery.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -323,6 +324,19 @@ describe("canonical conversation title mutation", () => {
 });
 
 describe("BrokerDurableRecordStore", () => {
+  test("an invocation whose local review guard was revoked cannot commit an ask", async () => {
+    const h = createTestRecordStore();
+    await h.runtime.upsertNode(testNode());
+    await h.runtime.upsertAgent(testAgent());
+    await h.runtime.upsertConversation(testConversation());
+    const request = Object.defineProperty(testInvocation(), manualReviewDeliveryGuard, { value: () => {
+      throw new Error("review revoked");
+    } });
+    await expect(h.records.recordInvocation(request, { message: testMessage() })).rejects.toThrow("review revoked");
+    expect(h.appended).toEqual([]);
+    expect(h.runtime.peek().invocations[request.id]).toBeUndefined();
+  });
+
   test("canonical acceptance frame contains a complete recoverable receipt before sidecar save", async () => {
     const h = createTestRecordStore();
     await h.runtime.upsertNode(testNode());

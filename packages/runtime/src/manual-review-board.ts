@@ -44,7 +44,10 @@ export type ManualReviewBoardReads = {
   /** Local configuration only: may a routine name this connection and channel. */
   reviewChannel(request: { connectionId: string; channel: string }): Promise<void>;
   /** One read of one item, after every local check. Never a write. */
-  reviewItem(request: { connectionId: string; channel: string; itemId: string }): Promise<{ id: string; channel: string; version: number }>;
+  reviewGrant(request: { connectionId: string; channel: string; itemId: string }): {
+    check: () => void;
+    read: () => Promise<{ id: string; version: number; pinSource: () => string }>;
+  };
 };
 
 export type ManualReviewBoardServiceDeps = {
@@ -81,6 +84,14 @@ export class ManualReviewBoardService {
   ): Promise<ManualReviewBoardRoutineSaveResponse> => {
     const errors = validateManualReviewBoardRoutineSaveRequest(request);
     if (errors.length > 0) throw invalid(errors);
+    const saved = this.deps.routines.get(request.id);
+    if (!request.enabled && (saved || request.expectedVersion !== 0)) {
+      // Turning off a grant is a local CAS, not a reconfiguration. Preserve
+      // its saved fields even if the project or connection has vanished.
+      return this.deps.routines.save({
+        ...(saved ?? request), enabled: false, expectedVersion: request.expectedVersion, savedById: attribution.actorId,
+      });
+    }
     let projectPath: string;
     try {
       projectPath = await this.project.canonical(request.projectPath);
@@ -108,7 +119,7 @@ export class ManualReviewBoardService {
   readonly preview = async (request: ManualReviewBoardPreviewRequest): Promise<ManualReviewBoardPreviewResponse> => {
     const errors = validateManualReviewBoardPreviewRequest(request);
     if (errors.length > 0) throw invalid(errors);
-    return this.read(this.enabledRoutine(request.routineId), request.itemId);
+    return (await this.read(this.enabledRoutine(request.routineId), request.itemId)).pins;
   };
 
   /**
@@ -128,8 +139,6 @@ export class ManualReviewBoardService {
     const errors = validateManualReviewBoardRunRequest(request);
     if (errors.length > 0) throw invalid(errors);
     const scope = manualReviewBoardScope(request.routineId);
-    const routine = this.routine(request.routineId);
-
     const stored = this.deps.occurrences.lookup({ scope, requestId: request.requestId });
     if (stored) {
       const differs = manualReviewBoardRunDifferences(stored, request);
@@ -142,25 +151,18 @@ export class ManualReviewBoardService {
         });
       }
       if (stored.dispatch) {
-        // The run was admitted with this target. It is finished, or reported, as admitted:
-        // the target comes from the record, never from the routine as it is saved now.
-        if (stored.state === "admitted") this.requireEnabled(routine);
-        return this.deps.dispatch.dispatch({ scope, requestId: request.requestId, target: stored.dispatch.target, attribution }, options);
+        // Recover acceptance from Scout before checking the live grant.
+        // Only a retry that could start work needs another authorized read.
+        return this.deps.dispatch.dispatch({ scope, requestId: request.requestId, target: stored.dispatch.target, attribution }, {
+          ...options,
+          prepareBoardAsk: async () => (await this.readRun(request)).prepare(),
+        });
       }
-      // Recorded and never admitted: nothing started. It is checked as a new run is.
     }
 
-    this.requireEnabled(routine);
-    if (routine.version !== request.routineVersion) {
-      throw this.changed(["routine.version"], `Routine ${routine.id} is saved at version ${routine.version}, not ${request.routineVersion}.`);
-    }
-    const current = await this.read(routine, request.itemId);
-    const differs: ManualReviewPinnedField[] = [];
-    if (current.input.version !== request.inputVersion) differs.push("input.version");
-    if (current.artifact.revision !== request.revision) differs.push("artifact.revision");
-    if (differs.length > 0) {
-      throw this.changed(differs, "The Board item or the checked-out commit changed after the preview.", current);
-    }
+    const { pins: current, check, prepare } = await this.readRun(request);
+    const prepared = prepare();
+    const routine = current.routine;
 
     await this.deps.occurrences.record({
       scope,
@@ -169,10 +171,32 @@ export class ManualReviewBoardService {
       artifact: { ...current.artifact, observedAt: this.deps.now?.() ?? Date.now() },
       routine: { id: routine.id, version: routine.version },
       requestedById: attribution.actorId,
-    });
+    }, check);
     const target: ManualReviewDispatchTarget = { kind: "project_path", projectPath: routine.projectPath, harness: routine.harness };
-    return this.deps.dispatch.dispatch({ scope, requestId: request.requestId, target, attribution }, options);
+    return this.deps.dispatch.dispatch({ scope, requestId: request.requestId, target, attribution }, {
+      ...options, prepareBoardAsk: () => prepared,
+    });
   };
+
+  private checkRoutine(id: string, version: number): ManualReviewBoardRoutine {
+    const routine = this.enabledRoutine(id);
+    if (routine.version !== version) {
+      throw this.changed(["routine.version"], `Routine ${id} is saved at version ${routine.version}, not ${version}.`);
+    }
+    return routine;
+  }
+
+  private async readRun(request: ManualReviewBoardRunRequest) {
+    const read = await this.read(this.checkRoutine(request.routineId, request.routineVersion), request.itemId);
+    const current = read.pins;
+    const differs: ManualReviewPinnedField[] = [];
+    if (current.input.version !== request.inputVersion) differs.push("input.version");
+    if (current.artifact.revision !== request.revision) differs.push("artifact.revision");
+    if (differs.length > 0) {
+      throw this.changed(differs, "The Board item or the checked-out commit changed after the preview.", current);
+    }
+    return read;
+  }
 
   private routine(routineId: string): ManualReviewBoardRoutine {
     const routine = this.deps.routines.get(routineId);
@@ -200,7 +224,7 @@ export class ManualReviewBoardService {
   private changed(differs: ManualReviewPinnedField[], why: string, current?: ManualReviewBoardPreviewResponse): ManualReviewBoardError {
     return new ManualReviewBoardError(409, {
       error: "manual_review_preview_changed",
-      detail: `${why} Nothing was recorded and nothing started. Preview again, then run with a new request ID.`,
+      detail: `${why} No new review started. Preview again, then run with a new request ID.`,
       differs,
       ...(current ? { current } : {}),
     });
@@ -210,7 +234,16 @@ export class ManualReviewBoardService {
    * Read what an enabled routine would pin for one item. The project is read
    * first: it is local, and a project that is gone means no Board read at all.
    */
-  private async read(routine: ManualReviewBoardRoutine, itemId: string): Promise<ManualReviewBoardPreviewResponse> {
+  private async read(routine: ManualReviewBoardRoutine, itemId: string) {
+    const board = this.boardAdapter();
+    const grant = this.translateBoard(() => board.reviewGrant({ connectionId: routine.connectionId, channel: routine.channel, itemId }));
+    const check = () => {
+      this.checkRoutine(routine.id, routine.version);
+      if (this.deps.board() !== board) {
+        throw new ManualReviewBoardError(409, { error: "vercel_board_changed", detail: "The Board adapter changed while preparing the review." });
+      }
+      this.translateBoard(grant.check);
+    };
     let revision: string;
     try {
       const canonical = await this.project.canonical(routine.projectPath);
@@ -224,27 +257,43 @@ export class ManualReviewBoardService {
       }
       throw error;
     }
-    const item = await this.boardCall(board => board.reviewItem({ connectionId: routine.connectionId, channel: routine.channel, itemId }));
-    return {
+    check();
+    let item: Awaited<ReturnType<typeof grant.read>>;
+    try { item = await grant.read(); }
+    catch (error) { throw this.boardError(error); }
+    check();
+    const pins: ManualReviewBoardPreviewResponse = {
       routine,
       input: { source: manualReviewBoardInputSource(routine.connectionId, routine.channel), id: item.id, version: String(item.version) },
       artifact: { kind: MANUAL_REVIEW_BOARD_ARTIFACT_KIND, ref: routine.projectPath, revision },
     };
+    return { pins, check, prepare: () => {
+      check();
+      return { reference: this.translateBoard(item.pinSource), check };
+    } };
   }
 
-  /** Only the Board service's own code, message and fix cross this boundary. */
-  private async boardCall<T>(call: (board: ManualReviewBoardReads) => Promise<T>): Promise<T> {
+  private boardAdapter(): ManualReviewBoardReads {
     const board = this.deps.board();
     if (!board) {
       throw new ManualReviewBoardError(503, { error: "vercel_board_unavailable", detail: "This runtime has no Vercel Board adapter running." });
     }
-    try {
-      return await call(board);
-    } catch (error) {
-      if (error instanceof VercelBoardServiceError) {
-        throw new ManualReviewBoardError(error.status, { error: error.code, detail: error.message, ...(error.fix ? { fix: error.fix } : {}) });
-      }
-      throw error;
-    }
+    return board;
+  }
+
+  private boardError(error: unknown): unknown {
+    return error instanceof VercelBoardServiceError
+      ? new ManualReviewBoardError(error.status, { error: error.code, detail: error.message, ...(error.fix ? { fix: error.fix } : {}) })
+      : error;
+  }
+
+  private translateBoard<T>(call: () => T): T {
+    try { return call(); }
+    catch (error) { throw this.boardError(error); }
+  }
+
+  private async boardCall<T>(call: (board: ManualReviewBoardReads) => Promise<T>): Promise<T> {
+    try { return await call(this.boardAdapter()); }
+    catch (error) { throw this.boardError(error); }
   }
 }
