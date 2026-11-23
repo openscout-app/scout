@@ -608,7 +608,7 @@
   ],
   "scripts": {
     "build": "bun run --cwd ../agent-sessions build && rm -rf dist && node_modules/.bin/tsc -p tsconfig.json && node scripts/stage-extension-channel.mjs",
-    "broker": "node ./bin/openscout-runtime.mjs broker",
+    "broker": "bun ./bin/openscout-runtime.mjs broker",
     "service": "node ./bin/openscout-runtime.mjs service",
     "discover": "node ./bin/openscout-runtime.mjs discover",
     "db:generate": "bunx drizzle-kit generate --config drizzle.config.ts",
