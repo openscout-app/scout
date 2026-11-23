@@ -43,7 +43,7 @@ import { BrokerIntegrationSetupService, IntegrationSetupError } from "./broker-i
 import { deckLanes } from "./deck-lanes.js";
 import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } from "./host-web-request.js";
 import { ChatQuestionError } from "./chat-question-transition.js";
-import { ChatMessageCorrectionError } from "@openscout/protocol";
+import { ChatMessageCorrectionError, TurnCredentialError, type TurnCredentialClaims } from "@openscout/protocol";
 import type { BrokerExternalSessionService } from "./broker-external-session-service.js";
 import type { BrokerT3Service } from "./t3/broker-service.js";
 import { T3RpcError } from "./t3/rpc-client.js";
@@ -251,6 +251,8 @@ export type BrokerHttpRouterDeps = {
   readRepoDiff?: RepoDiffRead;
   shows?: ShowHttpDeps;
   posts?: PostHttpDeps;
+  /** Checks a turn credential this runtime issued, including that its flight is still live. */
+  verifyTurnCredential?: (credential: unknown) => TurnCredentialClaims;
   /** Work items as a feed reads them (GET /v1/feed/work). */
   feedWork?: FeedWorkHttpDeps;
   attachments?: AttachmentHttpDeps;
@@ -678,6 +680,22 @@ export function createBrokerHttpRouter(
     json(response, 503, { error: "access_unavailable" }); return;
   }
   if (request.transportContext?.scoped) { json(response, 403, { error: "access_denied" }); return; }
+  if (method === "POST" && url.pathname === "/v1/access/turn") {
+    const context = request.transportContext;
+    if (context && (!["unix-socket", "loopback"].includes(context.transport) || context.guest || context.peer)) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    if (!deps.verifyTurnCredential) { json(response, 503, { error: "turn_credentials_unavailable" }); return; }
+    const body = await readRequestBody<{ credential?: unknown }>(request, { maxBytes: 8 * 1024 });
+    try {
+      const claims = deps.verifyTurnCredential(body?.credential);
+      json(response, 200, { live: true, claims });
+    } catch (error) {
+      const code = error instanceof TurnCredentialError ? error.code : "malformed_turn_credential";
+      json(response, code === "malformed_turn_credential" ? 400 : 403, { live: false, error: code });
+    }
+    return;
+  }
   if (method === "GET" && url.pathname === "/v1/terminal-hosts/herdr/workspaces") {
     // Same machine-local boundary as observed sessions. No CLI/web forwarding,
     // guest/scoped grants or origin-bearing browser requests can initiate probes.

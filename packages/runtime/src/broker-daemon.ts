@@ -1,5 +1,6 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { createTurnCredentialIssuer, installTurnCredentialIssuer, verifyTurnCredential } from "./turn-credentials.js";
 import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
@@ -712,6 +713,18 @@ const nodeIdentity = loadOrCreateNodeIdentity();
 const nodeIdentityKeyId = nodeKeyId(nodeIdentity.publicKey);
 const nodeIdentityFingerprint = nodeFingerprint(nodeIdentity.publicKey);
 const brokerBootedAt = Date.now();
+// Each agent turn dispatched for an ask carries a credential signed by this
+// node key, so an action can name its turn and nothing else can claim it.
+installTurnCredentialIssuer(createTurnCredentialIssuer({
+  identity: nodeIdentity,
+  nodeId: () => nodeId,
+  flightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+}));
+const verifyTurnCredentialHere = (credential: unknown) => verifyTurnCredential(credential, {
+  publicKey: nodeIdentity.publicKey,
+  nodeId,
+  flight: (flightId) => runtime.routingSnapshot().flights[flightId],
+});
 const trustedPeerStore = sharedControlPlaneStore;
 // Guest grants (docs/proposals/scout-tailscale.md) share the control-plane
 // database but never the trusted_peers table or its tiers.
@@ -3857,6 +3870,7 @@ const routeRequest = createBrokerHttpRouter({
   derivedRecords,
   tasks: taskService,
   shows: { store: showStore, snapshot: () => runtime.snapshot() },
+  verifyTurnCredential: verifyTurnCredentialHere,
   posts: { store: new BrokerPostStore(join(supportDirectory, "posts"), nodeId), shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
   feedWork: sqliteDisabled ? {} : { read: readFeedWork },
   attachments: {
