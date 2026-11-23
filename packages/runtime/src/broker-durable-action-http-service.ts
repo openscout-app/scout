@@ -4,6 +4,7 @@ import type {
 } from "@openscout/protocol";
 
 import type { BrokerJournalEntry } from "./broker-journal.js";
+import { isManualReviewAction } from "./manual-review-occurrences.js";
 
 export type DurableActionHeartbeatBody = {
   owner: string;
@@ -39,6 +40,11 @@ export class BrokerDurableActionHttpService {
       throw new Error("action.id is required");
     }
     await this.deps.runDurableWrite(async () => {
+      // This write replaces the record under the ID. A manual review occurrence
+      // is written once, by its own service, and never replaced from here.
+      if (isManualReviewAction(action) || isManualReviewAction(this.deps.getDurableAction(action.id))) {
+        throw new Error("manual review occurrences are recorded through the manual review entry point");
+      }
       await this.deps.commitEntries(
         { kind: "durable.action.record", action },
         async () => {},
