@@ -1,3 +1,4 @@
+import { claudeProjectForPath, claudeProjectRoots } from "../claude-projects.js";
 import { stripHarnessBoilerplate, stripHarnessValue } from "./boilerplate.js";
 import { knowledgeIndexEnabled, KNOWLEDGE_INDEX_OFF } from "./settings.js";
 import { createHash } from "node:crypto";
@@ -175,7 +176,7 @@ function sessionRoots(harnessFilter: Set<Harness> | null): Array<{ harness: Harn
   const roots: Array<{ harness: Harness; root: string }> = [
     { harness: "codex", root: process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT ?? join(home, ".codex", "sessions") },
     { harness: "codex", root: join(home, ".openai-codex", "sessions") },
-    { harness: "claude", root: process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT ?? join(home, ".claude", "projects") },
+    ...claudeProjectRoots(home).map(({ root }) => ({ harness: "claude" as const, root })),
     { harness: "kimi", root: process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT ?? join(kimiHome, "sessions") },
   ];
   return roots.filter((entry, index, entries) =>
@@ -682,11 +683,12 @@ function sourceRefWithRecordRange(ref: KnowledgeSourceRef, range: [number, numbe
   return ref.kind === "harness_transcript" ? { ...ref, recordRange: range } : ref;
 }
 
-function projectName(cwd: string | null, filePath: string): string {
+function projectName(cwd: string | null, file: SessionFile): string {
+  const claude = file.harness === "claude" ? claudeProjectForPath(file.path) : undefined;
+  if (claude?.mirror) return claude.folder;
   if (cwd) return basename(cwd);
-  const claudeProjectMatch = /\/\.claude\/projects\/([^/]+)/u.exec(filePath);
-  if (claudeProjectMatch?.[1]) return claudeProjectMatch[1].replace(/^-/, "").replace(/-/g, "/").split("/").pop() || "claude";
-  return basename(filePath).replace(/\.jsonl$/u, "");
+  if (claude) return claude.folder.replace(/^-/, "").split("-").filter(Boolean).pop() || "claude";
+  return basename(file.path).replace(/\.jsonl$/u, "");
 }
 
 function titleFor(file: SessionFile, parse: ParseResult, project: string): string {
@@ -1092,7 +1094,7 @@ async function storeSessionCollection(
   parse: ParseResult,
   force: boolean,
 ): Promise<IndexedSessionKnowledgeSummary> {
-  const project = projectName(parse.cwd, file.path);
+  const project = projectName(parse.cwd, file);
   const id = collectionIdFor(file, parse);
   const qmdPath = knowledgeCollectionQmdPath(id);
   const title = titleFor(file, parse, project);
@@ -1252,7 +1254,7 @@ export async function indexRecentSessionKnowledge(
             collectionId: `failed/${file.harness}/${stableId(file.path)}`,
             title: basename(file.path),
             harness: file.harness,
-            project: projectName(null, file.path),
+            project: projectName(null, file),
             transcriptPath: file.path,
             qmdPath: "",
             records: 0,
@@ -1666,7 +1668,7 @@ export async function scanRecentSessionKnowledge(
       const head = await transcriptHead(file);
       input.signal?.throwIfAborted();
       const resolvedSession = head.sessionId ?? basename(file.path).replace(/\.jsonl$/u, "");
-      const project = projectName(head.cwd, file.path);
+      const project = projectName(head.cwd, file);
       const collectionId = `sessions/${file.harness}/${resolvedSession.replace(/[^A-Za-z0-9_.-]+/gu, "-").slice(0, 80)}-${stableId(file.path, 10)}`;
       const when = new Date(file.mtimeMs).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
       for (const match of matches.slice(0, SCAN_HITS_PER_FILE)) {
