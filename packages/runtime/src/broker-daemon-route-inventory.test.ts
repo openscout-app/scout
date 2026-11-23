@@ -46,6 +46,8 @@ const expectedRouteInventory = [
   "GET /v1/approvals/remote",
   "GET /v1/assistant-claims",
   "GET /v1/attachments/capability",
+  "GET /v1/boards",
+  "GET /v1/boards/:id",
   "GET /v1/broker/messages",
   "GET /v1/capabilities",
   "GET /v1/capabilities/availability",

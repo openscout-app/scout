@@ -18,6 +18,7 @@ export * from "./channel-reception.js";
 export * from "./collaboration.js";
 export * from "./work-lifecycle.js";
 export * from "./derived-records.js";
+export * from "./boards.js";
 export * from "./work-claims.js";
 export * from "./assigned-roles.js";
 export * from "./orchestrator-prompt.js";

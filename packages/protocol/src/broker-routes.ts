@@ -53,6 +53,7 @@ export const scoutBrokerPaths = {
     activity: "/v1/activity",
     collaborationRecords: "/v1/collaboration/records",
     collaborationEvents: "/v1/collaboration/events",
+    boards: "/v1/boards",
     workBoard: "/v1/work/board",
     workLifecycles: "/v1/work/lifecycles",
     workMoves: "/v1/work/moves",
@@ -101,6 +102,15 @@ export function scoutBrokerMessagesPath(search: URLSearchParams): string {
 /** Name a conversation. An empty title hands it back to automatic naming. */
 export function scoutBrokerConversationTitlePath(conversationId: string): string {
   return `${scoutBrokerPaths.v1.conversations}/${encodeURIComponent(conversationId)}/title`;
+}
+
+/** One board's columns and cards. `default` names the runtime's default lifecycle. */
+export function scoutBrokerBoardPath(boardId: string, query: { closedSince?: number; limit?: number } = {}): string {
+  const search = new URLSearchParams();
+  if (query.closedSince !== undefined) search.set("closedSince", String(query.closedSince));
+  if (query.limit !== undefined) search.set("limit", String(query.limit));
+  const q = search.toString();
+  return `${scoutBrokerPaths.v1.boards}/${encodeURIComponent(boardId)}${q ? `?${q}` : ""}`;
 }
 
 export function scoutBrokerInvocationPath(invocationId: string): string {

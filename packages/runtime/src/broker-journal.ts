@@ -1416,6 +1416,18 @@ export class FileBackedBrokerJournal {
     return found;
   }
 
+  /** The newest event of each named record, in one pass without copying the ledger. A tie goes to the later append. */
+  latestCollaborationEvents(recordIds: ReadonlySet<string>): Map<string, CollaborationEvent> {
+    const latest = new Map<string, CollaborationEvent>();
+    if (recordIds.size === 0) return latest;
+    for (const event of this.state.collaborationEvents) {
+      if (!recordIds.has(event.recordId)) continue;
+      const current = latest.get(event.recordId);
+      if (!current || event.at >= current.at) latest.set(event.recordId, event);
+    }
+    return latest;
+  }
+
   getDurableAction(actionId: string): DurableAction | null {
     return this.state.durableActions.get(actionId) ?? null;
   }

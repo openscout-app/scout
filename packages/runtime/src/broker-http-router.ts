@@ -143,6 +143,7 @@ import {
   throwIfAborted,
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
+import type { BrokerBoardService } from "./broker-boards.js";
 import { WorkClaimConflictError } from "./broker-work-claims.js";
 import type { DerivedWriteRequest, WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
 import { DerivedRecordError, type BrokerDerivedRecordService } from "./broker-derived-records.js";
@@ -264,6 +265,8 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 export type BrokerHttpRouterDeps = {
   /** Work lifecycles: stations, moves and reviews. */
   workLifecycles?: BrokerWorkLifecycleService;
+  /** Boards: a lifecycle's columns and its cards with their content. */
+  boards?: BrokerBoardService;
   workRetry?: import("./broker-work-retry.js").BrokerWorkRetryService;
   derivedRecords?: BrokerDerivedRecordService;
   tasks?: import("./broker-tasks.js").BrokerTaskService;
@@ -2271,6 +2274,25 @@ export function createBrokerHttpRouter(
       else badRequest(response, error);
       return;
     }
+  }
+
+  const boardMatch = method === "GET" ? url.pathname.match(/^\/v1\/boards\/([^/]+)$/) : null;
+  if (deps.boards && (boardMatch || (method === "GET" && url.pathname === "/v1/boards"))) {
+    try {
+      if (!boardMatch) {
+        json(response, 200, deps.boards.list());
+        return;
+      }
+      const closedSince = Number(url.searchParams.get("closedSince"));
+      json(response, 200, deps.boards.read(decodeURIComponent(boardMatch[1]!), {
+        closedSince: Number.isFinite(closedSince) && closedSince > 0 ? closedSince : undefined,
+        limit: parseLimit(url),
+      }));
+    } catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
   }
 
   if (deps.workLifecycles && url.pathname.startsWith("/v1/work/")) {
