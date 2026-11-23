@@ -28,6 +28,7 @@ import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js
 import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
 import { VercelBoardServiceError } from "./vercel-board/service.js";
+import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { createRuntimeRegistrySnapshot, queryRuntimeNotificationRouting } from "./registry.js";
 import {
   TrustEndpointRateLimiter,
@@ -2274,4 +2275,51 @@ describe("derived record routes", () => {
     expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=Bad")).response.status).toBe(400);
     expect((await requestRouter(h, "GET", "/v1/derived?workId=nope&kind=presentation")).response.status).toBe(404);
   });
+});
+
+test("manual review occurrences record, replay, refuse a conflict and read back over HTTP", async () => {
+  const actions = new Map<string, import("@openscout/protocol").DurableAction>();
+  const harness = createHarness({
+    manualReviewOccurrences: new ManualReviewOccurrenceService({
+      authorityCellId: "node-local",
+      runDurableWrite: (work) => work(),
+      commitEntries: async (entries) => {
+        const committed = Array.isArray(entries) ? entries : [entries];
+        for (const entry of committed) if (entry.kind === "durable.action.record") actions.set(entry.action.id, entry.action);
+        return committed;
+      },
+      getDurableAction: (actionId) => actions.get(actionId),
+      now: () => 1_000,
+    }),
+  });
+  const path = "/v1/manual-review/occurrences";
+  const body = {
+    scope: "review",
+    requestId: "run-1",
+    input: { source: "board:connection-1", id: "message-42", version: "3" },
+    artifact: { kind: "pull_request", ref: "example/repo#12", revision: "1f2e3d4c" },
+  };
+
+  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`)).response.status).toBe(404);
+  expect((await requestRouter(harness, "GET", `${path}?scope=review`)).response.status).toBe(400);
+
+  const created = await requestRouter(harness, "POST", path, { body });
+  expect(created.response.status).toBe(200);
+  expect(created.body).toMatchObject({
+    created: true,
+    occurrence: { scope: "review", requestId: "run-1", input: body.input, artifact: body.artifact, requestedById: "operator", state: "recorded" },
+  });
+  const { occurrence } = created.body as { occurrence: unknown };
+
+  expect((await requestRouter(harness, "POST", path, { body })).body).toEqual({ created: false, occurrence });
+  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`)).body).toEqual({ occurrence });
+
+  const conflict = await requestRouter(harness, "POST", path, { body: { ...body, artifact: { ...body.artifact, revision: "89abcdef" } } });
+  expect(conflict.response.status).toBe(409);
+  expect(conflict.body).toMatchObject({ error: "manual_review_conflict", differs: ["artifact.revision"], occurrence });
+
+  const invalid = await requestRouter(harness, "POST", path, { body: { ...body, artifact: { kind: "pull_request", ref: "example/repo#12" } } });
+  expect(invalid.response.status).toBe(400);
+  expect(invalid.body).toMatchObject({ error: "invalid_manual_review_request" });
+  expect(actions.size).toBe(1);
 });

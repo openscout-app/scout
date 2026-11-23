@@ -67,6 +67,7 @@ import type {
   InboxClaimRequest,
   InboxNackRequest,
   InvocationRequest,
+  ManualReviewOccurrenceRequest,
   MessageRecord,
   ScoutRendezvousRequest,
   ScoutDeliverRequest,
@@ -114,6 +115,7 @@ import type {
   BrokerDurableActionHttpService,
   DurableActionHeartbeatBody,
 } from "./broker-durable-action-http-service.js";
+import { ManualReviewOccurrenceError, type ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import {
   a2aJson,
   badRequest as writeBadRequest,
@@ -294,6 +296,7 @@ export type BrokerHttpRouterDeps = {
   nudgeHarnessTopologyScan: () => unknown | Promise<unknown>;
   deliveryHttpService: BrokerDeliveryHttpService;
   durableActionHttpService: BrokerDurableActionHttpService;
+  manualReviewOccurrences: ManualReviewOccurrenceService;
   controlStreams: BrokerControlStreamService;
   managedSessionHttpService: BrokerManagedSessionHttpService;
   meshDiscoveryService: BrokerMeshDiscoveryService;
@@ -579,6 +582,7 @@ export function createBrokerHttpRouter(
     nudgeHarnessTopologyScan,
     deliveryHttpService,
     durableActionHttpService,
+    manualReviewOccurrences,
     controlStreams,
     managedSessionHttpService,
     meshDiscoveryService,
@@ -3249,6 +3253,35 @@ export function createBrokerHttpRouter(
       json(response, 200, await durableActionHttpService.recordAction(action));
     } catch (error) {
       badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/v1/manual-review/occurrences") {
+    try {
+      const occurrence = manualReviewOccurrences.lookup({
+        scope: url.searchParams.get("scope") ?? "",
+        requestId: url.searchParams.get("requestId") ?? "",
+      });
+      if (occurrence) json(response, 200, { occurrence });
+      else json(response, 404, { error: "not_found", detail: "no manual review occurrence is recorded for this scope and request ID" });
+    } catch (error) {
+      if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/manual-review/occurrences") {
+    try {
+      const body = await readRequestBody<ManualReviewOccurrenceRequest>(request, { maxBytes: 16 * 1024 });
+      json(response, 200, await manualReviewOccurrences.record({
+        ...body,
+        requestedById: attributedActorId(body?.requestedById ?? "operator"),
+      }));
+    } catch (error) {
+      if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
+      else badRequest(response, error);
     }
     return;
   }

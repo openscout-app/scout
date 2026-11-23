@@ -2,7 +2,9 @@ import type { MetadataMap, ScoutId } from "./common.js";
 
 // First implementation slice. Add work_item/question/approval only after ask,
 // message_delivery, and checkback semantics prove out against real paths.
-export type DurableActionKind = "ask" | "message_delivery" | "checkback";
+// `manual_review` is a recorded occurrence (see manual-review-occurrences.ts).
+// It carries no due time and no lease, so nothing claims or runs it.
+export type DurableActionKind = "ask" | "message_delivery" | "checkback" | "manual_review";
 
 export type DurableCheckbackMode =
   | "notify"

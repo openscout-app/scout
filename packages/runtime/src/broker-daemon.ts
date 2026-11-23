@@ -124,6 +124,7 @@ import { BrokerDeliveryRouter, type ExactSessionWakeInput } from "./broker-deliv
 import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
 import { BrokerDeliveryHttpService } from "./broker-delivery-http-service.js";
 import { BrokerDurableActionHttpService } from "./broker-durable-action-http-service.js";
+import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
 import { bootstrapSecretRedaction } from "./secret-redaction-bootstrap.js";
 import { applyRoleLifecycleForTerminalFlight } from "./role-lifecycle.js";
@@ -1061,6 +1062,12 @@ const durableActionHttpService = new BrokerDurableActionHttpService({
   runDurableWrite,
   commitEntries: commitDurableEntries,
   heartbeatDurableAction: heartbeatDurableActionDurably,
+  getDurableAction: (actionId) => journal.getDurableAction(actionId),
+});
+const manualReviewOccurrences = new ManualReviewOccurrenceService({
+  authorityCellId: nodeId,
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
   getDurableAction: (actionId) => journal.getDurableAction(actionId),
 });
 const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
@@ -3934,6 +3941,7 @@ const routeRequest = createBrokerHttpRouter({
   nudgeHarnessTopologyScan,
   deliveryHttpService,
   durableActionHttpService,
+  manualReviewOccurrences,
   controlStreams,
   managedSessionHttpService,
   meshDiscoveryService,
