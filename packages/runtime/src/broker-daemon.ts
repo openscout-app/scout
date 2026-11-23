@@ -16,7 +16,7 @@ import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
+import { REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -1551,7 +1551,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
+  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, REPLY_POINTS_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
