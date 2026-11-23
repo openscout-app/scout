@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
+import { runInstallAll, type InstallAllDependencies } from "./install-all.ts";
 
 export const OPENSCOUT_RELEASE_OWNER = "openscout-app";
 export const OPENSCOUT_RELEASE_REPOSITORY = "scout";
@@ -51,6 +52,8 @@ export type ScoutInstallOptions = {
   force: boolean;
   version: string | null;
   restart: boolean;
+  /** Install every part of Scout, not only the app. See install-all.ts. */
+  all?: boolean;
   candidate?: string;
   dmg?: string;
 };
@@ -120,6 +123,8 @@ export type ScoutInstallDependencies = {
   tmpdir?: () => string;
   sleep?: (ms: number) => void;
   appPath?: string;
+  /** Overrides for `--all`; the release lookup always comes from this module. */
+  all?: Omit<InstallAllDependencies, "resolveTarget">;
 };
 
 type ResolvedInstallDependencies = {
@@ -169,6 +174,10 @@ export function parseInstallArgs(args: string[]): ScoutInstallOptions {
       options.force = true;
       continue;
     }
+    if (arg === "--all") {
+      options.all = true;
+      continue;
+    }
     if (arg === "--no-restart") {
       options.restart = false;
       continue;
@@ -205,6 +214,9 @@ export function parseInstallArgs(args: string[]): ScoutInstallOptions {
     throw new ScoutCliError("--candidate and --dmg must be provided together");
   }
   if (options.candidate && options.version) throw new ScoutCliError("Use either --candidate or --version");
+  if (options.all && options.candidate) {
+    throw new ScoutCliError("--all installs a published release; a local candidate carries only the app");
+  }
   return options;
 }
 
@@ -995,6 +1007,14 @@ export async function runInstallCommand(
 
   const options = parseInstallArgs(args);
   if (options.version) normalizeReleaseVersion(options.version);
+
+  if (options.all) {
+    await runInstallAll(context, options, {
+      ...dependencies.all,
+      resolveTarget: async (version) => normalizeReleaseVersion((await fetchRelease(version, deps)).tag_name),
+    });
+    return;
+  }
 
   if (options.check) {
     await runCheck(context, options, deps);
