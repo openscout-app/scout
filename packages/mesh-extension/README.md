@@ -21,6 +21,13 @@ loads a node key. Modern MCP Events still use runtime claim/prepare/settle lease
 revocation is checked before sending. Mailbox notifications remain hints over
 `/v1/events/stream`, not a replacement for the durable mailbox.
 
+With `OPENSCOUT_MCP_EVENTS=1` on the runtime and bridge, `server/discover`
+advertises `io.modelcontextprotocol/events` on MCP 2026-07-28. Use `events/list`
+to discover the filters for `flight.completed`, `work.waiting`, and `message.created`.
+They deliver signed HTTPS webhooks. Unsubscribe with the original event name,
+arguments, and callback URL. The original discovery key remains available to
+earlier webhook clients. [MCP Events beta specification](https://github.com/modelcontextprotocol/ext-events/blob/main/specification/beta/events/events.mdx)
+
 Feedback always uses bridge-specific collection/upload routes, with principal
 from constructor state. Remote diagnostics default to note-only unless the
 runtime finds explicit matching consent. Failure never switches to the local

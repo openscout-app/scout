@@ -1,5 +1,5 @@
 import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/core";
-import { createMcpHandler, Server, ProtocolError } from "@modelcontextprotocol/server";
+import { createMcpHandler, readRequestBody, Server, ProtocolError } from "@modelcontextprotocol/server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,25 +18,40 @@ export async function createModernScoutHandler(principal: McpEventPrincipal, leg
   const handler = createMcpHandler(async () => {
     // Refuse discovery while the broker feature is unavailable instead of advertising partial support.
     await broker({ operation: "rpc", principal, method: "events/list", params: {} });
-    const capabilities = { tools: {}, events: {} }; // Events is a draft extension, outside the SDK's core capability type.
+    // Keep the original webhook discovery key for clients using the earlier contract.
+    const capabilities = { tools: {}, events: {}, extensions: { "io.modelcontextprotocol/events": {} } };
     const server = new Server({ name: "openscout", version: "0.3.1" }, {
       capabilities,
       supportedProtocolVersions: ["2026-07-28"],
     });
     server.setRequestHandler("tools/list", async (request) => ListToolsResultSchema.parse(await client.listTools(request.params)));
     server.setRequestHandler("tools/call", async (request) => CallToolResultSchema.parse(await client.callTool(request.params)));
-    for (const method of ["events/list", "events/subscribe", "events/unsubscribe"]) {
+    for (const method of ["events/list", "events/subscribe", "events/unsubscribe", "events/poll", "events/stream"]) {
       server.setRequestHandler(method, { params: z.record(z.string(), z.unknown()) }, async (params) => {
         try { return await broker({ operation: "rpc", principal, method, params }) as Record<string, unknown>; }
         catch (error) {
-          if (error instanceof McpEventError) throw new ProtocolError(error.code, error.message, error.reason ? { reason: error.reason } : undefined);
+          if (error instanceof McpEventError) throw new ProtocolError(error.code, error.message, error.data);
           throw new ProtocolError(-32603, "Scout event service is unavailable");
         }
       });
     }
     return server;
   }, { legacy: "reject", responseMode: "json", maxSubscriptions: 0, maxRequestBodySize: 256 * 1024 });
-  return { fetch: handler.fetch, async close() { await handler.close(); await client.close(); await legacy.close(); } };
+  // SDK 2.3 checks core routing headers. SEP-3415 also binds Mcp-Name to the event name.
+  async function fetchEventRequest(request: Request) {
+    const method = request.headers.get("mcp-method");
+    if (!["events/poll", "events/stream", "events/subscribe", "events/unsubscribe"].includes(method ?? "")) return handler.fetch(request);
+    const body = await readRequestBody(request, 256 * 1024);
+    if (body.tooLarge) return new Response(null, { status: 413 });
+    let rpc;
+    try { rpc = JSON.parse(body.text); }
+    catch { return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Invalid JSON" } }, { status: 400 }); }
+    if (rpc?.method === method && typeof rpc.params?.name === "string" && request.headers.get("mcp-name") !== rpc.params.name) {
+      return Response.json({ jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32020, message: "Mcp-Name must match the event name" } }, { status: 400 });
+    }
+    return handler.fetch(request, { parsedBody: rpc });
+  }
+  return { fetch: fetchEventRequest, async close() { await handler.close(); await client.close(); await legacy.close(); } };
 }
 
 export function eventBrokerClient(brokerUrl: string): EventBrokerCall {
@@ -44,19 +59,20 @@ export function eventBrokerClient(brokerUrl: string): EventBrokerCall {
     const response = await fetch(new URL("/v1/mcp-events", brokerUrl), {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
     });
-    const payload = await response.json() as { result?: unknown; error?: { code?: number; message?: string; data?: { reason?: string } } };
+    const payload = await response.json() as { result?: unknown; error?: { code?: number; message?: string; data?: Record<string, unknown> } };
     if (!response.ok) throw new Error("Scout event service is unavailable");
-    if (payload.error) throw new McpEventError(payload.error.code ?? -32603, payload.error.message ?? "Scout event service error", payload.error.data?.reason);
+    if (payload.error) throw new McpEventError(payload.error.code ?? -32603, payload.error.message ?? "Scout event service error", payload.error.data);
     return payload.result;
   };
 }
 
-export async function deliverMcpEvent(job: McpEventDelivery, authorize: (principal: McpEventPrincipal) => Promise<boolean>, post: WebhookPost = postWebhook, prepare: (job: McpEventDelivery) => Promise<McpEventDelivery | null> = async (job) => job) {
-  if (!await authorize(job.principal)) return { status: 403, revoked: true };
-  const current = await prepare(job);
+export async function deliverMcpEvent(job: McpEventDelivery, authorize: (principal: McpEventPrincipal) => Promise<boolean>, post: WebhookPost = postWebhook, prepare: (job: McpEventDelivery, revoked: boolean) => Promise<McpEventDelivery | null> = async (job, revoked) => revoked ? null : job) {
+  const revoked = !await authorize(job.principal);
+  const current = await prepare(job, revoked);
+  // A bridge can briefly run ahead of the runtime during an upgrade.
+  if (revoked && (!current || JSON.parse(current.body).type !== "terminated")) return { status: 403, revoked: true };
   if (!current) return { status: 0, revoked: false };
-  const event = JSON.parse(current.body) as { eventId: string };
-  const response = await post(current.url, current.body, webhookHeaders(event.eventId, current.subscriptionId, current.body, current.secret, current.previousSecret));
+  const response = await post(current.url, current.body, webhookHeaders(current.id, current.subscriptionId, current.body, current.secret, current.previousSecret));
   return { status: response.status, revoked: false };
 }
 
@@ -84,7 +100,7 @@ export function startMcpEventDeliveryWorker(options: { relayUrl: string; token: 
         let result: { status: number; revoked: boolean };
         try {
           result = await deliverMcpEvent(job, async (p) => (await check(p)).authorized, postWebhook,
-            async () => closed ? null : await options.broker({ operation: "prepare", id: job.id, lease: job.lease }) as McpEventDelivery | null);
+            async (_, revoked) => closed ? null : await options.broker({ operation: "prepare", id: job.id, lease: job.lease, ...(revoked ? { revoked } : {}) }) as McpEventDelivery | null);
         }
         catch { result = { status: 503, revoked: false }; }
         await options.broker({ operation: "settle", id: job.id, lease: job.lease, ...result });

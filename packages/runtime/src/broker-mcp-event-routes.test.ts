@@ -25,6 +25,9 @@ test("local event calls validate principal and translate schema failures without
   const principal = { kind: "agent_token", id: "t", ownerKey: "owner:a", node: "default", agentId: "agent:a" };
   expect(await call({ transport: "unix-socket" }, { operation: "rpc", principal, method: "events/list", params: {} }, events))
     .toEqual({ status: 200, payload: { result: { events: [] } } });
+  const unavailableMode = await call({ transport: "loopback" }, { operation: "rpc", principal, method: "events/poll", params: { name: "flight.completed" } },
+    { list: () => ({ events: [{ name: "flight.completed" }] }) } as unknown as BrokerMcpEvents);
+  expect(unavailableMode.payload.error).toMatchObject({ code: -32026, data: { feature: "deliveryMode", value: "poll" } });
   const invalid = await call({ transport: "loopback" }, { operation: "rpc", principal: { ...principal, secret: "do-not-reflect" }, method: "events/list" }, events);
   expect(invalid.payload.error.code).toBe(-32602);
   expect(JSON.stringify(invalid)).not.toContain("do-not-reflect");

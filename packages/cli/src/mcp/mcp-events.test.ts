@@ -21,7 +21,7 @@ test("official SDK serves stateless discovery, events and existing Scout tools",
   try {
     const discovery = await handler.fetch(modernRequest("server/discover"));
     expect({ status: discovery.status, body: await discovery.clone().json() }).toMatchObject({ status: 200 });
-    expect(await discovery.json()).toMatchObject({ result: { resultType: "complete", supportedVersions: ["2026-07-28"], capabilities: { tools: {}, events: {} } } });
+    expect(await discovery.json()).toMatchObject({ result: { resultType: "complete", supportedVersions: ["2026-07-28"], capabilities: { tools: {}, extensions: { "io.modelcontextprotocol/events": {} } } } });
     const events = await (await handler.fetch(modernRequest("events/list"))).json();
     expect(events).toMatchObject({ result: { events: [{ name: "flight.completed" }] } });
     const tool = await (await handler.fetch(modernRequest("tools/call", { name: "whoami", arguments: {} }))).json();
@@ -37,11 +37,11 @@ test("official SDK serves stateless discovery, events and existing Scout tools",
 
 test("revoked grants never send application data", async () => {
   let sent = 0;
-  const job = { principal, body: JSON.stringify({ eventId: "evt_1" }), secret: `whsec_${Buffer.alloc(32).toString("base64")}`, url: "https://example.com", subscriptionId: "sub_1" } as McpEventDelivery;
+  const job = { id: "sub_1:evt_1", principal, body: JSON.stringify({ eventId: "evt_1" }), secret: `whsec_${Buffer.alloc(32).toString("base64")}`, url: "https://example.com", subscriptionId: "sub_1" } as McpEventDelivery;
   expect(await deliverMcpEvent(job, async () => false, async () => { sent++; return { status: 200, body: "" }; })).toEqual({ status: 403, revoked: true });
   expect(sent).toBe(0);
   await deliverMcpEvent(job, async () => true, async (_url, body, headers) => {
-    sent++; expect(headers["webhook-id"]).toBe("evt_1"); expect(body).toBe(job.body); return { status: 200, body: "" };
+    sent++; expect(headers["webhook-id"]).toBe(job.id); expect(body).toBe(job.body); return { status: 200, body: "" };
   });
   expect(sent).toBe(1);
 });
@@ -78,12 +78,18 @@ test("event lifecycle crosses the SDK facade, durable broker and signed delivery
     service.capture([{ kind: "message.record", message: { id: "msg_1", conversationId: channel.id, actorId: "writer", body: "hello café", visibility: "workspace", createdAt: Date.now() } } as never]);
     const job = service.claim(principal.ownerKey, principal.node)!;
     const result = await deliverMcpEvent(job, async () => true, async (_url, body, headers) => {
-      expect(verify(body, headers)).toMatchObject({ eventId: headers["webhook-id"], name: params.name, data: { text: "hello café" } });
+      expect(verify(body, headers)).toMatchObject({ eventId: JSON.parse(job.body).eventId, name: params.name, data: { text: "hello café" } });
       expect(headers["X-MCP-Subscription-Id"]).toBe(accepted.result.id);
       return { status: 200, body: "" };
     });
     service.settle(job.id, job.lease, result.status, result.revoked);
-    const stopped = await (await handler.fetch(modernRequest("events/unsubscribe", params))).json();
+    const remove = { name: params.name, arguments: params.arguments, delivery: { url: params.delivery.url } };
+    const mismatched = modernRequest("events/unsubscribe", remove);
+    mismatched.headers.delete("mcp-name");
+    const rejected = await handler.fetch(mismatched);
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ error: { code: -32020 } });
+    const stopped = await (await handler.fetch(modernRequest("events/unsubscribe", remove))).json();
     expect(stopped).toMatchObject({ result: { resultType: "complete" } });
     service.capture([{ kind: "message.record", message: { id: "msg_2", conversationId: channel.id, actorId: "writer", body: "later", visibility: "workspace", createdAt: Date.now() } } as never]);
     expect(service.claim(principal.ownerKey, principal.node)).toBeNull();
