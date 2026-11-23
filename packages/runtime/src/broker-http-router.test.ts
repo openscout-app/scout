@@ -2476,14 +2476,21 @@ test("Board review routes serve only the verified operator on this machine, and 
       } as unknown as import("@openscout/protocol").ScoutDeliverResponse;
     },
   });
+  const board: import("./manual-review-board.js").ManualReviewBoardReads = {
+    reviewChannel: async () => { reads.push("channel"); },
+    reviewGrant: ({ itemId }) => ({
+      check: () => {},
+      read: async () => {
+        reads.push("item");
+        return { id: itemId, version: 7, pinSource: () => "/fixture/review-source" };
+      },
+    }),
+  };
   const manualReviewBoard = new ManualReviewBoardService({
     routines: new ManualReviewBoardRoutineStore({ ...stores, listDurableActions: (kind) => [...actions.values()].filter(action => action.kind === kind) }),
     occurrences,
     dispatch,
-    board: () => ({
-      reviewChannel: async () => { reads.push("channel"); },
-      reviewItem: async ({ itemId, channel }) => { reads.push("item"); return { id: itemId, channel, version: 7 }; },
-    }),
+    board: () => board,
     project: {
       canonical: async (projectPath) => { reads.push("project"); return projectPath; },
       head: async () => "1f2e3d4c5b6a79880123456789abcdef01234567",
