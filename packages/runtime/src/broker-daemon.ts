@@ -4,6 +4,8 @@ import { BrokerWorkRetryService } from "./broker-work-retry.js";
 import { BrokerVercelBoardService } from "./vercel-board/service.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
+import { RoutineRunner } from "./routine-runner.js";
+import type { DurableCheckbackMetadata } from "@openscout/protocol";
 import type { PostAuthorNamer } from "./broker-posts-http.js";
 import { queryFeedWork } from "./feed-work.js";
 import { configuredOperatorActorIds } from "./conversations/legacy-ids.js";
@@ -70,7 +72,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import { statSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 
@@ -3889,13 +3891,42 @@ function readFeedWork(read: Parameters<typeof queryFeedWork>[1]) {
   return queryFeedWork(feedWorkDb, read, configuredOperatorActorIds());
 }
 
+const postStore = new BrokerPostStore(join(supportDirectory, "posts"), nodeId);
+// Routines post as their owner, under the routine's title.
+const routineRunner = new RoutineRunner({
+  nodeId,
+  listActions: () => journal.listDurableActions(),
+  getAction: actionId => journal.getDurableAction(actionId),
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
+  post: ({ routine, text, links }) => {
+    const metadata = (routine.metadata ?? {}) as DurableCheckbackMetadata;
+    return postStore.post({
+      text, links,
+      currentDirectory: typeof metadata.currentDirectory === "string" ? metadata.currentDirectory : homedir(),
+      author: { agentId: typeof metadata.ownerId === "string" ? metadata.ownerId : operatorActorId, name: String(metadata.title ?? "Routine") },
+    });
+  },
+  facts: () => {
+    const snapshot = runtime.snapshot();
+    const flights = Object.values(snapshot.flights ?? {});
+    return {
+      nodeId,
+      agents: Object.keys(snapshot.agents ?? {}).length,
+      runningFlights: flights.filter(flight => flight.state === "running" || flight.state === "waiting").length,
+    };
+  },
+  log: line => console.log(line),
+});
+
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
   workRetry,
   derivedRecords,
   tasks: taskService,
   shows: { store: showStore, snapshot: () => runtime.snapshot() },
-  posts: { store: new BrokerPostStore(join(supportDirectory, "posts"), nodeId), shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
+  posts: { store: postStore, shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
+  routines: { runner: routineRunner },
   feedWork: sqliteDisabled ? {} : { read: readFeedWork },
   attachments: {
     service: attachmentService, nodeId,
@@ -4642,6 +4673,7 @@ function startBrokerCoordination(): void {
   startPresenceSampling();
   registerActiveScoutBrokerService(brokerService);
   peerDelivery.start();
+  routineRunner.start();
   setTimeout(recoverStartupWork, 0).unref();
 
   if (!meshInstanceRefusal) {
@@ -4730,6 +4762,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   }
   shuttingDown = true;
   clearTimeout(projectionRetryTimer);
+  routineRunner.stop();
   hostKeepAwake?.stop();
   capabilityMatrixService.stop();
   tailscaleListenerGuard.stop();

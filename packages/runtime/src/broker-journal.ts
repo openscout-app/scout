@@ -1429,6 +1429,11 @@ export class FileBackedBrokerJournal {
     return found;
   }
 
+  /** Every durable action this journal holds. */
+  listDurableActions(): IterableIterator<DurableAction> {
+    return this.state.durableActions.values();
+  }
+
   getDurableActionByIdempotencyKey(input: {
     authorityCellId: string;
     kind: DurableAction["kind"];
