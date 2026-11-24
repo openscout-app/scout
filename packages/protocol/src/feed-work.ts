@@ -36,6 +36,12 @@ export interface ScoutFeedWork {
   harness: string | null;
   /** The session recorded on this turn's invocation, not the owner's current endpoint. */
   sessionId: string | null;
+  /**
+   * The endpoint this turn's session ran on (its trace's newest entry). It
+   * stays the same when a session's id changes mid-run, from Scout's routing
+   * id to the harness's own, so a feed can tell that two ids are one session.
+   */
+  endpointId: string | null;
   conversationId: string | null;
   parentId: string | null;
   parentTitle: string | null;
