@@ -37,7 +37,7 @@ places below.
 ## Rules the help text won't tell you
 
 **`/scout <anything>`: route what the user means.** Split their request into
-recipient clues and the message to deliver. Call MCP `route_context` (CLI
+recipient clues and the message to deliver. Use MCP `route_context` with the `routing` group (CLI
 `scout locate "<clues>" --machine <hint> --json`) to get live mesh agents,
 sessions, projects, work summaries and local indexed topic matches together.
 Pass machine/project/harness/time clues explicitly where supported; keep the
@@ -60,8 +60,8 @@ from a native session id. For clearly fresh work, copy a discovered project's
 versus continuation when that distinction is unresolved. Use `ask` for expected
 replies/work, and ask with fyi=true only for FYIs. Finding someone alone does not authorize a
 message. Reuse `requestId` on retries and return the recipient and task link.
-If `route_context` is unavailable on an older/hosted tool tier, fall back to
-`agents_search`/`hosts_list` and the available session search tools, keeping the
+On the default local profile use `agents_search` and `hosts_list`, or the CLI
+locator above. On other tiers use the available discovery tools, keeping the
 same evidence and clarification rules.
 
 **Two verbs: ask and reply.** Use `scout ask` (MCP `ask`) for work,
@@ -91,8 +91,8 @@ card starts a fresh session. To continue an exact harness session, use only
 instead.
 
 **Cards: this session vs. a new identity.** `card` with no other target, run
-inside a live session, means "give *this* conversation an address": call MCP
-`session_attach_current`, which binds the address to this same process so
+inside a live session, means "give *this* conversation an address": use the
+`sessions` group's `session_attach_current`, which binds the address to this same process so
 asks land here. It works for Codex, and for Claude, Grok and other TUIs running
 in a tmux pane or a Ghostty terminal. If it refuses (another terminal with no
 tmux), say so plainly and offer `scout session transfer`, which moves this same
@@ -193,7 +193,7 @@ push request. `--notify` is not an asynchronous agent-ask flag.
 
 **Use Scout's own reads.** For past harness work, run `scout search` before
 grepping `~/.claude`, `~/.codex` or `~/.kimi-code`. For a Herdr panel, call
-`sessions_inventory` or `herdr_workspaces` first; those hits aren't routing
+`sessions_inventory` (`sessions` group) or `herdr_workspaces` (`terminals` group) if available; those hits aren't routing
 addresses. Correlate sessions by exact id, never by title or folder. Never read
 broker storage or call broker HTTP yourself.
 
@@ -210,7 +210,7 @@ reinstall, switch brokers, or override service ownership just to get a call thro
 
 **Native Codex app replies.** Discover the exact thread id with session inventory
 or route context; never launch a replacement beside a live app thread. To leave
-a reply for review without sending, use `session_send` with `harness: "codex"`,
+a reply for review without sending, use the `terminals` group's `session_send` with `harness: "codex"`,
 `mode: "draft"`, or `scout session send <id> --harness codex --draft "reply"`.
 Draft only opens the native thread link with composer text; it is not transcript
 confirmation. Default send submits and must be confirmed by the transcript.

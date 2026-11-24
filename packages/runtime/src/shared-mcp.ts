@@ -25,6 +25,8 @@ import { deriveOpenScoutInstanceLayout } from "./instance.js";
 export const SHARED_MCP_OPT_IN_FILE = "shared-mcp.json";
 
 export type SharedMcpOptIn = {
+  /** Local tool profile selected at install. Older opt-ins use the default. */
+  profile?: string;
   url: string;
   port: number;
   enabledAt: number;
@@ -99,6 +101,7 @@ export function readSharedMcpOptIn(supportDirectory: string): SharedMcpOptIn | n
     if (typeof value.port !== "number" || !Number.isInteger(value.port) || value.port <= 0) return null;
     return {
       url: sharedMcpUrl(value.port),
+      ...(typeof value.profile === "string" ? { profile: value.profile } : {}),
       port: value.port,
       enabledAt: Number(value.enabledAt) || 0,
       state: value.state === "draining" ? "draining" : "on",
@@ -118,11 +121,15 @@ function saveOptIn(supportDirectory: string, optIn: SharedMcpOptIn): SharedMcpOp
 }
 
 /** Turns the shared server on, or back on from draining. */
-export function writeSharedMcpOptIn(supportDirectory: string, port: number, now = Date.now()): SharedMcpOptIn {
+export function writeSharedMcpOptIn(supportDirectory: string, endpoint: number | { port: number; profile: string }, now = Date.now()): SharedMcpOptIn {
   const previous = readSharedMcpOptIn(supportDirectory);
+  const { port, profile } = typeof endpoint === "number"
+    ? { port: endpoint, profile: previous?.port === endpoint ? previous.profile : undefined }
+    : endpoint;
   return saveOptIn(supportDirectory, {
     url: sharedMcpUrl(port),
     port,
+    ...(profile === undefined ? {} : { profile }),
     enabledAt: previous?.port === port ? previous.enabledAt : now,
     state: "on",
   });
@@ -199,6 +206,7 @@ export type SharedMcpCommand = { command: string; args: string[]; cwd: string };
  * the source checkout's CLI; then the CLI packaged beside this runtime.
  */
 export function resolveSharedMcpCommand(options: {
+  profile?: string;
   port: number;
   bunExecutable: string | null;
   repoRoot: string | null;
@@ -209,6 +217,7 @@ export function resolveSharedMcpCommand(options: {
   const env = options.env ?? process.env;
   const exists = options.exists ?? existsSync;
   const serveArgs = ["mcp", "serve", "--host", "127.0.0.1", "--port", String(options.port)];
+  if (options.profile) serveArgs.push("--profile", options.profile);
   if (env.OPENSCOUT_MCP_ENABLE_NOTIFICATIONS === "1") serveArgs.push("--notifications");
 
   const explicit = [env.OPENSCOUT_CLI_BIN, env.SCOUT_CLI_BIN].map((value) => value?.trim()).find((value) => value && exists(value));

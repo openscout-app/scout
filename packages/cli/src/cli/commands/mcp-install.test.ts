@@ -8,6 +8,7 @@ import { drainSharedMcpOptIn, readSharedMcpOptIn, writeSharedMcpOptIn } from "@o
 import {
   enableSharedScoutMcp,
   installScoutMcpForHosts,
+  waitForSharedMcpServer,
   parseMcpInstallCommandOptions,
 } from "./mcp-install.ts";
 
@@ -147,14 +148,21 @@ describe("shared Scout MCP install", () => {
     const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
     const calls: Call[] = [];
     const lines = await enableSharedScoutMcp(sharedInput(dir, calls, {
-      waitForServer: async (port) => {
+      ...parseMcpInstallCommandOptions(["--host", "claude", "--host", "codex", "--profile=work,git"], {}),
+      waitForServer: async (port, profile) => {
+        expect(profile).toBe("git,work");
+        expect(readSharedMcpOptIn(dir)?.profile).toBe(profile);
         expect(calls).toEqual([]);
         return port === 43115;
       },
     }));
     expect(readSharedMcpOptIn(dir)).toMatchObject({ port: 43115, url: SHARED_URL });
     expect(calls.filter((call) => call.args[1] === "add").length).toBe(2);
-    expect(lines[0]).toBe(`The shared Scout MCP server is on at ${SHARED_URL}, run by scout-base.`);
+    expect(lines[0]).toContain("profile: git,work");
+    await expect(enableSharedScoutMcp(sharedInput(dir, calls, {
+      profile: parseMcpInstallCommandOptions(["--host", "codex", "--profile=full"], {}).profile,
+    }))).rejects.toThrow("let the old sessions exit");
+    expect(readSharedMcpOptIn(dir)?.profile).toBe("git,work");
     expect(lines.at(-1)).toContain("New Codex and Claude Code sessions use it.");
   });
 
@@ -172,6 +180,14 @@ describe("shared Scout MCP install", () => {
     expect(calls.every((call) => call.args[1] === "get")).toBe(true);
     expect(lines).toContain(`[codex] Would run: /tmp/codex mcp add scout --url ${SHARED_URL}`);
   });
+});
+
+test("a shared install verifies the running profile, not just an answering port", async () => {
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ profile: "git" }) });
+  try {
+    expect(await waitForSharedMcpServer(server.port!, "git", 0)).toBe(true);
+    expect(await waitForSharedMcpServer(server.port!, "full", 0)).toBe(false);
+  } finally { server.stop(true); }
 });
 
 describe("parseMcpInstallCommandOptions", () => {
@@ -244,9 +260,7 @@ describe("installScoutMcpForHosts", () => {
     ];
     const outcomes = installScoutMcpForHosts({
       env: process.env,
-      hosts: ["codex"],
-      force: true,
-      dryRun: false,
+      ...parseMcpInstallCommandOptions(["--host", "codex", "--force"], { OPENSCOUT_MCP_PROFILE: "full" }),
       resolveHostPath: () => "/tmp/codex",
       resolveLaunchCommand: () => ({
         command: "/tmp/scout",
@@ -268,7 +282,7 @@ describe("installScoutMcpForHosts", () => {
     expect(calls).toEqual([
       { command: "/tmp/codex", args: ["mcp", "get", "scout"] },
       { command: "/tmp/codex", args: ["mcp", "remove", "scout"] },
-      { command: "/tmp/codex", args: ["mcp", "add", "scout", "--", "/tmp/scout", "mcp"] },
+      { command: "/tmp/codex", args: ["mcp", "add", "scout", "--env", "OPENSCOUT_MCP_PROFILE=full", "--", "/tmp/scout", "mcp"] },
     ]);
   });
 
@@ -276,9 +290,7 @@ describe("installScoutMcpForHosts", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const outcomes = installScoutMcpForHosts({
       env: process.env,
-      hosts: ["claude"],
-      force: false,
-      dryRun: true,
+      ...parseMcpInstallCommandOptions(["--host", "claude", "--dry-run", "--profile=git,chat"], {}),
       resolveHostPath: () => "/tmp/claude",
       resolveLaunchCommand: () => ({
         command: "/tmp/scout",
@@ -294,7 +306,7 @@ describe("installScoutMcpForHosts", () => {
       {
         host: "claude",
         status: "installed",
-        detail: "Would run: /tmp/claude mcp add --scope user scout -- /tmp/scout mcp",
+        detail: "Would run: /tmp/claude mcp add --scope user scout -- /tmp/scout mcp --profile chat,git",
       },
     ]);
     expect(calls).toEqual([

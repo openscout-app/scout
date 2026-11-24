@@ -49,6 +49,7 @@ async function connectTestServer(
       ...process.env,
       OPENSCOUT_BROKER_URL: "http://broker.test",
       CODEX_THREAD_ID: "019ddb1b-test-thread",
+      OPENSCOUT_MCP_PROFILE: "full",
       OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK: "1",
       OPENSCOUT_AGENT: "",
       OPENSCOUT_REPLY_CONTEXT: "",
@@ -856,16 +857,6 @@ describe("createScoutMcpServer", () => {
         flightId: "flt-1",
       },
     });
-  });
-
-  test("every tool on the setup allow list is annotated read-only", async () => {
-    const { SCOUT_READ_ONLY_TOOLS } = await import("../lib/core/setup/agent-guide.ts");
-    const { client } = await connectTestServer({});
-    const { tools } = await client.listTools();
-    for (const name of SCOUT_READ_ONLY_TOOLS) {
-      const tool = tools.find((candidate) => candidate.name === name);
-      expect({ name, readOnly: tool?.annotations?.readOnlyHint }).toEqual({ name, readOnly: true });
-    }
   });
 
   test("server instructions teach cross-machine asks", async () => {

@@ -74,7 +74,7 @@ export function buildCollaborationContractPrompt(agentId: string): string {
     "  - Default loop: orient -> resolve -> choose venue -> keep follow-up in that same venue",
     "  - Treat information-seeking requests as questions; treat durable execution as work with state, context, and artifacts",
     "  - Use canonical lifecycle verbs intentionally: answered, handoff, waiting, review_requested, done, cancelled",
-    "  - For task progress use reply with progress=true; work_update is only for work not tied to a task",
+    "  - For task progress use reply with progress=true",
     "  - For broker-requested work, acknowledge through the provided reply context/tool when one exists; if no reply context/tool exists, do not invent a second channel",
     "  - @mention another agent only when handing off real work or requesting a concrete answer",
     "  - One target means DM; group coordination means an explicit channel or separate DMs",
