@@ -33,6 +33,7 @@ export type ScoutCommandName =
   | "env"
   | "flight"
   | "work-retry"
+  | "worktree"
   | "worktrees"
   | "init"
   | "instance"
@@ -138,6 +139,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./flight.ts")).runFlightCommand;
     case "work-retry":
       return (await import("./work-retry.ts")).runWorkRetryCommand;
+    case "worktree":
+      return (await import("./worktree.ts")).runWorktreeCommand;
     case "worktrees":
       return (await import("./worktrees.ts")).runWorktreesCommand;
     case "init":

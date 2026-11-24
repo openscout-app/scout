@@ -8,7 +8,7 @@ const instanceEnvironment = () => [
   process.env.OPENSCOUT_SUPPORT_DIRECTORY,
   process.env.OPENSCOUT_CONTROL_HOME,
 ];
-const legacySources = {
+const facadeSources = {
   client: [
     "broker-api", "delivery-client", "web-full-client", "broker-trpc-router",
     "mcp-events", "mcp-event-webhook", "remote-tail",
@@ -25,7 +25,7 @@ const legacySources = {
   harnesses: [
     "harness-catalog", "harness-topology", "harness-model-preferences", "local-agents",
     "local-agent-harnesses", "control-plane-agents", "scoutbot-role", "agent-workspace", "agent-workspace-retirement",
-    "live-terminal-session", "terminal-environment", "in-place", "tail", "pi-rpc",
+    "./agent-workspace-gc.js", "live-terminal-session", "terminal-environment", "in-place", "tail", "pi-rpc",
     "claude-stream-json", "claude-statusline", "tool-resolution", "broker-runtime-profiles",
     "runtime-list-preferences",
   ],
@@ -46,18 +46,20 @@ const legacySources = {
   extensions: ["scout-extensions", "extension-channel-host", "shared-mcp"],
 };
 
-for (const [facade, sources] of Object.entries(legacySources)) {
-  test(`${facade} exposes exactly its legacy runtime bindings`, async () => {
+for (const [facade, sources] of Object.entries(facadeSources)) {
+  test(`${facade} exposes exactly its declared runtime bindings`, async () => {
     const instanceBeforeImport = instanceEnvironment();
     const actual = await import(prefix + facade);
     expect(instanceEnvironment()).toEqual(instanceBeforeImport);
     const expected = new Map<string, unknown>();
 
     for (const source of sources) {
-      // Setup and routing now resolve to their facades. Read their old entrypoints directly.
+      // Read old entrypoints that now resolve to a facade, and facade-only modules, directly.
       const original = await import(source.startsWith("./") ? source : prefix + source);
       for (const [name, value] of Object.entries(original)) {
-        const publicName = source === "drizzle" && name === "briefingsTable" ? "drizzleBriefingsTable" : name;
+        const publicName = source === "drizzle" && name === "briefingsTable" ? "drizzleBriefingsTable"
+          : source === "agent-workspace-retirement" && name === "listScoutWorktrees" ? "listScoutWorktreeRetirementCandidates"
+          : name;
         // Identical re-exports are OK; distinct bindings must have distinct names.
         if (expected.has(publicName)) {
           expect(value, `${source} conflicts on ${publicName}`).toBe(expected.get(publicName));
@@ -76,7 +78,7 @@ for (const [facade, sources] of Object.entries(legacySources)) {
 test("prunes unused package subpaths and keeps manifest lookup available", () => {
   for (const name of [
     "local-agent-template", "solo-pro", "instance-bootstrap", "memory-snapshot",
-    "runtime-adapters", "codex-app-server", "scout-agent-cards", "lan-network",
+    "runtime-adapters", "codex-app-server", "scout-agent-cards", "lan-network", "agent-workspace-gc",
   ]) {
     expect(Object.hasOwn(manifest.exports, `./${name}`), name).toBe(false);
   }

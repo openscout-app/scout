@@ -7,6 +7,7 @@ export * from "../control-plane-agents.js";
 export * from "../scoutbot-role.js";
 export * from "../agent-workspace.js";
 export * from "../agent-workspace-retirement.js";
+export { listScoutWorktrees as listScoutWorktreeRetirementCandidates } from "../agent-workspace-retirement.js";
 export * from "../live-terminal-session.js";
 export * from "../terminal-environment.js";
 export * from "../in-place/index.js";
@@ -17,3 +18,14 @@ export * from "../claude-statusline.js";
 export * from "../tool-resolution.js";
 export * from "../broker-runtime-profiles.js";
 export * from "../runtime-list-preferences.js";
+export {
+  gcScoutWorktrees,
+  listScoutWorktrees,
+  type ScoutWorktree,
+  type ScoutWorktreeGcEntry,
+  type ScoutWorktreeGcOptions,
+  type ScoutWorktreeGcReport,
+  type ScoutWorktreeList,
+  type ScoutWorktreeListOptions,
+  type ScoutWorktreeSkipReason,
+} from "../agent-workspace-gc.js";
