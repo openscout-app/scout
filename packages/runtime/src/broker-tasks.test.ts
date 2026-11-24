@@ -110,6 +110,7 @@ async function taskFixture(state: FlightRecord["state"] = "running", extra: Reco
 
 test.each(["queued", "waking"] as const)("follow-up on %s creates no invocation and returns its own receipt", async state => {
   const { h, ask } = await taskFixture(state);
+  await expect(ask({ task: { version: 1, continue: "parent" } })).rejects.toThrow("use --ref parent to add context");
   const before = Object.keys(h.runtime.snapshot().invocations);
   const first = await ask(); expect(first).toMatchObject({ accepted: true, message: { body: "scope change" } });
   await ask(); expect(Object.keys(h.runtime.snapshot().invocations)).toEqual(before);
@@ -125,7 +126,7 @@ test.each(["completed", "failed", "cancelled"] as const)("%s rejects ref and per
 });
 test("unfinished tasks reject continue; unauthorized follow-ups and cancellation fail", async () => {
   const { ask } = await taskFixture();
-  await expect(ask({ task: { version: 1, continue: "parent" } })).rejects.toThrow("unfinished");
+  await expect(ask({ task: { version: 1, continue: "parent" } })).rejects.toThrow("Use --continue parent after it finishes.");
   await expect(ask({ requesterId: "stranger" })).rejects.toThrow("not authorized");
   await expect(ask({ requesterId: "worker", task: { version: 1, ref: "parent", cancel: true } })).rejects.toThrow("not authorized");
 });
