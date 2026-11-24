@@ -73,6 +73,35 @@ describe("queryFeedWork", () => {
     });
   });
 
+  test("each turn names the endpoint its session ran on, which holds when the session id is promoted", () => {
+    const cp = controlPlane();
+    const turn = (n: number, sessionId: string, at: number) => {
+      cp.message(`ask-${n}`, "operator", `Ask ${n}.`, at - 500);
+      cp.work(`w${n}`, "done", at, `inv-${n}`);
+      cp.store.recordInvocation({
+        id: `inv-${n}`, requesterId: "operator", requesterNodeId: "node-1", targetAgentId: "agent-1", action: "consult",
+        task: `Ask ${n}.`, collaborationRecordId: `w${n}`, messageId: `ask-${n}`, ensureAwake: true, stream: false, createdAt: at - 500,
+      });
+      cp.store.recordFlight({
+        id: `flt-${n}`, invocationId: `inv-${n}`, requesterId: "operator", targetAgentId: "agent-1", state: "completed",
+        metadata: { sessionTrace: [{ sessionId, endpointId: "endpoint.session-a.tmux", startedAt: at - 400, lastAcknowledgedAt: at - 400 }] },
+      } as never);
+    };
+    // The first turn records Scout's routing id; a later one, the harness id learned mid-run.
+    turn(1, "session-a", 2_000);
+    turn(2, "harness-uuid", 4_000);
+
+    const byId = new Map(queryFeedWork(cp.read(), { mode: "window", since: 0, limit: -1 }, OPERATORS).tasks.map((task) => [task.id, task]));
+    expect(byId.get("w1")).toMatchObject({ sessionId: "session-a", endpointId: "endpoint.session-a.tmux" });
+    expect(byId.get("w2")).toMatchObject({ sessionId: "harness-uuid", endpointId: "endpoint.session-a.tmux" });
+  });
+
+  test("a turn with no flight names no endpoint", () => {
+    const cp = controlPlane();
+    cp.work("w-bare", "done", 2_000);
+    expect(queryFeedWork(cp.read(), { mode: "window", since: 0, limit: -1 }, OPERATORS).tasks[0]).toMatchObject({ sessionId: null, endpointId: null });
+  });
+
   test("an item in a state a feed does not keep comes back as gone", () => {
     const cp = controlPlane();
     cp.work("w-open", "open", 2_000);
@@ -107,7 +136,7 @@ describe("projection", () => {
     id: "w1", title: "Work", state: "review", acceptance_state: null, owner_id: "agent-1", owner_name: null, conversation_id: "c",
     parent_id: null, parent_title: null, created_at: "100", updated_at: 200, requested_by: "Arach", placement_revision: 3,
     presentation: null, reply_id: null, reply_body: "  ", reply_at: null, operator_id: null, operator_body: null, operator_at: null,
-    harness: null, session_id: null, cwd: null, project_root: null, branch: "  ", asked_from: null, ...partial,
+    harness: null, session_id: null, endpoint_id: null, cwd: null, project_root: null, branch: "  ", asked_from: null, ...partial,
   });
 
   test("an ask by any configured operator id counts as the operator's, and blank text reads as none", () => {
