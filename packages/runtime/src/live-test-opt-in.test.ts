@@ -8,7 +8,10 @@ const files = ["src/opencode-acp-live.test.ts", "src/codex-app-server-live.test.
 
 test("package unit selection includes nested tests and scenarios but excludes every live file", () => {
   const pkg = JSON.parse(readFileSync(join(runtime, "package.json"), "utf8"));
-  expect(pkg.scripts.test).toBe("bun test ./src --path-ignore-patterns='**/*live.test.ts'");
+  expect(pkg.scripts.test.split(" && ")).toEqual([
+    "bun test ./src --path-ignore-patterns='**/*live.test.ts'",
+    "bun run test:mesh-facade:node",
+  ]);
   expect(pkg.scripts["test:live:opencode-acp"]).toContain("OPENSCOUT_LIVE_OPENCODE_ACP=1");
   expect(pkg.scripts["test:live:codex-app-server"]).toContain("OPENSCOUT_LIVE_CODEX_APP_SERVER=1");
 });

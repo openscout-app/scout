@@ -13,6 +13,48 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./client": {
+      "bun": "./src/facades/client.ts",
+      "types": "./dist/facades/client.d.ts",
+      "import": "./dist/facades/client.js",
+      "default": "./dist/facades/client.js"
+    },
+    "./daemon": {
+      "bun": "./src/facades/daemon.ts",
+      "types": "./dist/facades/daemon.d.ts",
+      "import": "./dist/facades/daemon.js",
+      "default": "./dist/facades/daemon.js"
+    },
+    "./config": {
+      "bun": "./src/facades/config.ts",
+      "types": "./dist/facades/config.d.ts",
+      "import": "./dist/facades/config.js",
+      "default": "./dist/facades/config.js"
+    },
+    "./harnesses": {
+      "bun": "./src/facades/harnesses.ts",
+      "types": "./dist/facades/harnesses.d.ts",
+      "import": "./dist/facades/harnesses.js",
+      "default": "./dist/facades/harnesses.js"
+    },
+    "./mesh": {
+      "bun": "./src/facades/mesh.ts",
+      "types": "./dist/facades/mesh.d.ts",
+      "import": "./dist/facades/mesh.js",
+      "default": "./dist/facades/mesh.js"
+    },
+    "./storage": {
+      "bun": "./src/facades/storage.ts",
+      "types": "./dist/facades/storage.d.ts",
+      "import": "./dist/facades/storage.js",
+      "default": "./dist/facades/storage.js"
+    },
+    "./extensions": {
+      "bun": "./src/facades/extensions.ts",
+      "types": "./dist/facades/extensions.d.ts",
+      "import": "./dist/facades/extensions.js",
+      "default": "./dist/facades/extensions.js"
+    },
     "./inherited-descriptors": {
       "bun": "./src/inherited-descriptors.ts",
       "types": "./dist/inherited-descriptors.d.ts",
@@ -32,10 +74,10 @@
       "default": "./dist/repo-watch/index.js"
     },
     "./setup": {
-      "bun": "./src/setup.ts",
-      "types": "./dist/setup.d.ts",
-      "import": "./dist/setup.js",
-      "default": "./dist/setup.js"
+      "bun": "./src/facades/setup.ts",
+      "types": "./dist/facades/setup.d.ts",
+      "import": "./dist/facades/setup.js",
+      "default": "./dist/facades/setup.js"
     },
     "./onboarding": {
       "bun": "./src/onboarding.ts",
@@ -96,12 +138,6 @@
       "types": "./dist/control-plane-agents.d.ts",
       "import": "./dist/control-plane-agents.js",
       "default": "./dist/control-plane-agents.js"
-    },
-    "./local-agent-template": {
-      "bun": "./src/local-agent-template.ts",
-      "types": "./dist/local-agent-template.d.ts",
-      "import": "./dist/local-agent-template.js",
-      "default": "./dist/local-agent-template.js"
     },
     "./broker-process-manager": {
       "bun": "./src/broker-process-manager.ts",
@@ -181,12 +217,6 @@
       "import": "./dist/dist-access.js",
       "default": "./dist/dist-access.js"
     },
-    "./solo-pro": {
-      "bun": "./src/solo-pro.ts",
-      "types": "./dist/solo-pro.d.ts",
-      "import": "./dist/solo-pro.js",
-      "default": "./dist/solo-pro.js"
-    },
     "./web-full-client": {
       "bun": "./src/web-full-client.ts",
       "types": "./dist/web-full-client.d.ts",
@@ -198,12 +228,6 @@
       "types": "./dist/instance.d.ts",
       "import": "./dist/instance.js",
       "default": "./dist/instance.js"
-    },
-    "./instance-bootstrap": {
-      "bun": "./src/instance-bootstrap.ts",
-      "types": "./dist/instance-bootstrap.d.ts",
-      "import": "./dist/instance-bootstrap.js",
-      "default": "./dist/instance-bootstrap.js"
     },
     "./instance-checkout-bootstrap": {
       "bun": "./src/instance-checkout-bootstrap.ts",
@@ -228,12 +252,6 @@
       "types": "./dist/support-paths.d.ts",
       "import": "./dist/support-paths.js",
       "default": "./dist/support-paths.js"
-    },
-    "./memory-snapshot": {
-      "bun": "./src/memory-snapshot.ts",
-      "types": "./dist/memory-snapshot.d.ts",
-      "import": "./dist/memory-snapshot.js",
-      "default": "./dist/memory-snapshot.js"
     },
     "./pairing-security": {
       "bun": "./src/pairing-security/index.ts",
@@ -283,12 +301,6 @@
       "import": "./dist/pairing-supervisor.js",
       "default": "./dist/pairing-supervisor.js"
     },
-    "./runtime-adapters": {
-      "bun": "./src/runtime-adapters.ts",
-      "types": "./dist/runtime-adapters.d.ts",
-      "import": "./dist/runtime-adapters.js",
-      "default": "./dist/runtime-adapters.js"
-    },
     "./sqlite-adapter": {
       "bun": "./src/sqlite-adapter.ts",
       "types": "./dist/sqlite-adapter.d.ts",
@@ -301,23 +313,11 @@
       "import": "./dist/claude-stream-json.js",
       "default": "./dist/claude-stream-json.js"
     },
-    "./codex-app-server": {
-      "bun": "./src/codex-app-server.ts",
-      "types": "./dist/codex-app-server.d.ts",
-      "import": "./dist/codex-app-server.js",
-      "default": "./dist/codex-app-server.js"
-    },
     "./pi-rpc": {
       "bun": "./src/pi-rpc.ts",
       "types": "./dist/pi-rpc.d.ts",
       "import": "./dist/pi-rpc.js",
       "default": "./dist/pi-rpc.js"
-    },
-    "./scout-agent-cards": {
-      "bun": "./src/scout-agent-cards.ts",
-      "types": "./dist/scout-agent-cards.d.ts",
-      "import": "./dist/scout-agent-cards.js",
-      "default": "./dist/scout-agent-cards.js"
     },
     "./mesh/tailscale": {
       "bun": "./src/tailscale.ts",
@@ -470,10 +470,10 @@
       "default": "./dist/conversations/legacy-ids.js"
     },
     "./routing": {
-      "bun": "./src/routing/index.ts",
-      "types": "./dist/routing/index.d.ts",
-      "import": "./dist/routing/index.js",
-      "default": "./dist/routing/index.js"
+      "bun": "./src/facades/routing.ts",
+      "types": "./dist/facades/routing.d.ts",
+      "import": "./dist/facades/routing.js",
+      "default": "./dist/facades/routing.js"
     },
     "./knowledge": {
       "bun": "./src/knowledge/index.ts",
@@ -554,12 +554,6 @@
       "import": "./dist/mcp-event-webhook.js",
       "default": "./dist/mcp-event-webhook.js"
     },
-    "./lan-network": {
-      "bun": "./src/lan-network.ts",
-      "types": "./dist/lan-network.d.ts",
-      "import": "./dist/lan-network.js",
-      "default": "./dist/lan-network.js"
-    },
     "./scout-extensions": {
       "bun": "./src/scout-extensions.ts",
       "types": "./dist/scout-extensions.d.ts",
@@ -632,7 +626,8 @@
     "db:generate": "bunx drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "bun ./src/drizzle-migrate.ts",
     "check": "bun run --cwd ../agent-sessions build && tsc --noEmit -p tsconfig.json",
-    "test": "bun test ./src --path-ignore-patterns='**/*live.test.ts'",
+    "test": "bun test ./src --path-ignore-patterns='**/*live.test.ts' && bun run test:mesh-facade:node",
+    "test:mesh-facade:node": "bun run --cwd ../protocol build && bun run build && node --test scripts/mesh-facade-import.test.mjs",
     "test:conformance": "OPENSCOUT_CONFORMANCE=1 bun test src/system-probes.test.ts --test-name-pattern='scoutd conformance diff harness'",
     "test:scenarios": "bun test src/scenario-suite.test.ts",
     "test:live:jetstream": "bun test src/jetstream/*live.test.ts",
