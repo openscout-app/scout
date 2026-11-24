@@ -227,6 +227,15 @@ describe("runtime execution contracts", () => {
   });
 
   test("Antigravity accepts account-provided model IDs and keeps the native default when omitted", () => {
+    expect(SCOUT_LAUNCHABLE_HARNESSES).toContain("antigravity");
+    expect(parseScoutRuntimeSpec("antigravity")).toEqual({
+      ok: true,
+      value: { harness: "antigravity" },
+    });
+    expect(parseScoutRuntimeSpec("antigravity/gemini-fixture")).toEqual({
+      ok: true,
+      value: { harness: "antigravity", model: "gemini-fixture" },
+    });
     expect(isModelSelectableHarness("antigravity")).toBe(true);
     expect(parseScoutRuntimeSpec("antigravity")).toEqual({ ok: true, value: { harness: "antigravity" } });
     for (const [model, effort] of [

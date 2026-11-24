@@ -83,6 +83,8 @@ export function renderScoutHelp(version = "0.2.19", detail = false, extensions: 
     "  scout doctor",
     "  scout doctor --fix --yes                       # conservative native repairs when scoutd supports them",
     "  scout runtimes",
+    "  scout crew list                               # configured crew roles and slot profiles",
+    "  scout crew check                              # verify configured role bindings against live harnesses",
     "  scout providers usage                         # live provider quota windows and reset times",
     "  scout providers map                           # quota-aware role/model/provider recommendations",
     "  scout status --all --blocked                    # inspect explicit blockers",

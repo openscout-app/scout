@@ -30,6 +30,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "diff", summary: "Inspect worktree or session-scoped diffs" },
   { name: "runtimes", summary: "Show harness catalog and readiness" },
   { name: "providers", summary: "Show provider usage quota windows" },
+  { name: "crew", summary: "Manage crew role bindings, presets, and live reachability" },
   { name: "role", summary: "Assign roles (orchestrator) and read/write mission logs" },
   { name: "env", summary: "Show executable and agent identity context" },
   { name: "instance", summary: "List or release non-prod OpenScout instances (OPENSCOUT_INSTANCE)" },

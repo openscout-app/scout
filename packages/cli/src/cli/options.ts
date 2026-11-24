@@ -70,6 +70,7 @@ export type ScoutAskCommandOptions = ContextRootOptions & {
   existingTargetHandle?: string;
   runtimeProfile?: string;
   runtimeLiteral?: string;
+  role?: string;
   executionSource?: Partial<Record<"harness" | "model" | "reasoningEffort", "flag" | "literal">>;
   model?: string;
   reasoningEffort?: string;
@@ -259,11 +260,12 @@ function shouldInferCurrentProjectAskTarget(input: {
   harness?: string;
   model?: string;
   reasoningEffort?: string;
+  role?: string;
   session?: ScoutAskCommandOptions["session"];
 }): boolean {
   return !input.targetLabel
     && !input.projectPath
-    && Boolean(input.harness || input.model || input.reasoningEffort || input.session);
+    && Boolean(input.harness || input.model || input.reasoningEffort || input.role || input.session);
 }
 
 type NaturalLanguageAskTarget =
@@ -900,6 +902,7 @@ export function parseAskCommandOptions(
   let existingTargetHandle: string | undefined;
   let runtimeProfile: string | undefined;
   let runtimeLiteral: string | undefined;
+  let role: string | undefined;
   let runtimeLiteralModel: string | undefined;
   let runtimeLiteralHarness: string | undefined;
   let runtimeLiteralEffort: string | undefined;
@@ -1006,6 +1009,13 @@ export function parseAskCommandOptions(
       runtimeLiteralHarness = runtime.harness;
       runtimeLiteralModel = runtime.model;
       runtimeLiteralEffort = runtime.reasoningEffort;
+      index = value.nextIndex;
+      continue;
+    }
+    if (current === "--role" || current.startsWith("--role=")) {
+      const value = parseAskFlagValue(parsed.args, index, "--role");
+      role = value.value.trim();
+      if (!role) missingFlagValue("--role");
       index = value.nextIndex;
       continue;
     }
@@ -1166,18 +1176,18 @@ export function parseAskCommandOptions(
     projectPath = rawProjectPath?.trim();
     session ??= "new";
   }
-  if (!task.operator && !task.ref && !task.continue && !channel && !runtimeProfile && shouldInferCurrentProjectAskTarget({ targetLabel, projectPath, harness, model, reasoningEffort, session })) {
+  if (!task.operator && !task.ref && !task.continue && !channel && !runtimeProfile && shouldInferCurrentProjectAskTarget({ targetLabel, projectPath, harness, model, reasoningEffort, role, session })) {
     projectPath = parsed.currentDirectory;
   }
   const parsedExplicitTarget = targetLabel ? parseScoutComposerRouteTarget(targetLabel) : null;
   if (
-    (harness || model || reasoningEffort)
+    (harness || model || reasoningEffort || (role && !targetLabel))
     && !session
     && parsedExplicitTarget?.kind !== "session_id"
   ) {
     session = "new";
   }
-  if (!targetLabel && !task.operator && !task.ref && !task.continue && !projectPath && !runtimeProfile && !channel) {
+  if (!targetLabel && !task.operator && !task.ref && !task.continue && !projectPath && !runtimeProfile && !role && !channel) {
     const positional = message.match(/^@([^\s]+)(?:\s|$)/);
     if (positional && firstMessageIndex !== undefined) {
       // Context-root parsing removes tokens. Map this body token back to the
@@ -1201,14 +1211,14 @@ export function parseAskCommandOptions(
   // which flags it can be combined with.
   validateTaskAsk(callbackFile ? { ...task, callback: { code: "export default () => {};" } } : task, {
     to: targetLabel ?? undefined, channel,
-    capability: !task.continue && Boolean(projectPath || runtimeProfile),
-    execution: Boolean(harness || model || reasoningEffort || onHost || projectPath || runtimeProfile || runtimeLiteral || session || placement),
+    capability: !task.continue && Boolean(projectPath || runtimeProfile || (role && !targetLabel)),
+    execution: Boolean(harness || model || reasoningEffort || onHost || projectPath || runtimeProfile || runtimeLiteral || (role && !targetLabel) || session || placement),
     relation: Boolean(relation),
   });
   if (runtimeProfile) {
     rejectUnsupportedRuntimeProfileEffort(runtimeProfile, reasoningEffort);
   }
-  if ((model || reasoningEffort) && !harness && !runtimeProfile) {
+  if ((model || reasoningEffort) && !harness && !runtimeProfile && !role) {
     throw new ScoutCliError("runtime_target_required: --model/--effort requires --harness, --runtime, or --profile");
   }
   if (message && promptFile) {
@@ -1237,6 +1247,7 @@ export function parseAskCommandOptions(
     ...(existingTargetHandle ? { existingTargetHandle } : {}),
     ...(runtimeProfile ? { runtimeProfile } : {}),
     ...(runtimeLiteral ? { runtimeLiteral } : {}),
+    ...(role ? { role } : {}),
     ...((runtimeLiteral || explicitHarnessFlag || explicitModelFlag || explicitEffortFlag) ? {
       executionSource: {
         ...(harness ? { harness: explicitHarnessFlag ? "flag" as const : "literal" as const } : {}),

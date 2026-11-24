@@ -117,7 +117,7 @@ async function main() {
     }
     const implicitPromptArgs = [command, ...commandArgs];
     const routeFlags = ["--to", "--operator", "--channel", "--project", "--ref", "--continue",
-      "--harness", "--runtime", "--profile", "--model", "--effort", "--reasoning-effort", "--session", "--new", "--on", "--host"];
+      "--role", "--harness", "--runtime", "--profile", "--model", "--effort", "--reasoning-effort", "--session", "--new", "--on", "--host"];
     const literal = implicitPromptArgs.indexOf("--");
     const routeArgs = literal < 0 ? implicitPromptArgs : implicitPromptArgs.slice(0, literal);
     if (!command.startsWith("@") && !routeArgs.some(arg => routeFlags.includes(arg.split("=")[0]!))) {

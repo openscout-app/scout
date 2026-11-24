@@ -1,3 +1,5 @@
+import type { CrewWhoAmISummary } from "@openscout/protocol";
+import type { CrewReachabilityChecker } from "@openscout/runtime/crew";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
 import {
   detectCodingAgentHost,
@@ -17,6 +19,7 @@ import {
   resolveScoutBrokerUrl,
   resolveScoutSenderId,
 } from "../../lib/core/broker/service.ts";
+import { loadCliCrewWhoAmISummary } from "../../lib/core/crew/service.ts";
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
 
@@ -30,6 +33,7 @@ type ScoutWhoAmIReport = {
   projectAgentsMd: string | null;
   brokerUrl: string;
   discovery: OpenScoutAgentDiscovery;
+  crew?: CrewWhoAmISummary;
 };
 
 async function resolveProjectAgentsMd(projectRoot: string | null): Promise<string | null> {
@@ -53,9 +57,16 @@ async function resolveProjectAgentsMd(projectRoot: string | null): Promise<strin
 async function loadScoutWhoAmIReport(
   context: ScoutCommandContext,
   currentDirectory: string,
+  deps: { crewChecker?: CrewReachabilityChecker } = {},
 ): Promise<ScoutWhoAmIReport> {
   const defaultSenderId = await resolveScoutSenderId(null, currentDirectory, context.env);
   const projectRoot = await findNearestProjectRoot(currentDirectory);
+  const crew = await loadCliCrewWhoAmISummary({
+    currentDirectory,
+    projectRoot,
+    env: context.env,
+    checker: deps.crewChecker,
+  });
 
   return {
     defaultSenderId,
@@ -67,6 +78,7 @@ async function loadScoutWhoAmIReport(
     projectAgentsMd: await resolveProjectAgentsMd(projectRoot),
     brokerUrl: resolveScoutBrokerUrl(),
     discovery: OPENSCOUT_AGENT_DISCOVERY,
+    ...(crew ? { crew } : {}),
   };
 }
 
@@ -98,6 +110,27 @@ function renderScoutWhoAmIReport(report: ScoutWhoAmIReport): string {
     lines.push(`Project Instructions: ${report.projectAgentsMd}`);
   }
 
+  if (report.crew?.activeSeat) {
+    const seat = report.crew.activeSeat;
+    const posture = seat.profile ? ` — ${seat.profile.economics}` : "";
+    lines.push(`Active Seat: ${seat.role}${seat.runtime ? ` (${seat.runtime})` : ""}${posture}`);
+    if (seat.profile) {
+      lines.push(`Seat Posture: ${seat.profile.posture}`);
+    }
+  }
+
+  if (report.crew && report.crew.availableRoles.length > 0) {
+    const summary = report.crew.availableRoles
+      .map((entry) => {
+        const hostSuffix = entry.host ? `@${entry.host}` : "";
+        const poolSuffix = entry.pool && entry.pool > 1 ? ` x${entry.pool}` : "";
+        return `${entry.role}=${entry.runtime}${hostSuffix}${poolSuffix}`;
+      })
+      .join(" · ");
+    const presetPrefix = report.crew.activePreset ? `[${report.crew.activePreset}] ` : "";
+    lines.push(`Crew Roles: ${presetPrefix}${summary}`);
+  }
+
   lines.push(`Discovery: ${report.discovery.agentInstructions}`);
 
   return lines.join("\n");
@@ -111,7 +144,8 @@ export function renderWhoAmICommandHelp(): string {
     "",
     "The report includes the default sender id, current directory, nearest Scout project root when found,",
     "OPENSCOUT_AGENT when it overrides the sender, detected host harness signals (Cursor, Claude Code, Codex),",
-    "the broker URL the CLI will contact, OpenScout discovery URLs, and the nearest project AGENTS.md path when found.",
+    "the broker URL the CLI will contact, OpenScout discovery URLs, available crew roles and active seat posture,",
+    "and the nearest project AGENTS.md path when found.",
     "",
     "Examples:",
     "  scout whoami",
@@ -119,13 +153,17 @@ export function renderWhoAmICommandHelp(): string {
   ].join("\n");
 }
 
-export async function runWhoAmICommand(context: ScoutCommandContext, args: string[]): Promise<void> {
+export async function runWhoAmICommand(
+  context: ScoutCommandContext,
+  args: string[],
+  deps: { crewChecker?: CrewReachabilityChecker } = {},
+): Promise<void> {
   if (args.some((arg) => HELP_FLAGS.has(arg))) {
     context.output.writeText(renderWhoAmICommandHelp());
     return;
   }
 
   const options = parseContextRootCommandOptions("whoami", args, defaultScoutContextDirectory(context));
-  const report = await loadScoutWhoAmIReport(context, options.currentDirectory);
+  const report = await loadScoutWhoAmIReport(context, options.currentDirectory, deps);
   context.output.writeValue(report, renderScoutWhoAmIReport);
 }
