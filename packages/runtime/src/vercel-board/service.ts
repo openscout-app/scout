@@ -873,7 +873,7 @@ export class BrokerVercelBoardService {
 
   /**
    * A channel's messages, newest `limit`, oldest first. A mirrored channel
-   * answers from the copy in one query; any other channel reads the board in
+   * answers from the copy and confirmed local claim renewals; any other channel reads the board in
    * one call and keeps nothing.
    */
   async messages(request: { connectionId: string; channel: string; limit?: number }): Promise<VercelBoardMessagesResponse> {
@@ -883,8 +883,21 @@ export class BrokerVercelBoardService {
     const conversationId = vercelBoardRoomId(live.config.id, request.channel);
     const state = this.mirrorState(live, request.channel);
     if (state !== "not_mirrored") {
-      return { connectionId: live.config.id, channel: request.channel, conversationId, state, cursor: live.store.cursor(live.config.id, request.channel)?.cursor ?? null,
-        messages: live.mirror.window(live.config.id, request.channel, limit) };
+      const messages = live.mirror.window(live.config.id, request.channel, limit);
+      // Renewals can reach custody before the next version of a mirrored root.
+      // Only extend the same held epoch, without reviving a released or superseded task.
+      if (messages.some(message => message.task?.state === "claimed")) {
+        const held = new Map(this.claimsOf(live).filter(claim => claim.state === "held").map(claim => [claim.taskId, claim]));
+        for (const message of messages) {
+          const task = message.task;
+          const current = held.get(message.id);
+          if (task?.state === "claimed" && task.claim && current?.until != null
+            && current.epoch === task.epoch && current.until > Date.parse(task.claim.until)) {
+            task.claim.until = new Date(current.until).toISOString();
+          }
+        }
+      }
+      return { connectionId: live.config.id, channel: request.channel, conversationId, state, cursor: live.store.cursor(live.config.id, request.channel)?.cursor ?? null, messages };
     }
     const page = await live.transport.channelMessages({ channel: request.channel, limit });
     return { connectionId: live.config.id, channel: request.channel, conversationId, state, cursor: page.cursor,
