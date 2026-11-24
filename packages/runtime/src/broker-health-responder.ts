@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { basename, dirname, join } from "node:path";
+import type { BrokerStartupTrafficGateSnapshot } from "./broker-startup-traffic-gate.js";
 
 /** Something that fell behind. Health stays up; the flag says what and since when. */
 export type BrokerHealthFlag = {
@@ -12,6 +13,7 @@ export type BrokerHealthFlag = {
 export type BrokerHealthResponderMessage =
   | { type: "ready"; nodeId: string; brokerUrl?: string }
   | { type: "flags"; flags: BrokerHealthFlag[] }
+  | { type: "startup"; startup: BrokerStartupTrafficGateSnapshot }
   | { type: "stopping" };
 
 export type BrokerHealthResponderWorkerData = {
@@ -42,6 +44,7 @@ export class BrokerHealthResponder {
   #worker: Worker | null = null;
   #beatTimer: ReturnType<typeof setInterval> | null = null;
   #ready: Extract<BrokerHealthResponderMessage, { type: "ready" }> | null = null;
+  #startupJson: string | null = null;
 
   constructor(private readonly options: {
     socketPath: string;
@@ -51,6 +54,8 @@ export class BrokerHealthResponder {
     now?: () => number;
     log?: (message: string) => void;
     workerUrl?: URL;
+    /** Cheap main-thread snapshot; the health worker never calls the runtime. */
+    readStartup?: () => BrokerStartupTrafficGateSnapshot;
   }) {}
 
   get socketPath(): string { return this.options.socketPath; }
@@ -59,7 +64,10 @@ export class BrokerHealthResponder {
     if (this.#worker) return Promise.resolve();
     const now = this.#now();
     this.#beat[0] = now;
-    this.#beatTimer = setInterval(() => { this.#beat[0] = this.#now(); }, this.options.beatMs ?? 250);
+    this.#beatTimer = setInterval(() => {
+      this.#beat[0] = this.#now();
+      this.#postStartup();
+    }, this.options.beatMs ?? 250);
     this.#beatTimer.unref();
     const url = this.options.workerUrl ?? new URL(import.meta.url.endsWith(".ts")
       ? "./broker-health-responder-worker-entry.ts" : "./broker-health-responder-worker-entry.js", import.meta.url);
@@ -80,6 +88,8 @@ export class BrokerHealthResponder {
         worker.on("error", (error) => this.options.log?.(`health responder failed: ${error instanceof Error ? error.message : String(error)}`));
         if (this.#ready) worker.postMessage(this.#ready);
         this.#postFlags();
+        this.#startupJson = null;
+        this.#postStartup();
         resolve();
       };
       const onStartError = (error: unknown) => { worker.off("message", onMessage); this.#worker = null; reject(error); };
@@ -121,6 +131,19 @@ export class BrokerHealthResponder {
 
   #postFlags(): void {
     this.#worker?.postMessage({ type: "flags", flags: this.flags() } satisfies BrokerHealthResponderMessage);
+  }
+
+  #postStartup(): void {
+    if (!this.#worker || !this.options.readStartup) return;
+    try {
+      const startup = this.options.readStartup();
+      const encoded = JSON.stringify(startup);
+      if (encoded === this.#startupJson) return;
+      this.#worker.postMessage({ type: "startup", startup } satisfies BrokerHealthResponderMessage);
+      this.#startupJson = encoded;
+    } catch (error) {
+      this.options.log?.(`health readiness snapshot failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   #now(): number { return this.options.now?.() ?? Date.now(); }

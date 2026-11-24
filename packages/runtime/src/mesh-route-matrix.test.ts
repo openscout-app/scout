@@ -36,13 +36,14 @@ describe("mesh route matrix", () => {
     expect(Object.keys(matrix).filter((route) => !live.includes(route))).toEqual([TRPC_UPGRADE_ROUTE]);
   });
 
-  // Remove only the eight newly explicit registrations to reconstruct the
+  // Remove only the newly explicit registrations to reconstruct the
   // previous policy with the same lookup algorithm, including parameter matching.
   const newlyRegistered = [
     "GET /v1/attachments/capability", "POST /v1/attachments/read",
     "POST /v1/messages/with-attachments", "GET /v1/history/records",
     "GET /v1/history/records/:kind/:id", "GET /v1/quarantine",
     "GET /v1/quarantine/:id", "POST /v1/quarantine/:id/acknowledge",
+    "POST /v1/quarantine/:id/defer", "POST /v1/quarantine/:id/retry",
   ];
   for (const route of newlyRegistered) {
     test(`registration preserves the previous default-local tier: ${route}`, () => {

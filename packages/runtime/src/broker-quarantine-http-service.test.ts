@@ -80,3 +80,24 @@ test("inventory-friendly dispatch preserves namespace, method and denial precede
     }
   }
 });
+
+test("review decisions are local and retry failure is explicit rather than a false success", async () => {
+  const id = `quarantine-${"b".repeat(64)}`;
+  const record = { id, status: "deferred", kind: "message.record", reason: "missing parent", bytes: 2,
+    digest: "digest", createdAt: 1, acknowledgedAt: null, scope: { recordIds: [], sessionIds: [], invocationIds: [], actorIds: [] } } as const;
+  let calls = 0;
+  const queries: BrokerQuarantineQueries = { status: () => ({ openCount: 0, acknowledgedCount: 0, deferredCount: 1, samples: [] }),
+    list: () => [], read: () => null, acknowledge: () => null,
+    defer: () => { calls++; return record as any; },
+    retry: () => { calls++; return { record: { ...record, status: "open" } as any, outcome: "failed", detail: "parent still missing" }; } };
+  expect((await call(`/v1/quarantine/${id}/defer`, queries, "POST")).value.record.status).toBe("deferred");
+  const failed = await call(`/v1/quarantine/${id}/retry`, queries, "POST");
+  expect(failed.status).toBe(409); expect(failed.value.detail).toBe("parent still missing");
+  for (const action of ["defer", "retry"]) {
+    expect((await call(`/v1/quarantine/${id}/${action}`, queries, "POST", true)).status).toBe(403);
+    expect((await call(`/v1/quarantine/${id}/${action}`, queries, "GET")).status).toBe(405);
+  }
+  expect(calls).toBe(2);
+  expect((await call("/v1/quarantine?status=deferred", queries)).status).toBe(200);
+  expect((await call("/v1/quarantine?status=resolved", queries)).status).toBe(200);
+});

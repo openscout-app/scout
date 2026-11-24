@@ -10,11 +10,13 @@ const beat = new Float64Array(data.beat);
 let state: "starting" | "up" | "stopping" = "starting";
 let identity: { nodeId?: string; brokerUrl?: string } = {};
 let flags: BrokerHealthFlag[] = [];
+let startup: Extract<BrokerHealthResponderMessage, { type: "startup" }>["startup"] | undefined;
 let busySince: number | null = null;
 
 port.on("message", (message: BrokerHealthResponderMessage) => {
   if (message.type === "ready") { state = "up"; identity = { nodeId: message.nodeId, brokerUrl: message.brokerUrl }; }
   else if (message.type === "flags") flags = message.flags;
+  else if (message.type === "startup") startup = message.startup;
   else if (message.type === "stopping") state = "stopping";
 });
 
@@ -36,6 +38,7 @@ function read(now: number) {
     pid: data.pid,
     startedAt: data.startedAt,
     ...identity,
+    ...(startup ? { startup } : {}),
     mainThread: main,
     flags: current,
     checkedAt: now,

@@ -77,3 +77,19 @@ test("404 and unavailable storage remain explicit errors without automatic mutat
     expect(calls).toBe(1);
   }
 });
+
+test("defer and retry issue one explicit decision request and never dispatch agent work", async () => {
+  const requests: Request[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = new Request(input, init); requests.push(req);
+    return Response.json({ record: { ...record, status: req.url.endsWith("defer") ? "deferred" : "resolved" }, outcome: "resolved", detail: null });
+  }) as unknown as typeof fetch;
+  const deferred = context(); await runQuarantineCommand(deferred.value, ["defer", "record-one"]);
+  expect(deferred.output[0]).toContain("remains quarantined");
+  const retried = context(); await runQuarantineCommand(retried.value, ["retry", "record-one"]);
+  expect(retried.output[0]).toContain("no task was rerun");
+  expect(requests.map(req => [req.method, new URL(req.url).pathname])).toEqual([
+    ["POST", "/v1/quarantine/record-one/defer"], ["POST", "/v1/quarantine/record-one/retry"],
+  ]);
+  expect(parseQuarantineCommandOptions(["list", "--status", "deferred"]).status).toBe("deferred");
+});
