@@ -120,6 +120,14 @@ test("person registration and operator-only routes require operator proof", asyn
   expect(signed.body).toMatchObject({ outcome: "ended" });
   expect((await post(h.baseUrl, "/v1/operator-requests/dismiss", { requestId: "missing" })).status).toBe(403);
   expect((await post(h.baseUrl, "/v1/tasks/ready/decide", { ref: "missing", decision: "hold" })).status).toBe(403);
+  const answer = { id: "missing-ask", requestId: "decision-missing", answer: { kind: "text", text: "Go ahead" } };
+  const unprovenAnswer = await post(h.baseUrl, "/v1/decisions/answer", answer);
+  expect(unprovenAnswer.status).toBe(403);
+  expect(unprovenAnswer.body.error).toBe("operator_attribution_required");
+  // Signed, the route itself answers: the ask does not exist.
+  const provenAnswer = await broker.postJsonStatus(h.baseUrl, "/v1/decisions/answer", answer);
+  expect(provenAnswer.status).not.toBe(403);
+  expect((provenAnswer.body as { error?: string }).error).not.toBe("operator_attribution_required");
   expect((await post(h.baseUrl, "/v1/commands", { kind: "message.post", message: {} })).status).toBe(403);
 }, 15_000);
 

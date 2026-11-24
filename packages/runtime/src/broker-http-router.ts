@@ -775,6 +775,8 @@ export function createBrokerHttpRouter(
         return;
       }
       if (method === "POST" && url.pathname === "/v1/decisions/answer") {
+        // Answering is the operator's act, as with permission and Ready decisions.
+        if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
         const body = await readRequestBody<{ id?: unknown; answer?: unknown; requestId?: unknown }>(request, { maxBytes: 16 * 1024 });
         if (typeof body.id !== "string" || typeof body.requestId !== "string" || !body.answer || typeof body.answer !== "object") {
           throw new DecisionAnswerError("id, requestId and answer are required");
