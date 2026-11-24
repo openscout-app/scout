@@ -38,7 +38,7 @@ import {
   SCOUTBOT_RUNTIME_INSTANCE_ID,
   scoutbotCodexLaunchArgs,
   scoutbotProvenance,
-} from "./role.ts";
+} from "@openscout/runtime/scoutbot-role";
 
 export interface ScoutbotRunnerHandle {
   /** Set when bootstrap could not reach the broker; this handle answers nothing. */
@@ -483,11 +483,7 @@ function hasCurrentScoutbotRuntimeConfig(endpoint: ScoutBrokerEndpointRecord): b
     && metadataString(endpoint.metadata, "approvalPolicy") === "never"
     && metadataString(endpoint.metadata, "sandbox") === "read-only"
     && endpoint.metadata?.shellTool === false
-    && launchArgs.includes("features.shell_tool=false")
-    && launchArgs.includes(`mcp_servers.scout.enabled_tools=${JSON.stringify([
-      ...SCOUTBOT_ROLE_CONFIG.grants.read,
-      ...SCOUTBOT_ROLE_CONFIG.grants.write,
-    ])}`);
+    && JSON.stringify(launchArgs) === JSON.stringify(scoutbotCodexLaunchArgs());
 }
 
 function scoutbotEndpointTransportSessionId(endpoint: ScoutBrokerEndpointRecord): string | null {

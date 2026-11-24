@@ -7,9 +7,7 @@ export const SCOUTBOT_ENDPOINT_ID = "endpoint.scoutbot.codex_app_server";
 export const SCOUTBOT_RUNTIME_INSTANCE_ID = "scoutbot-default";
 export const SCOUTBOT_REASONING_EFFORT = "low";
 
-export type ScoutbotStructuredWriteTool =
-  | "messages_send"
-  | "ask";
+export type ScoutbotStructuredWriteTool = "ask";
 
 export type ScoutbotReadTool =
   | "attachments_read"
@@ -99,9 +97,7 @@ Scout coordinates over herdr; it does not manage herdr's layout. You cannot spli
 
 Offload with structured broker operations when the request requires a project agent to inspect files, run commands, reproduce a bug, write code, review a diff, research a repo, operate a UI, or own multi-step work. Pick the agent by explicit routing metadata or by the closest matching project/workspace identity. If the target is ambiguous, ask one clarifying question instead of guessing.
 
-Use messages_send for tells/status nudges. Use ask when the meaning is "own this and report back"; ask is also the delegation primitive for project or sub-agent work.
-
-messages_send is a tell. It opens no flight and returns no handle, so nothing ever comes back to you through it. If the operator is waiting on an answer, the tool is ask.
+Use ask with fyi=true for tells or status nudges. This creates a message but no flight. If the operator is waiting on an answer, leave fyi unset so ask creates a task you can follow up on.
 
 ## Getting the answer back
 
@@ -119,7 +115,7 @@ Follow up with invocations_wait (flightId plus a timeoutSeconds budget, default 
 
 Both return the same shape. Read terminal and waitStatus for whether the work has finished, output for the reply body, and error for a failure. A flight that is not terminal has not failed — say it is still running; never report it as having produced nothing.
 
-When a receipt comes back with state "ambiguous" it carries a next hint naming a tool and arguments. If that tool is agents_resolve or agents_search, follow the hint and retry the ask against the resolved target. If it names anything else — agents_start, for instance, which is not granted to you — do not attempt it and do not fall back to a tool you do have. Report the hint to the operator as the next step: the target you were resolving, the tool the broker asked for, and its arguments, so they can run it or route it to an agent that can. Never substitute a different agent because the first one did not resolve.
+When a receipt comes back with state "ambiguous" it carries a next hint naming a tool and arguments. If that tool is agents_resolve or agents_search, follow the hint and retry the ask against the resolved target. If it names anything else, do not attempt it and do not fall back to a tool you do have. Report the hint to the operator as the next step: the target you were resolving, the tool the broker asked for, and its arguments, so they can run it or route it to an agent that can. Never substitute a different agent because the first one did not resolve.
 
 ## Parallelism
 
@@ -131,7 +127,7 @@ Collect a fan-out by its flightIds rather than waiting on each ask in turn: issu
 
 ## Tools and routing
 
-Use read-only broker tools first: attachments_read, sessions_search, sessions_inventory, herdr_workspaces, agents_search, agents_resolve, broker_feed, messages_inbox, messages_channel, invocations_get, invocations_wait, current_reply_context, and whoami. For writes, use only messages_send for tells/status nudges and ask for owned work or delegation. Flight cancellation is not currently granted; tell the operator when cancellation needs to be performed elsewhere. No shell access. No codebase writes.
+Use read-only broker tools first: attachments_read, sessions_search, sessions_inventory, herdr_workspaces, agents_search, agents_resolve, broker_feed, messages_inbox, messages_channel, invocations_get, invocations_wait, current_reply_context, and whoami. For writes, use only ask. Flight cancellation is not granted; tell the operator when cancellation needs to be performed elsewhere. No shell access. No codebase writes.
 
 Routing must be explicit. Resolve targets before broker writes; do not rely on body mentions as instructions. Every broker write you emit must carry Scoutbot provenance so the operator can audit why it happened.
 
@@ -156,10 +152,7 @@ export const SCOUTBOT_ROLE_CONFIG: ScoutbotRoleConfig = {
       "invocations_get",
       "invocations_wait",
     ],
-    write: [
-      "messages_send",
-      "ask",
-    ],
+    write: ["ask"],
     shell: false,
     codebaseWrites: false,
   },
@@ -177,6 +170,10 @@ export function scoutbotRuntimeToolNames(): string[] {
     ...SCOUTBOT_ROLE_CONFIG.grants.read,
     ...SCOUTBOT_ROLE_CONFIG.grants.write,
   ];
+}
+
+export function scoutbotMcpConfig() {
+  return { profile: "sessions,terminals", enabledTools: scoutbotRuntimeToolNames() };
 }
 
 export function scoutbotCodexLaunchArgs(): string[] {
@@ -201,10 +198,6 @@ export function scoutbotCodexLaunchArgs(): string[] {
     "features.multi_agent=false",
     "-c",
     "web_search=\"disabled\"",
-    "-c",
-    `mcp_servers.scout.enabled_tools=${JSON.stringify(scoutbotRuntimeToolNames())}`,
-    "-c",
-    "mcp_servers.scout.default_tools_approval_mode=\"approve\"",
   ];
 }
 

@@ -1,89 +1,65 @@
+import { resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { SCOUT_MCP_LOCAL_DEFAULT_TOOLS } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";
-import { parseContextRootCommandOptions } from "../options.ts";
+import { LOCAL_MCP_TOOL_GROUPS, selectedLocalMcpProfile } from "../../mcp/local-tool-profile.ts";
 import { runScoutMcpServer } from "../../mcp/scout-mcp.ts";
 import { renderMcpInstallHelp, runMcpInstallCommand } from "./mcp-install.ts";
 import { ScoutCliError } from "../errors.ts";
 
-export type ScoutMcpCommandOptions = {
-  currentDirectory: string;
-  enableNotifications: boolean;
-};
+const serverFlags = {
+  profile: { type: "string" },
+  notifications: { type: "boolean" },
+  "enable-notifications": { type: "boolean" },
+} as const;
 
-export function parseMcpCommandOptions(
-  args: string[],
-  defaultCurrentDirectory: string,
-): ScoutMcpCommandOptions {
-  const filteredArgs: string[] = [];
-  let enableNotifications = false;
-
-  for (const arg of args) {
-    if (arg === "--notifications" || arg === "--enable-notifications") {
-      enableNotifications = true;
-      continue;
-    }
-    filteredArgs.push(arg);
-  }
-
-  const options = parseContextRootCommandOptions(
-    "mcp",
-    filteredArgs,
-    defaultCurrentDirectory,
-  );
+export function parseMcpCommandOptions(args: string[], defaultCurrentDirectory: string, env = process.env) {
+  const { values } = parseArgs({ args, options: { ...serverFlags, "context-root": { type: "string" } } });
   return {
-    currentDirectory: options.currentDirectory,
-    enableNotifications,
+    currentDirectory: values["context-root"] === undefined ? defaultCurrentDirectory : resolve(values["context-root"]),
+    enableNotifications: Boolean(values.notifications || values["enable-notifications"]),
+    profile: selectedLocalMcpProfile(values.profile, env),
+  };
+}
+
+export function parseMcpServeCommandOptions(args: string[], env: NodeJS.ProcessEnv) {
+  const { values } = parseArgs({ args, options: {
+    ...serverFlags, host: { type: "string", default: "127.0.0.1" },
+    port: { type: "string", default: "0" }, "idle-timeout": { type: "string" },
+  } });
+  // Identity comes from the local process on the other end of the socket.
+  if (!["127.0.0.1", "localhost", "::1"].includes(values.host)) {
+    throw new ScoutCliError("scout mcp serve listens on loopback only (127.0.0.1, localhost or ::1).");
+  }
+  return {
+    host: values.host,
+    port: Number(values.port),
+    idleTimeoutMs: values["idle-timeout"] === undefined ? undefined : Number(values["idle-timeout"]) * 1000,
+    notifications: Boolean(values.notifications || values["enable-notifications"]),
+    profile: selectedLocalMcpProfile(values.profile, env),
   };
 }
 
 export function renderMcpCommandHelp(): string {
   return [
     "Usage:",
-    "  scout mcp [--context-root <path>] [--notifications]",
-    "  scout mcp install [--host <codex|claude|zed|antigravity>] [--shared] [--force] [--dry-run]",
-    "  scout mcp serve [--port <n>] [--host 127.0.0.1] [--idle-timeout <seconds>] [--notifications]",
-    "                   one shared server for every local session (Streamable HTTP)",
+    "  scout mcp [--profile <selection>] [--context-root <path>] [--notifications]",
+    "  scout mcp serve [--profile <selection>] [--port <n>] [--host 127.0.0.1] [--idle-timeout <seconds>] [--notifications]",
+    "  scout mcp install [--profile <selection>] [--host <codex|claude|zed|antigravity>] [--shared] [--force] [--dry-run]",
     "",
-    "Run or install the Scout MCP server.",
+    "Run a local MCP server over stdio, or use serve for one shared HTTP server.",
+    "Both register the default coordination tools:",
+    `  ${SCOUT_MCP_LOCAL_DEFAULT_TOOLS.join(", ")}`,
     "",
-    "`--notifications` enables background MCP reply notifications on this",
-    "stdio connection. Omit it for a quiet tool-only MCP lane.",
+    "--profile full restores all tools. To add only selected groups to the default,",
+    "pass a comma-separated list, for example --profile git,work. Available groups:",
+    `  ${Object.keys(LOCAL_MCP_TOOL_GROUPS).join(", ")}`,
+    "The flag overrides OPENSCOUT_MCP_PROFILE. Use --profile default for no groups.",
     "",
-    "The stdio server form is intended to be launched by an MCP host. It exposes",
-    "the same canonical Scout coordination loop the CLI teaches:",
-    "",
-    "  whoami           inspect sender identity when the host is unclear",
-    "  messages_inbox   read recent direct/addressed messages for this sender",
-    "  messages_channel read recent messages from a named channel",
-    "  broker_feed      native broker messages/status/errors for an agent",
-    "  tail_events      recent observed harness activity from the broker tail",
-    "  session_attach_current",
-    "                   pro integration: attach the current live Codex session",
-    "  card_create      pro integration: fresh reply-ready return address",
-    "  rex_start_agent  open a Scout-addressable Claude or Codex window in the caller's local Rex session",
-    "  rex_status       read Rex windows, child addresses, or a block's native program reports",
-    "  agents_start     pro integration: start/create a concrete local agent session",
-    "  where            shortlist local projects, agents or sessions by topic",
-    "  check            read live work, optionally resolving a topic first",
-    "  agents_search    search the known roster by identity fields",
-    "  agents_resolve   pin one exact target when needed",
-    "  ask              broker front door for agent-to-agent work/replies",
-    "  reply            final answer or task progress by ref",
-    "  ask + fyi        deliberate no-answer message",
-    "  ask + operator   human-owned task; defaultAction declares a safe default",
-    "  invocations_get  fetch current state for an existing ask flight",
-    "  invocations_wait bounded wait for an existing ask flight",
-    "  work_update      progress / waiting / review / done for existing work",
-    "  work_retry       retry a failed run in a fresh session; reuse the attempt for receipts",
-    "  work_move        move work to a lifecycle station; the runtime checks it",
-    "  work_review      confirm, reopen, or consult on a move pending review",
-    "  work_lifecycle   stations, where an item sits, and its recent moves",
-    "  derived_read     a derived record on a work item, and whether it is current",
-    "  derived_write    write a derived record against the version you read",
-    "  derived_pending  work items that need a derived record",
-    "",
-    "Pass targets as tool fields. Message body text is payload, so quoted",
-    "handles such as @codex should not become routing instructions.",
+    "Route with tool fields, not quoted handles in the body. Use ask for tasks,",
+    "ask with fyi=true for news, and reply by ref to answer an existing task.",
+    "--notifications enables background MCP reply notifications.",
     "",
     renderMcpInstallHelp(),
   ].join("\n");
@@ -106,37 +82,19 @@ export async function runMcpCommand(
   }
 
   if (subcommand === "serve") {
-    const rest = args.slice(1);
-    const flag = (name: string) => {
-      const index = rest.indexOf(name);
-      return index === -1 ? undefined : rest[index + 1];
-    };
-    const host = flag("--host") ?? "127.0.0.1";
-    // Identity comes from the local process on the other end of the socket.
-    if (!["127.0.0.1", "localhost", "::1"].includes(host)) {
-      throw new ScoutCliError("scout mcp serve listens on loopback only (127.0.0.1, localhost or ::1).");
-    }
-    const idleSeconds = flag("--idle-timeout");
+    const options = parseMcpServeCommandOptions(args.slice(1), context.env);
     const { runSharedScoutMcpServer } = await import("../../mcp/shared-http.ts");
-    await runSharedScoutMcpServer({
-      host,
-      port: Number(flag("--port") ?? 0),
-      env: context.env,
-      idleTimeoutMs: idleSeconds === undefined ? undefined : Number(idleSeconds) * 1000,
-      notifications: rest.includes("--notifications") || rest.includes("--enable-notifications"),
-    });
+    await runSharedScoutMcpServer({ ...options, env: context.env });
     return;
   }
 
-  const options = parseMcpCommandOptions(
-    args,
-    defaultScoutContextDirectory(context),
-  );
+  const options = parseMcpCommandOptions(args, defaultScoutContextDirectory(context), context.env);
   if (options.enableNotifications) {
     context.env.OPENSCOUT_MCP_ENABLE_NOTIFICATIONS = "1";
   }
   await runScoutMcpServer({
     defaultCurrentDirectory: options.currentDirectory,
+    profile: options.profile,
     env: context.env,
   });
 }

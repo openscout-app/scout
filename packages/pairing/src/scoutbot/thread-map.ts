@@ -12,7 +12,7 @@ import type {
 import {
   SCOUTBOT_DEFAULT_THREAD_ID,
   SCOUTBOT_DEFAULT_THREAD_NAME,
-} from "./role.ts";
+} from "@openscout/runtime/scoutbot-role";
 
 export type ScoutbotThreadPins = {
   projectRoot?: string;

@@ -115,14 +115,10 @@ export function runAgentGuide(options: {
 export const SCOUT_READ_ONLY_TOOLS = [
   "whoami",
   "hosts_list",
-  "where",
-  "check",
   "agents_search",
   "agents_resolve",
   "invocations_get",
   "invocations_wait",
-  "sessions_inventory",
-  "sessions_search",
 ] as const;
 
 export function claudeAllowList(serverName = "scout"): string[] {

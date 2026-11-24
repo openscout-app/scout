@@ -29,6 +29,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { resolveScoutBrokerUrl } from "../lib/core/broker/service.ts";
 import { codexThreadIdFromMeta, codexTurnIdFromMeta, findCodexRollout, readCodexRolloutCwd } from "./codex-threads.ts";
 import { findLoopbackPeerPid, isProcessAlive, resolvePeerIdentity, type PeerIdentity } from "./peer-process.ts";
+import { resolveLocalMcpProfile, type LocalMcpProfile } from "./local-tool-profile.ts";
 import { createSharedScoutTools, type ScoutSessionContext, type SharedToolRequest } from "./shared-tools.ts";
 
 /** Keys that name one session. The shared process's own values never leak into a connection. */
@@ -68,6 +69,7 @@ type Connection = {
 };
 
 export type SharedMcpServerOptions = {
+  profile?: LocalMcpProfile;
   host?: string;
   port?: number;
   env?: NodeJS.ProcessEnv;
@@ -92,7 +94,7 @@ export type SharedMcpServerHandle = {
   url: string;
   port: number;
   connections: () => Connection[];
-  stats: () => ReturnType<typeof statsOf>;
+  stats: () => ReturnType<typeof statsOf> & { profile: string };
   stop: () => Promise<void>;
 };
 
@@ -267,9 +269,11 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
       log(`could not register client pid ${pid}: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
+  const profile = options.profile ?? resolveLocalMcpProfile(baseEnv.OPENSCOUT_MCP_PROFILE);
   const lag = createLagSampler();
   // Built once: every connection runs these tool definitions and handlers.
-  const tools = createSharedScoutTools(baseEnv);
+  const tools = createSharedScoutTools(baseEnv, profile);
+  const stats = () => ({ ...statsOf(connections, lag, clientPids), profile: profile.name });
 
   const close = async (connection: Connection, reason: string) => {
     if (!connections.delete(connection.id)) return;
@@ -409,7 +413,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
       const refused = refuseForeignRequest(request);
       if (refused) return refused;
       const url = new URL(request.url);
-      if (url.pathname === "/stats") return Response.json(statsOf(connections, lag, clientPids));
+      if (url.pathname === "/stats") return Response.json(stats());
       if (url.pathname === "/sessions") {
         const now = Date.now();
         return Response.json([...connections.values()].map((c) => describe(c, now)));
@@ -469,7 +473,7 @@ export function startSharedScoutMcpServer(options: SharedMcpServerOptions = {}):
     url: `http://${options.host ?? "127.0.0.1"}:${port}/mcp`,
     port,
     connections: () => [...connections.values()],
-    stats: () => statsOf(connections, lag, clientPids),
+    stats,
     stop: async () => {
       clearInterval(reaper);
       lag.stop();

@@ -58,7 +58,7 @@ import {
 } from "../broker/service.ts";
 import { resolveOperatorName } from "@openscout/runtime/user-config";
 import { postScoutbotOperatorMessage } from "../../scoutbot/runner.ts";
-import { SCOUTBOT_AGENT_ID } from "../../scoutbot/role.ts";
+import { SCOUTBOT_AGENT_ID } from "@openscout/runtime/scoutbot-role";
 import type { AgentAttentionEntry } from "../attention/agent-attention.ts";
 import { createAgentAttentionIndexReader } from "../attention/build-agent-attention-index.ts";
 

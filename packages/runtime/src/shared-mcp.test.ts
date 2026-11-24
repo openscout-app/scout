@@ -129,12 +129,12 @@ describe("draining the shared server", () => {
     expect(settleSharedMcpOptIn(dir, { isAlive: alive([]) })?.state).toBe("on");
   });
 
-  test("turning it back on while draining keeps the start time", () => {
+  test("turning it back on while draining keeps the start time and selected profile", () => {
     const dir = mkdtempSync(join(tmpdir(), "scout-shared-mcp-"));
-    writeSharedMcpOptIn(dir, 43115, 5);
+    writeSharedMcpOptIn(dir, { port: 43115, profile: "work" }, 5);
     drainSharedMcpOptIn(dir);
     writeSharedMcpOptIn(dir, 43115, 9);
-    expect(readSharedMcpOptIn(dir)).toEqual({ url: "http://127.0.0.1:43115/mcp", port: 43115, enabledAt: 5, state: "on" });
+    expect(readSharedMcpOptIn(dir)).toEqual({ url: "http://127.0.0.1:43115/mcp", port: 43115, profile: "work", enabledAt: 5, state: "on" });
   });
 });
 
@@ -151,11 +151,11 @@ describe("resolveSharedMcpCommand", () => {
       .toEqual({ command: "/bin/bun", args: ["/pkg/runtime/bin/scout.mjs", ...serve], cwd: "/pkg/runtime" });
   });
 
-  test("returns null without Bun or an entrypoint, and passes notifications through", () => {
+  test("returns null without Bun or an entrypoint, and passes launch options through", () => {
     expect(resolveSharedMcpCommand({ ...base, bunExecutable: null, exists: () => true })).toBeNull();
     expect(resolveSharedMcpCommand({ ...base, exists: () => false })).toBeNull();
-    expect(resolveSharedMcpCommand({ ...base, env: { OPENSCOUT_MCP_ENABLE_NOTIFICATIONS: "1" }, exists: () => true })?.args.at(-1))
-      .toBe("--notifications");
+    expect(resolveSharedMcpCommand({ ...base, profile: "git,work", env: { OPENSCOUT_MCP_ENABLE_NOTIFICATIONS: "1" }, exists: () => true })?.args.slice(-3))
+      .toEqual(["--profile", "git,work", "--notifications"]);
   });
 });
 
