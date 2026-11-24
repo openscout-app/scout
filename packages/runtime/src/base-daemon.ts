@@ -339,12 +339,13 @@ const roomListeningSupervisor = createRoomListeningSupervisor({
 const sharedMcpSupervisor = createSharedMcpSupervisor({
   desired: () => readSharedMcpOptIn(config.supportDirectory) !== null,
   spawn: () => {
-    const port = readSharedMcpOptIn(config.supportDirectory)?.port ?? sharedMcpPort();
+    const optIn = readSharedMcpOptIn(config.supportDirectory);
     const repoRoot = resolveOpenScoutRepoRoot({
       startDirectories: [process.env.OPENSCOUT_SETUP_CWD, process.cwd(), dirname(fileURLToPath(import.meta.url))],
     });
     const launch = resolveSharedMcpCommand({
-      port,
+      port: optIn?.port ?? sharedMcpPort(),
+      profile: optIn?.profile ?? "default",
       bunExecutable: resolveBunExecutable()?.path ?? null,
       repoRoot,
       runtimePackageDir: config.runtimePackageDir,

@@ -1,0 +1,7 @@
+// The tools in every local coding session. The CLI registers these names and
+// the runtime uses them for Claude's launch allowlist. Not the hosted mcp:core tier.
+export const SCOUT_MCP_LOCAL_DEFAULT_TOOLS = [
+  "whoami", "hosts_list", "agents_search", "agents_resolve",
+  "ask", "reply", "current_reply_context", "invocations_get", "invocations_wait",
+  "messages_inbox", "messages_channel", "broker_feed", "attachments_read", "show",
+] as const;

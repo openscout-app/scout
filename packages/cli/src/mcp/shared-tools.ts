@@ -1,9 +1,8 @@
 /**
  * One set of Scout tool definitions for every connection.
  *
- * Building a Scout MCP server registers ~50 tools with their schemas and
- * handlers, about 3 MB. The shared HTTP server builds that once. Each
- * connection gets only a protocol endpoint (a low-level `Server`) whose
+ * The shared HTTP server builds the selected tool schemas and handlers once.
+ * Each connection gets only a protocol endpoint (a low-level `Server`) whose
  * requests run the shared handlers inside an AsyncLocalStorage scope that
  * holds the connection's environment, folder and notification target.
  *
@@ -16,6 +15,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { resolveLocalMcpProfile } from "./local-tool-profile.ts";
 import { createScoutMcpServer, type ScoutMcpSessionScope } from "./scout-mcp.ts";
 
 export type ScoutSessionContext = {
@@ -56,7 +56,7 @@ export type SharedScoutTools = {
   methods: string[];
 };
 
-export function createSharedScoutTools(baseEnv: NodeJS.ProcessEnv = process.env): SharedScoutTools {
+export function createSharedScoutTools(baseEnv: NodeJS.ProcessEnv = process.env, profile = resolveLocalMcpProfile(baseEnv.OPENSCOUT_MCP_PROFILE)): SharedScoutTools {
   const sessions = new AsyncLocalStorage<ScoutSessionContext>();
   const buildTimeReads = new Set<string>();
   const current = () => sessions.getStore();
@@ -100,6 +100,7 @@ export function createSharedScoutTools(baseEnv: NodeJS.ProcessEnv = process.env)
       return current()?.currentDirectory ?? baseEnv.HOME ?? "/";
     },
     env,
+    toolFilter: profile.includes,
     sessionScope: () => current()?.scope,
   });
 
