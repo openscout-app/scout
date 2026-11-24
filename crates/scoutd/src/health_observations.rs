@@ -793,15 +793,15 @@ pub(super) fn operator_notify_command(config: &Config, body: &str) -> Option<Com
         .args([
             "--instance",
             &super::launch_instance(&super::env_nonempty),
-            "notify",
-            "--as",
-            "scoutd-health",
-            "--message",
-            body,
+            "ask",
+            "--operator",
+            "--fyi",
+            "--notify",
             "--json",
-            "--cwd",
+            "--context-root",
         ])
         .arg(&config.runtime_directory)
+        .arg(body)
         .current_dir(&config.runtime_directory)
         .env_remove("OPENSCOUT_CLIENT_INSTANCE")
         .env("OPENSCOUT_HOME", &config.open_scout_home)
@@ -811,7 +811,7 @@ pub(super) fn operator_notify_command(config: &Config, body: &str) -> Option<Com
     Some(cmd)
 }
 
-/// Invoke the exact CLI operator-notify implementation used by notify_operator.
+/// Use the supported FYI/operator notification path; the old notify verb is retired.
 /// This keeps local-admin signing, caller registration and routing in their owner.
 pub fn notify(config: &Config, condition: &health_sweep::Condition, runtime_up: bool) -> bool {
     if super::SHUTDOWN_REQUESTED.load(super::Ordering::SeqCst) {

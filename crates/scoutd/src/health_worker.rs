@@ -92,8 +92,12 @@ impl Worker {
                 if let Err(error) = super::maintain_health_sweep_logs(&config) {
                     eprintln!("[scoutd] health sweep log maintenance: {error}");
                 }
-                let observation =
-                    collector.observe(&config, super::fetch_health(&config).body, slow, now);
+                let observation = collector.observe(
+                    &config,
+                    super::fetch_health_for_sweep(&config).body,
+                    slow,
+                    now,
+                );
                 if super::health_sweep::disk_level(observation.disk) == 0 {
                     super::prepare_health_reserve(&config);
                 }
