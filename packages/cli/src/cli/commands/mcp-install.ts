@@ -20,9 +20,9 @@ import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { planZedScoutContextServer, zedSettingsPath } from "./zed-settings.ts";
 
-export type ScoutMcpInstallHost = "claude" | "codex" | "zed";
+export type ScoutMcpInstallHost = "claude" | "codex" | "zed" | "antigravity";
 
-const SUPPORTED_HOSTS = ["codex", "claude", "zed"] as const;
+const SUPPORTED_HOSTS = ["codex", "claude", "zed", "antigravity"] as const;
 
 type ScoutMcpInstallOptions = {
   dryRun: boolean;
@@ -127,6 +127,7 @@ function resolveHostPath(
   host: ScoutMcpInstallHost,
   env: NodeJS.ProcessEnv,
 ): string | null {
+  if (host === "antigravity") return resolveExecutableFromSearchPath(["agy"], env);
   if (host === "codex") {
     return resolveExecutableFromSearchPath(["codex"], env);
   }
@@ -192,12 +193,12 @@ function parseHostValue(value: string): ScoutMcpInstallHost {
   if ((SUPPORTED_HOSTS as readonly string[]).includes(value)) {
     return value as ScoutMcpInstallHost;
   }
-  throw new ScoutCliError(`unsupported MCP host "${value}" (expected codex, claude, or zed)`);
+  throw new ScoutCliError(`unsupported MCP host "${value}" (expected codex, claude, zed, or antigravity)`);
 }
 
 export function renderMcpInstallHelp(): string {
   return [
-    "Usage: scout mcp install [--host <codex|claude|zed>] [--shared] [--force] [--dry-run]",
+    "Usage: scout mcp install [--host <codex|claude|zed|antigravity>] [--shared] [--force] [--dry-run]",
     "",
     "Register the current Scout MCP server command with supported local hosts.",
     "",
@@ -209,7 +210,7 @@ export function renderMcpInstallHelp(): string {
     "--shared turns on one shared Scout MCP server for every session on this",
     "host, run by scout-base at http://127.0.0.1:43115/mcp, and points Codex",
     "and Claude Code at it instead of starting a server per session. Zed keeps",
-    "its own server. Sessions that are already running keep theirs until they",
+    "its own server, as does Antigravity. Sessions that are already running keep theirs until they",
     "restart. Run on the main instance only, since the host configs are global.",
     "",
     "--force without --shared replaces the entries with the per-session",
@@ -221,6 +222,7 @@ export function renderMcpInstallHelp(): string {
     "  scout mcp install --host codex --force",
     "  scout mcp install --host claude --dry-run",
     "  scout mcp install --host zed",
+    "  scout mcp install --host antigravity",
     "  scout mcp install --shared",
     "  scout mcp install --force",
   ].join("\n");
@@ -481,6 +483,9 @@ export function installScoutMcpForHosts(input: {
   }
 
   return input.hosts.map((host): HostInstallOutcome => {
+    if (sharedUrl && host === "antigravity") {
+      return { host, status: "skipped", detail: "Skipped antigravity: it keeps its own Scout MCP server." };
+    }
     if (sharedUrl && host === "zed") {
       return { host, status: "skipped", detail: "Skipped zed: it keeps its own Scout MCP server." };
     }
@@ -491,6 +496,22 @@ export function installScoutMcpForHosts(input: {
         status: "skipped",
         detail: host === "zed" ? "Skipped zed: Zed not found." : `Skipped ${host}: executable not found.`,
       };
+    }
+    if (host === "antigravity") {
+      const listed = run(executablePath, ["mcp", "list"]);
+      if (commandFailed(listed)) {
+        return { host, status: "failed", detail: "Antigravity could not list its MCP servers." };
+      }
+      if (!input.force && /^\s*scout\s+(?:stdio|http)\b/m.test(listed.stdout)) {
+        return { host, status: "already_installed", detail: "Antigravity already has a scout MCP entry." };
+      }
+      const launch = stdioLaunch();
+      const args = ["mcp", "add", "--type", "stdio", "scout", launch.command, ...launch.args];
+      if (input.dryRun) return { host, status: "installed", detail: `Would run: ${executablePath} ${args.join(" ")}` };
+      const added = run(executablePath, args);
+      return commandFailed(added)
+        ? { host, status: "failed", detail: "Antigravity could not save the scout MCP entry." }
+        : { host, status: "installed", detail: "Installed scout MCP for Antigravity." };
     }
     if (host === "zed") {
       return installForZed({
@@ -623,7 +644,7 @@ export async function runMcpInstallCommand(
     return;
   }
   if (options.hosts.length === 0) {
-    context.output.writeText("No supported hosts detected. Looked for codex, claude, and zed.");
+    context.output.writeText("No supported hosts detected. Looked for codex, claude, zed, and antigravity.");
     return;
   }
 

@@ -1,0 +1,7 @@
+{
+  "path": "packages/cli/src/cli/commands/install-all.ts",
+  "symbol": "spawnSync",
+  "category": "cli",
+  "reason": "The foreground install --all command waits for each package, runtime, app and web installer before starting the next step.",
+  "owner": "desktop"
+}

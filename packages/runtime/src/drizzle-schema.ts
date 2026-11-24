@@ -1315,6 +1315,21 @@ export const vercelBoardRolesTable = sqliteTable("vercel_board_roles", {
   primaryKey({ columns: [table.connectionId, table.agentId, table.role] }),
 ]);
 
+export const vercelBoardLeadsTable = sqliteTable("vercel_board_leads", {
+  connectionId: text("connection_id").notNull(),
+  planId: text("plan_id").notNull(),
+  channel: text("channel").notNull(),
+  lead: text("lead"),
+  cursor: integer("cursor").notNull().default(0),
+  done: integer("done").notNull().default(0),
+  lastNoticeAt: integer("last_notice_at"),
+  lastError: text("last_error"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.connectionId, table.planId] }),
+]);
+
 export const vercelBoardOutboxTable = sqliteTable("vercel_board_outbox", {
   connectionId: text("connection_id").notNull(),
   clientId: text("client_id").notNull(),

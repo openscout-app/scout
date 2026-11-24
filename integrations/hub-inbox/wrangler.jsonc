@@ -1,0 +1,13 @@
+{
+  // Scout Hub inbox. Deploy with: bunx wrangler@4 deploy
+  // Create the bucket first: bunx wrangler@4 r2 bucket create scout-hub-inbox
+  // Then set the tokens that `scout hub init` printed:
+  //   bunx wrangler@4 secret put READ_TOKEN
+  //   bunx wrangler@4 secret put WRITE_TOKEN
+  "name": "scout-hub-inbox",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "r2_buckets": [{ "binding": "INBOX", "bucket_name": "scout-hub-inbox" }],
+  "triggers": { "crons": ["17 3 * * *"] },
+  "vars": { "HOLD_DAYS": "7" }
+}

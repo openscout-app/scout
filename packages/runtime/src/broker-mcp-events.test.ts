@@ -36,6 +36,9 @@ test("subscriptions and pending deliveries survive restart, refresh is idempoten
   const first = await f.service.subscribe(p, subscribe());
   f.advance(60_000);
   expect((await f.service.subscribe(p, subscribe())).id).toBe(first.id);
+  // A different subscription at this principal's verified URL reuses its challenge.
+  const flight = subscribe({ name: "flight.completed", arguments: {} });
+  await f.service.subscribe(p, flight);
   expect(f.verified).toBe(1);
   f.service.capture([message("m1", f.now)]);
   f.restart();
@@ -47,7 +50,7 @@ test("subscriptions and pending deliveries survive restart, refresh is idempoten
   const recovered = f.service.claim(p.ownerKey, p.node)!;
   expect(recovered.id).toBe(job.id); expect(recovered.lease).not.toBe(job.lease);
   f.service.settle(job.id, job.lease, 200); // stale workers cannot acknowledge a new lease
-  expect(f.service.isActive(recovered.id, recovered.lease)).toBe(true);
+  expect(f.service.prepare(recovered.id, recovered.lease)).not.toBeNull();
   f.service.settle(recovered.id, recovered.lease, 503);
   expect(f.service.claim(p.ownerKey, p.node)).toBeNull();
   f.advance(1001);
@@ -71,7 +74,10 @@ test("filters, resource access, private messages, and owner/node scopes prevent 
   const job = f.service.claim(p.ownerKey, p.node)!;
   expect(JSON.parse(job.body).data.message_id).toBe("public");
   f.channel.participantIds = [];
-  expect(f.service.isActive(job.id, job.lease)).toBe(false);
+  const ended = f.service.prepare(job.id, job.lease)!;
+  expect(JSON.parse(ended.body)).toEqual({ type: "terminated", error: { code: -32024, message: "Access revoked" } });
+  expect(ended.id).toStartWith("msg_terminated_");
+  expect(f.service.prepare(job.id, job.lease)).toBeNull();
   f.advance(61_000);
   expect(f.service.claim(p.ownerKey, p.node)).toBeNull();
 });
@@ -85,11 +91,11 @@ test("expiry, TTL cap, secret rotation and unsubscribe govern already queued del
   expect((await f.service.subscribe(p, next)).id).toBe(first.id);
   const job = f.service.claim(p.ownerKey, p.node)!;
   expect(job.secret).toBe(rotated); expect(job.previousSecret).toBe(secret);
-  await f.service.unsubscribe({ ...p, id: "different-grant" }, next);
-  expect(f.service.isActive(job.id, job.lease)).toBe(true);
+  await expect(f.service.unsubscribe({ ...p, id: "different-grant" }, next)).rejects.toMatchObject({ code: -32023 });
+  expect(f.service.prepare(job.id, job.lease)).not.toBeNull();
   await f.service.unsubscribe(p, next);
-  await f.service.unsubscribe(p, next);
-  expect(f.service.isActive(job.id, job.lease)).toBe(false);
+  await expect(f.service.unsubscribe(p, next)).rejects.toMatchObject({ code: -32023 });
+  expect(f.service.prepare(job.id, job.lease)).toBeNull();
   await f.service.subscribe(p, subscribe({ ttlMs: 1 }));
   f.service.capture([message("m2", f.now)]); f.advance(2);
   expect(f.service.claim(p.ownerKey, p.node)).toBeNull();
@@ -97,7 +103,7 @@ test("expiry, TTL cap, secret rotation and unsubscribe govern already queued del
 
 test("failed callback verification never activates a subscription", async () => {
   const f = fixture(async () => ({ status: 302, body: "{}" }));
-  await expect(f.service.subscribe(p, subscribe())).rejects.toMatchObject({ code: -32015 });
+  await expect(f.service.subscribe(p, subscribe())).rejects.toMatchObject({ code: -32027 });
   f.service.capture([message("m1", f.now)]);
   expect(f.service.claim(p.ownerKey, p.node)).toBeNull();
 });
@@ -113,7 +119,7 @@ test("unsubscribe waits for an in-progress verification and cancels its result",
   expect(f.service.claim(p.ownerKey, p.node)).toBeNull();
 });
 
-test("410 ends a subscription, 413 drops just that event, transient retries are bounded", async () => {
+test("410 and 413 each drop one delivery, transient retries are bounded", async () => {
   const f = fixture(); await f.service.subscribe(p, subscribe());
   f.service.capture([message("m1", f.now)]);
   let job = f.service.claim(p.ownerKey, p.node)!;
@@ -127,7 +133,7 @@ test("410 ends a subscription, 413 drops just that event, transient retries are 
   f.service.capture([message("m3", f.now)]); job = f.service.claim(p.ownerKey, p.node)!;
   f.service.settle(job.id, job.lease, 410);
   f.service.capture([message("m4", f.now)]);
-  expect(f.service.claim(p.ownerKey, p.node)).toBeNull();
+  expect(f.service.claim(p.ownerKey, p.node)?.subscriptionId).toBe(job.subscriptionId);
 });
 
 test("completion events belong only to the requester/target; waiting emits on transitions", async () => {

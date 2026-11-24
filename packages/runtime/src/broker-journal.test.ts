@@ -1592,3 +1592,18 @@ test("task indexes replay, exclude closed history and retain only queued follow-
   expect([...closed.openOperatorTasks()]).toEqual([]);
   expect(await closed.pendingTaskFollowups(task.id)).toEqual([]);
 });
+
+test("latest collaboration events name the newest event of each asked record", async () => {
+  const { journal, journalPath } = createJournal();
+  const event = (id: string, recordId: string, at: number) => JSON.stringify({
+    kind: "collaboration.event.record", event: { id, recordId, recordKind: "work_item", kind: "progressed", actorId: "agent-1", at },
+  });
+  writeFileSync(journalPath, [
+    event("a-1", "rec-a", 10), event("a-3", "rec-a", 30), event("a-2", "rec-a", 20),
+    event("b-1", "rec-b", 5), event("b-tie", "rec-b", 5), event("c-1", "rec-c", 99),
+  ].join("\n") + "\n", "utf8");
+  await journal.load();
+  const latest = journal.latestCollaborationEvents(new Set(["rec-a", "rec-b", "rec-missing"]));
+  expect([...latest.entries()].map(([recordId, e]) => [recordId, e.id]).sort()).toEqual([["rec-a", "a-3"], ["rec-b", "b-tie"]]);
+  expect(journal.latestCollaborationEvents(new Set()).size).toBe(0);
+});

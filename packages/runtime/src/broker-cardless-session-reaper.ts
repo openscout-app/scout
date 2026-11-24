@@ -12,11 +12,11 @@ function metadataTimestamp(endpoint: AgentEndpoint, key: string): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function activeFlightForAgent(flight: FlightRecord, agentId: string): boolean {
+export function activeFlightForAgent(flight: FlightRecord, agentId: string): boolean {
   return flight.targetAgentId === agentId && !isTerminalFlightState(flight.state);
 }
 
-function activeCollaborationForAgent(record: CollaborationRecord, agentId: string): boolean {
+export function activeCollaborationForAgent(record: CollaborationRecord, agentId: string): boolean {
   const addressed = record.ownerId === agentId || record.nextMoveOwnerId === agentId;
   if (!addressed) return false;
   if (record.kind === "work_item") {
@@ -25,7 +25,7 @@ function activeCollaborationForAgent(record: CollaborationRecord, agentId: strin
   return record.state !== "closed" && record.state !== "declined";
 }
 
-function lastSessionActivity(snapshot: RuntimeRegistrySnapshot, endpoint: AgentEndpoint): number {
+export function lastSessionActivity(snapshot: RuntimeRegistrySnapshot, endpoint: AgentEndpoint): number {
   let latest = Math.max(
     metadataTimestamp(endpoint, "startedAt"),
     metadataTimestamp(endpoint, "lastCompletedAt"),

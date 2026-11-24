@@ -60,6 +60,7 @@ const PERSISTENT_RECEIVE_TRANSPORTS = new Set<DeliveryTransport>([
   "kimi_acp",
   "cursor_acp",
   "opencode_acp",
+  "antigravity_acp",
   "devin_acp",
   "cursor_sdk_local",
 ]);

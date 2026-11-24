@@ -20,6 +20,7 @@ Not governance docs. Not proposals. Compressed ontology + invariants.
 | [instances.agent.md](./instances.agent.md) | `OPENSCOUT_INSTANCE`: dev/worktree isolation from prod, rails, systemd unit |
 | [integration-contract.agent.md](./integration-contract.agent.md) | external agent minimum contract |
 | [derived-records.agent.md](./derived-records.agent.md) | records made from work items, the read rule, pull and push producers |
+| [boards.agent.md](./boards.agent.md) | `GET /v1/boards`: lifecycle columns and cards with their content, for Kanban clients |
 
 ## Read order by task
 
@@ -33,6 +34,7 @@ Not governance docs. Not proposals. Compressed ontology + invariants.
 | run a checkout beside the installed Scout | `instances.agent.md` |
 | new harness adapter | `integration-contract.agent.md` → `runtime-sessions.agent.md` |
 | make or read something derived from work (a presentation, a label) | `derived-records.agent.md` |
+| draw a Kanban from the runtime | `boards.agent.md` |
 
 ## Format
 

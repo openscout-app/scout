@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { readLocalAdminKey, signLocalAdminRequest } from "./mesh-access-local-auth.js";
+import { OPERATOR_ATTRIBUTION_HANDOFF_ENV, readLocalAdminKey, signLocalAdminRequest } from "./mesh-access-local-auth.js";
 
 import type {
   ActorIdentity,
@@ -346,11 +346,33 @@ function requestBody(options: ScoutBrokerJsonRequestOptions<any>): string | unde
 }
 
 const brokerAttributionAudiences = new Map<string, string>();
+let adoptedBrokerAttributionKey: string | undefined;
+
+/**
+ * For the operator's own long-lived surfaces (scout-web, pairing): read the
+ * key the runtime handed off (or an explicit OPENSCOUT_ATTRIBUTION_KEY_FILE)
+ * into memory and drop both variables, so agents and tools this process spawns
+ * cannot sign as the operator. Call once at startup, before spawning anything.
+ * Returns whether a key was adopted.
+ */
+export function adoptBrokerAttributionKey(env: Record<string, string | undefined> = process.env): boolean {
+  const keyFile = env[OPERATOR_ATTRIBUTION_HANDOFF_ENV]?.trim() || env.OPENSCOUT_ATTRIBUTION_KEY_FILE?.trim();
+  delete env[OPERATOR_ATTRIBUTION_HANDOFF_ENV];
+  delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  if (!keyFile) return false;
+  adoptedBrokerAttributionKey = readLocalAdminKey(keyFile);
+  return Boolean(adoptedBrokerAttributionKey);
+}
+
+/** Tests only: drop a key adopted earlier in this process. */
+export function forgetAdoptedBrokerAttributionKey(): void {
+  adoptedBrokerAttributionKey = undefined;
+}
 
 async function withBrokerAttribution<T>(baseUrl: string, path: string, options: ScoutBrokerJsonRequestOptions<T>): Promise<ScoutBrokerJsonRequestOptions<T>> {
-  const keyFile = process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
-  if (!keyFile || options.headers?.["x-openscout-local-admin"]) return options;
-  const key = readLocalAdminKey(keyFile);
+  if (options.headers?.["x-openscout-local-admin"]) return options;
+  const keyFile = adoptedBrokerAttributionKey ? undefined : process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  const key = adoptedBrokerAttributionKey ?? (keyFile ? readLocalAdminKey(keyFile) : undefined);
   if (!key) return options;
   let destinationKeyId = brokerAttributionAudiences.get(baseUrl);
   if (!destinationKeyId) {

@@ -1,3 +1,4 @@
+import { claudeProjectRoots, claudeProjectsRoot } from "./claude-projects.js";
 /**
  * Locate harness-native sessions on disk (T3 rung for flat session dispatch).
  *
@@ -166,7 +167,7 @@ function extractCodexMeta(path: string): { ids: string[]; cwd?: string } {
   return { ids: [...ids], ...(cwd ? { cwd } : {}) };
 }
 
-function extractClaudeMeta(path: string): { ids: string[]; cwd?: string } {
+function extractClaudeMeta(path: string, mirror: boolean): { ids: string[]; cwd?: string } {
   const ids = new Set<string>();
   const base = basename(path, ".jsonl");
   if (base) ids.add(base);
@@ -184,7 +185,7 @@ function extractClaudeMeta(path: string): { ids: string[]; cwd?: string } {
 
   // Claude stores under ~/.claude/projects/<slug>/<id>.jsonl — slug encodes cwd.
   const parent = basename(resolve(path, ".."));
-  if (parent.startsWith("-")) {
+  if (!mirror && parent.startsWith("-")) {
     // e.g. -Users-art-dev-openscout → /Users/art/dev/openscout (best-effort)
     const guessed = parent.replace(/^-/, "/").replace(/-/g, "/");
     if (guessed.startsWith("/") && guessed.length > 1 && pathIsDirectory(guessed)) {
@@ -217,13 +218,13 @@ function locateCodexSessions(root: string, nativeSessionId: string): LocatedHarn
   return hits;
 }
 
-function locateClaudeSessions(root: string, nativeSessionId: string): LocatedHarnessSession[] {
+function locateClaudeSessions(root: string, nativeSessionId: string, mirror: boolean): LocatedHarnessSession[] {
   if (!pathExists(root)) return [];
   const needle = normalizeSessionId(nativeSessionId).toLowerCase();
   const files = walkFiles(root, (name) => name.endsWith(".jsonl"));
   const hits: LocatedHarnessSession[] = [];
   for (const path of files) {
-    const meta = extractClaudeMeta(path);
+    const meta = extractClaudeMeta(path, mirror);
     const matched = meta.ids.find((id) => id.toLowerCase() === needle);
     if (!matched) continue;
     hits.push({
@@ -271,7 +272,6 @@ export function locateHarnessSession(input: SessionLocateInput): SessionLocateRe
 
   const home = input.homeDir?.trim() || homedir();
   const codexRoot = input.codexSessionsRoot?.trim() || join(home, ".codex", "sessions");
-  const claudeRoot = input.claudeProjectsRoot?.trim() || join(home, ".claude", "projects");
   const requestedHarness = normalizeHarness(input.harness ?? undefined);
   const projectPath = input.projectPath?.trim() || undefined;
 
@@ -280,7 +280,9 @@ export function locateHarnessSession(input: SessionLocateInput): SessionLocateRe
     candidates.push(...locateCodexSessions(codexRoot, nativeSessionId));
   }
   if (!requestedHarness || requestedHarness === CLAUDE_HARNESS) {
-    candidates.push(...locateClaudeSessions(claudeRoot, nativeSessionId));
+    for (const { root, mirror } of claudeProjectRoots(home, input.claudeProjectsRoot?.trim())) {
+      candidates.push(...locateClaudeSessions(root, nativeSessionId, mirror));
+    }
   }
 
   if (candidates.length === 0) {
@@ -347,7 +349,7 @@ export function defaultCodexSessionsRoot(homeDir = homedir()): string {
 }
 
 export function defaultClaudeProjectsRoot(homeDir = homedir()): string {
-  return join(homeDir, ".claude", "projects");
+  return claudeProjectsRoot(homeDir);
 }
 
 /** Slug decoding is lossy; never promote a nonexistent guess to a cwd. */

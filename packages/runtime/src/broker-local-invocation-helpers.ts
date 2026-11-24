@@ -427,6 +427,32 @@ export function awaitingFinalReplyExitReason(
   return null;
 }
 
+/** Reopening Scout's store does not establish what happened in Codex. */
+export function interruptedCodexFlight(flight: FlightRecord, bootedAt?: number): FlightRecord | null {
+  if (flight.state !== "running" || bootedAt === undefined
+    || flightCompletion(flight)?.awaitingFinal === true || isResumableInPlaceFlight(flight)) return null;
+  const outcome = flight.metadata?.dispatchOutcome as { status?: unknown; reason?: unknown; checkedAt?: unknown } | undefined;
+  if (!isCodexSubmissionCheckpoint(outcome) || typeof outcome?.checkedAt !== "number" || outcome.checkedAt >= bootedAt) return null;
+  const ack = flight.metadata?.dispatchAck as { sessionId?: unknown; nativeTurnId?: unknown } | undefined;
+  const session = metadataStringValue(ack, "sessionId");
+  const turn = metadataStringValue(ack, "nativeTurnId");
+  const detail = turn
+    ? `Codex acknowledged the submission for turn ${turn}, but Scout did not record its outcome.`
+    : "Scout restarted without confirmation that Codex received the submission.";
+  return {
+    ...flight,
+    state: "waiting",
+    summary: `${detail} ${session ? `Inspect Codex session ${session}.` : "Inspect the original dispatch."}`,
+    error: undefined,
+    completedAt: undefined,
+  };
+}
+
+function isCodexSubmissionCheckpoint(outcome: { status?: unknown; reason?: unknown } | undefined): boolean {
+  return (outcome?.status === "submission_unknown" && outcome.reason === "codex_send_boundary")
+    || (outcome?.status === "submitted" && outcome.reason === "codex_rpc_acknowledged");
+}
+
 export function staleWorkingFlightFailure(
   snapshot: RuntimeSnapshot,
   flight: FlightRecord,
@@ -452,9 +478,9 @@ export function staleWorkingFlightFailure(
   if (options.isInvocationActive(flight.invocationId)) {
     return null;
   }
-  const dispatchOutcome = flight.metadata?.dispatchOutcome;
-  if (dispatchOutcome && typeof dispatchOutcome === "object"
-    && (dispatchOutcome as Record<string, unknown>).status === "submission_unknown") {
+  const dispatchOutcome = flight.metadata?.dispatchOutcome as { status?: unknown; reason?: unknown } | undefined;
+  if (dispatchOutcome?.status === "submission_unknown"
+    || (flight.state === "waiting" && isCodexSubmissionCheckpoint(dispatchOutcome))) {
     return null;
   }
 

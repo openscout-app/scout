@@ -53,6 +53,7 @@ export const scoutBrokerPaths = {
     activity: "/v1/activity",
     collaborationRecords: "/v1/collaboration/records",
     collaborationEvents: "/v1/collaboration/events",
+    boards: "/v1/boards",
     workBoard: "/v1/work/board",
     workLifecycles: "/v1/work/lifecycles",
     workMoves: "/v1/work/moves",
@@ -60,6 +61,15 @@ export const scoutBrokerPaths = {
     workReview: "/v1/work/review",
     workRetry: "/v1/work/retry",
     workClaim: "/v1/work/claim",
+    worktreeRetirement: "/v1/worktrees/retirement",
+    worktreeRetirementSweep: "/v1/worktrees/retirement/sweep",
+    manualReviewOccurrences: "/v1/manual-review/occurrences",
+    manualReviewDispatches: "/v1/manual-review/dispatches",
+    manualReviewBoardRoutines: "/v1/manual-review/board-routines",
+    manualReviewBoardPreview: "/v1/manual-review/board-preview",
+    manualReviewBoardTicket: "/v1/manual-review/board-ticket",
+    manualReviewBoardAccept: "/v1/manual-review/board-accept",
+    manualReviewBoardRuns: "/v1/manual-review/board-runs",
     derived: "/v1/derived",
     derivedPending: "/v1/derived/pending",
     taskNotify: "/v1/tasks/notify",
@@ -72,6 +82,8 @@ export const scoutBrokerPaths = {
     vercelBoardMessages: "/v1/integrations/vercel-board/messages",
     vercelBoardHandoffs: "/v1/integrations/vercel-board/handoffs",
     vercelBoardRoles: "/v1/integrations/vercel-board/roles",
+    vercelBoardDispatcher: "/v1/integrations/vercel-board/dispatcher",
+    vercelBoardDispatcherRun: "/v1/integrations/vercel-board/dispatcher/run",
     pairingAttach: "/v1/pairing/attach",
     pairingDetach: "/v1/pairing/detach",
     localSessionsAttach: "/v1/local-sessions/attach",
@@ -94,6 +106,15 @@ export function scoutBrokerMessagesPath(search: URLSearchParams): string {
 /** Name a conversation. An empty title hands it back to automatic naming. */
 export function scoutBrokerConversationTitlePath(conversationId: string): string {
   return `${scoutBrokerPaths.v1.conversations}/${encodeURIComponent(conversationId)}/title`;
+}
+
+/** One board's columns and cards. `default` names the runtime's default lifecycle. */
+export function scoutBrokerBoardPath(boardId: string, query: { closedSince?: number; limit?: number } = {}): string {
+  const search = new URLSearchParams();
+  if (query.closedSince !== undefined) search.set("closedSince", String(query.closedSince));
+  if (query.limit !== undefined) search.set("limit", String(query.limit));
+  const q = search.toString();
+  return `${scoutBrokerPaths.v1.boards}/${encodeURIComponent(boardId)}${q ? `?${q}` : ""}`;
 }
 
 export function scoutBrokerInvocationPath(invocationId: string): string {
