@@ -105,6 +105,29 @@ scout config set worktree-retire off
 The reclaimed size is `du -sk` before removal, so it is approximate: APFS
 clones and shared blocks make `du` read high.
 
+### Inspect or clean up one project
+
+Use the singular `scout worktree` command for a local Git inspection or
+immediate cleanup. It does not use the runtime's idle threshold.
+
+```bash
+scout worktree list --project ./app
+scout worktree gc --project ./app --dry-run
+scout worktree gc --project ./app
+```
+
+The project defaults to the current directory. Both commands accept `--json`
+and `--base <ref>`. Without `--base`, Scout checks against `origin/main`,
+then `main`, then `HEAD`. GC only considers Git worktrees directly under the
+project's `.scout-worktrees/` directory. It keeps worktrees with a lock,
+tracked changes, untracked files, or commits not in the base. Ignored files
+do not count as changes and can be deleted with a worktree.
+
+Scout uses the local runtime's endpoint inventory to keep worktrees in use.
+If the runtime is unavailable, confirm that no sessions are using the worktrees
+before you run GC. Git can refuse a removal or branch deletion, and Scout never
+forces either. GC only deletes branches under `scout/` and keeps the base branch.
+
 ## Operator Name Resolution Order
 
 Scout resolves your operator name in this order:
