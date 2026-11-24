@@ -73,11 +73,26 @@ text — Kimi, via `part.think` — always render it, whatever this is set to.
 Setting it never hides reasoning Scout has; it only decides whether to mark
 reasoning Scout does not have.
 
-## Agent Worktree Retirement
+## Agent worktree base
 
 A session asked to run in a new worktree gets a git worktree at
-`<project>/.scout-worktrees/<agent>` on branch `scout/<agent>`. The runtime
-retires such a worktree when all of these hold:
+`<project>/.scout-worktrees/<agent>` on branch `scout/<agent>`. To set its
+starting ref, run this command in the project repository:
+
+```bash
+git config --local scout.worktreeBase origin/main
+```
+
+The runtime uses that ref if it resolves to a commit. Otherwise, it checks the
+current branch's remote-tracking upstream, then `origin/main` or `origin/HEAD`
+if the branch has no remote upstream. It uses that remote ref only when it can
+refresh the ref and it is strictly ahead of local `HEAD`. If the fetch fails,
+or local `HEAD` is ahead of or has diverged from the remote, the runtime uses
+local `HEAD`. The fetch has a short timeout and does not move local branches.
+
+## Agent Worktree Retirement
+
+The runtime retires a Scout worktree when all of these hold:
 
 | Check | Meaning |
 | --- | --- |
