@@ -5,7 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Server as LegacyServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { RuntimeHttpClient } from "./http-client.ts";
 import type { McpEventDelivery, McpEventPrincipal } from "@openscout/protocol";
-import { McpEventError, postWebhook, webhookHeaders, type WebhookPost } from "@openscout/runtime/mcp-event-webhook";
+import { McpEventError, postWebhook, webhookHeaders, type WebhookPost } from "@openscout/runtime/client";
 import * as z from "zod/v4";
 
 export type EventBrokerCall = (body: Record<string, unknown>) => Promise<unknown>;

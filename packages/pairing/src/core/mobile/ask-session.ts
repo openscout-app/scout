@@ -1,8 +1,8 @@
-import { scoutSessionReplyTarget, validateScoutSessionReplyResult } from "@openscout/runtime/delivery-client";
+import { scoutSessionReplyTarget, validateScoutSessionReplyResult } from "@openscout/runtime/client";
 // Reply from the phone to a harness session Scout did not start (seen in the
 // transcript tail: session id, harness, cwd). A session open somewhere gets
 // the words where it runs — its Herdr pane, its Orca terminal, its tmux pane, or its terminal tab
-// (see @openscout/runtime/in-place). Only a session nothing holds is resumed, as an
+// (see @openscout/runtime/harnesses). Only a session nothing holds is resumed, as an
 // exact-session ask. Replies never split off into a fork or a background copy.
 
 import type { ScoutSessionInputReceipt } from "@openscout/protocol";

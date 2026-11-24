@@ -1,4 +1,4 @@
-import { deriveOpenScoutInstanceLayout, selectCliOpenScoutInstance } from "@openscout/runtime/instance";
+import { deriveOpenScoutInstanceLayout, selectCliOpenScoutInstance } from "@openscout/runtime/config";
 
 /** Match CLI home selection without claiming an instance, loading settings or starting a service. */
 export function scoutDiscoveryEnv(env: NodeJS.ProcessEnv, instance?: string | null): NodeJS.ProcessEnv {

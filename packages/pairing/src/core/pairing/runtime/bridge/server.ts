@@ -19,7 +19,7 @@ import { homedir } from "os";
 import {
   readSessionFileScan,
   readSessionSearch,
-} from "@openscout/runtime/system-probes";
+} from "@openscout/runtime/setup";
 import {
   isSessionRegistryError,
   type ActionBlock,

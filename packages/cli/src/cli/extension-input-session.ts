@@ -1,4 +1,4 @@
-import type { ScoutExtension } from "@openscout/runtime/scout-extensions";
+import type { ScoutExtension } from "@openscout/runtime/extensions";
 import { ScoutCommandUnavailableError } from "./command-unavailable.ts";
 import type { ScoutExtensionContext } from "./extension-context.ts";
 import { inputRefusal, scoutExtensionInputBinding, type ExtensionInputSelection } from "./extension-input-grants.ts";

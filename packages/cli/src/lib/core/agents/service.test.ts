@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import * as harnesses from "@openscout/runtime/harnesses";
 
 afterEach(() => {
   mock.restore();
@@ -37,7 +38,8 @@ describe("agent service wiring", () => {
         throw new Error("unexpected up");
       }),
     }));
-    mock.module("@openscout/runtime/control-plane-agents", () => ({
+    mock.module("@openscout/runtime/harnesses", () => ({
+      ...harnesses,
       createScoutAgentService,
     }));
 

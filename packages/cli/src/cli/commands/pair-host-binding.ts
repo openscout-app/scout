@@ -1,8 +1,8 @@
 import {existsSync, mkdirSync, readFileSync, writeFileSync, lstatSync, openSync, closeSync, fsyncSync, readdirSync, unlinkSync} from "node:fs";
 import {join} from "node:path";
-import {PairingTrustOwner} from "@openscout/runtime/pairing-security/trust-owner";
-import {resolveOpenScoutSupportPaths} from "@openscout/runtime/support-paths";
-import {resolveScoutPairingSupervisorPaths, readScoutPairingProcessPid, isScoutPairingProcessRunning} from "@openscout/runtime/pairing-supervisor";
+import {PairingTrustOwner} from "@openscout/runtime/pairing-security";
+import {resolveOpenScoutSupportPaths} from "@openscout/runtime/config";
+import {resolveScoutPairingSupervisorPaths, readScoutPairingProcessPid, isScoutPairingProcessRunning} from "@openscout/runtime/daemon";
 import type {ScoutCommandContext} from "../context.ts";
 
 /** Trusted operator maintenance, deliberately independent of a running runtime.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createRuntimeRegistrySnapshot } from "@openscout/runtime/registry";
+import { createRuntimeRegistrySnapshot } from "@openscout/runtime/routing";
 
 import {
   buildScoutAttentionReport,

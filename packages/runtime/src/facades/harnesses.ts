@@ -4,6 +4,7 @@ export * from "../harness-model-preferences.js";
 export * from "../local-agents.js";
 export * from "../local-agent-harnesses.js";
 export * from "../control-plane-agents.js";
+export * from "../scoutbot-role.js";
 export * from "../agent-workspace.js";
 export * from "../agent-workspace-retirement.js";
 export * from "../live-terminal-session.js";

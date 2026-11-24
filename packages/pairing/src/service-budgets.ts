@@ -35,9 +35,8 @@ import {
 import { Database } from "bun:sqlite";
 import { epochMs } from "@openscout/protocol";
 import { healProviderTelemetryIfStale } from "@openscout/runtime";
-import { resolveClaudeStatuslineDirectory } from "@openscout/runtime/claude-statusline";
-import { buildPiRpcCredentialEnv } from "@openscout/runtime/pi-rpc";
-import { execSystemFile } from "@openscout/runtime/system-probes";
+import { resolveClaudeStatuslineDirectory, buildPiRpcCredentialEnv } from "@openscout/runtime/harnesses";
+import { execSystemFile } from "@openscout/runtime/setup";
 import { db, resolveDbPath } from "./db/internal/db.ts";
 import { closeWebDb, webDb } from "./db/internal/web-db.ts";
 

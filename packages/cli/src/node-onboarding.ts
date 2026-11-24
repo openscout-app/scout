@@ -3,7 +3,7 @@ import { parseSetupCommandOptions, parseScoutArgv, preflightLifecycle, QUICK_LIN
 import {
   brokerServiceStatus,
   type BrokerServiceStatus,
-} from "@openscout/runtime/broker-process-manager";
+} from "@openscout/runtime/daemon";
 import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
 import {
   DEFAULT_LOCAL_CONFIG,
@@ -12,14 +12,15 @@ import {
   localConfigPath,
   writeLocalConfig,
   type LocalConfig,
-} from "@openscout/runtime/local-config";
+  resolveOpenScoutSupportPaths,
+  resolveOperatorName,
+} from "@openscout/runtime/config";
 import {
   loadOpenScoutOnboardingState,
   markOpenScoutOnboardingCommand,
   runOpenScoutOnboardingSetup,
   saveOpenScoutOnboardingIdentity,
-} from "@openscout/runtime/onboarding";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+} from "@openscout/runtime/setup";
 import {
   SCOUT_RUNTIME_CATALOG,
   parseScoutRuntimeCatalog,
@@ -34,7 +35,6 @@ import {
   type ScoutOwnedRuntimeCatalog,
   type ScoutRuntimeCapabilityCatalog,
 } from "@openscout/runtime";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
 import { resolve } from "node:path";
 
 type JsonMode = "plain" | "json";

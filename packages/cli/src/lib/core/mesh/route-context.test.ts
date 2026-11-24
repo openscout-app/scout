@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { NodeDefinition } from "@openscout/protocol";
-import type { MeshNodeStateReport } from "@openscout/runtime/mesh-node-state";
+import type { MeshNodeStateReport } from "@openscout/runtime/mesh";
 import { loadRouteContext, type RouteContextDeps } from "./route-context.ts";
 
 const node = { id: "mini-id", name: "mini", hostName: "mini.local" } as NodeDefinition;

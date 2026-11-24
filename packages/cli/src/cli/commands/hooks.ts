@@ -1,5 +1,5 @@
-import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
+import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/client";
+import { resolveBrokerControlUrl } from "@openscout/runtime/config";
 import type { HarnessHookStatus, HarnessHooksResult, HarnessHooksSkipReason } from "../../../../runtime/src/harness-hooks.js";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";

@@ -1,1 +1,16 @@
-export * from "@openscout/runtime/pairing-security/identity";
+export {
+  bytesToHex,
+  createQRPayload,
+  hexToBytes,
+  isTrustedPeer,
+  loadOrCreateIdentity,
+  loadTrustedPeers,
+  refreshTrustedPeer,
+  saveTrustedPeer,
+  tryLoadIdentity,
+  tryLoadIdentityPublicKeyHex,
+  validateQRPayload,
+  type QRPayload,
+  type SerializedIdentity,
+  type TrustedPeer,
+} from "@openscout/runtime/pairing-security";

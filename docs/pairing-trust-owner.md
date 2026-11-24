@@ -10,7 +10,7 @@ registry, authorization endpoint or automatic adapter installation.
 
 ## Public interface and compatibility
 
-`@openscout/runtime/pairing-security/trust-owner` exports `pairingTrustOwner`,
+`@openscout/runtime/pairing-security` exports `pairingTrustOwner`,
 `PairingTrustOwner`, `PairingTrustError` and the transaction types.
 
 - `read(context?)` returns an owned snapshot of authoritative peers and the owner

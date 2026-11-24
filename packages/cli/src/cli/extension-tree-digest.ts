@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, type BigIntStats } from "node:fs";
 import { isAbsolute, relative, resolve, sep, join } from "node:path";
-import { untrustedPathMetadata } from "@openscout/runtime/path-trust";
-import { scoutExtensionDirectoryProblem } from "@openscout/runtime/scout-extensions";
+import { untrustedPathMetadata } from "@openscout/runtime/config";
+import { scoutExtensionDirectoryProblem } from "@openscout/runtime/extensions";
 
 export const SCOUT_EXTENSION_TREE_DIGEST_SCHEME = "sha256:scout-extension-tree-v1";
 export const SCOUT_EXTENSION_TREE_LIMITS = Object.freeze({ bytes: 32 * 1024 * 1024, entries: 1024, depth: 16 });

@@ -4,7 +4,7 @@ import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, rmSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Duplex, Writable } from "node:stream";
-import { INHERITED_DESCRIPTOR_LAYOUTS, MAX_INHERITED_DESCRIPTOR_SLOT } from "@openscout/runtime/inherited-descriptors";
+import { INHERITED_DESCRIPTOR_LAYOUTS, MAX_INHERITED_DESCRIPTOR_SLOT } from "@openscout/runtime/daemon";
 
 type Identity = { dev: number; ino: number; file: boolean; socket: boolean; fifo: boolean };
 export type DescriptorForm = "context" | "credential";

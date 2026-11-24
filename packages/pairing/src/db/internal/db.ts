@@ -4,10 +4,10 @@
  */
 
 import { Database } from "bun:sqlite";
-import { observeSqliteDatabase } from "@openscout/runtime/sqlite-adapter";
+import { observeSqliteDatabase } from "@openscout/runtime/storage";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 
 /* ── DB path ── */
 

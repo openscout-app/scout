@@ -97,7 +97,7 @@ for (const mode of ["plain", "json"] as const) {
         home = mkdtempSync(join(tmpdir(), "scout-setup-handoff-"));
         const command = resolve(import.meta.dir, "setup.ts");
         const context = resolve(import.meta.dir, "../context.ts");
-        const onboardingModule = Bun.resolveSync("@openscout/runtime/onboarding", import.meta.dir);
+        const onboardingModule = Bun.resolveSync("@openscout/runtime/setup", import.meta.dir);
         child = join(home, "child.ts");
         writeFileSync(child, `
 import { mock } from "bun:test";

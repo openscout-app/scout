@@ -30,7 +30,7 @@ import {
   serveClaudeChannelSocket,
   type ClaudeChannelHost,
   type ClaudeChannelSocketServer,
-} from "@openscout/runtime/in-place";
+} from "@openscout/runtime/harnesses";
 import { waitForStdioServerClosure } from "./stdio-server-lifecycle.ts";
 
 type InboxStreamEvent = {

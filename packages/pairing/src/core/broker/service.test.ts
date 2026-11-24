@@ -14,7 +14,7 @@ import { BrokerRequestReceipts } from "../../../../runtime/src/broker-request-re
 import {
   LOCAL_CONFIG_VERSION,
   writeLocalConfig,
-} from "@openscout/runtime/local-config";
+} from "@openscout/runtime/config";
 import {
   resolveRelayAgentConfig,
   writeOpenScoutSettings,

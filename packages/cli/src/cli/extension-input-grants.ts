@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { findScoutExtension, normalizeScoutExtensionDestination, scoutExtensionRoots, type ScoutExtension, type ScoutExtensionInvocation, type ScoutExtensionRefusalReason } from "@openscout/runtime/scout-extensions";
-import { resolveScoutHome } from "@openscout/runtime/scout-home";
+import { findScoutExtension, normalizeScoutExtensionDestination, scoutExtensionRoots, type ScoutExtension, type ScoutExtensionInvocation, type ScoutExtensionRefusalReason } from "@openscout/runtime/extensions";
+import { resolveScoutHome } from "@openscout/runtime/config";
 import { readScoutExtensionInstallReceipt } from "./extension-install.ts";
 import { isScoutExtensionTreeDigest } from "./extension-tree-digest.ts";
 import { ScoutCommandUnavailableError } from "./command-unavailable.ts";

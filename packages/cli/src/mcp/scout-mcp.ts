@@ -17,7 +17,7 @@ import {
   detectCurrentLiveTerminalSession,
   type LiveTerminalDetection,
   type LiveTerminalSession,
-} from "@openscout/runtime/live-terminal-session";
+} from "@openscout/runtime/harnesses";
 import { registerChatListeningTools } from "./chat-listening-tools.ts";
 import { chatListeningRequest } from "../cli/commands/chat-listening.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -52,14 +52,12 @@ import {
   findNearestProjectRoot,
   loadResolvedRelayAgents,
   type ResolvedRelayAgentConfig,
-} from "@openscout/runtime/setup";
-import { resolveHost, resolveWebPort } from "@openscout/runtime/local-config";
-import {
   reporterHarness,
   submitDiagnosticReport,
   type DiagnosticOptions,
   type DiagnosticReceipt,
-} from "@openscout/runtime/diagnostic-report";
+} from "@openscout/runtime/setup";
+import { resolveHost, resolveWebPort } from "@openscout/runtime/config";
 import { hostname } from "node:os";
 import * as z from "zod/v4";
 

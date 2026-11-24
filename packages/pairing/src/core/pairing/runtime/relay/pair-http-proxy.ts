@@ -1,6 +1,6 @@
 // Private phone/web policy. The public relay has no default HTTP target.
-import { resolveWebPort } from "@openscout/runtime/local-config";
-import type { RelayHttpHandler } from "@openscout/runtime/relay-transport";
+import { resolveWebPort } from "@openscout/runtime/config";
+import type { RelayHttpHandler } from "@openscout/runtime/mesh";
 
 export function createPairRelayHttpHandler(pairHttpOrigin?: string | null): RelayHttpHandler {
   return (request, { clientAddress }) => {

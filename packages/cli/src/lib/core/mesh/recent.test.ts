@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { NodeDefinition } from "@openscout/protocol";
 import { PeerCardVerificationError, PeerTlsPinError } from "@openscout/runtime/mesh-peer-client";
-import type { MeshNodeStateReport } from "@openscout/runtime/mesh-node-state";
+import type { MeshNodeStateReport } from "@openscout/runtime/mesh";
 import { createScoutCommandContext } from "../../../cli/context.ts";
 import { renderScoutRecent } from "../../ui/terminal/recent.ts";
 import { loadScoutRecent, projectScoutRecentEntries, type ScoutRecentDeps } from "./recent.ts";

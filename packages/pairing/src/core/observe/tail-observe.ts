@@ -1,4 +1,4 @@
-import type { DiscoveredTranscript, TailEvent } from "@openscout/runtime/tail";
+import type { DiscoveredTranscript, TailEvent } from "@openscout/runtime/harnesses";
 
 import type { ObserveData, ObserveEvent } from "./service.ts";
 

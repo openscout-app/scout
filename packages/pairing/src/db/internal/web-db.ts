@@ -19,7 +19,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { CONTROL_PLANE_TERMINAL_WORKSPACE_SQLITE_SCHEMA } from "@openscout/runtime/schema";
+import { CONTROL_PLANE_TERMINAL_WORKSPACE_SQLITE_SCHEMA } from "@openscout/runtime/storage";
 
 import { resolveDbPath } from "./db.ts";
 

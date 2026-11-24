@@ -1,5 +1,5 @@
 import {runPairHostBinding} from "./pair-host-binding.ts";
-import { localConfigHome } from "@openscout/runtime/local-config";
+import { localConfigHome } from "@openscout/runtime/config";
 import { createPendingPairRequestStore, pairRequestStatePath, type PairRequest } from "@openscout/pairing/pair-requests";
 import { decideHostPairingRequest } from "@openscout/pairing/host";
 import type { ScoutCommandContext } from "../context.ts";

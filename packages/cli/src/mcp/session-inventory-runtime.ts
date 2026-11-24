@@ -1,6 +1,6 @@
 import * as z from "zod/v4";
 import type { ObservedSessionInventory } from "@openscout/protocol";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
+import { resolveBrokerControlUrl } from "@openscout/runtime/config";
 
 const status = z.enum(["not_scanned", "available", "unavailable", "unknown"]);
 const id = z.string().min(1).max(1024).regex(/^[^\x00-\x1f]+$/u);

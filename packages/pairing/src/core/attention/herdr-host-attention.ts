@@ -12,7 +12,7 @@
 
 import type { HerdrPaneProjection } from "@openscout/protocol";
 import { parseContinuationDialog, type ContinuationDialog } from "@openscout/runtime";
-import { readHerdrSessions, readHerdrTopology } from "@openscout/runtime/system-probes";
+import { readHerdrSessions, readHerdrTopology } from "@openscout/runtime/setup";
 
 import { herdrTerminalHost } from "../../terminal-hosts/herdr.ts";
 import { detectClaudeTmuxHostAttention } from "./tmux-host-attention.ts";

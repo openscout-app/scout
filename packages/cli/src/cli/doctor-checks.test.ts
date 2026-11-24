@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { DEFAULT_OPENSCOUT_MESH_RELAY_URL, DEFAULT_OPENSCOUT_MESH_RENDEZVOUS_URL } from "@openscout/protocol";
 import { expect, test } from "bun:test";
 import { collectDoctorCheck, doctorBunReport, doctorMeshBridgeCheck, doctorBrokerCheck, doctorNativeCheck, doctorWorkerCommand, renderDoctorAssessment, renderDoctorCheck, runDoctorCheck } from "./doctor-checks.ts";
-import type { BrokerServiceStatus } from "@openscout/runtime/broker-process-manager";
+import type { BrokerServiceStatus } from "@openscout/runtime/daemon";
 
 const input = { cwd: process.cwd(), env: process.env };
 

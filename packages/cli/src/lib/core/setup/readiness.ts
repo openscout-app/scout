@@ -1,11 +1,10 @@
 import {
   assessCoreSetupCompletion, buildCoreServiceReport, describeCoreHarnessPresence,
   type CoreHealthObservation, type CoreReportHealthPayload, type CoreServiceReport,
-} from "@openscout/runtime/core-report";
+} from "@openscout/runtime/setup";
 import { requestScoutBrokerJsonWithTrace, ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
-import { resolveOpenScoutInstanceName } from "@openscout/runtime/instance";
-import type { HarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
+import { resolveBrokerControlUrl, resolveOpenScoutInstanceName } from "@openscout/runtime/config";
+import type { HarnessCatalogSnapshot } from "@openscout/runtime/harnesses";
 
 export const APP_READINESS_UNCHECKED = Object.freeze({
   status: "not_checked" as const, reason: "private_app_scope" as const,

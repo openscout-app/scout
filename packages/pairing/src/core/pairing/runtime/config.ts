@@ -2,9 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { loadLocalConfig, resolvePairingPort } from "@openscout/runtime/local-config";
-import { readOpenScoutNetworkSettingsSync } from "@openscout/runtime/open-scout-network";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
+import { loadLocalConfig, resolvePairingPort, resolveOpenScoutPairingHome } from "@openscout/runtime/config";
+import { readOpenScoutNetworkSettingsSync } from "@openscout/runtime/mesh";
 
 export type PairingSessionConfig = {
   adapter: string;

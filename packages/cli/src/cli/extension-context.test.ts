@@ -6,15 +6,20 @@ import { spawn } from "node:child_process";
 import { chmodSync, closeSync, fstatSync, openSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { releaseExtensionChannelCodeForWitness, BoundedChannelDescriptor } from "../../../runtime/src/extension-channel-io.ts";
-import { applyOpenScoutInstanceEnvironment, deriveOpenScoutInstanceLayout, selectCliOpenScoutInstance } from "@openscout/runtime/instance";
-import { resolveOpenScoutPairingHomeForEnv, resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
-import { resolveScoutHome } from "@openscout/runtime/scout-home";
+import {
+  applyOpenScoutInstanceEnvironment,
+  deriveOpenScoutInstanceLayout,
+  selectCliOpenScoutInstance,
+  resolveOpenScoutPairingHomeForEnv,
+  resolveOpenScoutHomeForEnv,
+  resolveScoutHome,
+} from "@openscout/runtime/config";
 import { findScoutExtension, scoutExtensionEnv } from "./extensions.ts";
 import { SCOUT_APP_VERSION } from "../lib/shared/product.ts";
 import { mutateScoutExtension, readScoutExtensionInstallReceipt } from "./extension-install.ts";
 import { captureScoutExtensionSelection, projectScoutExtensionContext, encodeScoutExtensionContext, EXTENSION_CONTEXT_MAX_BYTES, type ScoutExtensionContext } from "./extension-context.ts";
 import { prepareScoutExtensionContext, runScoutExtensionWithQualifiedContext, runScoutExtensionWithContext, scoutExtensionContextStdio, stopScoutExtensionContextChild } from "./extension-context-runner.ts";
-import { INHERITED_DESCRIPTOR_LAYOUTS, MAX_INHERITED_DESCRIPTOR_SLOT } from "@openscout/runtime/inherited-descriptors";
+import { INHERITED_DESCRIPTOR_LAYOUTS, MAX_INHERITED_DESCRIPTOR_SLOT } from "@openscout/runtime/daemon";
 const root = mkdtempSync(join(import.meta.dir, "../../node_modules/.extension-context-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const invocation = { context: "scout.extension-context/v1" as const, requires: ["selection/v1", "web.selection/v1", "distribution.endpoint/v1", "pair.configuration/v1", "runtime.tools/v1", "menu.bootstrap/v1", "server.configuration/v1"] as const };

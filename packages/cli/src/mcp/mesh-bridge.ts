@@ -4,7 +4,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs
 import { join } from "node:path";
 
 import { createModernScoutHandler, eventBrokerClient, startMcpEventDeliveryWorker } from "./mcp-events.ts";
-import { mcpEventPrincipalSchema } from "@openscout/runtime/mcp-events";
+import { mcpEventPrincipalSchema } from "@openscout/runtime/client";
 import type { McpEventPrincipal } from "@openscout/protocol";
 import { SCOUT_MCP_CORE_TOOL_NAMES } from "@openscout/protocol";
 import { resolveScoutBrokerUrl } from "../lib/core/broker/service.ts";

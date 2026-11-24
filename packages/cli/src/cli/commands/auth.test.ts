@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { distKeyPath, fileDistKeyStore } from "@openscout/runtime/dist-access";
-import { resolveInstalledWebFullClient } from "@openscout/runtime/web-full-client";
+import { distKeyPath, fileDistKeyStore } from "@openscout/runtime/routing";
+import { resolveInstalledWebFullClient } from "@openscout/runtime/client";
 
 import { createScoutCommandContext } from "../context.ts";
 import { runAuthCommand } from "./auth.ts";

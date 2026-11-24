@@ -1,15 +1,29 @@
-import { signLocalAdminRequest, readLocalAdminKey } from "@openscout/runtime/mesh/local-auth";
+import {
+  signLocalAdminRequest,
+  readLocalAdminKey,
+  PRE_BOOT_GRACE_MS,
+  signScopedPeerRequest,
+  ACCESS_PROTOCOL,
+  ACCESS_POLICY_TTL_MS,
+  ACCESS_ARTIFACT_MAX_BYTES,
+  accessKeyId,
+  signAccessArtifact,
+  validateAccessPolicy,
+  validateAccessGrant,
+  validateAccessDelegation,
+  validateAccessScope,
+  validateAccessRevocation,
+  type AccessPrincipal,
+  type AccessPolicy,
+  type AccessGrant,
+  type AccessDelegation,
+  type AccessRevocation,
+} from "@openscout/runtime/mesh";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
 import { constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { nodeFingerprint, verifySignedNodeCard, type SignedNodeCard, type NodeIdentity } from "@openscout/runtime";
 import { createPinnedHttpsClient, type PinnedHttpsClient } from "@openscout/runtime/mesh/pinned-https-client";
-import { PRE_BOOT_GRACE_MS, signScopedPeerRequest } from "@openscout/runtime/mesh/peer-auth";
-import {
-  ACCESS_PROTOCOL, ACCESS_POLICY_TTL_MS, ACCESS_ARTIFACT_MAX_BYTES, accessKeyId, signAccessArtifact,
-  validateAccessPolicy, validateAccessGrant, validateAccessDelegation, validateAccessScope, validateAccessRevocation,
-  type AccessPrincipal, type AccessPolicy, type AccessGrant, type AccessDelegation, type AccessRevocation,
-} from "@openscout/runtime/mesh/access";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";

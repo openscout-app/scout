@@ -7,7 +7,7 @@ import * as trust from './mesh-trust.ts';
 import { runMeshGuestsCommand, MESH_GUESTS_HELP } from './mesh-guests.ts';
 import { runMeshAccessCommand, MESH_ACCESS_HELP } from './mesh-access.ts';
 import { runMeshApprovalsCommand, MESH_APPROVALS_HELP } from './mesh-approvals.ts';
-import { visibleMeshNodes } from '@openscout/runtime/mesh-peer-filter';
+import { visibleMeshNodes } from '@openscout/runtime/mesh';
 
 export const HELP = `scout mesh — portable mesh extension (HTTP runtime client)
 

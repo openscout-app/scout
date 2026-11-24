@@ -1,4 +1,4 @@
-import { isDormantMeshNode } from "@openscout/runtime/mesh-peer-filter";
+import { isDormantMeshNode } from "@openscout/runtime/mesh";
 // The phone's view of the broker's mesh nodes (`mobile/mesh/nodes`).
 //
 // Pure: a projection of the broker snapshot's node registry, with the agents

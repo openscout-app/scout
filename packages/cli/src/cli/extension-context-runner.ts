@@ -5,7 +5,7 @@ import { inputRefusal } from "./extension-input-grants.ts";
 import { loadScoutExtensionChannelHost, scoutExtensionContextBackend } from "./extension-context-host.ts";
 import { realpathSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { findScoutExtension, scoutExtensionRoots, type ScoutExtension } from "@openscout/runtime/scout-extensions";
+import { findScoutExtension, scoutExtensionRoots, type ScoutExtension } from "@openscout/runtime/extensions";
 import { readScoutExtensionInstallReceipt } from "./extension-install.ts";
 import { contextRefusal, encodeScoutExtensionContext, projectScoutExtensionContext, type ScoutExtensionContext, type ScoutExtensionSelection } from "./extension-context.ts";
 

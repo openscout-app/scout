@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile, rename, chmod, rm } from "node:fs/promises"
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ScoutCommandContext } from "../context.ts";
-import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/config";
 
 type Membership = { origin: string; channelId: string; title: string; space: string; spaceTitle?: string; token: string; actorId: string; sessionId?: string; cursor?: string | null };
 type State = { active?: string; rooms: Record<string, Membership>; attempts: Record<string, string> };

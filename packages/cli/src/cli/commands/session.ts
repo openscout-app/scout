@@ -5,8 +5,9 @@ import { existsSync, mkdirSync, openSync, readFileSync, readdirSync } from "node
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
-import { buildHarnessResumeCommand, findHarnessEntry } from "@openscout/runtime/harness-catalog";
 import {
+  buildHarnessResumeCommand,
+  findHarnessEntry,
   findGhosttyTerminalForTty,
   findHarnessAncestor,
   findHarnessOnTty,
@@ -16,7 +17,11 @@ import {
   sendGhosttyPrompt,
   stopProcessGracefully,
   type LiveHarnessProcess,
-} from "@openscout/runtime/live-terminal-session";
+  deliverInPlace,
+  type DeliverInPlaceDeps,
+  type InPlaceDelivery,
+  wrapUserSpawnPaneCommand,
+} from "@openscout/runtime/harnesses";
 import {
   SQLiteControlPlaneStore,
   endpointMatchesTargetSessionAddress,
@@ -24,7 +29,6 @@ import {
   runtimeSessionAddressEntries,
   type RuntimeSessionAddressEntry,
 } from "@openscout/runtime";
-import { deliverInPlace, type DeliverInPlaceDeps, type InPlaceDelivery } from "@openscout/runtime/in-place";
 import type {
   TerminalBackend,
   TerminalSessionRecord,
@@ -47,9 +51,11 @@ import {
 } from "../../lib/core/broker/service.ts";
 import { askScoutApp } from "../scout-app-socket.ts";
 import { runSessionNamesAction, runSessionRenameAction } from "./session-rename.ts";
-import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
-import { wrapUserSpawnPaneCommand } from "@openscout/runtime/terminal-environment";
-import { buildMultiplexerServerEnvironment, buildUserSpawnEnvironment } from "@openscout/runtime/instance";
+import {
+  resolveOpenScoutHomeForEnv,
+  buildMultiplexerServerEnvironment,
+  buildUserSpawnEnvironment,
+} from "@openscout/runtime/config";
 
 const SESSION_HELP = `scout session — actions on a harness session
 

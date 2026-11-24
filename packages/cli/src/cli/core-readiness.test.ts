@@ -70,15 +70,17 @@ mock.module(${JSON.stringify(source("../../../../apps/desktop/src/core/setup/loc
 mock.module(${JSON.stringify(source("../../../../apps/desktop/src/core/setup/terminal-pty-dependencies.ts"))},()=>({inspectScoutTerminalPtyDependencies:forbid}));
 const setup=await import(${JSON.stringify(runtime("setup"))});
 const settings={discovery:{workspaceRoots:[]},agents:{defaultHarness:"codex",defaultCapabilities:[],sessionPrefix:"fixture"}};
-mock.module(${JSON.stringify(runtime("setup"))},()=>({...setup,loadResolvedRelayAgents:async()=>({supportDirectory:"fixture",settingsPath:"fixture",harnessCatalogPath:"fixture",relayAgentsPath:"fixture",managedInstallsPath:"fixture",currentProjectConfigPath:null,settings,projectInventory:[]})}));
-const catalog=await import(${JSON.stringify(runtime("harness-catalog"))});
+mock.module(${JSON.stringify(runtime("setup"))},()=>({
+ ...setup,
+ loadResolvedRelayAgents:async()=>({supportDirectory:"fixture",settingsPath:"fixture",harnessCatalogPath:"fixture",relayAgentsPath:"fixture",managedInstallsPath:"fixture",currentProjectConfigPath:null,settings,projectInventory:[]}),
+ loadSystemProbeDoctorReport:async()=>({socketPath:"fixture",supportedProbeIds:[],families:[],warnings:[]}),
+}));
+const catalog=await import(${JSON.stringify(runtime("harnesses"))});
 let reads=0;
-mock.module(${JSON.stringify(runtime("harness-catalog"))},()=>({...catalog,loadHarnessCatalogSnapshot:async(options)=>{expect(options).toEqual({localOnly:true});reads++;return {entries:[]};}}));
+mock.module(${JSON.stringify(runtime("harnesses"))},()=>({...catalog,loadHarnessCatalogSnapshot:async(options)=>{expect(options).toEqual({localOnly:true});reads++;return {entries:[]};}}));
 const broker=await import(${JSON.stringify(source("../lib/core/broker/service.ts"))});
 mock.module(${JSON.stringify(source("../lib/core/broker/service.ts"))},()=>({...broker,readScoutCapabilityMatrix:async()=>null}));
 mock.module(${JSON.stringify(source("../lib/app/host/runtime-service-client.ts"))},()=>({getRuntimeBrokerServiceStatus:async()=>({health:{ok:true},reachable:true,serviceAdapter:"headless-foreground"})}));
-const probes=await import(${JSON.stringify(runtime("system-probes"))});
-mock.module(${JSON.stringify(runtime("system-probes"))},()=>({...probes,loadSystemProbeDoctorReport:async()=>({socketPath:"fixture",supportedProbeIds:[],families:[],warnings:[]})}));
 let fixes=[];
 const native=await import(${JSON.stringify(source("./scoutd.ts"))});
 mock.module(${JSON.stringify(source("./scoutd.ts"))},()=>({...native,loadNativeScoutdDoctorReport:async(input)=>{fixes.push(input.fix);return native.normalizeNativeScoutdDoctorReport({raw:{},scoutdPath:null,source:null,available:false});}}));

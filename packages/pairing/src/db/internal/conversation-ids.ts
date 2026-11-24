@@ -9,4 +9,4 @@ export {
   configuredOperatorActorIds,
   conversationIdAliases,
   isLikelyLocalSessionAgentId,
-} from "@openscout/runtime/conversations/legacy-ids";
+} from "@openscout/runtime/routing";

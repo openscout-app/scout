@@ -1,4 +1,4 @@
-import { readNativeAppThreads, type NativeThreadInventory } from "@openscout/runtime/in-place";
+import { readNativeAppThreads, type NativeThreadInventory } from "@openscout/runtime/harnesses";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { knowledgeIndexEnabled, KNOWLEDGE_INDEX_OFF, searchSessionKnowledge, SQLiteKnowledgeStore, type KnowledgeSearchHit, type SessionKnowledgeSearchInput } from "@openscout/runtime";

@@ -1,10 +1,10 @@
 import { createCredentialBinding } from "./credential-binding.ts";
 import { timingSafeEqual } from "node:crypto";
-import { localConfigHome, resolveWebAuthToken } from "@openscout/runtime/local-config";
+import { localConfigHome, resolveWebAuthToken } from "@openscout/runtime/config";
 import { mountPairingRoutes } from "../../../../routes/pairing.ts";
 import { createPendingPairRequestStore, pairRequestStatePath, type PendingPairRequestStore } from "../../../../pairing-pair-requests.ts";
 import { isSameMacScoutRequest } from "../../../../pairing-request-trust.ts";
-import type { PairingOpportunityControlAction, PairingRequestBinding } from "@openscout/runtime/pairing-local-socket";
+import type { PairingOpportunityControlAction, PairingRequestBinding } from "@openscout/runtime/daemon";
 import { watchSharedScoutMessages } from "./broker-message-fanout.ts";
 // Bridge server — Hono + tRPC edition.
 //

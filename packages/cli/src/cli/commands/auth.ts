@@ -17,8 +17,8 @@ import {
   distBaseUrl,
   resolveDistKey,
   type DistKeyStore,
-} from "@openscout/runtime/dist-access";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+} from "@openscout/runtime/routing";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";

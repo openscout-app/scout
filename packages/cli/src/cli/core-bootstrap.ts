@@ -1,5 +1,5 @@
 import { applyInstanceFlag, extractInstanceFlag, parseScoutArgv } from "../../bin/lifecycle-preflight.mjs";
-import { applyOpenScoutInstanceEnvironment, assertOpenScoutInstanceIsolation, selectCliOpenScoutInstance } from "@openscout/runtime/instance";
+import { applyOpenScoutInstanceEnvironment, assertOpenScoutInstanceIsolation, selectCliOpenScoutInstance } from "@openscout/runtime/config";
 
 /** Select before the legacy ask/lifecycle graph loads. Setup, doctor and runtimes use their retained
  * core handlers; no private command dispatch or lifecycle preflight is loaded. */

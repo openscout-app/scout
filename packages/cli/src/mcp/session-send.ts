@@ -1,7 +1,7 @@
 import { currentSessionReturnAddress, stampSessionReturnAddress, type SessionReturnAddress } from "./session-return-address.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { type InPlaceDelivery } from "@openscout/runtime/in-place";
+import { type InPlaceDelivery } from "@openscout/runtime/harnesses";
 
 import { deliverDirectSessionInput, renderInPlaceDelivery } from "../cli/commands/session.ts";
 

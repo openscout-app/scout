@@ -13,7 +13,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { resolvedPairingConfig } from "./core/pairing/runtime/config.ts";
 import { assertIsolatedPairingRunStateWrite } from "./pairing-run-state.ts";
-import { localConfigHome } from "@openscout/runtime/local-config";
+import { localConfigHome } from "@openscout/runtime/config";
 import { tryLoadIdentityPublicKeyHex } from "./core/pairing/runtime/security/identity.ts";
 
 const RECONCILE_INTERVAL_MS = 5_000;

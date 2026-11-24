@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { generateKeyPair } from "@openscout/runtime/pairing-security/noise";
+import { generateKeyPair } from "@openscout/runtime/pairing-security";
 
 import type { Bridge } from "./bridge.ts";
 import { connectToRelay } from "./relay-client.ts";

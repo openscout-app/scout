@@ -56,7 +56,7 @@ test("revoked grants never send application data", async () => {
 });
 
 test("event lifecycle crosses the SDK facade, durable broker and signed delivery worker", async () => {
-  const { BrokerMcpEvents } = await import("@openscout/runtime/mcp-events");
+  const { BrokerMcpEvents } = await import("@openscout/runtime/client");
   const { Database } = await import("bun:sqlite");
   const { createHmac } = await import("node:crypto");
   const db = new Database(":memory:");

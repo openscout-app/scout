@@ -1,13 +1,12 @@
-import { inspectMeshBridgeCredentialConfig } from "@openscout/runtime/mesh-bridge-config";
+import { inspectMeshBridgeCredentialConfig } from "@openscout/runtime/mesh";
 import { resolveMeshRendezvousPublishConfig } from "@openscout/runtime";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 import { MINIMUM_BUN_VERSION, supportedBunVersion } from "../../bin/bun-preflight.mjs";
 import { loadScoutCoreReport } from "../lib/core/setup/readiness.ts";
-import { assessCoreSetupCompletion } from "@openscout/runtime/core-report";
+import { assessCoreSetupCompletion, loadSystemProbeDoctorReport } from "@openscout/runtime/setup";
 import type { ScoutCommandContext } from "./context.ts";
 import type { getRuntimeBrokerServiceStatus } from "../lib/app/host/runtime-service-client.ts";
-import { loadSystemProbeDoctorReport } from "@openscout/runtime/system-probes";
-import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
+import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harnesses";
 import { loadNativeScoutdDoctorReport, type NativeScoutdDoctorReport } from "./scoutd.ts";
 import { spawn } from "node:child_process";
 

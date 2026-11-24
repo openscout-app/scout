@@ -2,8 +2,8 @@ import { runScoutExtensionWithContext } from "./extension-context-runner.ts";
 import { contextRefusal, type ScoutExtensionContext } from "./extension-context.ts";
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-import type { ScoutExtension } from "@openscout/runtime/scout-extensions";
-export * from "@openscout/runtime/scout-extensions";
+import type { ScoutExtension } from "@openscout/runtime/extensions";
+export * from "@openscout/runtime/extensions";
 type Env = NodeJS.ProcessEnv;
 
 /**

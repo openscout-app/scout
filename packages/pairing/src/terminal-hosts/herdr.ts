@@ -10,7 +10,7 @@ import {
   parseHerdrAgentList,
   readHerdrSessions,
   readHerdrTopology,
-} from "@openscout/runtime/system-probes";
+} from "@openscout/runtime/setup";
 import { formatTerminalSurfaceId } from "@openscout/protocol";
 import type { HerdrSessionTopology, TerminalSurface } from "@openscout/protocol";
 
@@ -20,7 +20,7 @@ import type {
   TerminalHostAdapter,
   TerminalHostSession,
 } from "./types.ts";
-import { buildUserSpawnEnvironment } from "@openscout/runtime/instance";
+import { buildUserSpawnEnvironment } from "@openscout/runtime/config";
 
 const HERDR_TIMEOUT_MS = 2_000;
 

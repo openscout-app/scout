@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/config";
 
 /**
  * Graceful stop/restart: before the supervised tree comes down, wait for the

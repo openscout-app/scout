@@ -10,8 +10,8 @@
 // the views that read one (voice, broadcast).
 
 import { createTRPCClient, createWSClient, wsLink } from "@trpc/client";
-import type { BrokerRouter } from "@openscout/runtime/broker-trpc-router";
-import { resolveWebAuthToken, resolveWebPort } from "@openscout/runtime/local-config";
+import type { BrokerRouter } from "@openscout/runtime/client";
+import { resolveWebAuthToken, resolveWebPort } from "@openscout/runtime/config";
 
 import { resolveScoutBrokerUrl } from "../../../broker/service.ts";
 import { isAllowedBridgeWebPath } from "./web-request.ts";
