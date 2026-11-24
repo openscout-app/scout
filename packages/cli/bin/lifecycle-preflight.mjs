@@ -282,7 +282,7 @@ export function parseSetupCommandOptions(args, defaultCurrentDirectory) {
     if (flag === "--context-root") currentDirectory = resolve(parsed.value);
     else if (flag === "--source-root") sourceRoots.push(resolve(parsed.value));
     else {
-      if (!["claude", "codex", "cursor", "grok", "pi", "opencode", "devin"].includes(parsed.value)) {
+      if (!["claude", "codex", "cursor", "grok", "pi", "opencode", "devin", "antigravity"].includes(parsed.value)) {
         throw new Error(`invalid default harness: ${parsed.value}`);
       }
       defaultHarness = parsed.value;

@@ -54,6 +54,7 @@ import {
   ScoutWorkClaimConflictError,
   waitForScoutFlight,
   watchScoutMessages,
+  replyToScoutTask,
 } from "./service.ts";
 import { scoutAskHandler } from "./ask.ts";
 import { runAskCommand } from "../../../cli/commands/ask.ts";
@@ -4647,5 +4648,43 @@ describe("queued flight cancellation", () => {
       return Response.json(response);
     }) as typeof fetch;
     expect(await cancelScoutFlight("http://broker.test", "queued-flight")).toMatchObject({ ...expected, flightId: "queued-flight" });
+  });
+});
+
+describe("reply points capability", () => {
+  const reply = { requestId: "reply-1", senderId: "agent-1", ref: "ref:1-abcdef", body: "Rebuttal",
+    points: [{ stance: "claim" as const, text: "Keep Home on the shipped Feed" }] };
+
+  function brokerWith(capabilities: string[]) {
+    const requested: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      requested.push(`${request.method} ${new URL(request.url).pathname}`);
+      if (new URL(request.url).pathname === "/v1/node") return jsonResponse({ id: "node-1", capabilities });
+      return jsonResponse({ ok: true, messageId: "msg-1" });
+    }) as typeof fetch;
+    return requested;
+  }
+
+  test("a reply with points is refused by a runtime without reply-points/1, not sent without them", async () => {
+    useIsolatedOpenScoutHome();
+    const requested = brokerWith(["ask-reply/1"]);
+    await expect(replyToScoutTask(reply)).rejects.toThrow("reply-points/1");
+    expect(requested).toEqual(["GET /v1/node"]);
+  });
+
+  test("a reply without points still goes to a runtime without reply-points/1", async () => {
+    useIsolatedOpenScoutHome();
+    const requested = brokerWith(["ask-reply/1"]);
+    const { points: _points, ...plain } = reply;
+    await replyToScoutTask(plain);
+    expect(requested).toEqual(["GET /v1/node", "POST /v1/messages/reply"]);
+  });
+
+  test("a reply with points goes to a runtime that advertises reply-points/1", async () => {
+    useIsolatedOpenScoutHome();
+    const requested = brokerWith(["ask-reply/1", "reply-points/1"]);
+    await replyToScoutTask(reply);
+    expect(requested).toEqual(["GET /v1/node", "POST /v1/messages/reply"]);
   });
 });

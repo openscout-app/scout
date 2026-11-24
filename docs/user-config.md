@@ -73,6 +73,38 @@ text — Kimi, via `part.think` — always render it, whatever this is set to.
 Setting it never hides reasoning Scout has; it only decides whether to mark
 reasoning Scout does not have.
 
+## Agent Worktree Retirement
+
+A session asked to run in a new worktree gets a git worktree at
+`<project>/.scout-worktrees/<agent>` on branch `scout/<agent>`. The runtime
+retires such a worktree when all of these hold:
+
+| Check | Meaning |
+| --- | --- |
+| Scout made it | A registered worktree directly under `.scout-worktrees/`, with `scout/<folder name>` checked out. Any other worktree or branch is never touched. |
+| Idle | No endpoint whose working directory is the worktree is alive, owes a flight or an open work item, or belongs to a registered agent that can be woken there. Nothing happened there (session records, commits, reflog, index) for the idle threshold. |
+| Clean | `git status --porcelain --untracked-files=all` is empty. Ignored files such as `node_modules` do not count and are removed with the worktree. |
+| Merged | The branch tip is part of `main` (or `master`), local or on `origin`. A squash merge is not detected, so that worktree is kept. |
+
+Retiring stops the dead cardless session endpoints that ran there, then runs
+`git worktree remove` (never `--force`) and `git branch -d` (never `-D`). It
+runs `git worktree prune` only when that would prune nothing else.
+
+| Setting | Default | Values |
+| --- | --- | --- |
+| `worktree-retire` | `on` | `on` runs the sweep every hour; `off` stops it. A sweep run by hand still works. |
+| `worktree-retire-idle-hours` | `24` | Hours of idleness before a worktree may go. The minimum is 1. |
+
+```bash
+scout worktrees                          # the setting and the last sweep
+scout worktrees retire --dry-run         # what a sweep would retire, and why the rest stay
+scout worktrees retire --project ~/dev/app
+scout config set worktree-retire off
+```
+
+The reclaimed size is `du -sk` before removal, so it is approximate: APFS
+clones and shared blocks make `du` read high.
+
 ## Operator Name Resolution Order
 
 Scout resolves your operator name in this order:

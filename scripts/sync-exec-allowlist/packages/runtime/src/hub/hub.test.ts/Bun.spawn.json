@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/hub/hub.test.ts",
+  "symbol": "Bun.spawn",
+  "category": "test",
+  "reason": "runs the reporter text under real Node, the way a Claude Code hook runs it in a vendor sandbox",
+  "owner": "runtime"
+}

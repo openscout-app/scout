@@ -1,4 +1,4 @@
-import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, SCOUT_TASKS_CAPABILITY, agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
+import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY,agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -80,6 +80,8 @@ import type {
   WorkReviewRequest,
   VercelBoardPlanRequest,
   VercelBoardPlanResponse,
+  VercelBoardDispatcherStatus,
+  VercelBoardDispatchRunResponse,
   WorkReviewResponse,
 } from "@openscout/protocol";
 import {
@@ -5945,6 +5947,16 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   }
 }
 
+/** The Board dispatcher's settings, decisions and held claims. Read-only. */
+export async function readScoutBoardDispatcher(connectionId: string): Promise<VercelBoardDispatcherStatus> {
+  return brokerReadJson<VercelBoardDispatcherStatus>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${new URLSearchParams({ connection: connectionId })}`);
+}
+
+/** Why the dispatcher would or would not claim one Board task now. Claims nothing. */
+export async function explainScoutBoardDispatch(connectionId: string, taskId: string): Promise<VercelBoardDispatchRunResponse> {
+  return brokerReadJson<VercelBoardDispatchRunResponse>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${new URLSearchParams({ connection: connectionId, explain: taskId })}`);
+}
+
 /** The Board planning path: creates Board tasks only. Work items appear when the connected runtime projects them. */
 export async function planScoutBoardTasks(input: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
   return brokerPostJson<VercelBoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.vercelBoardPlan, input);
@@ -5986,6 +5998,10 @@ export async function replyToScoutTask(input: ScoutTaskReply): Promise<unknown> 
   const baseUrl = resolveScoutBrokerUrl();
   const node = await brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node);
   if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before replying`);
+  // An older runtime accepts the reply but drops points it does not know.
+  if (input.points?.length && !node.capabilities.includes(REPLY_POINTS_CAPABILITY)) {
+    throw new Error(`Broker does not advertise ${REPLY_POINTS_CAPABILITY}; send the reply without points or upgrade the runtime`);
+  }
   return brokerPostJson(baseUrl, "/v1/messages/reply", input);
 }
 

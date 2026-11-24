@@ -36,6 +36,7 @@ export const TRPC_UPGRADE_ROUTE = "GET /trpc";
  * TRPC_UPGRADE_ROUTE allowlist entry, which the inventory test exempts).
  */
 const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
+  "GET /v1/integrations/vercel-board/dispatcher": "local",
   "GET /v1/integrations/vercel-board/handoffs": "local",
   "GET /v1/integrations/vercel-board/messages": "local",
   "GET /v1/integrations/vercel-board/status": "local",
@@ -45,16 +46,24 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/shows/:id/bytes": "local",
   "POST /v1/integrations/vercel-board/claim": "local",
   "POST /v1/integrations/vercel-board/connect": "local",
+  "POST /v1/integrations/vercel-board/dispatcher": "local",
+  "POST /v1/integrations/vercel-board/dispatcher/run": "local",
   "POST /v1/integrations/vercel-board/plan": "local",
   "POST /v1/integrations/vercel-board/promote": "local",
   "POST /v1/integrations/vercel-board/roles": "local",
   "POST /v1/shows": "local",
   "GET /v1/posts": "local",
   "POST /v1/posts": "local",
+  "GET /v1/routines": "local",
+  "POST /v1/routines": "local",
+  "POST /v1/routines/:id/cancel": "local",
+  "GET /v1/worktrees/retirement": "local",
+  "POST /v1/worktrees/retirement/sweep": "local",
   "GET /v1/feed/work": "local",
   "POST /v1/access/rpc": "scoped",
   "POST /v1/access/policy": "public",
   "POST /v1/access/admin": "local",
+  "POST /v1/access/turn": "local",
   "POST /v1/mcp-events": "local",
   "POST /v1/native-session-attention": "local",
   "POST /v1/surfaces/deck": "local",
@@ -96,6 +105,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   // project that exists here. Same trust as forwarding an invocation.
   "POST /v1/mesh/sessions/start": "control",
   "POST /v1/mesh/web-request": "control",
+  // Cross-host session search: one bounded query over the answering host's
+  // own index. Hits carry transcript snippets, so control, not observe.
+  "GET /v1/mesh/knowledge/search": "control",
   // Cross-machine approvals: control tier AND a per-peer share opt-in on this
   // machine (mesh-approvals.ts) — the tier alone never exposes them.
   "GET /v1/mesh/approvals/config": "local",
@@ -142,6 +154,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/collaboration/records": "local",
   "GET /v1/derived": "local",
   "GET /v1/derived/pending": "local",
+  "GET /v1/boards": "local",
+  "GET /v1/boards/:id": "local",
   "GET /v1/work/board": "local",
   "GET /v1/work/lifecycles": "local",
   "GET /v1/work/moves": "local",
@@ -169,6 +183,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/invocations/:id/stream": "local",
   "GET /v1/machines": "local",
   "GET /v1/machines/:id": "local",
+  "GET /v1/manual-review/board-routines": "local",
+  "GET /v1/manual-review/board-ticket": "local",
+  "POST /v1/manual-review/board-accept": "local",
   "GET /v1/manual-review/occurrences": "local",
   "GET /v1/message-reactions": "local",
   "GET /v1/messages": "local",
@@ -245,6 +262,9 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/durable-actions/:id/heartbeat": "local",
   "POST /v1/manual-review/occurrences": "local",
   "POST /v1/manual-review/dispatches": "local",
+  "POST /v1/manual-review/board-routines": "local",
+  "POST /v1/manual-review/board-preview": "local",
+  "POST /v1/manual-review/board-runs": "local",
   "POST /v1/endpoints": "local",
   "POST /v1/external-sessions/ack": "local",
   "POST /v1/external-sessions/attach": "local",

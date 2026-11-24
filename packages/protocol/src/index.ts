@@ -18,6 +18,7 @@ export * from "./channel-reception.js";
 export * from "./collaboration.js";
 export * from "./work-lifecycle.js";
 export * from "./derived-records.js";
+export * from "./boards.js";
 export * from "./work-claims.js";
 export * from "./assigned-roles.js";
 export * from "./orchestrator-prompt.js";
@@ -32,6 +33,7 @@ export * from "./budget.js";
 export * from "./agent-broker-feed.js";
 export * from "./durable-actions.js";
 export * from "./manual-review-occurrences.js";
+export * from "./manual-review-board.js";
 export * from "./observed-status.js";
 export * from "./presence.js";
 export * from "./activity.js";
@@ -81,6 +83,7 @@ export * from "./mcp-core-tools.js";
 
 export * from "./integrations.js";
 export * from "./vercel-board.js";
+export * from "./vercel-board-dispatch.js";
 export * from "./slack-manifest.js";
 
 export * from "./room-listening.js";
@@ -97,6 +100,7 @@ export * from "./session-names.js";
 
 export * from "./host-attention.js";
 export * from "./tasks.js";
+export * from "./reply-points.js";
 export * from "./decision-cards.js";
 export * from "./failed-runs.js";
 export * from "./task-ready.js";
@@ -104,3 +108,6 @@ export * from "./task-ready.js";
 export * from "./shows.js";
 export * from "./posts.js";
 export * from "./feed-work.js";
+export * from "./access-evaluator.js";
+export * from "./access-evaluator-cases.js";
+export * from "./turn-credentials.js";

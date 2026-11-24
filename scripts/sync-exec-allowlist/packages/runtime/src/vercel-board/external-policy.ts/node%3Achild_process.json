@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/vercel-board/external-policy.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "operator-installed dispatch policy extension: one asynchronous child per decision, JSON on stdin and stdout, a minimal environment, bounded output and a timeout that kills its process group",
+  "owner": "runtime"
+}
