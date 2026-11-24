@@ -100,19 +100,24 @@ export type ScoutDeliverRejectReason =
 /** Advertised by /v1/node before clients may request live session input. */
 export const SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY = "session-input-receipts/1";
 
+/** Advertised by /v1/node when this host answers GET /v1/mesh/knowledge/search for its own index. */
+export const SCOUT_SESSION_SEARCH_CAPABILITY = "session-search/1";
+
 /** Input submission is not an invocation or proof of execution completion. */
 export interface ScoutSessionInputReceipt {
   kind: "in_place";
   state: "submitted";
   sessionId: ScoutId;
   harness: "claude" | "codex";
-  via: "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
+  via: "herdr" | "orca" | "tmux" | "claude-channel" | "lattices" | "scout-app";
   location: string;
 }
 
 export interface ScoutDeliverRequest {
   task?: import("./tasks.js").ScoutTaskAsk;
   image?: import("./attachments.js").AttachmentUpload;
+  /** Pictures for `task.decision`, indexed by each option's `picture.image`. */
+  decisionImages?: import("./attachments.js").AttachmentUpload[];
   completion?: ScoutCompletionRequest;
   relation?: ScoutCompletionRelation;
   /** Caller-supplied, requester-scoped idempotency key. */
@@ -211,6 +216,8 @@ export interface ScoutDeliverAcceptedResponse {
   aliasResolution?: RouteAliasResolutionProof;
   flight?: FlightRecord;
   workItem?: WorkItemRecord;
+  /** Work was recorded, but the broker’s work-page projection is unavailable. */
+  workPageUnavailable?: true;
 }
 
 /**

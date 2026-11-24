@@ -858,3 +858,8 @@ test("positional route rewrites preserve flags and shell-quote literal payload",
   expect(() => parseAskCommandOptions(["--as", "sender", "@worker", "--fyi", "--image", "shot.png", "news $HOME"], "/repo"))
     .toThrow("scout ask --as sender --to worker --fyi --image shot.png 'news $HOME'");
 });
+
+test.each(["ref:1-ti4i2u", "1-ti4i2u", "flt-example"])("normalizes continuation ref %s", ref => {
+  const parsed = parseAskCommandOptions(["--continue", ref, "next"], "/tmp/workspace");
+  expect(parsed.task?.continue).toBe(ref.replace(/^ref:/, ""));
+});

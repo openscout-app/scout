@@ -1,0 +1,381 @@
+// Scout's Board worker.
+//
+// The runtime starts this process and talks to it over stdio, one JSON object
+// per line. The first line is the bootstrap; every later line is one call from
+// a closed set of typed operations. The worker is not a Board proxy: it applies
+// the fixed profile and `x-board-can` from the bootstrap to every call, holds
+// no claim token, cursor or renew timer, and retries nothing a caller sent.
+//
+// The credential reaches it only as VERCEL_BOARD_TOKEN in its own environment, put
+// there by `secret run --map <entry>=VERCEL_BOARD_TOKEN`. The worker reads it once,
+// removes it from the environment, and sends it to api.vercel.com only. It
+// never reads the Vercel CLI's login: it passes its own `fetch`, so
+// `@vercel/board` never runs its credential lookup, and it runs with an empty
+// HOME besides.
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
+
+export const WORKER_PROTOCOL = 1;
+export const VERCEL_API = "https://api.vercel.com";
+
+/** The closed set. Anything else is refused. */
+export const OPERATIONS = Object.freeze([
+  "me", "ensureChannel", "events", "tasks", "messages", "message", "post", "postById", "createTask", "createBatch", "batch",
+  "claim", "renew", "complete", "fail", "release", "block", "unblock", "labels",
+]);
+const WRITES = new Set(["ensureChannel", "post", "createTask", "createBatch", "claim", "renew", "complete", "fail", "release", "block", "unblock", "labels"]);
+const BLOCK_KINDS = new Set(["needs_input", "awaiting_approval"]);
+const SECRET_ENV = ["VERCEL_BOARD_TOKEN", "BOARD_TOKEN", "BOARD_URL", "VERCEL_OIDC_TOKEN", "VERCEL_AUTH_TOKEN", "VERCEL_TOKEN"];
+const CLAIM_PATH = /\/messageboard\/.*\/claim\/?$/;
+const TEAM = /^[^\s/]{1,128}$/;
+const VERCEL_BOARD_NAME = /^[^/]{1,64}$/;
+const PROFILE = /^[A-Za-z][A-Za-z0-9-]{0,31}$/;
+
+/** Thrown inside `fetch` to end a claim the SDK would otherwise send again. */
+class ClaimStop extends Error {
+  constructor(status, retryAfter) {
+    super(`claim stopped after HTTP ${status}`);
+    this.name = "ClaimStop";
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
+/** Per-call state, so `fetch` knows which operation it serves. */
+export const callContext = new AsyncLocalStorage();
+
+/**
+ * The only `fetch` `@vercel/board` gets. It adds the bearer token for
+ * api.vercel.com and refuses every other origin and every redirect.
+ *
+ * A claim is sent once. `@vercel/board` retries a POST that carries an
+ * operation ID on 429 and 503, and a claim carries one. Here a claim that
+ * answers 429 or 503 ends the call instead, and a second claim send in the
+ * same call is refused before it leaves.
+ */
+export function scoutFetch(token, { upstream = globalThis.fetch, context = callContext } = {}) {
+  if (typeof token !== "string" || !token) throw new Error("scoutFetch needs a token");
+  return async (input, init = {}) => {
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : null;
+    const url = new URL(request ? request.url : String(input));
+    if (url.origin !== VERCEL_API) throw new Error(`board worker: refused a request to ${url.origin}. The credential goes to ${VERCEL_API} only.`);
+    const method = String(init.method ?? request?.method ?? "GET").toUpperCase();
+    const headers = new Headers(init.headers ?? request?.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    const call = context.getStore();
+    const claim = method === "POST" && CLAIM_PATH.test(url.pathname);
+    if (claim) {
+      if (!call || call.op !== "claim") throw new Error("board worker: a claim outside the claim operation was refused.");
+      if (call.claimSent) {
+        call.claimStop ??= { status: 0 };
+        throw new ClaimStop(0);
+      }
+      call.claimSent = true;
+    }
+    const response = await upstream(request ? new Request(request, { headers, redirect: "error" }) : url.toString(), request ? undefined : { ...init, headers, redirect: "error" });
+    if (claim && (response.status === 429 || response.status === 503)) {
+      const retryAfter = response.headers.get("retry-after");
+      call.claimStop = { status: response.status, retryAfter };
+      await response.body?.cancel().catch(() => {});
+      throw new ClaimStop(response.status, retryAfter);
+    }
+    return response;
+  };
+}
+
+const retryAfterMs = (header) => {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 3_600_000);
+  const at = Date.parse(header);
+  return Number.isFinite(at) ? Math.max(0, Math.min(at - Date.now(), 3_600_000)) : undefined;
+};
+
+/** How a failed call reads to the runtime. A message never carries a credential. */
+export function failureOf(op, error, call) {
+  if (error?.name === "AbortError") return { kind: "aborted" };
+  if (op === "claim" && call?.claimStop) {
+    if (call.claimStop.status === 429) {
+      return { kind: "http", status: 429, code: "rate_limited", message: "The board rate limited the claim. It was not taken.", retryAfterMs: retryAfterMs(call.claimStop.retryAfter) };
+    }
+    return { kind: "unknown", code: "claim_unanswered" };
+  }
+  const status = Number.isInteger(error?.status) ? error.status : undefined;
+  const code = typeof error?.code === "string" && /^[a-z_]{1,64}$/.test(error.code) ? error.code : "remote_error";
+  // A write that got no answer, or a gateway error, may have landed.
+  if (WRITES.has(op) && (status === undefined || code === "unreachable" || (status >= 500 && status !== 501 && status !== 503))) {
+    return { kind: "unknown", code };
+  }
+  if (op === "claim" && status === 503) return { kind: "unknown", code };
+  return {
+    kind: "http", status: status ?? 502, code,
+    message: typeof error?.message === "string" ? error.message.slice(0, 500) : "The board call failed.",
+    ...(typeof error?.hint === "string" ? { hint: error.hint.slice(0, 500) } : {}),
+  };
+}
+
+const text = (value, what) => {
+  if (typeof value !== "string" || !value) throw Object.assign(new Error(`${what} is required`), { status: 400, code: "invalid_request" });
+  return value;
+};
+const notFound = (error) => error?.status === 404;
+const withoutMentions = (message) => {
+  if (!message || typeof message !== "object") return message;
+  const { mentions: _mentions, ...rest } = message;
+  return rest;
+};
+const lease = (value) => Number.isInteger(value) && value > 0 ? value : undefined;
+
+/** The operations. Each takes the narrowed client and plain arguments, and answers plain JSON. */
+export const operations = {
+  async me(client) {
+    const me = await client.me();
+    return { actor: me.actor, principal: me.principal, profile: me.profile ?? null, expiresAt: me.expiresAt ?? null };
+  },
+  async ensureChannel(client, args) {
+    const answer = await client.createChannel(text(args.channel, "channel"));
+    return { created: answer.created === true };
+  },
+  async events(client, args, signal) {
+    const wait = args.wait === undefined ? undefined : Math.max(0, Math.min(Math.floor(args.wait), 300));
+    const page = await client.poll({ channel: text(args.channel, "channel"), ...(args.after ? { after: String(args.after) } : {}), ...(wait !== undefined ? { wait } : {}) }, signal);
+    return { events: page.events, cursor: page.cursor };
+  },
+  async tasks(client, args) {
+    const page = await client.tasks.list({
+      channel: text(args.channel, "channel"),
+      ...(args.state ? { state: args.state } : {}), ...(args.after ? { after: String(args.after) } : {}), ...(args.limit ? { limit: args.limit } : {}),
+    });
+    return { tasks: page.tasks, cursor: page.cursor ?? null };
+  },
+  async messages(client, args) {
+    const limit = Number.isInteger(args.limit) ? Math.max(1, Math.min(args.limit, 500)) : 500;
+    const page = await client.channel(text(args.channel, "channel")).messages({ limit, ...(args.after ? { after: String(args.after) } : {}) });
+    return { messages: page.messages.map(withoutMentions), cursor: page.cursor ?? null };
+  },
+  async message(client, args) {
+    try { return { message: (await client.thread(text(args.id, "id"))).message }; }
+    catch (error) { if (notFound(error)) return { message: null }; throw error; }
+  },
+  async post(client, args) {
+    // Only an operator-enabled sync channel may publish Scout's Board writes.
+    const input = { text: typeof args.text === "string" ? args.text : "", ...(args.labels ? { labels: args.labels } : {}), id: text(args.id, "id"), noSync: args.noSync !== false };
+    const message = args.re ? await client.reply(String(args.re), input) : await client.post(text(args.channel, "channel"), input);
+    return { message: withoutMentions(message) };
+  },
+  async postById(client, args) {
+    try { return { message: withoutMentions(await client.posted(text(args.id, "id"))) }; }
+    catch (error) { if (notFound(error)) return { message: null }; throw error; }
+  },
+  async createTask(client, args) {
+    const answer = await client.tasks.create(text(args.channel, "channel"), {
+      text: text(args.text, "text"), id: text(args.id, "id"), noSync: args.noSync !== false,
+      ...(args.labels ? { labels: args.labels } : {}), ...(args.needs?.length ? { needs: args.needs } : {}),
+    });
+    return { task: answer.task };
+  },
+  async createBatch(client, args) {
+    if (!Array.isArray(args.tasks)) throw Object.assign(new Error("tasks is required"), { status: 400, code: "invalid_request" });
+    return { tasks: await client.tasks.createMany(text(args.channel, "channel"), args.tasks.map(task => ({ ...task, noSync: args.noSync !== false })), { id: text(args.id, "id") }) };
+  },
+  // Vercel's API has no batch lookup by client ID. A batch sent again with the same ID is the same batch.
+  async batch() {
+    return { tasks: null };
+  },
+  async claim(client, args, signal) {
+    const held = await client.tasks.claim(text(args.taskId, "taskId"), { ...(lease(args.lease) ? { lease: args.lease } : {}), ...(signal ? { signal } : {}) });
+    // The token goes to the runtime, which keeps custody of it. Nothing here keeps it.
+    return { task: held.task, claim: { epoch: held.epoch, token: held.token, until: held.until } };
+  },
+  async renew(client, args) {
+    const renewed = await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).renew(lease(args.lease));
+    return { task: renewed.task, until: renewed.until };
+  },
+  async complete(client, args) {
+    return { task: await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).complete(typeof args.result === "string" ? args.result : undefined) };
+  },
+  async fail(client, args) {
+    return { task: await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).fail(text(args.reason, "reason")) };
+  },
+  async release(client, args) {
+    return { task: await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).release() };
+  },
+  async block(client, args) {
+    const kind = BLOCK_KINDS.has(args.kind) ? args.kind : "needs_input";
+    return { task: await client.tasks.held(text(args.taskId, "taskId"), { epoch: args.epoch, token: text(args.token, "token") }).block(text(args.reason, "reason"), { kind }) };
+  },
+  async unblock(client, args) {
+    return { task: await client.tasks.unblock(text(args.taskId, "taskId")) };
+  },
+  async labels(client, args) {
+    const change = args.change && typeof args.change === "object" ? args.change : {};
+    await client.label(text(args.id, "id"), {
+      ...(change.set ? { set: change.set } : {}), ...(change.unset ? { unset: change.unset } : {}), ...(change.if ? { if: change.if } : {}),
+    });
+    return {};
+  },
+};
+
+/** Run one operation in its own call context. Answers `{ ok, value }` or `{ ok: false, error }`. */
+export async function runOperation(client, op, args, signal) {
+  if (!OPERATIONS.includes(op)) return { ok: false, error: { kind: "protocol", code: "unknown_operation", message: `${String(op).slice(0, 64)} is not a worker operation.` } };
+  const call = { op, claimSent: false, claimStop: undefined };
+  try {
+    const value = await callContext.run(call, () => operations[op](client, args && typeof args === "object" ? args : {}, signal));
+    return { ok: true, value };
+  } catch (error) {
+    return { ok: false, error: failureOf(op, error, call) };
+  }
+}
+
+/** Check the bootstrap line. It names the board and the narrowing; never a credential. */
+export function parseBootstrap(line) {
+  let value;
+  try { value = JSON.parse(line); } catch { throw new Error("The bootstrap is not JSON."); }
+  if (!value || value.protocol !== WORKER_PROTOCOL) throw new Error(`The bootstrap must name protocol ${WORKER_PROTOCOL}.`);
+  if (!Number.isSafeInteger(value.generation) || value.generation < 1) throw new Error("The bootstrap needs a generation.");
+  if (!PROFILE.test(value.profile ?? "")) throw new Error("The bootstrap needs a Board profile name.");
+  if (typeof value.can !== "string" || !value.can || value.can.length > 4096) throw new Error("The bootstrap needs the x-board-can text.");
+  const target = value.target;
+  if (target?.kind === "vercel") {
+    if (!TEAM.test(target.team ?? "") || !VERCEL_BOARD_NAME.test(String(target.board ?? "").trim())) throw new Error("The bootstrap needs a Vercel team and a board name.");
+  } else if (target?.kind !== "memory") {
+    throw new Error("The bootstrap target must be vercel or memory.");
+  }
+  const profiles = value.profiles === undefined ? [value.profile] : value.profiles;
+  if (!Array.isArray(profiles) || profiles.length > 16 || !profiles.every((name) => PROFILE.test(name ?? "")) || !profiles.includes(value.profile)) {
+    throw new Error("The bootstrap's profiles must be Board profile names, and include its profile.");
+  }
+  return { generation: value.generation, profile: value.profile, profiles, can: value.can, target };
+}
+
+/**
+ * Whether this Node's `node:sqlite` binds numbered parameters (`?1`). The
+ * in-memory board keeps its tables in SQLite and numbers every parameter.
+ * Node 24.0.0 refuses them ("column index out of range"), and the board then
+ * retries its table writes forever, so a call hangs instead of failing.
+ */
+export function sqliteBindsNumberedParameters() {
+  let db;
+  try {
+    const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
+    db = new DatabaseSync(":memory:");
+    return db.prepare("select ?1 as v").all(1)[0]?.v === 1;
+  } catch {
+    return false;
+  } finally {
+    try { db?.close(); } catch { /* not open */ }
+  }
+}
+
+/** Make the narrowed client for the bootstrap's own profile. */
+export async function openClient(bootstrap, options = {}) {
+  const handle = await openBoard(bootstrap, options);
+  return handle.as(bootstrap.profile, { can: bootstrap.can });
+}
+
+/**
+ * The clients a call may use: one per profile in the bootstrap's list, and
+ * the principal itself for null. Each is narrowed by the bootstrap's `can`;
+ * a call cannot name a profile outside the list or widen the narrowing.
+ */
+export function clientsFor(handle, bootstrap) {
+  const clients = new Map();
+  return (as) => {
+    const profile = as === undefined ? bootstrap.profile : as;
+    if (profile !== null && !bootstrap.profiles.includes(profile)) return undefined;
+    if (!clients.has(profile)) clients.set(profile, handle.as(profile, { can: bootstrap.can }));
+    return clients.get(profile);
+  };
+}
+
+/** Open the board, before narrowing. Only `clientsFor` and `openClient` hand out a handle to calls. */
+export async function openBoard(bootstrap, { token, upstream } = {}) {
+  const { board } = await import("@vercel/board");
+  let handle;
+  if (bootstrap.target.kind === "memory") {
+    if (!sqliteBindsNumberedParameters()) {
+      throw new Error(`Node ${process.version} cannot bind numbered SQLite parameters, and the in-memory board needs them. Run the worker on a Node that can, such as 22.22 or 26.`);
+    }
+    const { local } = await import("@vercel/board/backend-local");
+    handle = board({ backend: local({ memory: true }) });
+  } else {
+    const name = bootstrap.target.board.trim();
+    handle = board({ team: bootstrap.target.team, name, fetch: scoutFetch(token, { upstream }) });
+    // Find (or make) the board as the person, before narrowing. A caller
+    // narrowed with x-board-can names channels only, so Vercel refuses it a
+    // board it would have to make (403). The handle keeps the board's ID, and
+    // every call after this one is narrowed.
+    try { await handle.discovery(); }
+    catch (error) {
+      const why = error?.code ? `${error.code}: ${error.message ?? ""}` : String(error?.message ?? error);
+      throw new Error(`The board ${name} was not found or made (${why.slice(0, 300)}). If your plan allows one board, connect to it by its name, for example --board General.`);
+    }
+  }
+  return handle;
+}
+
+async function main() {
+  // Nothing but protocol lines goes to stdout.
+  const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+  console.log = console.info = console.debug = (...args) => console.error(...args);
+  const fatal = (message) => {
+    try { write({ fatal: String(message).slice(0, 500) }); } catch { /* the runtime is gone */ }
+    process.exit(1);
+  };
+
+  const token = process.env.VERCEL_BOARD_TOKEN || undefined;
+  for (const name of SECRET_ENV) delete process.env[name];
+  delete process.env.NODE_OPTIONS;
+  const home = mkdtempSync(join(tmpdir(), "scout-board-worker-"));
+  for (const name of ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]) process.env[name] = home;
+  process.on("exit", () => { try { rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ } });
+  process.on("uncaughtException", (error) => fatal(`uncaught: ${error?.name ?? "error"}: ${error?.message ?? ""}`));
+  process.on("unhandledRejection", (error) => fatal(`unhandled: ${error?.name ?? "error"}: ${error?.message ?? ""}`));
+
+  const lines = createInterface({ input: process.stdin, crlfDelay: Infinity })[Symbol.asyncIterator]();
+  const first = await lines.next();
+  if (first.done) process.exit(0);
+  let bootstrap;
+  try { bootstrap = parseBootstrap(first.value); } catch (error) { fatal(error.message); }
+  if (bootstrap.target.kind === "vercel" && !token) {
+    fatal("VERCEL_BOARD_TOKEN is not set. The worker starts only under: secret run --map <entry>=VERCEL_BOARD_TOKEN -- <node> <worker>");
+  }
+  let clientFor;
+  try { clientFor = clientsFor(await openBoard(bootstrap, { token }), bootstrap); }
+  catch (error) { fatal(`The board client did not open: ${error?.message ?? error}`); }
+  write({ ready: true, protocol: WORKER_PROTOCOL, generation: bootstrap.generation });
+
+  const running = new Map();
+  for await (const line of lines) {
+    let message;
+    try { message = JSON.parse(line); } catch { fatal("A call line is not JSON."); }
+    if (message && typeof message.cancel === "number") { running.get(message.cancel)?.abort(); continue; }
+    const id = message?.id;
+    if (!Number.isSafeInteger(id)) fatal("A call has no id.");
+    if (message.gen !== bootstrap.generation) {
+      write({ id, ok: false, error: { kind: "protocol", code: "stale_generation", message: `This worker is generation ${bootstrap.generation}.` } });
+      continue;
+    }
+    const client = clientFor(message.as);
+    if (!client) {
+      write({ id, ok: false, error: { kind: "protocol", code: "unknown_profile", message: `${String(message.as).slice(0, 64)} is not one of this worker's profiles.` } });
+      continue;
+    }
+    const controller = new AbortController();
+    running.set(id, controller);
+    void runOperation(client, message.op, message.args, controller.signal).then((answer) => {
+      running.delete(id);
+      write({ id, ...answer });
+    });
+  }
+  // The runtime closed stdin: stop.
+  process.exit(0);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) void main();

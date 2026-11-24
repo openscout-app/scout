@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { OPERATOR_ATTRIBUTION_HANDOFF_ENV, readLocalAdminKey, signLocalAdminRequest } from "./mesh-access-local-auth.js";
 
 import type {
   ActorIdentity,
@@ -265,7 +266,7 @@ export type ActiveScoutBrokerService = {
   listMessageReactions?: (channelId: string) => Promise<MessageReactionRecord[]>;
   deliver?: (
     request: ScoutDeliverRequest,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; executionPayload?: ScoutDeliverRequest },
   ) => Promise<ScoutDeliverResponse>;
   invokeAgent?: (
     request: InvocationRequest & BrokerRouteTargetInput,
@@ -342,6 +343,47 @@ function lowercaseKeys(value: Record<string, string>): Record<string, string> {
 
 function requestBody(options: ScoutBrokerJsonRequestOptions<any>): string | undefined {
   return options.body === undefined ? undefined : JSON.stringify(options.body);
+}
+
+const brokerAttributionAudiences = new Map<string, string>();
+let adoptedBrokerAttributionKey: string | undefined;
+
+/**
+ * For the operator's own long-lived surfaces (scout-web, pairing): read the
+ * key the runtime handed off (or an explicit OPENSCOUT_ATTRIBUTION_KEY_FILE)
+ * into memory and drop both variables, so agents and tools this process spawns
+ * cannot sign as the operator. Call once at startup, before spawning anything.
+ * Returns whether a key was adopted.
+ */
+export function adoptBrokerAttributionKey(env: Record<string, string | undefined> = process.env): boolean {
+  const keyFile = env[OPERATOR_ATTRIBUTION_HANDOFF_ENV]?.trim() || env.OPENSCOUT_ATTRIBUTION_KEY_FILE?.trim();
+  delete env[OPERATOR_ATTRIBUTION_HANDOFF_ENV];
+  delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  if (!keyFile) return false;
+  adoptedBrokerAttributionKey = readLocalAdminKey(keyFile);
+  return Boolean(adoptedBrokerAttributionKey);
+}
+
+/** Tests only: drop a key adopted earlier in this process. */
+export function forgetAdoptedBrokerAttributionKey(): void {
+  adoptedBrokerAttributionKey = undefined;
+}
+
+async function withBrokerAttribution<T>(baseUrl: string, path: string, options: ScoutBrokerJsonRequestOptions<T>): Promise<ScoutBrokerJsonRequestOptions<T>> {
+  if (options.headers?.["x-openscout-local-admin"]) return options;
+  const keyFile = adoptedBrokerAttributionKey ? undefined : process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  const key = adoptedBrokerAttributionKey ?? (keyFile ? readLocalAdminKey(keyFile) : undefined);
+  if (!key) return options;
+  let destinationKeyId = brokerAttributionAudiences.get(baseUrl);
+  if (!destinationKeyId) {
+    const { response } = await requestBrokerWire(baseUrl, "/v1/node", { method: "GET", signal: options.signal, socketPath: options.socketPath });
+    const node = JSON.parse(response.text) as { card?: { keyId?: unknown } };
+    if (!response.ok || typeof node.card?.keyId !== "string") throw new Error("Operator attribution is unavailable: broker identity could not be verified");
+    destinationKeyId = node.card.keyId;
+    brokerAttributionAudiences.set(baseUrl, destinationKeyId);
+  }
+  const method = options.method ?? (options.body === undefined ? "GET" : "POST");
+  return { ...options, headers: { ...options.headers, ...signLocalAdminRequest(key, { method, path, body: requestBody(options), destinationKeyId }) } };
 }
 
 async function requestBrokerOverHttp<T>(
@@ -529,7 +571,7 @@ export async function requestScoutBrokerJsonWithTrace<T>(
   path: string,
   options: ScoutBrokerJsonRequestOptions<T> = {},
 ): Promise<ScoutBrokerJsonWithTrace<T>> {
-  const { response, trace } = await requestBrokerWire(baseUrl, path, options);
+  const { response, trace } = await requestBrokerWire(baseUrl, path, await withBrokerAttribution(baseUrl, path, options));
   let parsed: unknown;
   let parsedJson = false;
   if (response.text.length > 0) {

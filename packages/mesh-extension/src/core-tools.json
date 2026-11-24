@@ -396,7 +396,7 @@
   {
     "name": "reply",
     "title": "Reply",
-    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. The harness final turn is already an automatic answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
+    "description": "Answer a task by ref. A final reply completes it; progress updates its work record without closing it; failed closes it as failed; waitingOn says the work is blocked (on a permission, question, or review) and keeps the task open and waiting. points states what the reply does: each point is a claim, agree, concede, dispute, or question for the operator, optionally answering another point by id (re) and naming the question it is about (about). While the task waits on an open permission request, a final reply is recorded as blocked on it. Only the current recipient may answer; the first final wins. If the ask requires a task reply, only a final reply by ref completes it. Otherwise the harness final turn is already the answer: do not answer twice. Use to for a plain conversation reply without a task lifecycle.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -462,6 +462,49 @@
             "summary"
           ],
           "additionalProperties": false
+        },
+        "points": {
+          "description": "Typed points the reply makes. The result returns each point's id.",
+          "maxItems": 24,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "stance": {
+                "type": "string",
+                "enum": [
+                  "claim",
+                  "agree",
+                  "concede",
+                  "dispute",
+                  "question"
+                ],
+                "description": "claim, agree, concede, dispute, or question (a question for the operator)."
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "re": {
+                "description": "The id of the point this one answers.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "about": {
+                "description": "A short lowercase key for the question, shared with the other agents, such as home-source.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            },
+            "required": [
+              "stance",
+              "text"
+            ],
+            "additionalProperties": false
+          }
         },
         "body": {
           "type": "string",
@@ -587,7 +630,7 @@
   {
     "name": "ask",
     "title": "Ask",
-    "description": "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
+    "description": "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. On an agent task, notify marks it Ready for the operator when it finishes (they get one ping and Continue or Hold); use it only for work the operator is waiting on. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -641,6 +684,22 @@
         "image": {
           "description": "Local image path.",
           "type": "string"
+        },
+        "decision": {
+          "description": "Operator tasks only: a decision card, as a local JSON file path or the card itself. Decision cards are host-local; send them through a local Scout client.",
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          ]
         },
         "completion": {
           "description": "Require an explicit final reply; exact local id or session targets only, with a stable requestId.",
@@ -826,7 +885,8 @@
             "cursor",
             "opencode",
             "pi",
-            "devin"
+            "devin",
+            "antigravity"
           ]
         },
         "model": {
@@ -1229,6 +1289,63 @@
     },
     "execution": {
       "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "work_retry",
+    "title": "Retry Failed Scout Work",
+    "description": "Send the original ask again to the same target in a fresh session, whatever the failure cause; the item's retryable flag is only a hint. Omit attempt for the next one. Reuse an attempt to recover its receipt after an uncertain result. Never retries automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "workId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "number"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "invocationId": {
+          "type": "string"
+        },
+        "flightId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workId",
+        "attempt",
+        "requestId",
+        "invocationId",
+        "flightId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "idempotentHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
     }
   },
   {

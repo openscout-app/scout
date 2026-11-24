@@ -1,11 +1,11 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { open as openFile, readdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, join, relative } from "node:path";
+import { basename, join } from "node:path";
 
 import { classifyClaudeCodePrompt } from "@openscout/agent-sessions/adapters/claude-code/prompt-markup";
 import { compactClassifiedPrompt, type ClassifiedPrompt } from "@openscout/agent-sessions";
 
+import { claudeProjectForPath, claudeProjectRoots, claudeProjectsRoot, hubLabelForPath } from "../claude-projects.js";
 import { resolveTailThinkingMode } from "../user-config.js";
 import { discoverClaudeProcesses } from "./discover.js";
 import { formatToolCall, formatToolResult } from "./tool-format.js";
@@ -66,11 +66,6 @@ function encodeProjectDir(cwd: string): string {
   // Claude encodes the cwd by replacing "/" with "-" and prefixing the result.
   // Example: /Users/arach/dev/openscout → -Users-arach-dev-openscout
   return cwd.replace(/\//g, "-");
-}
-
-function projectsRoot(): string {
-  return process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT
-    ?? join(homedir(), ".claude", "projects");
 }
 
 function listJsonlFiles(dir: string): string[] {
@@ -289,12 +284,11 @@ function decodeProjectDir(dirName: string): string | null {
 }
 
 function projectDirNameForPath(filePath: string): string | null {
-  const rel = relative(projectsRoot(), filePath);
-  if (!rel || rel.startsWith("..")) return null;
-  return rel.split(/[\\/]/)[0] ?? null;
+  return claudeProjectForPath(filePath)?.folder ?? null;
 }
 
 function fallbackCwdForPath(filePath: string): string | null {
+  if (hubLabelForPath(filePath)) return null;
   const dirName = projectDirNameForPath(filePath);
   const guessed = dirName ? decodeProjectDir(dirName) : null;
   try {
@@ -305,6 +299,7 @@ function fallbackCwdForPath(filePath: string): string | null {
 }
 
 async function fallbackCwdForPathAsync(filePath: string): Promise<string | null> {
+  if (hubLabelForPath(filePath)) return null;
   const dirName = projectDirNameForPath(filePath);
   const guessed = dirName ? decodeProjectDir(dirName) : null;
   if (!guessed) return null;
@@ -413,7 +408,7 @@ async function listRecentClaudeProjectTranscripts(
 
 export function resolveClaudeTranscriptPath(p: DiscoveredProcess): string | null {
   if (!p.cwd) return null;
-  const dir = join(projectsRoot(), encodeProjectDir(p.cwd));
+  const dir = join(claudeProjectsRoot(), encodeProjectDir(p.cwd));
   if (!existsSync(dir)) return null;
   return pickMostRecentJsonl(dir);
 }
@@ -649,7 +644,10 @@ export const ClaudeSource: TranscriptSource = {
   },
   async discoverTranscripts(_processes: DiscoveredProcess[], scope: TailDiscoveryScope = "shallow"): Promise<DiscoveredTranscript[]> {
     // Async so a scan of many project folders never blocks the broker.
-    const files = await listRecentClaudeProjectTranscripts(projectsRoot(), scope);
+    const files = (await Promise.all(claudeProjectRoots().map(({ root }) => listRecentClaudeProjectTranscripts(root, scope))))
+      .flat()
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, discoveryLimit(scope));
     const out: DiscoveredTranscript[] = [];
     for (const file of files) out.push(await claudeTranscriptForFileAsync(file));
     return out;
@@ -691,7 +689,7 @@ function claudeTranscriptFromMetadata(
     agentName: meta.agentName ?? null,
     aiTitle: meta.aiTitle ?? null,
     cwd,
-    project: cwd ? basename(cwd) : projectDirNameForPath(file.path) ?? "(unknown)",
+    project: hubLabelForPath(file.path) ?? (cwd ? basename(cwd) : projectDirNameForPath(file.path) ?? "(unknown)"),
     harness: "unattributed",
     lastEventAt: meta.lastEventAt,
     mtimeMs: file.mtimeMs,
@@ -707,7 +705,14 @@ function claudeTranscriptFromMetadata(
 export function findClaudeTranscript(sessionId: string): DiscoveredTranscript | null {
   const ref = sessionId.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(ref)) return null;
-  const root = projectsRoot();
+  for (const { root } of claudeProjectRoots()) {
+    const found = findClaudeTranscriptInRoot(root, ref);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findClaudeTranscriptInRoot(root: string, ref: string): DiscoveredTranscript | null {
   let projectDirs: string[];
   try {
     projectDirs = readdirSync(root);

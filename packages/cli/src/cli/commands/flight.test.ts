@@ -91,6 +91,11 @@ describe("task sharing links", () => {
     expect(new URL(links.tail!).searchParams.get("view")).toBe("tail");
     expect(new URL(links.tail!).searchParams.get("workId")).toBe("work/a b");
   });
+  test("a cardless session does not get an agent-card link", () => {
+    const links = buildFlightLinks({ flightId: "flt-1", sessionId: "session-1", targetAgentId: "session-1" }, env);
+    expect(links.agent).toBeNull();
+    expect(links.follow).toBe(links.session);
+  });
   test("missing work falls back to session observation without inventing a ticket", () => {
     const links = buildFlightLinks({ flightId: "flt-1" }, env);
     expect(links.work).toBeNull();

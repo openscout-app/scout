@@ -36,6 +36,7 @@ export type CardlessSessionSpawnTransport =
   | "cursor_acp"
   | "opencode_acp"
   | "pi_rpc"
+  | "antigravity_acp"
   | "devin_acp"
   | "tmux";
 
@@ -91,6 +92,7 @@ function isCardlessSessionSpawnTransport(value: string): value is CardlessSessio
     || value === "cursor_acp"
     || value === "opencode_acp"
     || value === "pi_rpc"
+    || value === "antigravity_acp"
     || value === "devin_acp"
     || value === "tmux";
 }
@@ -100,7 +102,7 @@ export interface CardlessSessionInput {
   sessionId: string;
   /** Human-addressable handle for this session actor. */
   handle?: string;
-  transport: ManagedLocalSessionTransport | "pi_rpc" | "pairing_bridge" | "grok_acp" | "kimi_acp" | "cursor_acp" | "opencode_acp" | "devin_acp" | "tmux";
+  transport: ManagedLocalSessionTransport | "pi_rpc" | "pairing_bridge" | "grok_acp" | "kimi_acp" | "cursor_acp" | "opencode_acp" | "antigravity_acp" | "devin_acp" | "tmux";
   harness: AgentHarness;
   cwd: string;
   projectRoot?: string;

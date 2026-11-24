@@ -24,7 +24,7 @@ import {
   runtimeSessionAddressEntries,
   type RuntimeSessionAddressEntry,
 } from "@openscout/runtime";
-import { deliverInPlace, type InPlaceDelivery } from "@openscout/runtime/in-place";
+import { deliverInPlace, type DeliverInPlaceDeps, type InPlaceDelivery } from "@openscout/runtime/in-place";
 import type {
   TerminalBackend,
   TerminalSessionRecord,
@@ -40,10 +40,13 @@ import type { ObservedSessionMaterials } from "@openscout/protocol";
 import {
   attachScoutManagedLocalSession,
   ensureScoutCodexChatWork,
+  loadScoutLiveSessionContext,
+  resolveScoutBrokerUrl,
   readScoutBrokerSnapshotResult,
   resolveScoutSenderId,
 } from "../../lib/core/broker/service.ts";
 import { askScoutApp } from "../scout-app-socket.ts";
+import { runSessionNamesAction, runSessionRenameAction } from "./session-rename.ts";
 import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
 import { wrapUserSpawnPaneCommand } from "@openscout/runtime/terminal-environment";
 import { buildMultiplexerServerEnvironment, buildUserSpawnEnvironment } from "@openscout/runtime/instance";
@@ -67,6 +70,8 @@ Usage:
                                             Move a live Claude/Grok TUI into tmux, same session
   scout session pin [--session <codex-thread-id>] [--title <name>]
                                             Pin a ChatGPT-app Codex chat as a desktop figure
+  scout session rename <selector> <name...>  Name a session for what it is doing now (--clear, --self, --harness)
+  scout session names                       List the session names you have set
 
 Options (intake):
   --harness <name>      Harness that owns the source session (claude, codex, pi)
@@ -161,9 +166,16 @@ export async function runSessionCommand(context: ScoutCommandContext, args: stri
     case "move":
       await runSessionTransferAction(context, args.slice(1));
       return;
+    case "rename":
+    case "name":
+      await runSessionRenameAction(context, args.slice(1));
+      return;
+    case "names":
+      await runSessionNamesAction(context, args.slice(1));
+      return;
     default:
       throw new ScoutCliError(
-        `unknown session action: ${action} (try: scout session intake|list|address|fork|send|touched|pin|transfer <session-id>)`,
+        `unknown session action: ${action} (try: scout session intake|list|address|fork|send|touched|pin|transfer|rename <session-id>)`,
       );
   }
 }
@@ -1437,7 +1449,8 @@ function renderSessionTransfer(payload: SessionTransferPayload): string {
 }
 
 const IN_PLACE_REFUSALS: Record<string, string> = {
-  not_live: "isn't open in Herdr, Orca, tmux, or a terminal tab on this machine; nothing was sent",
+  session_ambiguous: "matches more than one live pane; specify the harness or exact Scout session id; nothing was sent",
+  not_live: "isn't open in Herdr, Orca, tmux, a terminal tab, or a Claude session with the Scout channel on this machine; nothing was sent",
   busy: "is mid-run; use --harness codex --draft, or queue with ask and wait for app release",
   activity_unknown: "has unverified activity; use --harness codex --draft instead of submitting",
   draft_unsupported: "does not support draft mode",
@@ -1454,6 +1467,31 @@ export function renderInPlaceDelivery(sessionId: string, result: InPlaceDelivery
   const where = "location" in result ? ` (${result.location})` : "";
   const detail = "detail" in result ? `: ${result.detail}` : "";
   return `session ${sessionId} ${reason}${where}${detail}`;
+}
+
+/** A local broker can supply exact Scout-managed tmux addresses. */
+export function deliverDirectSessionInput(
+  env: NodeJS.ProcessEnv,
+  input: Parameters<typeof deliverInPlace>[0],
+  brokerUrl = resolveScoutBrokerUrl(),
+  /** Test seam for surface probes; the broker read and own-session checks stay real. */
+  probes: Omit<DeliverInPlaceDeps, "managedTmuxContext" | "ownSessionIds" | "ownTmuxPane"> = {},
+): Promise<InPlaceDelivery> {
+  // `env` is the caller's: the shared MCP server swaps in each session's own.
+  const ownPane = env.TMUX_PANE?.trim();
+  return deliverInPlace(input, {
+    ...probes,
+    ownSessionIds: [env.OPENSCOUT_SESSION_ID, env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_SESSION_ID,
+      env.CLAUDE_CODE_REMOTE_SESSION_ID, env.CODEX_THREAD_ID, env.OPENSCOUT_CODEX_THREAD_ID]
+      .flatMap(id => id?.trim() ? [id.trim()] : []),
+    ownTmuxPane: ownPane ? { target: ownPane, socketPath: env.TMUX?.split(",")[0]?.trim() || null } : null,
+    managedTmuxContext: async () => {
+      const url = new URL(brokerUrl);
+      if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return null;
+      const live = await loadScoutLiveSessionContext(brokerUrl);
+      return live && { nodeId: live.nodeId, snapshot: { endpoints: live.endpoints, flights: live.flights } };
+    },
+  });
 }
 
 async function runSessionSendAction(context: ScoutCommandContext, args: string[]): Promise<void> {
@@ -1499,7 +1537,7 @@ async function runSessionSendAction(context: ScoutCommandContext, args: string[]
     if (!address) throw new ScoutCliError("No unambiguous sender session id. Use scout ask for tracked replies, or include an explicit return address; nothing was typed.");
     body = stampSessionReturnAddress(body, address);
   }
-  const result = await deliverInPlace({ sessionId, harness: harness ?? null, body, ...(draft ? { mode: "draft" as const } : {}) });
+  const result = await deliverDirectSessionInput(context.env, { sessionId, harness: harness ?? null, body, ...(draft ? { mode: "draft" as const } : {}) });
   context.output.writeValue({ sessionId, ...result }, () => renderInPlaceDelivery(sessionId, result));
   if (!result.ok) process.exitCode = 1;
 }

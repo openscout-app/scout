@@ -1,18 +1,34 @@
 // Must stay the first import: materializes OPENSCOUT_INSTANCE before any module reads paths/ports.
 import { openScoutCheckoutInstanceDefault, openScoutInstanceBootstrap } from "./instance-checkout-bootstrap.js";
+import { createTurnCredentialIssuer, installTurnCredentialIssuer, verifyTurnCredential } from "./turn-credentials.js";
+import { BrokerWorkRetryService } from "./broker-work-retry.js";
+import { BrokerVercelBoardService } from "./vercel-board/service.js";
+import { HubCollectorService } from "./hub/collector.js";
+import { ManagedAgentsPuller } from "./hub/managed-agents.js";
 import { BrokerShowStore } from "./broker-show-store.js";
+import { BrokerPostStore } from "./broker-post-store.js";
+import { RoutineRunner } from "./routine-runner.js";
+import type { DurableCheckbackMetadata } from "@openscout/protocol";
+import type { PostAuthorNamer } from "./broker-posts-http.js";
+import { queryFeedWork } from "./feed-work.js";
+import { configuredOperatorActorIds } from "./conversations/legacy-ids.js";
+import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteDatabase } from "./sqlite-adapter.js";
 import { shapeAttentionContext } from "@openscout/agent-sessions";
 import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
+import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { SCOUT_TASKS_CAPABILITY, flightSessionTrace, type ScoutDeliverRequest } from "@openscout/protocol";
+import { REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
 import { createOperatorAttachmentNotifier } from "./broker-operator-attachment-notifier.js";
 import { AttachmentError } from "./attachment-contract.js";
 import { markAttachmentReferences } from "./attachment-retention.js";
-import { iterateMessageRecordsAsync } from "./broker-message-records.js";
+import { iterateMessageRecordsAsync, readMessageRecord } from "./broker-message-records.js";
+import { BrokerDecisionCardService } from "./broker-decision-cards.js";
+import { sessionActorAlias } from "./session-alias.js";
+import { createDecisionModel } from "./decision-synthesis-model.js";
 import { createTailscaleListenerGuard, isRuntimeLoopbackTcpSocket, type LocalListenerKind } from "./mesh-tailscale-listener-guard.js";
 import { MeshFeedback } from "./mesh-feedback.js";
 import { MeshBridgeManagement } from "./mesh-bridge-management.js";
@@ -20,18 +36,19 @@ import { meshDiagnostics } from "./mesh-diagnostics.js";
 import { tailscaleStatusProbe } from "./system-probes/tailscale-status.js";
 import { createMeshPing } from "./mesh-ping.js";
 import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
-import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY } from "@openscout/protocol";
+import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
+import { decidePermissionSupervisor } from "./permission-supervisor.js";
 import { permissionWaitPatch } from "./broker-blocked-reply.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
 import { requireProtectedAccessState, protectAccessDirectories, removeLocalAdminEnvironment } from "./mesh-access-startup.js";
 import { inspectMeshAccessIngressPosture } from "./mesh-access-ingress-posture.js";
 import { BrokerMcpEvents } from "./broker-mcp-events.js";
-import { readLocalAdminKey, preserveProtectedIngress } from "./mesh-access-local-auth.js";
+import { readLocalAdminKey, preserveProtectedIngress, resolveOperatorAttributionKeyFile } from "./mesh-access-local-auth.js";
 import { MeshAccessStore } from "./mesh-access-store.js";
 import { IntegrationSlackEvents } from "./integration-slack-events.js";
 import { IntegrationSlackDeliveryService } from "./integration-slack-delivery.js";
@@ -58,7 +75,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import { statSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 
@@ -112,9 +129,16 @@ import { BrokerDeliveryRouter, type ExactSessionWakeInput } from "./broker-deliv
 import { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptance-service.js";
 import { BrokerDeliveryHttpService } from "./broker-delivery-http-service.js";
 import { BrokerDurableActionHttpService } from "./broker-durable-action-http-service.js";
+import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
+import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import { manualReviewOccurrenceOf } from "@openscout/protocol";
+import { ManualReviewBoardTickets } from "./manual-review-board-ticket.js";
+import { ManualReviewBoardService } from "./manual-review-board.js";
+import { ManualReviewBoardRoutineStore } from "./manual-review-board-routines.js";
 import { BrokerFlightLifecycleService } from "./broker-flight-lifecycle-service.js";
 import { bootstrapSecretRedaction } from "./secret-redaction-bootstrap.js";
 import { applyRoleLifecycleForTerminalFlight } from "./role-lifecycle.js";
+import { RolePassService } from "./role-pass-service.js";
 import { BrokerRepoTailService } from "./broker-repo-tail-service.js";
 import { BrokerRendezvousService } from "./broker-rendezvous-service.js";
 import { BrokerOperatorAttentionService } from "./broker-operator-attention-service.js";
@@ -167,6 +191,7 @@ import {
   shutdownLocalSessionEndpoint,
   shouldDisableGeneratedCodexEndpoint,
   sleepLocalAgentSession,
+  codexEndpointResumeThreadId,
 } from "./local-agents.js";
 import {
   DEFAULT_RELAY_AGENT_SESSION_IDLE_TTL_MS,
@@ -194,15 +219,19 @@ import {
 } from "./mesh-approvals.js";
 import { normalizeCodexAppServerLaunchArgs } from "./codex-app-server.js";
 import { WorkerSQLiteProjection } from "./sqlite-projection-worker.js";
+import { describeDependencyLinkReport, describeRuntimeFault, inspectDependencyLinks, lastDependencyLinkReport, recordDependencyLinkReport, runtimeCheckoutRoot } from "./dependency-links.js";
 import {
   ObservedSessionReducer,
   subscribeObservedSessionReducer,
 } from "./observed-session-reducer.js";
 import { replacePersistedActiveObservedSessionSeeds, tailMemoryStats } from "./tail/service.js";
+import { macHostLaunchAdmission } from "./host-launch-admission.js";
 import { installMemorySnapshot } from "./memory-snapshot.js";
 import { ThreadEventPlane } from "./thread-events.js";
 import { invokeA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { BrokerWorkLifecycleService, WorkLifecycleRegistry, placeRuntimeChange, workLifecycleDirectory } from "./broker-work-lifecycles.js";
+import { BrokerDerivedRecordService } from "./broker-derived-records.js";
+import { BrokerBoardService } from "./broker-boards.js";
 import { ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths, controlPlaneArchiveDirectory } from "./support-paths.js";
 import { expandHomePath } from "./tool-resolution.js";
 import {
@@ -234,6 +263,7 @@ import {
   nudgeHarnessTopologyScan,
 } from "./harness-topology/index.js";
 import {
+  getCachedTailDiscovery,
   getTailDiscovery,
   readRecentLiveEvents,
   readRecentTranscriptEvents,
@@ -280,8 +310,9 @@ import { findHarnessEntry } from "./harness-catalog.js";
 import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
 import { createBrokerHttpRouter } from "./broker-http-router.js";
-import { BrokerRequestReceipts, RetryablePreEffectFailure } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, ProvenRequestFailure, RetryablePreEffectFailure } from "./broker-request-receipts.js";
 import { resolveSessionWorkspace } from "./agent-workspace.js";
+import { WorktreeRetirementService } from "./agent-workspace-retirement.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
   closeServer,
@@ -314,7 +345,7 @@ import { BrokerReplyCompletionRecovery } from "./broker-reply-completion-recover
 import { BrokerInvocationDispatchService } from "./broker-invocation-dispatch-service.js";
 import { BrokerCommandService } from "./broker-command-service.js";
 import { BrokerChannelInviteService } from "./broker-channel-invite-service.js";
-import { BrokerDispatchRecoveryService } from "./broker-dispatch-recovery-service.js";
+import { BrokerDispatchRecoveryService, deferredDispatchCheckedAt, supersedingFlight } from "./broker-dispatch-recovery-service.js";
 import { registrySubstanceKey } from "./registry-liveness.js";
 import {
   brokerActorDisplayName as resolveBrokerActorDisplayName,
@@ -345,10 +376,12 @@ import {
   isInactiveLocalAgent,
 } from "./broker-endpoint-selection.js";
 import { readMeshNodeState } from "./mesh-node-state.js";
+import { searchLocalSessionKnowledge } from "./knowledge/session-search.js";
 import { BrokerHomeService } from "./broker-home-service.js";
 import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
 import { BrokerUnavailableTargetService, localEndpointCanReceive, localEndpointSupportsQueue } from "./broker-unavailable-target-service.js";
 import { BrokerRouteAliasStore } from "./broker-route-alias-store.js";
+import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { BrokerRouteAliasError, BrokerRouteAliasService } from "./broker-route-alias-service.js";
 import { AgentRosterService } from "./agent-roster-service.js";
 import { AgentRosterStore } from "./agent-roster-store.js";
@@ -410,6 +443,11 @@ const dbPath = join(controlHome, "control-plane.sqlite");
 const journalPath = join(controlHome, "broker-journal.jsonl");
 const historyDirectory = join(controlHome, "history");
 const historicalReader = new ControlPlaneHistoryReader(historyDirectory);
+/** Free space kept for durable writes; 256 MB unless `OPENSCOUT_STORAGE_MIN_FREE_MB` says otherwise. */
+function configuredStorageReserveBytes(value: string | undefined): number | undefined {
+  const megabytes = Number(value?.trim());
+  return value?.trim() && Number.isFinite(megabytes) && megabytes >= 0 ? megabytes * 1024 * 1024 : undefined;
+}
 const storageMonitor = new BrokerStorageMonitor(controlHome, {
   journal: { path: journalPath, warningBytes: 64 * 1024 * 1024 },
   database: { path: dbPath, warningBytes: 512 * 1024 * 1024 },
@@ -417,7 +455,7 @@ const storageMonitor = new BrokerStorageMonitor(controlHome, {
   historicalIndex: { path: join(historyDirectory, "catalog.sqlite"), warningBytes: 256 * 1024 * 1024 },
   quarantine: { path: `${journalPath}.quarantine.sqlite`, warningBytes: 64 * 1024 * 1024 },
   quarantineWal: { path: `${journalPath}.quarantine.sqlite-wal`, warningBytes: 64 * 1024 * 1024 },
-});
+}, { minimumFreeDiskBytes: configuredStorageReserveBytes(process.env.OPENSCOUT_STORAGE_MIN_FREE_MB) });
 const commandAdmission = new BrokerCommandAdmission({ pressure: () => storageMonitor.admissionPressure() });
 const port = Number.parseInt(
   process.env.OPENSCOUT_BROKER_PORT?.trim() || String(openScoutInstanceBootstrap.layout.ports.broker),
@@ -448,6 +486,8 @@ const healthResponder = new BrokerHealthResponder({
 // scoutd watches the runtime's memory; when it asks, the runtime says what it holds.
 installMemorySnapshot({ role: "scout-broker", probes: { tail: () => tailMemoryStats() } });
 let nodeId = process.env.OPENSCOUT_NODE_ID?.trim() ?? "";
+// Declared early: role passes open it from the event path during startup.
+let rolesControlPlaneDb: import("bun:sqlite").Database | null = null;
 const tailnetWebHosts = readTailscaleSelfWebHostsSync();
 // The named web doorway this node answers for — same resolution the local edge
 // and the web server use for `advertisedHost`. Peers read it to open this
@@ -545,6 +585,23 @@ if (meshInstanceRefusal) {
   console.log(`[openscout-runtime] mesh off: ${meshInstanceRefusal}`);
 }
 const localAdminKey = readLocalAdminKey(process.env.OPENSCOUT_LOCAL_ADMIN_KEY_FILE);
+// The key file scout-web signs operator requests with. Protected ingress
+// (local admin key) keeps its own credentials, so it hands web nothing here.
+let operatorAttributionKeyFile: string | undefined;
+let attributionKey = localAdminKey;
+if (!localAdminKey) {
+  const resolved = resolveOperatorAttributionKeyFile(process.env, supportDirectory);
+  if (resolved) {
+    try {
+      attributionKey = readLocalAdminKey(resolved.file);
+      operatorAttributionKeyFile = attributionKey ? resolved.file : undefined;
+    } catch (error) {
+      if (resolved.explicit) throw error;
+      console.warn(`[openscout-runtime] operator attribution off: ${resolved.file}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+delete process.env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
 removeLocalAdminEnvironment(process.env);
 requireProtectedAccessState(dbPath, Boolean(localAdminKey));
 if (localAdminKey) { process.umask(0o077); protectAccessDirectories(controlHome, supportDirectory, dbPath); }
@@ -647,6 +704,16 @@ const routeAliasService = routeAliasDatabase
       createId: createRuntimeId,
     })
   : undefined;
+// Operator session names: local overlays on harness titles (docs/session-names.md).
+const sessionNameService = routeAliasDatabase
+  ? new SessionNameService({
+      store: new SessionNameStore(routeAliasDatabase),
+      nodeId,
+      operatorActorId: "operator",
+      registry: () => runtime.peek(),
+      transcripts: () => getCachedTailDiscovery().transcripts,
+    })
+  : undefined;
 // The agent roster (docs/agent-roster.md): roster numbers and project codes.
 const agentRosterService = routeAliasDatabase
   ? new AgentRosterService({
@@ -664,6 +731,18 @@ const nodeIdentity = loadOrCreateNodeIdentity();
 const nodeIdentityKeyId = nodeKeyId(nodeIdentity.publicKey);
 const nodeIdentityFingerprint = nodeFingerprint(nodeIdentity.publicKey);
 const brokerBootedAt = Date.now();
+// Each agent turn dispatched for an ask carries a credential signed by this
+// node key, so an action can name its turn and nothing else can claim it.
+installTurnCredentialIssuer(createTurnCredentialIssuer({
+  identity: nodeIdentity,
+  nodeId: () => nodeId,
+  flightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+}));
+const verifyTurnCredentialHere = (credential: unknown) => verifyTurnCredential(credential, {
+  publicKey: nodeIdentity.publicKey,
+  nodeId,
+  flight: (flightId) => runtime.routingSnapshot().flights[flightId],
+});
 const trustedPeerStore = sharedControlPlaneStore;
 // Guest grants (docs/proposals/scout-tailscale.md) share the control-plane
 // database but never the trusted_peers table or its tiers.
@@ -692,6 +771,7 @@ const meshIngressGate = createMeshIngressGate({
   },
   irohEndpointId: () => localIrohEntrypoint?.endpointId,
   localAdminKey,
+  attributionKey,
   keyConflict: (id) => [Boolean(trustedPeerStore?.knownTrustedPeerKey(id)), Boolean(guestGrantStore?.knownKey(id)), Boolean(meshAccessStore?.knownDevice(id)), Boolean(meshAccessStore?.knownPrincipal(id))].filter(Boolean).length > 1,
   scopedAccess: meshAccessStore ? {
     knownDevice: (keyId) => meshAccessStore.knownDevice(keyId),
@@ -1016,7 +1096,57 @@ const durableActionHttpService = new BrokerDurableActionHttpService({
   heartbeatDurableAction: heartbeatDurableActionDurably,
   getDurableAction: (actionId) => journal.getDurableAction(actionId),
 });
+const manualReviewOccurrences = new ManualReviewOccurrenceService({
+  authorityCellId: nodeId,
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
+  getDurableAction: (actionId) => journal.getDurableAction(actionId),
+});
+// A dispatch starts one ordinary ask. The acceptance service and its receipt
+// ledger decide whether a repeated request ID may run.
+const manualReviewDispatch = new ManualReviewDispatchService({
+  authorityCellId: nodeId,
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
+  getDurableAction: (actionId) => journal.getDurableAction(actionId),
+  deliver: request => deliveryAcceptanceService.accept(request),
+  readAskReceipt: (requesterId, requestId) => requestReceipts.get(requesterId, requestId, "deliver"),
+});
+// A Board review routine is a saved reviewer for one Board channel. A run
+// reads the board through the adapter below and then goes through the two
+// services above, like every other manual review.
+const manualReviewBoard = new ManualReviewBoardService({
+  routines: new ManualReviewBoardRoutineStore({
+    authorityCellId: nodeId,
+    runDurableWrite,
+    commitEntries: commitDurableEntries,
+    getDurableAction: (actionId) => journal.getDurableAction(actionId),
+    listDurableActions: (kind) => journal.listDurableActionsByKind(kind),
+  }),
+  occurrences: manualReviewOccurrences,
+  dispatch: manualReviewDispatch,
+  board: () => vercelBoardService,
+});
 const workLifecycleRegistry = new WorkLifecycleRegistry(workLifecycleDirectory(controlHome), message => console.warn(message));
+const manualReviewBoardTickets = new ManualReviewBoardTickets({
+  work: id => journal.getCollaborationRecord(id),
+  occurrence: id => manualReviewOccurrenceOf(journal.getDurableAction(id)),
+  latestFlight: id => journal.newestFlightForWork(id),
+  lifecycle: work => workLifecycleRegistry.forRecord(work),
+  children: id => Object.values(runtime.peek().collaborationRecords).filter(
+    (record): record is import("@openscout/protocol").WorkItemRecord => record.kind === "work_item" && record.parentId === id,
+  ),
+  write: runDurableWrite,
+  commit: async (record, events) => {
+    await commitDurableEntries([
+      { kind: "collaboration.record", record },
+      ...events.map(event => ({ kind: "collaboration.event.record" as const, event })),
+    ], async () => {
+      await runtime.upsertCollaboration(record);
+      for (const event of events) await runtime.appendCollaborationEvent(event);
+    });
+  },
+});
 const workLifecycles = new BrokerWorkLifecycleService({
   registry: workLifecycleRegistry,
   durableStore,
@@ -1027,6 +1157,25 @@ const workLifecycles = new BrokerWorkLifecycleService({
   createId: createRuntimeId,
   operatorActorId,
 });
+// Boards: the lifecycle board with each card's content, for clients that read only the runtime.
+const boards = new BrokerBoardService({
+  work: workLifecycles,
+  defaultLifecycleId: workLifecycleRegistry.defaultId,
+  registry: () => runtime.peek(),
+  latestEvents: recordIds => journal.latestCollaborationEvents(recordIds),
+});
+// Derived records: written only through this service; asks for pending ones
+// start only when a lifecycle station names where its agent runs.
+const derivedRecords = new BrokerDerivedRecordService({
+  registry: workLifecycleRegistry,
+  durableStore,
+  runtime,
+  listWorkItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  deliver: request => deliveryAcceptanceService.accept(request),
+  producerActorId: "scout.deriver",
+  nodeId,
+  warn: (message, error) => console.warn(message, error ?? ""),
+});
 const workItemStore = new BrokerWorkItemStore({
   runtime,
   durableStore,
@@ -1035,8 +1184,11 @@ const workItemStore = new BrokerWorkItemStore({
     : { record: after },
   durableFlight: (flightId) => journal.getFlight(flightId),
   durableWorkItem: (workId) => journal.getCollaborationRecord(workId),
+  newestFlightForWork: workId => journal.newestFlightForWork(workId),
+  durableCurrentFlight: id => journal.getCurrentFlightForInvocation(id),
   createId: createRuntimeId,
   warn: (message, error) => console.warn(message, error),
+  operatorActorId,
 });
 const recordDeliveryWorkItemIfNeeded = workItemStore.recordDeliveryWorkItemIfNeeded;
 const deliveryWorkItemResolutionForTell = workItemStore.deliveryWorkItemResolutionForTell;
@@ -1047,6 +1199,17 @@ function recoverTerminalWorkPromotions(): void {
   workPromotionRecovery = workItemStore.recoverTerminalWorkPromotions(journal.listPendingWorkPromotionFlights())
     .catch((error) => console.warn("[openscout-runtime] work promotion recovery failed:", error))
     .finally(() => { workPromotionRecovery = undefined; });
+}
+async function reconcileExistingFailedWork(): Promise<void> {
+  let cursor: { afterCreatedAt: number; afterId: string } | undefined;
+  for (;;) {
+    const page = journal.listCollaborationRecords({ kind: "work_item", state: "waiting", orderByCreatedAt: true, ...cursor, limit: 100 });
+    if (!page.length) return;
+    await workItemStore.reconcileFailedWorkItems(page);
+    const last = page.at(-1)!;
+    cursor = { afterCreatedAt: last.createdAt, afterId: last.id };
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
 }
 const wakeLocalSessionForBroker = (input: ExactSessionWakeInput): Promise<LocalSessionWakeResult> =>
   wakeLocalHarnessSession({
@@ -1175,6 +1338,7 @@ const webControl = new BrokerWebControlService({
   tailnetWebHosts,
   trustedHosts: webStartTrustedHosts,
   env: process.env,
+  operatorAttributionKeyFile,
   log: (message, detail) => {
     if (detail === undefined) {
       console.log(message);
@@ -1211,11 +1375,14 @@ const a2aService = new BrokerA2AService({
   brokerUrl,
   runtime,
   knownInvocations,
-  activeInvocationTasks,
+  activeInvocationTasks: { has: id => localInvocationService.hasExecutingInvocation(id) },
   createId: createRuntimeId,
   acceptInvocation: acceptInvocationDurably,
   dispatchInvocation: dispatchAcceptedInvocation,
   recordFlight: recordFlightDurably,
+  currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+  isInvocationActive: id => isInvocationDispatchActive(id, false),
+  cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   loadRegisteredLocalAgentBindings,
   sleep,
   error: (message, detail) => {
@@ -1289,11 +1456,37 @@ type LegacyRelayMessage = {
   channel?: string;
 };
 
+// Role passes (the PM's summary): coalesce work changes into one ask to the
+// holder, and write its answer to the slot when the pass ends.
+const rolePasses = sqliteDisabled ? null : new RolePassService({
+  nodeId,
+  openDb: () => openRolesControlPlaneDb(),
+  work: workLifecycles,
+  runtime,
+  invocations: () => Object.values(runtime.snapshot().invocations),
+  deliver: (request) => deliveryAcceptanceService.accept(request),
+  publish: publishEphemeralRuntimeEvent,
+  warn: (message, error) => console.warn(message, error ?? ""),
+});
+
+function publishEphemeralRuntimeEvent(event: ControlEvent): void {
+  controlStreams.streamEphemeralEvent(event);
+  publishEphemeralControlEvent(event);
+}
+
 runtime.subscribe((event) => {
   controlStreams.streamEvent(event);
   publishControlEvent(event);
+  try {
+    rolePasses?.noteEvent(event);
+  } catch (error) {
+    console.warn("[openscout-runtime] role pass scheduling failed", error);
+  }
   if (event.kind === "agent.registered" || event.kind === "agent.endpoint.upserted") {
     scheduleAgentRosterReconcile();
+  }
+  if (event.kind === "collaboration.upserted" && event.payload.record.kind === "work_item") {
+    derivedRecords.kick();
   }
 });
 
@@ -1383,7 +1576,7 @@ const localNode: NodeDefinition = {
   webHost: localWebHost,
   ...(localIrohEntrypoint ? { meshEntrypoints: [localIrohEntrypoint] } : {}),
   tailnetName,
-  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY],
+  capabilities: [SCOUT_TASKS_CAPABILITY, SCOUT_COMPLETION_CAPABILITY, REPLY_POINTS_CAPABILITY, "broker", "mesh", "local_runtime", SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY],
   registeredAt: Date.now(),
   lastSeenAt: Date.now(),
 };
@@ -1547,6 +1740,27 @@ async function recordScoutDispatchDurably(
   });
 }
 
+// One ring per Ready flight. An open operator question or permission from the
+// same agent owns the ping instead.
+const taskReadyNotifier = new TaskReadyNotifier({
+  nodeId,
+  hasOpenOperatorRequest: (flight) => {
+    const records = runtime.peek().collaborationRecords;
+    const permissionId = flight.metadata?.permissionRequestId;
+    if (typeof permissionId === "string" && records[permissionId]?.state === "open") return true;
+    return Object.values(records).some((record) => record.kind === "question" && record.state === "open"
+      && record.nextMoveOwnerId === operatorActorId && record.askedById === flight.targetAgentId);
+  },
+  notify: (notice) => operatorAttentionService.queueReadyTask({
+    ...notice,
+    projectRoot: (() => {
+      const endpoint = Object.values(runtime.peek().endpoints).find((item) => item.agentId === notice.agentId && (item.projectRoot || item.cwd));
+      return endpoint?.projectRoot ?? endpoint?.cwd;
+    })(),
+    createdAt: Date.now(),
+  }),
+  workIdFor: (invocation) => workItemStore.workIdForInvocation(invocation),
+});
 const flightLifecycleService = new BrokerFlightLifecycleService({
   runtime,
   journal,
@@ -1554,6 +1768,14 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
   updateDeliveryStatus: updateDeliveryStatusDurably,
   updateDeliveryStatusIf: deliveryStore.updateDeliveryStatusIf,
+  prepareTaskReady: (previous, flight, invocation) => prepareTaskReady(previous, flight, invocation, {
+    operatorActorId, nodeId, now: Date.now(),
+  }),
+  onFlightRecorded: async (previous, flight, invocation) => {
+    if (!taskReadyEntered(previous, flight)) return;
+    taskReadyNotifier.noteFlight(previous, flight, invocation);
+    await workItemStore.landReadyWorkItem(flight, invocation);
+  },
   prepareWorkPromotion: workItemStore.prepareTerminalWorkPromotion,
   promoteInvocationFlightToWork,
   prepareTerminalReport: (flight, invocation) => prepareTerminalReport(flight, invocation, {
@@ -1591,6 +1813,8 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
       const db = new Database(dbPath);
       try {
         db.exec("PRAGMA busy_timeout = 2500;");
+        const passNote = rolePasses?.applyTerminalFlight(db as never, flight, invocation);
+        if (passNote) console.log(`[openscout-runtime] ${passNote}`);
         const result = applyRoleLifecycleForTerminalFlight(db as never, {
           flight,
           invocation,
@@ -1643,6 +1867,7 @@ async function persistFlight(flight: FlightRecord, eligible?: () => boolean): Pr
 async function transitionInvocation(
   invocationId: string,
   patch: InvocationStatusPatch,
+  eligible?: () => boolean,
 ): Promise<FlightRecord> {
   const current = runtime.flightForInvocation(invocationId);
   if (!current) {
@@ -1651,10 +1876,56 @@ async function transitionInvocation(
     throw new Error(`cannot transition invocation ${invocationId}: no flight recorded`);
   }
   const next = applyInvocationStatusPatch(current, patch);
-  await recordFlightDurably(next);
+  await recordFlightDurably(next, eligible);
   // Recording can reject a stale patch after another writer completes/cancels
   // the invocation. Never return the uncommitted proposal to a side-effect caller.
   return runtime.flightForInvocation(invocationId)!;
+}
+
+/**
+ * Close a flight that is no longer its invocation's current flight: the
+ * placeholder a peer handoff leaves behind, for example. The write keeps the
+ * invocation's current flight and runs no lifecycle hooks. The placeholder did
+ * no work, and the current flight owns the requester's result.
+ */
+async function cancelSupersededFlight(flightId: string, summary: string): Promise<FlightRecord | null> {
+  return durableStore.runWrite(async () => {
+    const flight = journal.getFlight(flightId) ?? runtime.peek().flights[flightId];
+    const current = flight ? runtime.flightForInvocation(flight.invocationId) : undefined;
+    const superseding = supersedingFlight(flight, current);
+    if (!flight || !superseding) return null;
+    const completedAt = Date.now();
+    const cancelled: FlightRecord = { ...flight, state: "cancelled", summary, completedAt,
+      metadata: { ...flight.metadata, supersededByFlightId: superseding.id, supersededSettledAt: completedAt } };
+    await durableStore.commitEntries({ kind: "flight.record", flight: cancelled, preserveCurrent: true }, async () => {
+      await runtime.upsertFlight(cancelled, { preserveCurrent: true });
+    });
+    return cancelled;
+  });
+}
+
+/** Fail a delivery that stayed parked before submission too long, if it is still that park. */
+async function expireDeferredDispatch(invocation: InvocationRequest, flight: FlightRecord, detail: string): Promise<boolean> {
+  const parkedAt = deferredDispatchCheckedAt(flight);
+  if (parkedAt === null) return false;
+  const failed: FlightRecord = { ...flight, state: "failed", summary: detail, error: detail, completedAt: Date.now(),
+    metadata: { ...flight.metadata, failureStage: "deferred_dispatch_expired" } };
+  await recordFlightDurably(failed, () => {
+    const current = runtime.flightForInvocation(invocation.id);
+    return current?.id === flight.id && deferredDispatchCheckedAt(current) === parkedAt;
+  });
+  const recorded = runtime.flightForInvocation(invocation.id);
+  if (recorded?.id !== flight.id || recorded.state !== "failed" || recorded.metadata?.failureStage !== "deferred_dispatch_expired") return false;
+  await postInvocationStatusMessage(invocation, recorded);
+  return true;
+}
+
+/** Any executor holds this invocation: a local launch, an external session, T3, or reply recovery. */
+function isInvocationDispatchActive(invocationId: string, includeQueuedLaunch = true): boolean {
+  return flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
+    || replyCompletionRecovery.isPending(invocationId)
+    || (includeQueuedLaunch ? localInvocationService.hasActiveInvocation(invocationId) : localInvocationService.hasExecutingInvocation(invocationId))
+    || externalSessionService.hasPendingInvocation(invocationId) || t3Service.hasPendingInvocation(invocationId);
 }
 
 /**
@@ -2107,6 +2378,7 @@ const managedSessionService = new BrokerManagedSessionService({
 });
 
 const managedSessionHttpService = new BrokerManagedSessionHttpService({
+  startRexSession: (input) => managedSessionService.startRexSession(input),
   nodeId,
   runtimeSnapshot: () => runtime.snapshot(),
   processCwd: () => process.cwd(),
@@ -2115,7 +2387,10 @@ const managedSessionHttpService = new BrokerManagedSessionHttpService({
   detachManagedPairingSession: (input) => managedSessionService.detachManagedPairingSession(input),
   attachManagedLocalSession: (input) => managedSessionService.attachManagedLocalSession(input),
   detachManagedLocalSession: (input) => managedSessionService.detachManagedLocalSession(input),
-  ensureLocalSessionEndpointOnline,
+  ensureLocalSessionEndpointOnline: async endpoint => {
+    if (!isLocalAgentEndpointAlive(endpoint)) await macHostLaunchAdmission?.reserve();
+    return ensureLocalSessionEndpointOnline(endpoint);
+  },
   persistEndpoint,
 });
 
@@ -2206,7 +2481,10 @@ if (process.env.OPENSCOUT_ATTACHMENTS_DISABLED !== "1" && !sqliteDisabled) {
       conversation: id => runtime.conversation(id),
       authorizeActor: principal => {
         // Mesh host reads never inherit this broker's local operator privileges.
-        if (principal.actorId === operatorActorId) return principal.nodeId === nodeId;
+        if (principal.actorId === operatorActorId) {
+          return principal.nodeId === nodeId
+            && (principal.attribution === undefined || principal.attribution.source === "local-admin" || principal.attribution.source === "system");
+        }
         const agent = runtime.agent(principal.actorId);
         if (agent) return agent.authorityNodeId === principal.nodeId;
         const endpoints = Object.values(runtime.peek().endpoints).filter(e => e.agentId === principal.actorId);
@@ -2279,6 +2557,79 @@ const t3Service = new BrokerT3Service({
   deliver: request => deliveryAcceptanceService.accept(request),
 });
 
+async function interruptFlightSession(invocation: InvocationRequest, flight: FlightRecord): Promise<boolean> {
+  // Never signal a card's newer session when the referenced task used another.
+  const sessionId = flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId;
+  const endpoint = Object.values(runtime.snapshot().endpoints).find(item => item.agentId === invocation.targetAgentId
+    && item.nodeId === nodeId && item.sessionId === sessionId);
+  if (!endpoint || !sessionId || flight.state === "queued" || flight.state === "waking") return false;
+  if (endpoint.transport !== "tmux") return false;
+  return (await interruptLocalAgent(endpoint.agentId, sessionId)).ok;
+}
+
+async function cancelBoardFlight(flightId: string, reason: string): Promise<void> {
+  const flight = journal.getFlight(flightId);
+  if (!flight || isTerminalFlightState(flight.state)) return;
+  const invocation = knownInvocations.get(flight.invocationId) ?? journal.getInvocation(flight.invocationId);
+  if (!invocation || invocation.metadata?.source !== VERCEL_BOARD_ADAPTER_ID) return;
+  const stillThisFlight = () => {
+    const current = journal.getCurrentFlightForInvocation(invocation.id);
+    return Boolean(current?.id === flight.id && !isTerminalFlightState(current.state) && !current.metadata?.taskFinalReplyMessageId);
+  };
+  await persistFlight({
+    ...flight, state: "cancelled", completedAt: Date.now(), error: reason,
+    summary: "Board moved on; Scout cancelled this run. The worktree was kept.",
+    metadata: { ...flight.metadata, vercelBoardClaimLost: true },
+  }, stillThisFlight);
+  const current = journal.getCurrentFlightForInvocation(invocation.id);
+  if (current?.id === flight.id && current.state === "cancelled" && current.metadata?.vercelBoardClaimLost === true) {
+    await interruptFlightSession(invocation, flight);
+  }
+}
+
+// The Vercel Board adapter. It runs every connection this host made; the
+// credential and claim tokens never leave this host.
+// Scout Hub: mirror cloud sessions sealed to this runtime. Idle until `scout hub init`.
+const hubCollector = process.env.OPENSCOUT_HUB_COLLECTOR === "0"
+  ? null
+  : new HubCollectorService({ log: (message) => console.warn(message) });
+// Claude Managed Agents: pull recent sessions with an API key. Idle until
+// `scout hub connect managed-agents`.
+const managedAgentsPuller = process.env.OPENSCOUT_HUB_MANAGED_AGENTS === "0"
+  ? null
+  : new ManagedAgentsPuller({ log: (message) => console.warn(message) });
+const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
+  nodeId,
+  operatorId: operatorActorId,
+  database: routeAliasDatabase,
+  connectionsDirectory: join(controlHome, "vercel-board"),
+  recordWork: (record, options) => recordCollaborationDurably(record, options),
+  appendWorkEvent: appendCollaborationEventDurably,
+  work: id => runtime.collaborationRecord(id),
+  workItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
+  persistActor: upsertActorDurably,
+  placeWorkChange: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context) as never,
+  deliver: request => deliveryAcceptanceService.accept(request),
+  flight: id => journal.getFlight(id),
+  cancelFlight: cancelBoardFlight,
+  // One room per followed channel: merge the roster, never drop anyone already in it.
+  ensureRoom: async (room) => {
+    await durableRecords.updateConversation(room.id, current => {
+      if (!current) return room;
+      const participantIds = [...new Set([...current.participantIds, ...room.participantIds])];
+      if (participantIds.length === current.participantIds.length) return undefined;
+      return { ...current, participantIds };
+    });
+  },
+  // Live only, beside asks and flights. The mirror's task events are the record.
+  publish: (event) => {
+    controlStreams.streamEphemeralEvent(event);
+    publishEphemeralControlEvent(event);
+  },
+  createId: () => createRuntimeId("evt"),
+  warn: (message, error) => console.warn(`[openscout-runtime] ${message}`, error ?? ""),
+}) : undefined;
+
 const terminalReportDeliveryService = new BrokerTerminalReportDeliveryService({
   nodeId,
   flightById: (id) => journal.getFlight(id),
@@ -2345,6 +2696,7 @@ function recoverInvocationResultReplies(): void {
 }
 
 const localInvocationService = new BrokerLocalInvocationService({
+  launchAdmission: macHostLaunchAdmission,
   pendingTaskFollowups: id => journal.pendingTaskFollowups(id),
   nodeId,
   isLocalAgentEndpointAlive,
@@ -2855,25 +3207,38 @@ async function postConversationMessage(
 // Each host that holds a question to the operator keeps its own record of it,
 // so a question asked on another host can be dismissed here, and an answer
 // given on another host settles it here.
+// Built once the task and permission services exist; asks before then get their card on the startup pass.
+let decisionCardService: BrokerDecisionCardService | undefined;
+
 async function recordOperatorQuestion(message: MessageRecord, signal: ScoutOperatorSignal): Promise<void> {
-  if (signal.kind !== "need" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  // A need and a consult (an ask with a default) both wait on the operator, so
+  // both get a record, which is where their decision card lives. FYIs do not.
+  if (signal.kind === "notify" || runtime.collaborationRecord(`operator-question:${message.id}`)) return;
+  const question = signal.kind === "need" ? signal.question : message.body;
+  const requestKind = signal.kind === "need" ? signal.requestKind ?? "question" : "question";
   await recordCollaborationDurably({
     id: `operator-question:${message.id}`, kind: "question", state: "open", acceptanceState: "none",
-    title: signal.requestKind === "permission" ? "Permission request" : signal.question,
-    summary: signal.question, createdById: message.actorId, askedById: message.actorId,
+    title: requestKind === "permission" ? "Permission request" : question,
+    summary: question, createdById: message.actorId, askedById: message.actorId,
     ownerId: operatorActorId, nextMoveOwnerId: operatorActorId, conversationId: message.conversationId,
     createdAt: message.createdAt, updatedAt: message.createdAt,
-    metadata: { operatorNeedMessageId: message.id, requestKind: signal.requestKind ?? "question" },
+    metadata: { operatorNeedMessageId: message.id, requestKind },
   });
+  await decisionCardService?.register(message, signal);
 }
 
 async function settleOperatorQuestion(message: MessageRecord): Promise<void> {
   if (message.actorId !== operatorActorId || !message.replyToMessageId) return;
+  // A progress or blocked reply keeps the ask open: "show me more" is not an answer.
+  const completion = message.metadata?.completionReply as { kind?: string } | undefined;
+  if (completion?.kind === "progress" || completion?.kind === "blocked") return;
   const record = runtime.collaborationRecord(`operator-question:${message.replyToMessageId}`);
   if (record?.kind === "question" && record.state === "open" && record.conversationId === message.conversationId) {
+    const decisionAnswer = message.metadata?.decisionAnswer;
     await recordCollaborationDurably({ ...record, state: "closed", answer: message.body,
       answeredById: operatorActorId, answeredAt: message.createdAt, closedAt: message.createdAt,
-      nextMoveOwnerId: undefined, updatedAt: message.createdAt });
+      nextMoveOwnerId: undefined, updatedAt: message.createdAt,
+      ...(decisionAnswer ? { metadata: { ...record.metadata, decisionAnswer } } : {}) });
   }
 }
 
@@ -3056,13 +3421,14 @@ const dispatchRecoveryService = new BrokerDispatchRecoveryService({
   dispatchJobs: () => journal.listRecoverableInvocationDispatchJobs({ limit: 5000 }),
   dispatchJobForInvocation: (invocationId) => journal.getInvocationDispatchJobForInvocation(invocationId),
   invocationFor: (invocationId) => knownInvocations.get(invocationId),
-  isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
-    || replyCompletionRecovery.isPending(invocationId)
-    || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
-    || t3Service.hasPendingInvocation(invocationId),
+  isInvocationActive: isInvocationDispatchActive,
   runDispatchJob: (job, invocation) => invocationDispatchService.runDispatchJob(job, invocation),
   requeueDispatchJob: (job, invocation, flight) => invocationDispatchService.requeueDispatchJob(job, invocation, flight),
   dispatchAcceptedInvocation: (invocation) => invocationDispatchService.dispatchAcceptedInvocation(invocation),
+  currentFlightForInvocation: (invocationId) => runtime.flightForInvocation(invocationId),
+  settleSupersededFlight: async (flight, current) => Boolean(await cancelSupersededFlight(flight.id,
+    `Superseded by flight ${current.id}; this placeholder never ran and will not run.`)),
+  expireDeferredDispatch,
   endpointWakeKey: (agentId) => {
     const view = runtime.peek();
     const endpoints = Object.values(view.endpoints).filter((endpoint) => endpoint.agentId === agentId)
@@ -3131,6 +3497,7 @@ const permissionService = new BrokerPermissionService({
   operatorId: operatorActorId,
   nodeId,
   createId: () => createRuntimeId("permission"),
+  supervisor: decidePermissionSupervisor,
   record: recordCollaborationDurably,
   read: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
   requests: () => Object.values(runtime.snapshot().collaborationRecords)
@@ -3207,7 +3574,10 @@ const unavailableTargetService = new BrokerUnavailableTargetService({
     if (!projectRoot) return null;
     try { if (!statSync(projectRoot).isDirectory()) return null; } catch { return null; }
     if (!areHarnessBinariesAvailable({ harness: endpoint.harness, transport: endpoint.transport })) return null;
-    return { projectRoot, harness: endpoint.harness };
+    const resumesSessionId = endpoint.transport === "codex_app_server"
+      ? codexEndpointResumeThreadId(endpoint)
+      : undefined;
+    return { projectRoot, harness: endpoint.harness, ...(resumesSessionId ? { resumesSessionId } : {}) };
   },
   isEndpointAlive: (endpoint) => localEndpointCanReceive(endpoint, isLocalAgentEndpointAlive),
   supportsQueue: (endpoint) => endpoint.nodeId === nodeId && localEndpointSupportsQueue(
@@ -3229,34 +3599,106 @@ const taskService = new BrokerTaskService({
     return attachmentService.withTaskImage(message, image, commit);
   },
   accept: payload => deliveryAcceptanceService.accept(payload, { receiptReserved: true, admissionReserved: true }),
-  interrupt: async (invocation, flight) => {
-    // Never signal a card's newer session when the referenced task used another.
-    const sessionId = flightSessionTrace(flight).at(-1)?.sessionId ?? invocation.execution?.targetSessionId;
-    const endpoint = Object.values(runtime.snapshot().endpoints).find(item => item.agentId === invocation.targetAgentId
-      && item.nodeId === nodeId && item.sessionId === sessionId);
-    if (!endpoint || !sessionId || flight.state === "queued" || flight.state === "waking") return false;
-    if (endpoint.transport !== "tmux") return false;
-    return (await interruptLocalAgent(endpoint.agentId, sessionId)).ok;
-  },
+  interrupt: interruptFlightSession,
+  cancelSupersededFlight: (flight, summary) => cancelSupersededFlight(flight.id, summary),
   forward: async (home, kind, payload) => {
     const node = runtime.snapshot().nodes[home];
     if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY) || !node.brokerUrl) throw new Error(`task home ${home} requires ${SCOUT_TASKS_CAPABILITY} and a reachable broker`);
     const wirePayload = kind === "ask" ? { ...(payload as ScoutDeliverRequest), intent: "task_ask" } : payload;
     const response = await daemonMeshPeerFetch(node.brokerUrl, `/v1/mesh/tasks/${kind}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(wirePayload), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) throw new Error(`task home rejected request (${response.status}): ${await response.text()}`);
+    if (!response.ok) {
+      // Only a proven refusal from the task home settles the sender's receipt.
+      if (kind === "ask" && response.status === 409) {
+        const refusal = await response.clone().json().catch(() => null);
+        if ((refusal?.error === "task_followup_not_sent" || refusal?.error === "task_followup_unauthorized") && typeof refusal.detail === "string" && typeof refusal.evidence === "string") {
+          throw new ProvenRequestFailure(refusal.detail, refusal.error, refusal.evidence);
+        }
+      }
+      throw new Error(`task home rejected request (${response.status}): ${await response.text()}`);
+    }
     return response.json();
   },
 });
-const operatorTaskExpiryTimer = setInterval(() => { void taskService.expireOperatorTasks().catch(error => console.warn("operator task expiry failed", error)); }, 1_000);
+decisionCardService = new BrokerDecisionCardService({
+  operatorActorId,
+  record: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
+  questionRecords: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is QuestionRecord => record.kind === "question"),
+  writeRecord: recordCollaborationDurably,
+  message: id => readMessageRecord(runtime.peek().messages, id),
+  invocation: id => knownInvocations.get(id) ?? journal.getInvocation(id),
+  currentFlight: id => journal.getCurrentFlightForInvocation(id),
+  where: ({ actorId, sessionId }) => decisionCardWhere(actorId, sessionId),
+  reply: (input, extra) => taskService.reply(input, extra),
+  decidePermission: (id, version, decision) => permissionService.decide(id, version, decision),
+  model: createDecisionModel(),
+  log: (message, detail) => console.warn(message, detail),
+});
+
+/** Where a session runs, as a card names it: alias or name, harness, project. Never a raw id. */
+function decisionCardWhere(actorId: string | undefined, sessionId: string | undefined): { session?: string; harness?: string; project?: string } {
+  const snapshot = runtime.peek();
+  const endpoint = Object.values(snapshot.endpoints).find(item => (sessionId && item.sessionId === sessionId) || (actorId && item.agentId === actorId));
+  const agentId = endpoint?.agentId ?? actorId;
+  const alias = agentId ? sessionActorAlias(snapshot, agentId) : null;
+  const name = agentId && !alias ? brokerActorDisplayName(snapshot, agentId) : null;
+  const looksRaw = (value: string | null) => !value || value === agentId || value === sessionId || /[:/]|[0-9a-f]{12,}/iu.test(value);
+  const session = alias ?? (looksRaw(name) ? undefined : name!);
+  const root = endpoint?.projectRoot ?? endpoint?.cwd;
+  return {
+    ...(session ? { session } : {}),
+    ...(endpoint?.harness ? { harness: endpoint.harness } : {}),
+    ...(root ? { project: basename(root) } : {}),
+  };
+}
+
+const workRetry = new BrokerWorkRetryService({
+  nodeId, snapshot: () => journal.snapshot(), record: id => journal.getCollaborationRecord(id), durableStore,
+  apply: record => runtime.upsertCollaboration(record), appendEvent: event => runtime.appendCollaborationEvent(event),
+  accept: request => deliveryAcceptanceService.accept(request),
+  place: (before, after, context) => placeRuntimeChange(workLifecycleRegistry.forRecord(before), before, after, context),
+});
+
+const taskReadyService = new BrokerTaskReadyService({
+  nodeId, operatorActorId,
+  resolve: ref => taskService.resolve(ref),
+  flight: id => journal.getFlight(id) ?? runtime.snapshot().flights[id],
+  recordFlight: flight => persistFlight(flight),
+  workItem: (invocation) => {
+    const workId = workItemStore.workIdForInvocation(invocation);
+    const record = workId ? runtime.collaborationRecord(workId) : undefined;
+    return record?.kind === "work_item" ? record : undefined;
+  },
+  recordWorkItem: async (record) => { await recordCollaborationDurably(record); },
+  appendWorkEvent: async (event) => { await appendCollaborationEventDurably(event); },
+  deliverContinue: async ({ invocation }, input) => {
+    const response = await taskService.continueReady({ invocationId: invocation.id, requestId: input.requestId,
+      actorId: input.actorId, notify: input.notify, workId: workItemStore.workIdForInvocation(invocation) });
+    const flight = "flight" in response ? response.flight : undefined;
+    const message = "message" in response ? response.message : undefined;
+    return { ...(flight ? { invocationId: flight.invocationId, flightId: flight.id } : {}), ...(message ? { messageId: message.id } : {}) };
+  },
+  createId: createRuntimeId,
+});
+
+const operatorTaskExpiryTimer = setInterval(() => {
+  void taskService.expireOperatorTasks()
+    .then(() => decisionCardService?.settleDefaulted())
+    .catch(error => console.warn("operator task expiry failed", error));
+}, 1_000);
 operatorTaskExpiryTimer.unref();
 
 const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
+  workPageAvailable: () => projection.statusSnapshot().state === "ready",
   taskAsk: payload => taskService.ask(payload),
   recoverTaskFollowup: (actor, requestId) => taskService.recoverFollowup(actor, requestId),
   withTaskImage: (message, image, commit) => {
     if (!attachmentService) throw new Error("task images unavailable");
     return attachmentService.withTaskImage(message, image, commit);
+  },
+  withTaskImages: (message, uploads, commit) => {
+    if (!attachmentService) throw new Error("task images unavailable");
+    return attachmentService.withTaskImages(message, uploads, commit);
   },
   checkTaskPeer: payload => {
     if (!payload.task) return;
@@ -3360,6 +3802,7 @@ const brokerService = createBrokerCoreService({
     nodeId,
     meshId,
     actorDisplayName: brokerActorDisplayName,
+    sessionNamer: sessionNameService ? () => sessionNameService.endpointNamer() : undefined,
   }, query),
   readCapabilities: readBrokerCapabilityMatrixSnapshot,
   readRuntimeCatalog: readBrokerRuntimeCatalogSnapshot,
@@ -3462,12 +3905,105 @@ async function forwardAttachmentHostRead(input: import("./host-web-request.js").
   }
 }
 
+const showStore = new BrokerShowStore(join(supportDirectory, "shows"), nodeId);
+/** The operator's name for the session wins; else the agent's display name. */
+const postAuthorName: PostAuthorNamer = ({ agentId, harness, sessionId, endpoint }) => {
+  if (sessionNameService) {
+    if (harness && sessionId) {
+      const resolved = sessionNameService.resolver()(harness, sessionId, null);
+      if (resolved.source === "operator" && resolved.name) return resolved.name;
+    }
+    const named = endpoint ? sessionNameService.endpointNamer()(endpoint) : null;
+    if (named) return named;
+  }
+  const display = brokerActorDisplayName(runtime.snapshot(), agentId);
+  return display && display !== agentId ? display : undefined;
+};
+
+// The feed's read of work items, on its own read-only connection so a long
+// read never holds the projection's writer. Opened on first use; a database
+// not written yet is opened on the next read.
+let feedWorkDb: ControlPlaneSqliteDatabase | null = null;
+function readFeedWork(read: Parameters<typeof queryFeedWork>[1]) {
+  if (!feedWorkDb) {
+    feedWorkDb = openControlPlaneSqliteDatabase(dbPath, { readonly: true, create: false });
+    feedWorkDb.exec("PRAGMA busy_timeout = 2500;");
+  }
+  return queryFeedWork(feedWorkDb, read, configuredOperatorActorIds());
+}
+
+const postStore = new BrokerPostStore(join(supportDirectory, "posts"), nodeId);
+// Routines post as their owner, under the routine's title.
+const routineRunner = new RoutineRunner({
+  nodeId,
+  listActions: () => journal.listDurableActions(),
+  getAction: actionId => journal.getDurableAction(actionId),
+  runDurableWrite,
+  commitEntries: commitDurableEntries,
+  post: ({ routine, text, links }) => {
+    const metadata = (routine.metadata ?? {}) as DurableCheckbackMetadata;
+    return postStore.post({
+      text, links,
+      currentDirectory: typeof metadata.currentDirectory === "string" ? metadata.currentDirectory : homedir(),
+      author: { agentId: typeof metadata.ownerId === "string" ? metadata.ownerId : operatorActorId, name: String(metadata.title ?? "Routine") },
+    });
+  },
+  facts: () => {
+    const snapshot = runtime.snapshot();
+    const flights = Object.values(snapshot.flights ?? {});
+    return {
+      nodeId,
+      agents: Object.keys(snapshot.agents ?? {}).length,
+      runningFlights: flights.filter(flight => flight.state === "running" || flight.state === "waiting").length,
+    };
+  },
+  log: line => console.log(line),
+});
+
+// Retires dispatched-agent worktrees once they are idle, clean and merged.
+// Releasing a dead cardless session stamps its endpoint stopped first, so
+// nothing relaunches into the folder after it is gone.
+const worktreeRetirement = new WorktreeRetirementService({
+  nodeId,
+  snapshot: () => runtime.snapshot(),
+  isEndpointAlive: isLocalAgentEndpointAliveAsync,
+  ready: () => startupTrafficGate.snapshot().mutationsAdmitted,
+  intervalMs: Number.parseInt(process.env.OPENSCOUT_WORKTREE_RETIRE_INTERVAL_MS ?? "3600000", 10) || 3_600_000,
+  releaseEndpoints: async (endpoints, worktree) => {
+    const retiredAt = Date.now();
+    for (const endpoint of endpoints) {
+      await persistEndpoint({
+        ...endpoint,
+        state: "stopped",
+        metadata: {
+          ...(endpoint.metadata ?? {}),
+          staleLocalRegistration: true,
+          retiredAt,
+          worktreeRetiredAt: retiredAt,
+          worktreeRetiredPath: worktree.path,
+        },
+      });
+    }
+  },
+  log: (line) => console.log(line),
+});
+
 const routeRequest = createBrokerHttpRouter({
   workLifecycles,
+  boards,
+  workRetry,
+  derivedRecords,
   tasks: taskService,
-  shows: { store: new BrokerShowStore(join(supportDirectory, "shows"), nodeId), snapshot: () => runtime.snapshot() },
+  shows: { store: showStore, snapshot: () => runtime.snapshot() },
+  verifyTurnCredential: verifyTurnCredentialHere,
+  searchSessionKnowledge: searchLocalSessionKnowledge,
+  posts: { store: postStore, shows: showStore, snapshot: () => runtime.snapshot(), authorName: postAuthorName },
+  routines: { runner: routineRunner },
+  worktreeRetirement: { service: worktreeRetirement },
+  feedWork: sqliteDisabled ? {} : { read: readFeedWork },
   attachments: {
     service: attachmentService, nodeId,
+    snapshot: () => runtime.snapshot(),
     notifyOperator: createOperatorAttachmentNotifier({
       service: () => attachmentService, operatorActorId,
       ensureOperator: () => ensureBrokerActorForDelivery(operatorActorId),
@@ -3517,6 +4053,8 @@ const routeRequest = createBrokerHttpRouter({
     },
   }),
   permissionService,
+  decisionCards: decisionCardService,
+  taskReady: taskReadyService,
   nativePermissions,
   harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
@@ -3546,6 +4084,7 @@ const routeRequest = createBrokerHttpRouter({
   meshId,
   operatorActorId,
   runtime,
+  attributionSnapshot: () => runtime.snapshot(),
   journal,
   knownInvocations,
   brokerService,
@@ -3559,6 +4098,10 @@ const routeRequest = createBrokerHttpRouter({
   nudgeHarnessTopologyScan,
   deliveryHttpService,
   durableActionHttpService,
+  manualReviewOccurrences,
+  manualReviewDispatch,
+  manualReviewBoard,
+  manualReviewBoardTickets,
   controlStreams,
   managedSessionHttpService,
   meshDiscoveryService,
@@ -3592,8 +4135,10 @@ const routeRequest = createBrokerHttpRouter({
   rendezvousService,
   externalSessionService,
   t3Service,
+  vercelBoardService,
   routeAliasService,
   agentRosterService,
+  sessionNameService,
   integrationSetupService,
   integrationSlackDelivery,
   integrationSlackEvents,
@@ -3740,9 +4285,11 @@ const routeRequest = createBrokerHttpRouter({
     }
   },
   openRolesDb: openRolesControlPlaneDb,
+  publishEphemeralEvent: publishEphemeralRuntimeEvent,
+  runningRolePass: (assignmentId) => rolePasses?.runningPass(assignmentId) ?? null,
+  ...(rolePasses ? { ensureRolePass: (assignmentId: string) => rolePasses.ensure(assignmentId) } : {}),
 });
 
-let rolesControlPlaneDb: import("bun:sqlite").Database | null = null;
 function openRolesControlPlaneDb() {
   if (sqliteDisabled) return null;
   try {
@@ -3782,10 +4329,13 @@ async function routeBrokerHttpRequest(
   response: RuntimeHttpResponseLike,
 ): Promise<void> {
   if (!startupTrafficGate.admits(request.method, request.url ?? "/")) {
+    const startup = startupTrafficGate.snapshot();
     json(response, 503, {
       error: "broker_restoring",
-      detail: "This route requires context that is still restoring. Registration and covered reads are available as reported by startup capabilities.",
-      startup: startupTrafficGate.snapshot(),
+      detail: startup.nextRetryAt !== undefined
+        ? "Dispatch is paused while SQLite recovers. Scout retries automatically. Retry the same request ID once mutationsAdmitted is true."
+        : "This route requires context that is still restoring. Registration and covered reads are available as reported by startup capabilities.",
+      startup,
       retryable: true,
     });
     return;
@@ -3869,6 +4419,84 @@ const secretRedaction = await bootstrapSecretRedaction({ patchConsole: true });
 console.log(`[openscout-runtime] secret redaction armed (${secretRedaction.registered} value(s)${
   secretRedaction.schemaPath ? `, schema ${secretRedaction.schemaPath}` : ", no .env.schema found"
 })`);
+
+let projectionRetryDelayMs = 2_000;
+let projectionRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function restoreStartupProjection(): Promise<void> {
+  let canonicalStartupFailure = false;
+  try {
+    if (startupTrafficGate.snapshot().nextRetryAt !== undefined) {
+      await storageMonitor.refresh();
+      const pressure = storageMonitor.admissionPressure();
+      if (pressure) throw new Error(pressure);
+    }
+    if (shuttingDown) return;
+    projectionWarmStarted = true;
+    await projection.warm();
+    if (!sqliteDisabled) {
+      // Wait for the original replay, then schedule its accepted startup suffix
+      // before enabling live writes. No payload closure is retained for that
+      // suffix, and writes after its barrier queue strictly behind catch-up.
+      await projection.flush();
+      let catchUp: Promise<void> = Promise.resolve();
+      await durableStore.runWrite(async () => {
+        await controlEventWrites;
+        const boundary = await projection.captureStartupCatchUpBoundary();
+        catchUp = projection.catchUpStartup(boundary);
+        void catchUp.catch(() => {});
+        deferStartupProjection = false;
+      }).catch((error) => {
+        // A failed canonical event append or journal barrier is not a derived
+        // projection failure: never keep accepting writes on that evidence.
+        canonicalStartupFailure = true;
+        throw error;
+      });
+      await catchUp;
+      startupTrafficGate.restoringSessions();
+      const persistedObservedSessions = await projection.persistedActiveObservedSessionUpdates();
+      if (shuttingDown) return;
+      const status = projection.statusSnapshot();
+      if (status.state !== "ready") throw new Error(status.detail ?? "SQLite projection is unavailable.");
+      observedSessionReducer = new ObservedSessionReducer(projection);
+      if (persistedObservedSessions !== null) {
+        const hydration = observedSessionReducer.hydratePersistedActiveSessions(
+          persistedObservedSessions,
+        );
+        const lifecycleSeeds = replacePersistedActiveObservedSessionSeeds(
+          persistedObservedSessions.map((update) => ({
+            source: update.source,
+            sourceSessionId: update.sourceSessionId,
+            lastActivityAt: update.lastActivityAt,
+            project: update.project,
+            projectRoot: update.projectRoot,
+            cwd: update.cwd,
+          })),
+        );
+        if (hydration.dropped > 0 || lifecycleSeeds.dropped > 0) {
+          console.warn(
+            `[openscout-runtime] bounded observed-session restart seed: `
+            + `${hydration.hydrated} reducer rows, ${lifecycleSeeds.seeded} lifecycle rows, `
+            + `${hydration.dropped + lifecycleSeeds.dropped} dropped`,
+          );
+        }
+      }
+      unsubscribeObservedSessionReducer = subscribeObservedSessionReducer(observedSessionReducer);
+    }
+    deferStartupProjection = false;
+    startupTrafficGate.admitMutations();
+  } catch (error) {
+    if (shuttingDown) return;
+    if (canonicalStartupFailure) throw error;
+    // SQLite is derived. A healthy canonical journal still supports core
+    // registration and snapshots, but cannot certify projection-backed work.
+    deferStartupProjection = true;
+    projection.retireStartupWorker(error);
+    startupTrafficGate.degradeProjection(error, Date.now() + projectionRetryDelayMs);
+    projectionRetryDelayMs = Math.min(projectionRetryDelayMs * 2, 60_000);
+    console.error("[openscout-runtime] startup projection degraded; core remains available", startupTrafficGate.snapshot());
+  }
+}
 
 try {
   // §11.3: plaintext always on loopback; mesh TLS listeners are added by the
@@ -3963,73 +4591,7 @@ try {
     await sleep(startupBoundaryTestDelayMs);
   }
   await bootstrapIdentityWrite;
-  let canonicalStartupFailure = false;
-  try {
-    projectionWarmStarted = true;
-    await projection.warm();
-    if (!sqliteDisabled) {
-      // Wait for the original replay, then schedule its accepted startup suffix
-      // before enabling live writes. No payload closure is retained for that
-      // suffix, and writes after its barrier queue strictly behind catch-up.
-      await projection.flush();
-      let catchUp: Promise<void> = Promise.resolve();
-      await durableStore.runWrite(async () => {
-        await controlEventWrites;
-        const boundary = await projection.captureStartupCatchUpBoundary();
-        catchUp = projection.catchUpStartup(boundary);
-        void catchUp.catch(() => {});
-        deferStartupProjection = false;
-      }).catch((error) => {
-        // A failed canonical event append or journal barrier is not a derived
-        // projection failure: never keep accepting writes on that evidence.
-        canonicalStartupFailure = true;
-        throw error;
-      });
-      await catchUp;
-      startupTrafficGate.restoringSessions();
-      observedSessionReducer = new ObservedSessionReducer(projection);
-      const persistedObservedSessions = await projection.persistedActiveObservedSessionUpdates();
-      if (persistedObservedSessions !== null) {
-        const hydration = observedSessionReducer.hydratePersistedActiveSessions(
-          persistedObservedSessions,
-        );
-        const lifecycleSeeds = replacePersistedActiveObservedSessionSeeds(
-          persistedObservedSessions.map((update) => ({
-            source: update.source,
-            sourceSessionId: update.sourceSessionId,
-            lastActivityAt: update.lastActivityAt,
-            project: update.project,
-            projectRoot: update.projectRoot,
-            cwd: update.cwd,
-          })),
-        );
-        if (hydration.dropped > 0 || lifecycleSeeds.dropped > 0) {
-          console.warn(
-            `[openscout-runtime] bounded observed-session restart seed: `
-            + `${hydration.hydrated} reducer rows, ${lifecycleSeeds.seeded} lifecycle rows, `
-            + `${hydration.dropped + lifecycleSeeds.dropped} dropped`,
-          );
-        }
-      }
-      unsubscribeObservedSessionReducer = subscribeObservedSessionReducer(observedSessionReducer);
-    }
-    deferStartupProjection = false;
-    startupTrafficGate.admitMutations();
-  } catch (error) {
-    if (canonicalStartupFailure) throw error;
-    // SQLite is derived. A healthy canonical journal still supports core
-    // registration and snapshots, but cannot certify projection-backed work.
-    deferStartupProjection = true;
-    durableStore.abandonProjectedEntries();
-    projection.close();
-    startupTrafficGate.degradeProjection(error);
-    console.error("[openscout-runtime] startup projection degraded; core remains available", startupTrafficGate.snapshot());
-  }
-  if (startupTrafficGate.snapshot().mutationsAdmitted) {
-    startPresenceSampling();
-    registerActiveScoutBrokerService(brokerService);
-    peerDelivery.start();
-  }
+  await restoreStartupProjection();
   console.log(`[openscout-runtime] broker listening on 127.0.0.1:${port} (scope: ${advertiseScope}, url: ${brokerUrl})`);
   console.log(`[openscout-runtime] broker local socket ${brokerSocketPath}`);
   if (scoutbotProcessEnabled) scoutbotService.start();
@@ -4091,7 +4653,27 @@ function reportStorageHealthFlags(): void {
     ? `stopped at its scan budget after ${compaction.durationMs} ms; ${Math.round(compaction.sourceBytes / MB)} MB journal not compacted`
     : null);
   const maintenance = storageMaintenance.status();
-  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? maintenance.lastError ?? "failed" : null);
+  healthResponder.report("storage_maintenance", maintenance.phase === "error" ? describeRuntimeFault(maintenance.lastError ?? "failed") : null);
+  reportDependencyLinks();
+}
+let dependencyLinksCheckedAt = 0;
+/** Another checkout's install can relink this checkout's packages while the runtime runs. */
+function reportDependencyLinks(): void {
+  const root = runtimeCheckoutRoot();
+  if (!root || process.env.OPENSCOUT_DEPENDENCY_LINK_GUARD === "0") return;
+  if (Date.now() - dependencyLinksCheckedAt >= 60_000) {
+    dependencyLinksCheckedAt = Date.now();
+    try {
+      const report = inspectDependencyLinks(root);
+      const repaired = report.escaped.filter(item => item.repaired).length;
+      if (repaired) console.warn(`[openscout-runtime] relinked ${repaired} dependency link(s) that pointed into another checkout`);
+      recordDependencyLinkReport(report);
+    } catch (error) {
+      console.warn("[openscout-runtime] dependency link check failed:", error);
+    }
+  }
+  const report = lastDependencyLinkReport();
+  healthResponder.report("dependencies", report ? describeDependencyLinkReport(report) : null);
 }
 const refreshStorageStatus = () => storageMonitor.refresh().then(reportStorageHealthFlags, (error) => {
   console.warn("[openscout-runtime] storage status refresh failed:", error);
@@ -4101,11 +4683,14 @@ setInterval(() => { void refreshStorageStatus(); }, 30_000).unref();
 
 const otlpReceiver = localAdminKey ? undefined : await startBrokerOtlpReceiver(controlHome);
 
-setTimeout(() => {
-  if (!startupTrafficGate.snapshot().mutationsAdmitted) return;
+function recoverStartupWork(): void {
+  if (shuttingDown) return;
   recoverInvocationResultReplies();
   recoverTerminalReports();
   recoverTerminalWorkPromotions();
+  void reconcileExistingFailedWork().catch(error => console.warn("[openscout-runtime] failed-work reconciliation incomplete:", error));
+  // Pending derivations are computed from records, so one pass finds what a restart left.
+  derivedRecords.kick();
   // Reconcile persisted external attempts without repeating a provider send.
   void externalSessionService.recover([...knownInvocations.values()])
     .then((failed) => { if (failed.length) console.error("[openscout-runtime] external session recovery incomplete", failed); })
@@ -4129,6 +4714,9 @@ setTimeout(() => {
     console.error("[openscout-runtime] initial cardless session sweep failed:", error);
   });
   reconcilePermissionRequests("startup");
+  void decisionCardService?.resume().catch((error) => {
+    console.error("[openscout-runtime] decision card startup pass failed:", error);
+  });
   sweepRegistryRetention()
     .catch((error) => {
       console.error("[openscout-runtime] initial registry retention sweep failed:", error);
@@ -4140,7 +4728,7 @@ setTimeout(() => {
   });
   routeAliasService?.sweepExpired();
   reconcileAgentRoster("startup");
-}, 0).unref();
+}
 
 function sweepAndCompactMeshNodes(): void {
   if (!trustedPeerStore) return;
@@ -4177,8 +4765,15 @@ setInterval(() => {
   }
 }, runtimeHeartbeatIntervalMs).unref();
 
-// Background coordination must obey the same capability boundary as HTTP.
-if (startupTrafficGate.snapshot().mutationsAdmitted) {
+// Run the same startup work exactly once after ordinary or delayed admission.
+function startBrokerCoordination(): void {
+  startPresenceSampling();
+  registerActiveScoutBrokerService(brokerService);
+  peerDelivery.start();
+  routineRunner.start();
+  worktreeRetirement.start();
+  setTimeout(recoverStartupWork, 0).unref();
+
   if (!meshInstanceRefusal) {
     meshDiscoveryService.discoverPeers().catch((error) => {
       console.error("[openscout-runtime] initial mesh discovery failed:", error);
@@ -4245,6 +4840,9 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
   }, 60_000).unref();
 
   slackWorkerSupervisor?.start();
+  void vercelBoardService?.start().catch(error => console.error("[openscout-runtime] Vercel Board adapter did not start:", error));
+  hubCollector?.start();
+  managedAgentsPuller?.start();
   if (routeAliasService) {
     routeAliasSweepTimer = setInterval(() => {
       routeAliasService.sweepExpired();
@@ -4258,10 +4856,14 @@ if (startupTrafficGate.snapshot().mutationsAdmitted) {
 }
 
 async function shutdownBroker(exitCode = 0): Promise<void> {
+  derivedRecords.stop();
   if (shuttingDown) {
     return;
   }
   shuttingDown = true;
+  clearTimeout(projectionRetryTimer);
+  routineRunner.stop();
+  worktreeRetirement.stop();
   hostKeepAwake?.stop();
   capabilityMatrixService.stop();
   tailscaleListenerGuard.stop();
@@ -4270,6 +4872,9 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   meshApprovalShare.stop();
   await nativePermissions.close().catch(() => undefined);
   await slackWorkerSupervisor?.stop();
+  await vercelBoardService?.stop();
+  await hubCollector?.stop();
+  await managedAgentsPuller?.stop();
   await otlpReceiver?.close().catch(() => {
     console.warn("[openscout-runtime] OTLP receiver shutdown failed");
   });
@@ -4347,3 +4952,32 @@ if (Number.isFinite(parentPid) && parentPid > 0 && parentPid !== process.pid) {
   }, 2_000);
   parentWatcher.unref();
 }
+
+// A retry only reopens the derived SQLite worker. The broker, registered
+// sessions and canonical journal stay live while the storage fault clears.
+function coordinateWhenReady(): void {
+  if (shuttingDown) return;
+  const { mutationsAdmitted, nextRetryAt } = startupTrafficGate.snapshot();
+  if (mutationsAdmitted) {
+    startBrokerCoordination();
+    return;
+  }
+  if (nextRetryAt === undefined) return;
+  projectionRetryTimer = setTimeout(async () => {
+    try {
+      await restoreStartupProjection();
+    } catch (error) {
+      // A failed canonical append/barrier is fatal, just as on the first pass.
+      startupTrafficGate.fail(error);
+      console.error("[openscout-runtime] canonical startup recovery failed:", error);
+      await shutdownBroker(1);
+      return;
+    }
+    if (startupTrafficGate.snapshot().mutationsAdmitted) {
+      console.log("[openscout-runtime] startup projection recovered; dispatch ready");
+    }
+    coordinateWhenReady();
+  }, Math.max(0, nextRetryAt - Date.now()));
+  projectionRetryTimer.unref();
+}
+coordinateWhenReady();

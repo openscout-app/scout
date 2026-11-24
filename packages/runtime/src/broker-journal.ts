@@ -1,3 +1,4 @@
+import { newestWorkFlight } from "./broker-failed-work.js";
 import { projectFlightRecord } from "@openscout/protocol";
 import type { ControlPlaneHistoryReader, HistoricalRecord, HistoricalPublication } from "./control-plane-history-store.js";
 import type { BrokerMessageHistory } from "./broker-message-history.js";
@@ -1200,6 +1201,11 @@ export class FileBackedBrokerJournal {
     return cloneSnapshot(this.state.snapshot);
   }
 
+  /** Retained canonical coordination only; never opens harness history. */
+  newestFlightForWork(workId: string): FlightRecord | undefined {
+    return newestWorkFlight(workId, Object.values(this.state.snapshot.invocations), Object.values(this.state.snapshot.flights));
+  }
+
   /** The node record this journal last accepted, without copying the snapshot. Read only. */
   journaledNode(nodeId: string): Readonly<NodeDefinition> | undefined {
     return this.state.snapshot.nodes[nodeId];
@@ -1410,8 +1416,34 @@ export class FileBackedBrokerJournal {
     return found;
   }
 
+  /** The newest event of each named record, in one pass without copying the ledger. A tie goes to the later append. */
+  latestCollaborationEvents(recordIds: ReadonlySet<string>): Map<string, CollaborationEvent> {
+    const latest = new Map<string, CollaborationEvent>();
+    if (recordIds.size === 0) return latest;
+    for (const event of this.state.collaborationEvents) {
+      if (!recordIds.has(event.recordId)) continue;
+      const current = latest.get(event.recordId);
+      if (!current || event.at >= current.at) latest.set(event.recordId, event);
+    }
+    return latest;
+  }
+
   getDurableAction(actionId: string): DurableAction | null {
     return this.state.durableActions.get(actionId) ?? null;
+  }
+
+  /** Every durable action of one kind, in the order they were first recorded. */
+  listDurableActionsByKind(kind: DurableAction["kind"]): DurableAction[] {
+    const found: DurableAction[] = [];
+    for (const action of this.state.durableActions.values()) {
+      if (action.kind === kind) found.push(action);
+    }
+    return found;
+  }
+
+  /** Every durable action this journal holds. */
+  listDurableActions(): IterableIterator<DurableAction> {
+    return this.state.durableActions.values();
   }
 
   getDurableActionByIdempotencyKey(input: {
@@ -2242,7 +2274,9 @@ export class FileBackedBrokerJournal {
         }
         if ((entry.flight.metadata?.resultReply as { status?: unknown } | undefined)?.status === "pending") {
           this.pendingResultFlights.set(entry.flight.invocationId, entry.flight);
-        } else {
+        } else if (!entry.preserveCurrent || this.pendingResultFlights.get(entry.flight.invocationId)?.id === entry.flight.id) {
+          // A record that leaves another flight current (a closed twin copy)
+          // leaves that flight's result pending.
           this.pendingResultFlights.delete(entry.flight.invocationId);
         }
         return;

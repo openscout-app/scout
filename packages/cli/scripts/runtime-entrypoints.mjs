@@ -29,5 +29,12 @@ export function bundleRuntimeEntrypoints(repoRoot, outputDirectory) {
     if ((result.status ?? 1) !== 0 || !verifyBundleStaticChecks(outputFile)) return false;
     console.log(`  bundled runtime ${label} -> ${outputFile}`);
   }
-  return true;
+  // The Board SDK runs under Node, not under the Bun broker. Bundle its
+  // dependencies so a packed install does not need the workspace's packages.
+  const boardWorker = resolve(outputDirectory, "vercel-board-worker.mjs");
+  const boardResult = spawnSync("bun", ["build",
+    resolve(repoRoot, "packages/vercel-board-worker/src/worker.mjs"),
+    "--target=node", "--format=esm", "--outfile", boardWorker,
+  ], { cwd: repoRoot, stdio: "inherit" });
+  return boardResult.status === 0;
 }

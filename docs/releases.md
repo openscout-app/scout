@@ -68,7 +68,7 @@ against the exact reviewed head and current main base; observe required GitHub
 rules and feedback before merging.
 
 These versions have no npm provenance: 0.2.104 through 0.2.110, 0.3.2 through
-0.3.5, and 0.3.6 through 0.4.2. npm versions are immutable, so they keep that
+0.3.5, 0.3.6 through 0.4.2, and 0.5.3. npm versions are immutable, so they keep that
 state. Before hosted publication became the default, the last version with
 provenance was 0.3.6-dev.4.
 
@@ -143,6 +143,96 @@ node scripts/release-notes.mjs <version>
 
 `scripts/release-notes.test.mjs` fails when a section from 0.5.1 on has no
 headline bullet.
+
+## 0.5.4 Vercel Board
+
+Scout can now run a Vercel team board: it mirrors the board's channels into
+Scout rooms, claims tasks for agents by role, and settles them with a verb.
+This release also publishes from the hosted workflow again, so it carries npm
+provenance; 0.5.3 was published locally and has none. Install with
+`bun add -g @openscout/scout`.
+
+### What's changed
+
+* Run a Vercel team board through Scout and mirror it into rooms
+* Claim Board tasks by role, with a closed role list and a PM role
+* Deliver the operator's answer to a flight waiting on a question or review
+* Supervise managed permission requests and close their edge cases
+* Add verified actor attribution
+* Add GPT-6.2 Sol and Astra to the runtime catalog
+
+### Vercel Board
+
+- `scout integration connect vercel-board --team <team> --board <name>`
+  connects a board by team and name; one host holds the connection, its
+  cursor, claim tokens and outbox.
+- Each followed channel becomes a Scout room, and task hand-offs stream into
+  it. A task's dependency results reach the agent that claims it.
+- Agents declare a role (`scout`, `builder`, `reviewer`); the runtime claims
+  tasks kept for that role and settles them with a verb. A task stays held on
+  the board while its flight waits on a person.
+- A lost claim cancels the Scout flight working on it. Truncated results are
+  marked, and the original stays in Scout.
+- The Node Board worker ships with the installed runtime.
+
+### Asks and sessions
+
+- An ask's receipt keeps the execution payload, and follow links stay usable
+  when work pages are not.
+- Agents of an unbuilt checkout get the CLI source entry, and Claude agents of
+  a non-prod instance get a Scout MCP that reaches that instance's runtime.
+- Durable intake accepts user-attributed Slack events, and Board settlement
+  replies can travel through Slack sync.
+
+### Runtime
+
+- The startup projection retries after storage recovers.
+- PM passes run from the runtime, and assigned roles get a cited slot.
+
+## 0.5.3 shared MCP
+
+Scout's MCP server can now run as one shared process for every local session,
+and delivery into a terminal refuses to type into a composer it cannot see
+empty. Install with `bun add -g @openscout/scout`. 0.5.2 was never published
+as a complete set; this release ships as 0.5.3.
+
+### What's changed
+
+* Serve Scout MCP to every local session from one shared process
+* Refuse terminal delivery when the composer cannot be shown to be empty
+* Park an idle Codex app-server after 60 minutes and resume it on the next
+  message
+* Let the operator name a session, and keep that name across aliases
+* Offer Allow always on native Claude permission requests
+* Watch memory from scoutd, with per-role limits that explain themselves
+
+### Shared MCP
+
+- `scout mcp install --shared` runs the shared server under scout-base and
+  registers each client on disk.
+- Each call is credited to its Codex thread; a call whose thread or folder is
+  unknown is refused.
+- A stop drains the server after a grace period instead of cutting
+  connections.
+- New read-only tools list work in progress and read a worktree's diff.
+
+### Asks and sessions
+
+- A finished session task continues in that session.
+- `scout wait` and `scout status` take the session id an ask was sent to.
+- A reply can say a task is blocked and keep its flight waiting.
+- Follow-ups that cannot be delivered are refused, and continuations route to
+  their session.
+- Session and agent records carry the work item link and current task, and
+  record the model and effort from the running session.
+
+### Runtime and host health
+
+- Mesh listeners rebind when interface addresses change, and any address of
+  this machine counts as the same runtime.
+- Tail discovery reports agent CPU, memory and tokens.
+- Notifications use the host as their title and name agents and projects
+  briefly; large questions stay within the push size limit.
 
 ## 0.5.1 ask and reply
 

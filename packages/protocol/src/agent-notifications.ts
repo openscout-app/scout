@@ -13,12 +13,12 @@
  *   - `ask` is outside a turn: the agent finished and reached out on its own.
  * Only declared things become notifications. Inferred attention never does.
  *
- * Every kind reads by one formula (see {@link collapseAgentNotification}):
- *   title    who wants what       "Codex 012 wants to run a command"
- *   subtitle where                "webshop on studio"
- *   body     what it is about     "Show working tree status"
- * The body is one plain line taken from a summary, a question, or the start
- * of a note. Markdown is stripped. It is never a slice from inside a body.
+ * Only the host title uses emphasis. The sender, request and its context
+ * are regular-weight lines in the body:
+ *   Scout on studio
+ *   Claude · webshop
+ *   Allow EnterWorktree?
+ *   Create an isolated workspace.
  *
  * The record travels sealed (see the runtime's mobile-push sealing): the relay
  * that delivers the push never reads any of it.
@@ -49,7 +49,11 @@ export type AgentNotificationView =
   | { view: "turn.question.choice"; question: string; context?: string; options: string[]; multiSelect?: boolean }
   | { view: "turn.question.open"; question: string; context?: string }
   | { view: "turn.failed"; error: string; excerpt?: string[]; elapsed?: string }
-  | { view: "work.done"; summary: string; artifacts?: AgentNotificationArtifact[] }
+  /**
+   * `ready` marks a task the operator asked to hear about: finished and waiting
+   * on their Continue or Hold (see task-ready). Without it, the work is done.
+   */
+  | { view: "work.done"; summary: string; artifacts?: AgentNotificationArtifact[]; ready?: boolean }
   /**
    * `reply` says whether the agent waits on the answer (`required`) or will
    * go on without one (`optional`). `permission` marks a declared request for
@@ -117,11 +121,11 @@ export type AgentNotification = AgentNotificationView & {
 };
 
 export type AgentNotificationCollapse = {
-  /** Lock-screen title: who wants what. */
+  /** Lock-screen title: Scout and the originating host, when known. */
   title: string;
-  /** Lock-screen subtitle: the project, or empty. */
+  /** Empty so the OS does not add a second emphasized line. */
   subtitle: string;
-  /** Lock-screen body: what it is about, as one plain line. */
+  /** Regular-weight body: sender and project, followed by the request and context. */
   body: string;
   /** Row headline in the app: what is wanted, without who. */
   headline: string;
@@ -157,19 +161,20 @@ function fileName(path: string): string {
   return trimmed.slice(trimmed.lastIndexOf("/") + 1) || trimmed;
 }
 
+function editTarget(files: AgentNotificationFileChange[]): string {
+  return files.length === 1 && files[0] ? fileName(files[0].path) : plural(files.length, "file", "files");
+}
+
 /** What is wanted, as a verb phrase that follows the agent's name. Empty for `text`. */
 function wantPhrase(n: AgentNotification): string {
   switch (n.view) {
     case "turn.approve.command": return "wants to run a command";
-    case "turn.approve.edit":
-      return n.files.length === 1 && n.files[0]
-        ? `wants to edit ${fileName(n.files[0].path)}`
-        : `wants to edit ${plural(n.files.length, "file", "files")}`;
+    case "turn.approve.edit": return `wants to edit ${editTarget(n.files)}`;
     case "turn.approve.tool": return `wants to use ${n.tool}`;
     case "turn.question.choice": return "asks you to choose";
     case "turn.question.open": return "has a question";
     case "turn.failed": return "stopped on an error";
-    case "work.done": return "finished";
+    case "work.done": return n.ready ? "is ready" : "finished";
     case "ask":
       if (n.permission) return "needs your permission";
       return n.reply === "optional" ? "would like your input" : "is waiting on your answer";
@@ -184,18 +189,34 @@ export function agentNotificationHeadline(n: AgentNotification): string {
   return `${want.charAt(0).toUpperCase()}${want.slice(1)}`;
 }
 
-/** What the notification is about, as plain text. One line, except for `text`. */
-function aboutText(n: AgentNotification): string {
+/** The request and its context, also used for the size-limited text fallback. */
+export function agentNotificationPreview(n: AgentNotification): { title: string; body: string } {
   switch (n.view) {
-    case "turn.approve.command": return notificationPlainLine(n.why) || notificationPlainLine(n.command);
-    case "turn.approve.edit": return notificationPlainLine(n.summary) || notificationPlainLine(n.files.map((f) => f.path).join(", "));
-    case "turn.approve.tool": return notificationPlainLine(n.why) || notificationPlainLine(n.summary);
-    case "turn.question.choice": return notificationPlainLine(n.question);
-    case "turn.question.open": return notificationPlainLine(n.question);
-    case "turn.failed": return notificationPlainLine(n.error);
-    case "work.done": return notificationPlainLine(n.summary);
-    case "ask": return notificationPlainLine(n.note);
-    case "text": return [notificationPlainLine(n.title), notificationPlainLine(n.body)].filter(Boolean).join("\n");
+    case "turn.approve.command":
+      return { title: "Run command?", body: notificationPlainLine(n.why) || notificationPlainLine(n.command) };
+    case "turn.approve.edit":
+      return {
+        title: `Edit ${notificationPlainLine(editTarget(n.files))}?`,
+        body: notificationPlainLine(n.summary) || notificationPlainLine(n.files.map((f) => f.path).join(", ")),
+      };
+    case "turn.approve.tool":
+      return {
+        title: `Allow ${notificationPlainLine(n.tool) || "tool use"}?`,
+        body: notificationPlainLine(n.why) || notificationPlainLine(n.summary),
+      };
+    case "turn.question.choice":
+    case "turn.question.open":
+      return { title: notificationPlainLine(n.question) || "Question", body: notificationPlainLine(n.context) };
+    case "turn.failed":
+      return { title: "Run failed", body: notificationPlainLine(n.error) };
+    case "work.done":
+      return { title: n.ready ? "Ready" : "Work complete", body: notificationPlainLine(n.summary) };
+    case "ask": {
+      const title = n.permission ? "Permission requested" : n.reply === "optional" ? "Input welcome" : "Reply needed";
+      return { title, body: notificationPlainLine(n.note) };
+    }
+    case "text":
+      return { title: notificationPlainLine(n.title), body: notificationPlainLine(n.body) };
   }
 }
 
@@ -281,7 +302,7 @@ function idTail(id: string): string {
  *   "pike.main.studio" with roster 005   -> "pike 005"
  *   "session-mw00fkgt-qbus4s.studio", Codex      -> "Codex 012", or "Codex us4s" unnumbered
  *   "native:claude:6f1c…a3b9"                  -> "Claude a3b9"
- * A dotted id loses its branch and host: the subtitle says where. A generated
+ * A dotted id loses its branch and host: the banner already says where. A generated
  * handle reads as its harness. Without a roster number, a generated handle
  * keeps the last characters of its id so two sessions stay apart.
  */
@@ -303,20 +324,16 @@ export function notificationSenderLabel(sender: AgentNotification["sender"]): st
   return tail ? `${name} ${tail}` : name;
 }
 
-/** Where it happened, as one phrase: "scout-apps on mini". */
-function whereLine(n: AgentNotification): string {
-  const project = n.project?.trim();
-  const host = n.host?.trim();
-  return project && host ? `${project} on ${host}` : project || host || "";
-}
-
 export function collapseAgentNotification(n: AgentNotification): AgentNotificationCollapse {
-  const who = notificationSenderLabel(n.sender);
-  const want = wantPhrase(n);
+  const host = n.host?.trim().replace(/\s+/gu, " ");
+  const project = n.project?.trim().replace(/\s+/gu, " ");
+  const sender = notificationSenderLabel(n.sender).replace(/\s+/gu, " ");
+  const source = [sender, project].filter(Boolean).join(" · ");
+  const preview = agentNotificationPreview(n);
   return {
-    title: want ? `${who} ${want}` : who,
-    subtitle: whereLine(n),
-    body: aboutText(n),
+    title: host ? `Scout on ${host}` : "Scout",
+    subtitle: "",
+    body: [source, preview.title, preview.body].filter(Boolean).join("\n"),
     headline: agentNotificationHeadline(n),
     category: agentNotificationCategory(n),
     threadId: `scout.agent.${n.sender.agentId ?? n.sender.name}`,

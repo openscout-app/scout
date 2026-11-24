@@ -12,6 +12,7 @@ making the integration surface discoverable.
 | Host | Repository | Page | Purpose |
 | --- | --- | --- | --- |
 | T3 Orchestrator | Adapter in `packages/runtime/src/t3` | [T3 setup and contract](./t3-orchestrator.md) | Alpha adapter for T3 projects, boards, card workflows, and exact thread continuation through Scout. |
+| Vercel Board | Adapter in `packages/runtime/src/board`, worker in `packages/board-worker` | [Vercel Board plan](./vercel-board.md) | Alpha custodian adapter: mirrors Board tasks as Scout work items, holds operator-started claims for Scout agents, and writes planned tasks with `board_plan`. Speaks Board's documented HTTP protocol directly, and reaches a Vercel team board through a supervised Node worker that runs `@vercel/board`. |
 | Grok Bot (hosted) | [Grok Scout](https://github.com/arach/grok-scout) | [Grok Bot setup](https://openscout.app/grokbot) | Hosted MCP and OAuth through an online provisioned bridge. Marketplace submission pending review. |
 | Muse (hosted) | Remote client published with the hosted service | [Muse setup](https://openscout.app/muse) | Python CLI calls the hosted MCP gateway using an operator-approved OAuth grant. Requires an online Scout bridge; no Muse execution harness. |
 | Grok | [Grok Scout](https://github.com/arach/grok-scout) | [Grok guide](https://openscout.app/grok) · [Full connection map](./scout-for-grok.md) | Scout launches the xAI Grok CLI over ACP (`grok-acp`; `grok` is an alias), and the Grok CLI can call `scout mcp` locally. Grok Bot, the hosted connector, is a separate row; see /grokbot. |

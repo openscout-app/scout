@@ -12,6 +12,8 @@
  * a reviewer agent settles it later on a heartbeat. No model runs on a move.
  */
 import type { WorkItemRecord, WorkItemState } from "./collaboration.js";
+import { isValidDerivedKind } from "./derived-records.js";
+import type { ScoutAttribution } from "./common.js";
 
 export const WORK_LIFECYCLE_SCHEMA = "openscout.work-lifecycle.v1" as const;
 
@@ -50,6 +52,24 @@ export interface WorkLifecycleJudge {
   criterion: string;
 }
 
+/**
+ * Makes one derived record (see derived-records.ts) for items in a station.
+ * A station names what to make. Where an agent runs is optional: without a
+ * project path the derivation stays pending, and any producer may pull it.
+ */
+export interface WorkStationDeriver {
+  /** The derived record's kind, such as `presentation`. */
+  kind: string;
+  /** What to make, in prose. It becomes the agent's instructions. */
+  instructions: string;
+  /** A skill the agent loads, by name. */
+  skill?: string;
+  /** The project folder the agent starts in. Set it to have the runtime start the agent. */
+  projectPath?: string;
+  harness?: string;
+  model?: string;
+}
+
 export interface WorkStation {
   id: WorkStationId;
   name: string;
@@ -61,6 +81,8 @@ export interface WorkStation {
   rules?: WorkLifecycleRule[];
   /** Applied on the heartbeat to moves into this station. */
   judges?: WorkLifecycleJudge[];
+  /** Derived records made for items while they sit in this station. */
+  derive?: WorkStationDeriver[];
 }
 
 export interface WorkTransition {
@@ -214,6 +236,14 @@ export function validateWorkLifecycle(doc: WorkLifecycle): string[] {
     for (const rule of station.rules ?? []) checkRule(rule, `station ${station.id}`);
     for (const judge of station.judges ?? []) {
       if (!judge.id?.trim() || !judge.criterion?.trim()) errors.push(`station ${station.id}: a judge needs an id and a criterion`);
+    }
+    const kinds = new Set<string>();
+    for (const deriver of station.derive ?? []) {
+      if (!isValidDerivedKind(deriver.kind)) errors.push(`station ${station.id}: derive kind ${String(deriver.kind)} must be lowercase letters, digits, dots, dashes or underscores`);
+      else if (kinds.has(deriver.kind)) errors.push(`station ${station.id}: duplicate derive kind ${deriver.kind}`);
+      else kinds.add(deriver.kind);
+      if (!deriver.instructions?.trim()) errors.push(`station ${station.id}: derive ${String(deriver.kind)} needs instructions`);
+      if (deriver.projectPath !== undefined && !deriver.projectPath.trim()) errors.push(`station ${station.id}: derive ${String(deriver.kind)} has an empty projectPath`);
     }
   }
   for (const t of doc.transitions ?? []) {
@@ -432,6 +462,7 @@ export interface WorkMoveRequest {
   workId: string;
   to: WorkStationId;
   actorId?: string;
+  attribution?: ScoutAttribution;
   note?: string;
   evidence?: WorkMoveEvidence[];
   /** A waiting reason, required by stations that map to `waiting`. */
@@ -463,6 +494,7 @@ export interface WorkReviewRequest {
   /** The placement revision the reviewer judged; a later move makes the review stale. */
   revision: number;
   actorId?: string;
+  attribution?: ScoutAttribution;
   note?: string;
 }
 

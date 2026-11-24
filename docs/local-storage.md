@@ -112,6 +112,27 @@ retention window still governs retained event history.
 - The runtime SSE feed still carries substantive registry changes. JetStream's
   message publishing is independent of these four event kinds.
 
+## Disk and memory pressure
+
+- The runtime samples free disk space every 30 seconds. Below the durable-write
+  reserve (256 MB, or `OPENSCOUT_STORAGE_MIN_FREE_MB`), it refuses new commands
+  with a retryable `broker_busy` error and keeps reads and health serving. When
+  space returns, the next sample admits commands again. A retry with the same
+  request ID is safe.
+- The SQLite projection retries after a failure with a backoff of 1 second,
+  doubling to 1 minute. A read or a successful attempt retries at once.
+- A runtime that runs from a checkout loads its dependencies through that
+  checkout's `node_modules` links. A sibling repository that lists this
+  checkout's packages as workspaces rewrites those links into its own install
+  store, and deleting that sibling leaves them dangling. Before the first
+  import, the launcher points each such link at this checkout's identical store
+  entry, or restores this checkout's install with `bun install
+  --frozen-lockfile`. While it runs, the runtime repeats the link check every
+  minute and raises a `dependencies` health flag for a link it cannot repair.
+  Bun keeps a resolved path for the life of a process, so code that already
+  went missing needs a restart after the repair.
+  `OPENSCOUT_DEPENDENCY_LINK_GUARD=0` turns the check off.
+
 ## Agent stdout and stderr
 
 Codex app-server and Claude stream-json transports, plus the tmux pane pipe,

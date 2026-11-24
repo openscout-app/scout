@@ -89,7 +89,8 @@ The modes are mutually exclusive. `--to` may repeat; each target gets its own ta
 | State of the referenced task | Behavior |
 | --- | --- |
 | Queued | The follow-up is attached; the worker sees it with the original |
-| Running | Delivered into the working session as a follow-up message |
+| Running or waiting agent task | Refused before recording: send a separate ask to the session or use `--continue` after completion |
+| Human-owned task | Recorded in the conversation and sent to the recipient’s inbox |
 | Finished, failed or cancelled | Rejected: `task inv-123 is finished; to start follow-up work use --continue inv-123` |
 | Finishes while the follow-up is in transit | The runtime decides by its own ordering: if the task closed first, the follow-up is rejected as above and its receipt says so |
 | Remote | Forwarded to the task's home node, under the same rules |

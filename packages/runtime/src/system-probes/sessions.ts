@@ -1,3 +1,4 @@
+import { claudeProjectForPath, claudeProjectRoots } from "../claude-projects.js";
 import { createReadStream } from "node:fs";
 import type { Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
@@ -93,6 +94,7 @@ async function scanJsonlFiles(input: {
   cutoffMs: number;
   maxDepth: number;
   skipSubagents: boolean;
+  mirror?: boolean;
   signal: AbortSignal;
   cap: number;
 }): Promise<SessionFileRecord[]> {
@@ -119,8 +121,8 @@ async function scanJsonlFiles(input: {
         if (!info.isFile() || info.mtimeMs < input.cutoffMs) continue;
         out.push({
           path: filePath,
-          project: extractProjectName(filePath),
-          agent: detectAgent(filePath, input.agent),
+          project: (input.mirror ? claudeProjectForPath(filePath, [{ root: input.root, mirror: true }])?.folder : undefined) ?? extractProjectName(filePath),
+          agent: input.mirror ? input.agent : detectAgent(filePath, input.agent),
           modifiedAt: info.mtimeMs,
           sizeBytes: info.size,
           lineCount: 0,
@@ -138,7 +140,7 @@ async function scanSessionFilesLocal(input: SessionFileScanKey, ctx: ProbeCtx): 
   const normalized = normalizeScanKey(input);
   const cutoffMs = Date.now() - normalized.maxAgeDays * 24 * 60 * 60_000;
   const roots = [
-    { root: join(normalized.home!, ".claude", "projects"), agent: "claude-code", maxDepth: 8, skipSubagents: true },
+    ...claudeProjectRoots(normalized.home!).map((entry) => ({ ...entry, agent: "claude-code", maxDepth: 8, skipSubagents: true })),
     { root: join(normalized.home!, ".codex"), agent: "codex", maxDepth: 8, skipSubagents: true },
     { root: join(normalized.home!, ".openai-codex"), agent: "codex", maxDepth: 8, skipSubagents: true },
   ];

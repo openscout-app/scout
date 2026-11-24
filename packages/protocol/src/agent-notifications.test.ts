@@ -22,7 +22,7 @@ const base = {
 };
 
 describe("agent notifications", () => {
-  test("a command approval says who wants to run a command, then what it is for", () => {
+  test("a command approval puts the host in the title and the request in the body", () => {
     const n: AgentNotification = {
       ...base,
       view: "turn.approve.command",
@@ -31,9 +31,9 @@ describe("agent notifications", () => {
       risk: "high",
     };
     expect(collapseAgentNotification(n)).toEqual({
-      title: "machiavelli wants to run a command",
-      subtitle: "openscout on studio",
-      body: "Ship the iOS build",
+      title: "Scout on studio",
+      subtitle: "",
+      body: "machiavelli · openscout\nRun command?\nShip the iOS build",
       headline: "Wants to run a command",
       category: "scout.approval",
       threadId: "scout.agent.agent.machiavelli",
@@ -49,13 +49,13 @@ describe("agent notifications", () => {
       view: "turn.approve.command",
       command: "rm -rf dist",
     };
-    expect(collapseAgentNotification(n).title).toBe("Claude 3d4e wants to run a command");
+    expect(collapseAgentNotification(n).body.split("\n")[0]).toBe("Claude 3d4e · openscout");
     expect(nativeActorName("native:codex:abc")).toBe("Codex");
     expect(nativeActorName("agent.machiavelli")).toBeNull();
   });
 
   test("the sender reads as a short name and its roster number, never a handle", () => {
-    // A dotted agent id loses its branch and host; the subtitle says where.
+    // A dotted agent id loses its branch and host; the banner already says where.
     expect(notificationSenderLabel({ name: "pike.main.studio", code: "005" })).toBe("pike 005");
     expect(notificationSenderLabel({ name: "pike.main.studio" })).toBe("pike");
     // A generated handle reads as its harness, then its roster number.
@@ -79,41 +79,40 @@ describe("agent notifications", () => {
       why: "Show working tree status",
     };
     expect(collapseAgentNotification(n)).toMatchObject({
-      title: "Codex 012 wants to run a command",
-      subtitle: "webshop on studio",
-      body: "Show working tree status",
+      title: "Scout on studio",
+      subtitle: "",
+      body: "Codex 012 · webshop\nRun command?\nShow working tree status",
     });
   });
 
-  test("the subtitle says where: the project on its host, or whichever is known", () => {
+  test("missing host or project leaves a clean title and sender line", () => {
     const n: AgentNotification = { ...base, view: "turn.approve.command", command: "ls" };
-    expect(collapseAgentNotification(n).subtitle).toBe("openscout on studio");
-    expect(collapseAgentNotification({ ...n, host: undefined }).subtitle).toBe("openscout");
-    expect(collapseAgentNotification({ ...n, project: undefined }).subtitle).toBe("studio");
+    expect(collapseAgentNotification({ ...n, host: undefined })).toMatchObject({ title: "Scout", subtitle: "", body: "machiavelli · openscout\nRun command?\nls" });
+    expect(collapseAgentNotification({ ...n, project: undefined }).body).toBe("machiavelli\nRun command?\nls");
+    expect(collapseAgentNotification({ ...n, host: "  ", project: "  " })).toMatchObject({ title: "Scout", body: "machiavelli\nRun command?\nls" });
   });
 
   test("a command without a description shows the command", () => {
     const n: AgentNotification = { ...base, view: "turn.approve.command", command: "git push origin main" };
-    expect(collapseAgentNotification(n).body).toBe("git push origin main");
+    expect(collapseAgentNotification(n).body).toBe("machiavelli · openscout\nRun command?\ngit push origin main");
   });
 
   test("an edit names the one file it touches", () => {
     const one: AgentNotification = { ...base, view: "turn.approve.edit", files: [{ path: "src/a.ts", added: 3, removed: 1 }] };
-    expect(collapseAgentNotification(one)).toMatchObject({ title: "machiavelli wants to edit a.ts", body: "src/a.ts" });
+    expect(collapseAgentNotification(one)).toMatchObject({ headline: "Wants to edit a.ts", body: "machiavelli · openscout\nEdit a.ts?\nsrc/a.ts" });
     const two: AgentNotification = {
       ...base,
       view: "turn.approve.edit",
       summary: "Rename the client",
       files: [{ path: "a.ts", added: 3, removed: 1 }, { path: "b.ts", added: 2, removed: 0 }],
     };
-    expect(collapseAgentNotification(two)).toMatchObject({ title: "machiavelli wants to edit 2 files", body: "Rename the client" });
+    expect(collapseAgentNotification(two)).toMatchObject({ body: "machiavelli · openscout\nEdit 2 files?\nRename the client" });
   });
 
   test("a choice question puts the question in the body and takes a reply", () => {
-    const n: AgentNotification = { ...base, view: "turn.question.choice", question: "Which client?", options: ["In-process", "XPC"] };
+    const n: AgentNotification = { ...base, view: "turn.question.choice", question: "Which client?", context: "Both support streaming.", options: ["In-process", "XPC"] };
     const collapsed = collapseAgentNotification(n);
-    expect(collapsed.title).toBe("machiavelli asks you to choose");
-    expect(collapsed.body).toBe("Which client?");
+    expect(collapsed.body).toBe("machiavelli · openscout\nWhich client?\nBoth support streaming.");
     expect(collapsed.category).toBe("scout.question");
     expect(agentNotificationActions(n)).toEqual(["reply"]);
   });
@@ -128,13 +127,12 @@ describe("agent notifications", () => {
     };
     const collapsed = collapseAgentNotification(n);
     expect(collapsed.category).toBe("scout.question");
-    expect(collapsed.title).toBe("machiavelli is waiting on your answer");
-    expect(collapsed.body).toBe("Ship to staging or prod?");
+    expect(collapsed.body).toBe("machiavelli · openscout\nReply needed\nShip to staging or prod?");
   });
 
   test("a declared permission ask says so", () => {
     const n: AgentNotification = { ...base, view: "ask", note: "Write to /etc/hosts?", reply: "required", permission: true };
-    expect(collapseAgentNotification(n).title).toBe("machiavelli needs your permission");
+    expect(collapseAgentNotification(n).body).toBe("machiavelli · openscout\nPermission requested\nWrite to /etc/hosts?");
   });
 
   test("a long markdown ask shows its first line as plain text, never a slice from inside it", () => {
@@ -149,11 +147,10 @@ describe("agent notifications", () => {
     ].join("\n");
     const n: AgentNotification = { ...base, view: "ask", note, reply: "optional" };
     const collapsed = collapseAgentNotification(n);
-    expect(collapsed.title).toBe("machiavelli would like your input");
-    expect(collapsed.body).toBe("Fix how pushes read");
+    expect(collapsed.body).toBe("machiavelli · openscout\nInput welcome\nFix how pushes read");
   });
 
-  test("a failure is one plain line and the subtitle keeps the host when the project is missing", () => {
+  test("a failure keeps the error and the originating host when the project is missing", () => {
     const n: AgentNotification = {
       ...base,
       sender: { name: "pike" },
@@ -163,10 +160,10 @@ describe("agent notifications", () => {
       error: "the operation timed out",
     };
     const collapsed = collapseAgentNotification(n);
-    expect(collapsed.title).toBe("pike stopped on an error");
-    expect(collapsed.subtitle).toBe("studio");
+    expect(collapsed.title).toBe("Scout on studio");
+    expect(collapsed.subtitle).toBe("");
     expect(collapsed.threadId).toBe("scout.agent.pike");
-    expect(collapsed.body).toBe("the operation timed out");
+    expect(collapsed.body).toBe("pike\nRun failed\nthe operation timed out");
   });
 
   test("work.done offers the link first only when an artifact has one", () => {
@@ -174,19 +171,19 @@ describe("agent notifications", () => {
     const without: AgentNotification = { ...base, view: "work.done", summary: "Trimmed cache" };
     expect(agentNotificationActions(withLink)).toEqual(["open_link", "open_chat"]);
     expect(agentNotificationActions(without)).toEqual(["open_chat"]);
-    expect(collapseAgentNotification(without)).toMatchObject({ title: "machiavelli finished", body: "Trimmed cache" });
+    expect(collapseAgentNotification(without)).toMatchObject({ body: "machiavelli · openscout\nWork complete\nTrimmed cache" });
   });
 
-  test("text keeps the agent as the title", () => {
+  test("a text update keeps both its title and plain-text detail", () => {
     const n: AgentNotification = { ...base, level: "passive", view: "text", title: "Shared an update", body: "Done with the **pass**." };
-    expect(collapseAgentNotification(n)).toMatchObject({ title: "machiavelli", body: "Shared an update\nDone with the pass." });
+    expect(collapseAgentNotification(n)).toMatchObject({ title: "Scout on studio", body: "machiavelli · openscout\nShared an update\nDone with the pass." });
   });
 
   test("sealing marks only time-sensitive notifications urgent for older phones", () => {
     const ask: AgentNotification = { ...base, level: "time-sensitive", view: "ask", note: "Deploy?" };
     const approval: AgentNotification = { ...base, view: "turn.approve.tool", tool: "Read" };
     expect(sealedAgentNotification(ask)).toMatchObject({ urgent: true, lockScreen: { level: "time-sensitive" } });
-    expect(sealedAgentNotification(approval)).toMatchObject({ urgent: false, lockScreen: { level: "active", title: "machiavelli wants to use Read" } });
+    expect(sealedAgentNotification(approval)).toMatchObject({ urgent: false, lockScreen: { level: "active", title: "Scout on studio", subtitle: "", body: "machiavelli · openscout\nAllow Read?" } });
   });
 
   test("clamp bounds long fields and lists", () => {
@@ -226,9 +223,11 @@ describe("notificationPlainLine", () => {
   });
 });
 
-test("tool approval why is the lock-screen body, old summary still works", () => {
-  const notification: AgentNotification = { ...base, view: "turn.approve.tool", tool: "EnterWorktree", summary: "target", why: "Creating an isolated workspace." };
-  expect(sealedAgentNotification(notification).lockScreen.body).toBe("Creating an isolated workspace.");
-  expect(collapseAgentNotification({ ...notification, why: undefined }).body).toBe("target");
+test("a tool approval puts its reason beneath the agent and tool, with a summary fallback", () => {
+  const notification: AgentNotification = { ...base, sender: { name: "Claude" }, view: "turn.approve.tool", tool: "EnterWorktree", summary: "target", why: "Creating an isolated workspace." };
+  expect(sealedAgentNotification(notification).lockScreen).toMatchObject({
+    title: "Scout on studio", subtitle: "", body: "Claude · openscout\nAllow EnterWorktree?\nCreating an isolated workspace.",
+  });
+  expect(collapseAgentNotification({ ...notification, why: undefined }).body).toBe("Claude · openscout\nAllow EnterWorktree?\ntarget");
   expect((clampAgentNotification({ ...notification, why: "x".repeat(1000) }) as typeof notification).why!.length).toBeLessThanOrEqual(240);
 });

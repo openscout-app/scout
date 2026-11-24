@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import type { ClaudeSessionRecord } from "../claude-session-records.js";
 
-import { codexActivityFromRollout, codexActivityFromTranscript, deliverInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
+import { codexActivityFromRollout, codexActivityFromTranscript, deliverInPlace, probeInPlace, resolveInPlaceOrder, type DeliverInPlaceDeps } from "./deliver.js";
 import { parseOrcaWorktreeAgents } from "./orca.js";
 import { innermostProcessHost, parseProcessHostEnv, processHostLocations } from "./process-host.js";
 
@@ -140,6 +140,7 @@ function noHosts(overrides: Partial<DeliverInPlaceDeps> = {}): DeliverInPlaceDep
     ttyForPid: async () => null,
     typeIntoTty: never,
     codexHeldByApp: async () => false,
+    askClaudeChannel: async () => ({ ok: false, code: "channel_unavailable", message: "no channel" }),
     order: ["herdr", "orca", "tmux", "terminal"],
     ...overrides,
   };
@@ -184,13 +185,13 @@ describe("innermostProcessHost", () => {
 });
 
 describe("resolveInPlaceOrder", () => {
-  test("defaults to herdr, orca, tmux, terminal", () => {
-    expect(resolveInPlaceOrder({})).toEqual(["herdr", "orca", "tmux", "terminal"]);
+  test("defaults to herdr, orca, tmux, channel, terminal", () => {
+    expect(resolveInPlaceOrder({})).toEqual(["herdr", "orca", "tmux", "channel", "terminal"]);
   });
 
   test("a partial override moves named hosts first and keeps the rest", () => {
-    expect(resolveInPlaceOrder({ OPENSCOUT_IN_PLACE_ORDER: "orca, bogus" })).toEqual(["orca", "herdr", "tmux", "terminal"]);
-    expect(resolveInPlaceOrder({ OPENSCOUT_IN_PLACE_ORDER: "lattices,tmux" })).toEqual(["terminal", "tmux", "herdr", "orca"]);
+    expect(resolveInPlaceOrder({ OPENSCOUT_IN_PLACE_ORDER: "orca, bogus" })).toEqual(["orca", "herdr", "tmux", "channel", "terminal"]);
+    expect(resolveInPlaceOrder({ OPENSCOUT_IN_PLACE_ORDER: "lattices,tmux" })).toEqual(["terminal", "tmux", "herdr", "orca", "channel"]);
   });
 });
 
@@ -490,4 +491,141 @@ test("tmux refuses failed or missing composer observations before checkpoint or 
     expect(result).toMatchObject({ ok: false, code: "in_place_failed", nothingSent: true });
   }
   expect(touched).toBe(0);
+});
+
+describe("the Scout channel", () => {
+  const ORDER = ["herdr", "orca", "tmux", "channel", "terminal"] as const;
+  /** A channel that answers for SESSION and records what it was given. */
+  function channel(reply: "ok" | "not_accepted" | "no_answer" = "ok", hostPid: number | null = 77085) {
+    const asked: Array<{ op: string; sessionId: string; body?: string }> = [];
+    return {
+      asked,
+      askClaudeChannel: async (request: { op: "ping"; sessionId: string } | { op: "deliver"; sessionId: string; body: string }) => {
+        asked.push(request);
+        if (request.sessionId !== SESSION) return { ok: false as const, code: "channel_unavailable" as const, message: "none" };
+        if (request.op === "ping" || reply === "ok") return { ok: true as const, sessionId: SESSION, hostPid };
+        return reply === "no_answer"
+          ? { ok: false as const, code: "channel_no_answer" as const, message: "no answer" }
+          : { ok: false as const, code: "channel_not_accepted" as const, message: "not accepted" };
+      },
+    };
+  }
+
+  test("a Claude session in a plain terminal tab or a background job gets the words through its channel, not its tty", async () => {
+    for (const kind of ["interactive", "bg"]) {
+      const scout = channel();
+      const typedTty: string[] = [];
+      const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "check the build", requireExactHarness: true }, noHosts({
+        order: [...ORDER],
+        askClaudeChannel: scout.askClaudeChannel,
+        findClaudeRecord: async () => claudeRecord({ kind, status: "busy" }),
+        ttyForPid: async () => "ttys014",
+        typeIntoTty: async (tty) => { typedTty.push(tty); },
+      }));
+      expect(result).toEqual({ ok: true, via: "claude-channel", location: "Claude channel 4cc36bba" });
+      expect(scout.asked.filter((request) => request.op === "deliver")).toEqual([{ op: "deliver", sessionId: SESSION, body: "check the build" }]);
+      expect(typedTty).toEqual([]);
+    }
+  });
+
+  test("the delivery records itself before the words go", async () => {
+    const scout = channel();
+    const events: string[] = [];
+    const result = await deliverInPlace({
+      sessionId: SESSION, harness: "claude", body: "x",
+      beforeKeystroke: (place) => { events.push(`before:${place.via}`); },
+    }, noHosts({ order: [...ORDER], findClaudeRecord: async () => claudeRecord({ status: "idle" }), askClaudeChannel: async (request) => {
+      if (request.op === "deliver") events.push("deliver");
+      return scout.askClaudeChannel(request);
+    } }));
+    expect(result).toMatchObject({ ok: true, via: "claude-channel" });
+    expect(events).toEqual(["before:claude-channel", "deliver"]);
+  });
+
+  test("a channel counts only beside a live record held by the process it runs in", async () => {
+    const delivered = (scout: ReturnType<typeof channel>) => scout.asked.some((request) => request.op === "deliver");
+    // No live record: a channel left naming a closed session is not proof.
+    const orphan = channel();
+    expect(await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({ order: [...ORDER], askClaudeChannel: orphan.askClaudeChannel })))
+      .toEqual({ ok: false, code: "not_live" });
+    expect(orphan.asked).toEqual([]);
+    // After /clear or /resume the process holds another session; its old name is not this session.
+    for (const hostPid of [4242, null]) {
+      const moved = channel("ok", hostPid);
+      const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+        order: [...ORDER], askClaudeChannel: moved.askClaudeChannel, findClaudeRecord: async () => claudeRecord({ kind: "bg", status: "idle" }),
+      }));
+      expect(result).toMatchObject({ ok: false, code: "not_live" });
+      expect(delivered(moved)).toBe(false);
+    }
+    // Scout's own background copy of the session is never the operator's.
+    const copy = channel();
+    const fromCopy = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      order: [...ORDER], askClaudeChannel: copy.askClaudeChannel,
+      findClaudeRecord: async () => claudeRecord({ status: "idle", tmux: { session: "flat-4cc36bba", pane: "%9" } as ClaudeSessionRecord["tmux"] }),
+    }));
+    expect(fromCopy).toEqual({ ok: false, code: "not_live" });
+    expect(copy.asked).toEqual([]);
+  });
+
+  test("a session at a permission prompt is refused as blocked with nothing sent", async () => {
+    const scout = channel();
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      order: [...ORDER], askClaudeChannel: scout.askClaudeChannel, findClaudeRecord: async () => claudeRecord({ status: "waiting" }),
+    }));
+    expect(result).toEqual({ ok: false, code: "session_blocked", via: "claude-channel", location: "Claude channel 4cc36bba" });
+    expect(scout.asked.some((request) => request.op === "deliver")).toBe(false);
+  });
+
+  test("the sender's own session is never reached through its own channel", async () => {
+    const scout = channel();
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      order: [...ORDER], askClaudeChannel: scout.askClaudeChannel, ownSessionIds: [SESSION],
+    }));
+    expect(result).toEqual({ ok: false, code: "not_live" });
+    expect(scout.asked).toEqual([]);
+  });
+
+  test("a refusal says nothing was sent; silence after the words were written does not", async () => {
+    const findClaudeRecord = async () => claudeRecord({ kind: "bg", status: "idle" });
+    const refused = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      order: [...ORDER], askClaudeChannel: channel("not_accepted").askClaudeChannel, findClaudeRecord,
+    }));
+    expect(refused).toMatchObject({ ok: false, code: "in_place_failed", via: "claude-channel", nothingSent: true });
+    const silent = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      order: [...ORDER], askClaudeChannel: channel("no_answer").askClaudeChannel, findClaudeRecord,
+    }));
+    expect(silent).toMatchObject({ ok: false, code: "in_place_failed", via: "claude-channel" });
+    expect("nothingSent" in silent).toBe(false);
+  });
+
+  test("a tmux pane that holds the session is still typed into first, and Codex never asks a channel", async () => {
+    const scout = channel();
+    const pasted: string[] = [];
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "claude", body: "x" }, noHosts({
+      order: [...ORDER],
+      askClaudeChannel: scout.askClaudeChannel,
+      findClaudeRecord: async () => claudeRecord({ status: "idle", tmux: { session: "work", pane: "%3" } as ClaudeSessionRecord["tmux"] }),
+      promptTmux: async (target) => { pasted.push(target); },
+    }));
+    expect(result).toMatchObject({ ok: true, via: "tmux" });
+    expect(pasted).toEqual(["%3"]);
+
+    const codex = channel();
+    expect(await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "x" }, noHosts({ order: [...ORDER], askClaudeChannel: codex.askClaudeChannel })))
+      .toEqual({ ok: false, code: "not_live" });
+    expect(codex.asked).toEqual([]);
+  });
+
+  test("the probe reports the channel as the place, with the harness's own activity", async () => {
+    const scout = channel();
+    const probe = await probeInPlace({ sessionId: SESSION, harness: "claude", requireExactHarness: true }, noHosts({
+      order: [...ORDER], askClaudeChannel: scout.askClaudeChannel, findClaudeRecord: async () => claudeRecord({ kind: "bg", status: "idle" }),
+    }));
+    expect(probe).toEqual({ live: true, via: "claude-channel", location: "Claude channel 4cc36bba", activity: "idle" });
+    // Leaving the channel out of the order leaves a background job out of reach.
+    expect(await probeInPlace({ sessionId: SESSION, harness: "claude" }, noHosts({
+      askClaudeChannel: scout.askClaudeChannel, findClaudeRecord: async () => claudeRecord({ kind: "bg", status: "idle" }), ttyForPid: async () => "ttys014",
+    }))).toEqual({ live: false, code: "not_live", held: true });
+  });
 });

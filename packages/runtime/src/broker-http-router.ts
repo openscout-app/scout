@@ -1,4 +1,15 @@
+import { HostLaunchDeferred } from "./host-launch-admission.js";
+import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
+import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
+import { handlePostRoute, type PostHttpDeps } from "./broker-posts-http.js";
+import { handleRoutineRoute, type RoutineHttpDeps } from "./broker-routines-http.js";
+import { handleWorktreeRetirementRoute, type WorktreeRetirementHttpDeps } from "./broker-worktree-retirement-http.js";
+import { handleFeedWorkRoute, type FeedWorkHttpDeps } from "./broker-feed-work-http.js";
+import { RoleSlotError } from "./role-slots-store.js";
+import { RolePassError } from "./role-pass-scheduler.js";
+import { roleSlotBoardCards } from "./broker-roles-http.js";
+import { BrokerVercelBoardService, VercelBoardServiceError, VercelBoardConnectionError } from "./vercel-board/service.js";
 import { readHerdrWorkspaces, type HerdrWorkspacesReadDeps } from "./broker-herdr-workspaces-read.js";
 import { createRepoDiffReadHandler, type RepoDiffRead } from "./broker-repo-diff-read.js";
 import { readProviderQuotas } from "./broker-provider-quota-read.js";
@@ -11,15 +22,18 @@ import { MeshFeedback, MeshFeedbackError } from "./mesh-feedback.js";
 import { MeshBridgeManagement, MeshBridgeManagementError } from "./mesh-bridge-management.js";
 import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
-import { TaskClosedError, completionReply } from "@openscout/protocol";
+import { TaskClosedError, isTaskReadyDecision, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
+import { SessionNameTargetError, type SessionNameService } from "./session-names.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
+import { DecisionAnswerError, type BrokerDecisionCardService } from "./broker-decision-cards.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
 import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
 import { BrokerBusyError } from "./broker-storage-pressure.js";
+import { brokerAttributionFor, brokerAttributionFromMetadata, brokerAttributionParentForRef, brokerAttributionRequiresOperator, brokerPersonActorIds } from "./broker-attribution.js";
 import { handleBrokerHistoryRoute, type BrokerHistoryQueries } from "./broker-history-http-service.js";
 import { handleBrokerQuarantineRoute, type BrokerQuarantineQueries } from "./broker-quarantine-http-service.js";
 import { createHash } from "node:crypto";
-import { BrokerRequestReceipts } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, ProvenRequestFailure } from "./broker-request-receipts.js";
 import { hasRetiredEndpointRegistration } from "./broker-endpoint-selection.js";
 import { handleBrokerAccessRoute, type BrokerAccessHttpDeps } from "./broker-access-http-routes.js";
 import { handleBrokerMcpEvents } from "./broker-mcp-event-routes.js";
@@ -29,9 +43,10 @@ import type { IntegrationSlackEvents } from "./integration-slack-events.js";
 import type { IntegrationSlackDeliveryService } from "./integration-slack-delivery.js";
 import { BrokerIntegrationSetupService, IntegrationSetupError } from "./broker-integration-setup.js";
 import { deckLanes } from "./deck-lanes.js";
+import { parseSessionKnowledgeSearchParams, type SessionKnowledgeSearchInput, type SessionKnowledgeSearchResult } from "./knowledge/session-search.js";
 import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } from "./host-web-request.js";
 import { ChatQuestionError } from "./chat-question-transition.js";
-import { ChatMessageCorrectionError } from "@openscout/protocol";
+import { ChatMessageCorrectionError, TurnCredentialError, isManualReviewBoardScope, type TurnCredentialClaims } from "@openscout/protocol";
 import type { BrokerExternalSessionService } from "./broker-external-session-service.js";
 import type { BrokerT3Service } from "./t3/broker-service.js";
 import { T3RpcError } from "./t3/rpc-client.js";
@@ -40,6 +55,7 @@ import type { RuntimeHttpRequestLike, RuntimeHttpResponseLike } from "./portable
 import { performance } from "node:perf_hooks";
 
 import type {
+  ControlEvent,
   A2AJsonRpcRequest,
   ActorIdentity,
   AgentEndpoint,
@@ -54,6 +70,11 @@ import type {
   InboxClaimRequest,
   InboxNackRequest,
   InvocationRequest,
+  ManualReviewBoardPreviewRequest,
+  ManualReviewBoardRoutineSaveRequest,
+  ManualReviewBoardRunRequest,
+  ManualReviewDispatchRequest,
+  ManualReviewOccurrenceRequest,
   MessageRecord,
   ScoutRendezvousRequest,
   ScoutDeliverRequest,
@@ -82,6 +103,8 @@ import type { BrokerDeliveryAcceptanceService } from "./broker-delivery-acceptan
 import {
   brokerAppendMissionLog,
   brokerAssignRole,
+  brokerReadRoleSlots,
+  brokerWriteRoleSlot,
   brokerListMissionLog,
   brokerListRoleAssignments,
   brokerRevokeRole,
@@ -99,6 +122,11 @@ import type {
   BrokerDurableActionHttpService,
   DurableActionHeartbeatBody,
 } from "./broker-durable-action-http-service.js";
+import { ManualReviewOccurrenceError, type ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
+import { ManualReviewDispatchError, type ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import type { ManualReviewBoardTickets } from "./manual-review-board-ticket.js";
+import type { ManualReviewBoardService } from "./manual-review-board.js";
+import { ManualReviewBoardError } from "./manual-review-board-routines.js";
 import {
   a2aJson,
   badRequest as writeBadRequest,
@@ -116,8 +144,10 @@ import {
   throwIfAborted,
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
+import type { BrokerBoardService } from "./broker-boards.js";
 import { WorkClaimConflictError } from "./broker-work-claims.js";
-import type { WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import type { DerivedWriteRequest, WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
+import { DerivedRecordError, type BrokerDerivedRecordService } from "./broker-derived-records.js";
 import { handleBrokerHttpEntityWriteRoute } from "./broker-http-entity-write-routes.js";
 import { handleBrokerGuestRoute, type BrokerGuestHttpDeps } from "./broker-guest-http-routes.js";
 import type { BrokerManagedSessionHttpService } from "./broker-managed-session-http-service.js";
@@ -152,7 +182,7 @@ import {
   type ExternalAgentCardInput,
 } from "./scout-agent-cards.js";
 import type { RuntimeRegistrySnapshot } from "./registry.js";
-import type { BrokerRouteTargetInput } from "./scout-dispatcher.js";
+import type { BrokerRouteTargetInput, RuntimeSnapshot } from "./scout-dispatcher.js";
 import type { ThreadEventPlane } from "./thread-events.js";
 import {
   BrokerRouteAliasError,
@@ -171,15 +201,32 @@ import {
 } from "./mesh-trust-enrollment.js";
 import { normalizeConversationTitle } from "./conversation-title.js";
 
+const ACTIVE_FLIGHT_LIST_STATES = new Set(["queued", "waking", "running", "waiting"]);
+
+function isLocalReviewOperator(request: RuntimeHttpRequestLike): boolean {
+  const context = request.transportContext;
+  return !!context && ["loopback", "unix-socket"].includes(context.transport) && context.operator === true
+    && !context.guest && !context.scoped && !context.peer
+    && request.headers.origin === undefined && request.headers["x-openscout-forwarded-node-id"] === undefined;
+}
+
+const manualReviewBoardScopeReserved = {
+  error: "manual_review_scope_reserved",
+  detail: "Runs in a board-review scope are recorded and dispatched by the Board review entry point, which reads their pins and their reviewer itself.",
+} as const;
+
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
+  else if (error instanceof ProvenRequestFailure) json(response, 409, { error: error.code, detail: error.message, evidence: error.evidence });
+  else if (error instanceof HostLaunchDeferred) json(response, 503, { error: error.code, retryable: true, retryAt: error.retryAt, detail: error.message });
   else if (error instanceof BrokerBusyError) json(response, 503, { error: error.code, retryable: true, detail: error.message });
   else writeBadRequest(response, error);
 }
 
 export type BrokerHttpRuntime = {
   /** Metadata-only peek: endpoint readers must not detach/message-scan the registry. */
-  peek?: () => { endpoints: Record<string, AgentEndpoint> };
+  peek?: () => { endpoints: Record<string, AgentEndpoint>; flights?: Record<string, FlightRecord> };
+  attributionSnapshot?: () => RuntimeSnapshot;
   snapshot: () => { nodes: Record<string, NodeDefinition>; conversations: Record<string, ConversationDefinition>; messages?: Record<string, MessageRecord>; invocations?: Record<string, InvocationRequest> };
   recentEvents: (limit: number) => unknown;
   collaborationRecord: (recordId: string) => CollaborationRecord | undefined;
@@ -219,12 +266,27 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 export type BrokerHttpRouterDeps = {
   /** Work lifecycles: stations, moves and reviews. */
   workLifecycles?: BrokerWorkLifecycleService;
+  /** Boards: a lifecycle's columns and its cards with their content. */
+  boards?: BrokerBoardService;
+  workRetry?: import("./broker-work-retry.js").BrokerWorkRetryService;
+  derivedRecords?: BrokerDerivedRecordService;
   tasks?: import("./broker-tasks.js").BrokerTaskService;
   /** Test/embedding seam; default uses only the bounded public scoutd repo capability. */
   readRepoDiff?: RepoDiffRead;
   shows?: ShowHttpDeps;
+  posts?: PostHttpDeps;
+  /** Checks a turn credential this runtime issued, including that its flight is still live. */
+  verifyTurnCredential?: (credential: unknown) => TurnCredentialClaims;
+  /** Scheduled routines that post to the Feed (/v1/routines). */
+  routines?: RoutineHttpDeps;
+  /** Retirement of idle, clean, merged agent worktrees (/v1/worktrees/retirement). */
+  worktreeRetirement?: WorktreeRetirementHttpDeps;
+  /** Work items as a feed reads them (GET /v1/feed/work). */
+  feedWork?: FeedWorkHttpDeps;
   attachments?: AttachmentHttpDeps;
   readObservedSessionCache?: ObservedSessionReadDeps["readCache"];
+  /** One bounded query over this host's own session index (GET /v1/mesh/knowledge/search). */
+  searchSessionKnowledge?: (input: SessionKnowledgeSearchInput) => SessionKnowledgeSearchResult;
   herdrWorkspaces?: Omit<HerdrWorkspacesReadDeps, "nodeId">;
   encodedSnapshotBodies?: boolean;
   onSnapshotFlushedBytes?: (bytes: number) => void;
@@ -234,6 +296,7 @@ export type BrokerHttpRouterDeps = {
   meshId: string;
   operatorActorId: string;
   runtime: BrokerHttpRuntime;
+  attributionSnapshot?: () => RuntimeSnapshot;
   requestReceipts?: BrokerRequestReceipts;
   historyQueries?: BrokerHistoryQueries;
   quarantineQueries?: BrokerQuarantineQueries;
@@ -245,6 +308,10 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Decision cards on operator asks: reads and answers. */
+  decisionCards?: BrokerDecisionCardService;
+  /** Ready: set notify on a running task, and the operator's Continue or Hold. */
+  taskReady?: Pick<BrokerTaskReadyService, "setNotify" | "decide">;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
   /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
@@ -263,6 +330,11 @@ export type BrokerHttpRouterDeps = {
   nudgeHarnessTopologyScan: () => unknown | Promise<unknown>;
   deliveryHttpService: BrokerDeliveryHttpService;
   durableActionHttpService: BrokerDurableActionHttpService;
+  manualReviewOccurrences: ManualReviewOccurrenceService;
+  manualReviewDispatch: ManualReviewDispatchService;
+  /** Saved Board review routines, their preview and their runs. Absent in hosts that do not serve them; the routes then answer 503. */
+  manualReviewBoard?: ManualReviewBoardService;
+  manualReviewBoardTickets?: ManualReviewBoardTickets;
   controlStreams: BrokerControlStreamService;
   managedSessionHttpService: BrokerManagedSessionHttpService;
   meshDiscoveryService: BrokerMeshDiscoveryService;
@@ -326,8 +398,12 @@ export type BrokerHttpRouterDeps = {
   rendezvousService: BrokerRendezvousService;
   externalSessionService?: BrokerExternalSessionService;
   t3Service?: BrokerT3Service;
+  /** The Vercel Board adapter; it answers on each host that connected. */
+  vercelBoardService?: BrokerVercelBoardService;
   routeAliasService?: BrokerRouteAliasService;
   agentRosterService?: AgentRosterService;
+  /** Operator session names; absent without broker SQLite persistence. */
+  sessionNameService?: SessionNameService;
   integrationSetupService?: BrokerIntegrationSetupService;
   integrationSlackDelivery?: IntegrationSlackDeliveryService;
   integrationSlackEvents?: IntegrationSlackEvents;
@@ -343,6 +419,12 @@ export type BrokerHttpRouterDeps = {
    * role routes return 503 (tables owned by migrations; broker is writer).
    */
   openRolesDb?: () => ControlPlaneSqliteDatabase | null;
+  /** Live fan-out for an event whose record is elsewhere (SSE clients and the in-memory bus); never persisted. */
+  publishEphemeralEvent?: (event: ControlEvent) => void;
+  /** The unended flight holding a role pass lock, for the slot read. */
+  runningRolePass?: (assignmentId: string) => { flightId: string } | null;
+  /** Page open: return the running pass, or start one when the slot is behind. */
+  ensureRolePass?: (assignmentId: string) => Promise<{ flightId: string | null; started: boolean; behind: boolean }>;
   /**
    * Mesh trust cone (docs/proposals/mesh-trust-cone.md): enrollment handshake
    * endpoints and the signed node card. When absent, the trust routes 404 and
@@ -538,6 +620,10 @@ export function createBrokerHttpRouter(
     nudgeHarnessTopologyScan,
     deliveryHttpService,
     durableActionHttpService,
+    manualReviewOccurrences,
+    manualReviewDispatch,
+    manualReviewBoard,
+    manualReviewBoardTickets,
     controlStreams,
     managedSessionHttpService,
     meshDiscoveryService,
@@ -562,6 +648,7 @@ export function createBrokerHttpRouter(
     rendezvousService,
     routeAliasService,
     agentRosterService,
+    sessionNameService,
     integrationSetupService,
     integrationSlackDelivery,
     integrationSlackEvents,
@@ -578,8 +665,25 @@ export function createBrokerHttpRouter(
   const readSessionMaterials = createSessionMaterialsRead({ nodeId, readCache: deps.readObservedSessionCache,
     readEndpoints: runtime.peek ? () => runtime.peek!().endpoints : undefined });
 
+  const currentAttributionSnapshot = () => deps.attributionSnapshot?.() ?? runtime.snapshot() as RuntimeSnapshot;
   const routeRequest = async function(request: RuntimeHttpRequestLike, response: RuntimeHttpResponseLike): Promise<void> {
   const method = request.method ?? "GET";
+  const attributedActorId = (claimedActorId?: string) => brokerAttributionFor({ claimedActorId,
+    context: request.transportContext, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()) }).actorId;
+  const attributedTaskReply = (input: import("@openscout/protocol").ScoutTaskReply): import("@openscout/protocol").ScoutTaskReply => {
+    const snapshot = currentAttributionSnapshot();
+    const parent = input.to ? brokerAttributionFromMetadata(snapshot.messages?.[input.to]?.metadata) : input.ref ? brokerAttributionParentForRef(snapshot, input.ref) : undefined;
+    const attribution = brokerAttributionFor({ claimedActorId: input.senderId, context: request.transportContext,
+      personActorIds: brokerPersonActorIds(snapshot), parent, unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+    return { ...input, senderId: attribution.actorId, metadata: { ...input.metadata, attribution } };
+  };
+  const assertActorMutation = (actor: ActorIdentity) => {
+    const snapshot = currentAttributionSnapshot();
+    const existing = snapshot.actors?.[actor.id];
+    if (existing?.kind === "person" && actor.kind !== "person" && !brokerAttributionRequiresOperator(request.transportContext)) {
+      throw new Error("person_attribution_unverified");
+    }
+  };
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? `${host}:${port}`}`);
   if (method === "GET" && url.pathname === "/v1/supervision-handoff") {
     const context = request.transportContext;
@@ -611,6 +715,22 @@ export function createBrokerHttpRouter(
     json(response, 503, { error: "access_unavailable" }); return;
   }
   if (request.transportContext?.scoped) { json(response, 403, { error: "access_denied" }); return; }
+  if (method === "POST" && url.pathname === "/v1/access/turn") {
+    const context = request.transportContext;
+    if (context && (!["unix-socket", "loopback"].includes(context.transport) || context.guest || context.peer)) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    if (!deps.verifyTurnCredential) { json(response, 503, { error: "turn_credentials_unavailable" }); return; }
+    const body = await readRequestBody<{ credential?: unknown }>(request, { maxBytes: 8 * 1024 });
+    try {
+      const claims = deps.verifyTurnCredential(body?.credential);
+      json(response, 200, { live: true, claims });
+    } catch (error) {
+      const code = error instanceof TurnCredentialError ? error.code : "malformed_turn_credential";
+      json(response, code === "malformed_turn_credential" ? 400 : 403, { live: false, error: code });
+    }
+    return;
+  }
   if (method === "GET" && url.pathname === "/v1/terminal-hosts/herdr/workspaces") {
     // Same machine-local boundary as observed sessions. No CLI/web forwarding,
     // guest/scoped grants or origin-bearing browser requests can initiate probes.
@@ -641,14 +761,54 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/mcp-events") {
     await handleBrokerMcpEvents(request, response, deps.mcpEvents); return;
   }
+  const decisionMatch = method === "GET" ? url.pathname.match(/^\/v1\/decisions\/([^/]+)$/) : null;
+  if (url.pathname === "/v1/decisions" || url.pathname.startsWith("/v1/decisions/")) {
+    // Operator asks are this machine's: the same fence as permission decisions.
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    const cards = deps.decisionCards;
+    if (!cards) { json(response, 404, { error: "decision_cards_unavailable" }); return; }
+    try {
+      if (method === "GET" && url.pathname === "/v1/decisions") {
+        const state = url.searchParams.get("state") === "all" ? "all" : "open";
+        const limit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+        json(response, 200, { decisions: await cards.list({ state, ...(Number.isFinite(limit) ? { limit } : {}) }) });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/decisions/answer") {
+        const body = await readRequestBody<{ id?: unknown; answer?: unknown; requestId?: unknown }>(request, { maxBytes: 16 * 1024 });
+        if (typeof body.id !== "string" || typeof body.requestId !== "string" || !body.answer || typeof body.answer !== "object") {
+          throw new DecisionAnswerError("id, requestId and answer are required");
+        }
+        json(response, 200, { ok: true, decision: await cards.answer({ id: body.id, requestId: body.requestId, answer: body.answer as never }) });
+        return;
+      }
+      if (decisionMatch) {
+        const id = decodeURIComponent(decisionMatch[1]!);
+        const view = await cards.view(id);
+        if (!view) { json(response, 404, { error: "not_found", detail: `no operator ask ${id}` }); return; }
+        json(response, 200, { decision: view });
+        return;
+      }
+      json(response, 405, { error: "method_not_allowed" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof DecisionAnswerError) json(response, error.status, { error: message });
+      else if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended", sessionOpen: error.sessionOpen });
+      else json(response, error instanceof PermissionDeliveryUnconfirmedError ? 502 : 409, { error: message });
+    }
+    return;
+  }
   if (method === "POST" && url.pathname === "/v1/permissions/decide") {
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
     try {
       const body = await readRequestBody<{ requestId?: unknown; version?: unknown; decision?: unknown }>(request);
       if (typeof body.requestId !== "string" || typeof body.version !== "string"
         || !["once", "project", "deny"].includes(String(body.decision))) throw new Error("requestId, version, and decision (once/project/deny) are required");
       if (!deps.permissionService) throw new Error("Permission decisions are unavailable");
-      await deps.permissionService.decide(body.requestId, body.version, body.decision as "once" | "project" | "deny");
+      const attribution = brokerAttributionFor({ claimedActorId: "operator", context: request.transportContext,
+        personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+      await deps.permissionService.decide(body.requestId, body.version, body.decision as "once" | "project" | "deny", undefined, attribution);
       json(response, 200, { ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -700,8 +860,36 @@ export function createBrokerHttpRouter(
     }
     return;
   }
+  if (method === "POST" && url.pathname === "/v1/tasks/notify") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    try {
+      const body = await readRequestBody<{ ref?: unknown; notify?: unknown; actorId?: unknown }>(request);
+      if (typeof body.ref !== "string" || !body.ref.trim() || typeof body.notify !== "boolean") throw new TaskReadyError(400, "ref and notify (boolean) are required");
+      if (!deps.taskReady) throw new TaskReadyError(503, "Ready is unavailable");
+      const actorId = attributedActorId(typeof body.actorId === "string" ? body.actorId : undefined);
+      json(response, 200, await deps.taskReady.setNotify({ ref: body.ref.trim(), notify: body.notify, actorId }));
+    } catch (error) {
+      json(response, error instanceof TaskReadyError ? error.status : 404, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/tasks/ready/decide") {
+    if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
+    try {
+      const body = await readRequestBody<{ ref?: unknown; decision?: unknown; requestId?: unknown }>(request);
+      if (typeof body.ref !== "string" || !body.ref.trim() || !isTaskReadyDecision(body.decision)) throw new TaskReadyError(400, "ref and decision (continue/hold) are required");
+      if (!deps.taskReady) throw new TaskReadyError(503, "Ready is unavailable");
+      json(response, 200, await deps.taskReady.decide({ ref: body.ref.trim(), decision: body.decision, actorId: "operator",
+        ...(typeof body.requestId === "string" && body.requestId.trim() ? { requestId: body.requestId.trim() } : {}) }));
+    } catch (error) {
+      json(response, error instanceof TaskReadyError ? error.status : 409, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
   if (method === "POST" && url.pathname === "/v1/operator-requests/dismiss") {
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
+    if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
     try {
       const body = await readRequestBody<{ requestId?: unknown }>(request);
       if (typeof body.requestId !== "string" || !body.requestId) throw new Error("requestId is required");
@@ -807,6 +995,10 @@ export function createBrokerHttpRouter(
     }
   }
   if (await handleShowRoute(request, response, url, deps.shows ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
+  if (await handlePostRoute(request, response, url, deps.posts ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
+  if (await handleRoutineRoute(request, response, url, deps.routines ?? {})) return;
+  if (await handleWorktreeRetirementRoute(request, response, url, deps.worktreeRetirement ?? {})) return;
+  if (handleFeedWorkRoute(request, response, url, deps.feedWork ?? {})) return;
   if (await handleAttachmentRoute(request, response, url, deps.attachments ?? { nodeId, peerNode: () => undefined })) return;
   const aliasItemMatch = method === "PATCH" || method === "DELETE"
     ? url.pathname.match(/^\/v1\/aliases\/([^/]+)$/)
@@ -860,6 +1052,26 @@ export function createBrokerHttpRouter(
     } catch (error) { return badRequest(response, error instanceof Error ? error.message : String(error)); }
   }
 
+  if (method === "POST" && url.pathname === "/v1/integrations/rex/start") {
+    if (denyRemoteMutation()) return;
+    try {
+      const input = await readRequestBody<RexStartInput>(request);
+      json(response, 200, await managedSessionHttpService.startRexSession(input));
+    } catch (error) { badRequest(response, error); }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/integrations/rex/status") {
+    if (denyRemoteMutation()) return;
+    try {
+      const input = await readRequestBody<RexStatusInput>(request);
+      const observation = await readRexStatus(input);
+      const endpoints = runtime.peek?.().endpoints;
+      json(response, 200, { ...observation, agents: endpoints ? rexBindings(Object.values(endpoints), nodeId, input) : null });
+    } catch (error) { badRequest(response, error); }
+    return;
+  }
+
   if (method === "POST" && url.pathname.startsWith("/v1/integrations/t3/")) {
     if (denyRemoteMutation()) return;
     if (forwardedNodeId) { json(response, 403, { error: "t3_local_only" }); return; }
@@ -891,6 +1103,54 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  if (url.pathname.startsWith("/v1/integrations/vercel-board/")) {
+    if (!deps.vercelBoardService) { json(response, 503, { error: "vercel_board_unavailable" }); return; }
+    const board = deps.vercelBoardService;
+    try {
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/status") {
+        json(response, 200, { connections: await board.status(url.searchParams.get("connection") ?? undefined) });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/dispatcher") {
+        const connectionId = url.searchParams.get("connection") ?? "";
+        const explain = url.searchParams.get("explain");
+        // Explaining reads one task from the board and decides it; it never claims.
+        json(response, 200, explain !== null ? await board.runDispatcher({ connectionId, actorId: "", explain }) : await board.dispatcherStatus(connectionId));
+        return;
+      }
+      const number = (name: string) => { const raw = url.searchParams.get(name); return raw === null || !/^\d+$/.test(raw) ? undefined : Number(raw); };
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/messages") {
+        json(response, 200, await board.messages({ connectionId: url.searchParams.get("connection") ?? "", channel: url.searchParams.get("channel") ?? "", limit: number("limit") }));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/handoffs") {
+        const context = request.transportContext;
+        const includeScoutResult = Boolean(context && context.transport !== "remote" && !context.peer && !context.guest && !forwardedNodeId);
+        json(response, 200, await board.handoffs({ connectionId: url.searchParams.get("connection") ?? "", taskId: url.searchParams.get("task") ?? undefined, since: number("since"), limit: number("limit"), includeScoutResult }));
+        return;
+      }
+      if (method !== "POST") { notFound(response); return; }
+      // Board credentials and claim tokens stay on the host that holds them: no remote mutation, no forwarding.
+      if (denyRemoteMutation()) return;
+      if (forwardedNodeId) { json(response, 403, { error: "vercel_board_local_only" }); return; }
+      const input = await readRequestBody<Record<string, any>>(request, { maxBytes: 256 * 1024 });
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/connect") { json(response, 200, await board.connect(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/claim") { json(response, 200, await board.claim(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/dispatcher") { json(response, 200, await board.setDispatch(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/dispatcher/run") { json(response, 200, await board.runDispatcher(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/plan") { json(response, 200, await board.plan(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/promote") { json(response, 200, await board.promote(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/roles") { json(response, 200, await board.declareRole(input as any)); return; }
+      notFound(response);
+    } catch (error) {
+      // Only service error codes and messages cross this boundary; credentials and tokens never do.
+      if (error instanceof VercelBoardServiceError) { json(response, error.status, { error: error.code, message: error.message, ...(error.fix ? { fix: error.fix } : {}) }); return; }
+      if (error instanceof VercelBoardConnectionError) { json(response, 400, { error: error.code, message: error.message, ...(error.fix ? { fix: error.fix } : {}) }); return; }
+      json(response, 500, { error: "vercel_board_request_failed", message: error instanceof Error ? error.message.slice(0, 300) : "failed" });
+    }
+    return;
+  }
+
   if (method === "POST" && (url.pathname === "/v1/external-sessions/ack" || url.pathname === "/v1/external-sessions/poll" || url.pathname === "/v1/external-sessions/attach" || url.pathname === "/v1/external-sessions/get" || url.pathname === "/v1/external-sessions/reply")) {
     if (!deps.externalSessionService) { json(response, 503, { error: "external_sessions_unavailable" }); return; }
     try {
@@ -908,6 +1168,7 @@ export function createBrokerHttpRouter(
         ? await service.reply({ ownerId: input.ownerId, sessionId: string("sessionId"), deliveryId: string("deliveryId"), replyToken: typeof input.replyToken === "string" ? input.replyToken : undefined, body: string("body"),
           ...(typeof input.ref === "string" ? { ref: input.ref, requestId: string("requestId"), progress: input.progress === true,
             failed: input.failed === true, image: input.image as import("@openscout/protocol").ScoutTaskReply["image"],
+            ...(input.points !== undefined ? { points: input.points as import("@openscout/protocol").ScoutTaskReply["points"] } : {}),
             attachments: input.attachments as import("@openscout/protocol").ScoutTaskReply["attachments"] } : {}) })
         : url.pathname.endsWith("/poll")
         ? await service.poll({ ownerId: input.ownerId, sessionId: string("sessionId"), cursor: typeof input.cursor === "string" ? input.cursor : undefined, limit: typeof input.limit === "number" ? input.limit : undefined })
@@ -1192,7 +1453,18 @@ export function createBrokerHttpRouter(
 
   if (method === "POST" && (url.pathname === "/a2a" || url.pathname === "/v1/a2a/rpc" || a2aAgentRpcMatch)) {
     try {
-      const body = await readRequestBody<A2AJsonRpcRequest>(request);
+      let body = await readRequestBody<A2AJsonRpcRequest>(request);
+      if (["message/send", "message/sendStreaming", "SendMessage"].includes(body.method)) {
+        const params = body.params as any;
+        if (params?.message) {
+          const attribution = brokerAttributionFor({ claimedActorId: params.message.metadata?.scoutRequesterId ?? "a2a-client",
+            context: request.transportContext, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+          body = { ...body, params: { ...params,
+            message: { ...params.message, metadata: { ...params.message.metadata, scoutRequesterId: attribution.actorId, attribution } },
+            metadata: { ...params.metadata, attribution },
+          } };
+        }
+      }
       const pathAgentId = a2aAgentRpcMatch ? decodeURIComponent(a2aAgentRpcMatch[1] ?? "") : undefined;
       const result = await a2aService.handleJsonRpc(body, url.origin, pathAgentId);
       a2aJson(response, result.error ? 200 : 200, result);
@@ -1659,6 +1931,46 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  if (url.pathname === "/v1/session-names") {
+    // Session names are machine-local metadata, like the roster.
+    const context = request.transportContext;
+    if (context && (context.transport === "remote" || context.guest || context.scoped)) {
+      json(response, 403, { error: "local_only", detail: "session names are machine-local" });
+      return;
+    }
+    if (!sessionNameService) {
+      json(response, 503, { error: "session_names_unavailable", detail: "session names require broker SQLite persistence" });
+      return;
+    }
+    if (method === "GET" && url.pathname === "/v1/session-names") {
+      json(response, 200, { names: sessionNameService.list() } satisfies SessionNameListResult);
+      return;
+    }
+    if (method === "POST" && url.pathname === "/v1/session-names") {
+      try {
+        const body = await readRequestBody<SessionNameSetRequest>(request);
+        if (!body || typeof body !== "object" || !("name" in body)) {
+          json(response, 400, { error: "invalid_session_name", detail: "the body needs a name (null or empty clears it)" });
+          return;
+        }
+        json(response, 200, sessionNameService.set(body));
+      } catch (error) {
+        if (error instanceof SessionNameTargetError) {
+          json(response, error.code === "session_not_found" ? 404 : error.code === "ambiguous_session" ? 409 : 400, {
+            error: error.code,
+            detail: error.message,
+            ...(error.candidates.length ? { candidates: error.candidates } : {}),
+          });
+          return;
+        }
+        badRequest(response, error);
+      }
+      return;
+    }
+    json(response, 405, { error: "method_not_allowed" });
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/v1/topology/snapshot") {
     json(response, 200, await getHarnessTopologySnapshot(url.searchParams.get("force") === "1"));
     return;
@@ -1676,13 +1988,16 @@ export function createBrokerHttpRouter(
     };
     const timingDesc = [scope, limit ? `limit-${limit}` : null].filter(Boolean).join("-");
     const parentChainParam = url.searchParams.get("parentChain")?.trim().toLowerCase();
-    const payload = trimTailDiscoverySnapshot(
+    const shaped = trimTailDiscoverySnapshot(
       shapeTailDiscoverySnapshot(await getTailDiscovery(discoveryOptions), {
         includeParentChain: !(parentChainParam === "0" || parentChainParam === "false"),
         pid: parseTailDiscoveryPid(url.searchParams.get("pid")),
       }),
       limit,
     );
+    const payload = sessionNameService
+      ? { ...shaped, transcripts: sessionNameService.applyToTranscripts(shaped.transcripts) }
+      : shaped;
     jsonWithHeaders(response, 200, payload, {
       "Server-Timing": serverTimingHeader([{
         name: force ? "tail-discover-force" : "tail-discover",
@@ -1842,7 +2157,7 @@ export function createBrokerHttpRouter(
       }>(request);
       if (body.operation === "preferences") {
         if (!updateChatPreferences || typeof body.actorId !== "string" || !body.actorId.trim()) throw new Error("Preference writer and actor are required.");
-        const preferences = await updateChatPreferences(conversationId, body.actorId, body.change);
+        const preferences = await updateChatPreferences(conversationId, attributedActorId(body.actorId), body.change);
         json(response, 200, { ok: true, preferences });
         return;
       }
@@ -1869,7 +2184,9 @@ export function createBrokerHttpRouter(
       if (!respondToChatQuestion) throw new Error("Question responses are unavailable.");
       const body = await readRequestBody<{ actorId?: unknown; isOperator?: unknown; change?: unknown }>(request);
       if (typeof body.actorId !== "string" || !body.actorId.trim() || typeof body.isOperator !== "boolean") throw new ChatQuestionError(400, "Invalid question response identity.");
-      const record = await respondToChatQuestion(decodeURIComponent(conversationQuestionMatch[1]!), decodeURIComponent(conversationQuestionMatch[2]!), body.actorId, body.isOperator, body.change);
+      const actorId = attributedActorId(body.actorId);
+      const isOperator = body.isOperator && brokerAttributionRequiresOperator(request.transportContext);
+      const record = await respondToChatQuestion(decodeURIComponent(conversationQuestionMatch[1]!), decodeURIComponent(conversationQuestionMatch[2]!), actorId, isOperator, body.change);
       json(response, 200, { ok: true, record });
     } catch (error) {
       if (error instanceof ChatQuestionError) json(response, error.status, { error: error.message, status: error.status });
@@ -1883,7 +2200,9 @@ export function createBrokerHttpRouter(
       if (!correctChatMessage) throw new Error("Message corrections are unavailable.");
       const body = await readRequestBody<{ messageId?: unknown; actorId?: unknown; canModerate?: unknown; change?: unknown }>(request);
       if (typeof body.actorId !== "string" || !body.actorId.trim() || typeof body.messageId !== "string" || typeof body.canModerate !== "boolean") throw new Error("Invalid message correction request.");
-      const message = await correctChatMessage(decodeURIComponent(conversationCorrectionsMatch[1]!), body.messageId, body.actorId, body.canModerate, body.change);
+      const actorId = attributedActorId(body.actorId);
+      const canModerate = body.canModerate && brokerAttributionRequiresOperator(request.transportContext);
+      const message = await correctChatMessage(decodeURIComponent(conversationCorrectionsMatch[1]!), body.messageId, actorId, canModerate, body.change);
       json(response, 200, { ok: true, message });
     } catch (error) {
       if (error instanceof ChatMessageCorrectionError) json(response, error.status, { error: error.message, status: error.status });
@@ -1897,7 +2216,7 @@ export function createBrokerHttpRouter(
       if (!updateConversationPins) throw new Error("Channel pins are unavailable.");
       const body = await readRequestBody<{ actorId?: unknown; change?: unknown }>(request);
       if (typeof body.actorId !== "string" || !body.actorId.trim()) throw new Error("actorId is required");
-      const conversation = await updateConversationPins(decodeURIComponent(conversationPinsMatch[1]!), body.actorId, body.change);
+      const conversation = await updateConversationPins(decodeURIComponent(conversationPinsMatch[1]!), attributedActorId(body.actorId), body.change);
       json(response, conversation ? 200 : 404, conversation ? { ok: true, conversation } : { error: "unknown conversation" });
     } catch (error) { badRequest(response, error); }
     return;
@@ -1935,6 +2254,60 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  if (method === "POST" && url.pathname === "/v1/work/retry" && deps.workRetry) {
+    try { json(response, 200, await deps.workRetry.retry(await readRequestBody<import("@openscout/protocol").WorkRetryRequest>(request, { maxBytes: 16 * 1024 }))); }
+    catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
+    }
+
+  if (deps.derivedRecords && (url.pathname === "/v1/derived" || url.pathname === "/v1/derived/pending")) {
+    const derived = deps.derivedRecords;
+    try {
+      if (method === "GET" && url.pathname === "/v1/derived/pending") {
+        json(response, 200, { pending: derived.pending({ limit: parseLimit(url) }) });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/derived") {
+        json(response, 200, derived.read({
+          workId: url.searchParams.get("workId") ?? "",
+          kind: url.searchParams.get("kind") ?? "",
+          producerVersion: url.searchParams.get("producerVersion") ?? undefined,
+        }));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/derived") {
+        json(response, 200, await derived.write(await readRequestBody<DerivedWriteRequest>(request, { maxBytes: 64 * 1024 })));
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DerivedRecordError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+      return;
+    }
+  }
+
+  const boardMatch = method === "GET" ? url.pathname.match(/^\/v1\/boards\/([^/]+)$/) : null;
+  if (deps.boards && (boardMatch || (method === "GET" && url.pathname === "/v1/boards"))) {
+    try {
+      if (!boardMatch) {
+        json(response, 200, deps.boards.list());
+        return;
+      }
+      const closedSince = Number(url.searchParams.get("closedSince"));
+      json(response, 200, deps.boards.read(decodeURIComponent(boardMatch[1]!), {
+        closedSince: Number.isFinite(closedSince) && closedSince > 0 ? closedSince : undefined,
+        limit: parseLimit(url),
+      }));
+    } catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
+  }
+
   if (deps.workLifecycles && url.pathname.startsWith("/v1/work/")) {
     const work = deps.workLifecycles;
     try {
@@ -1961,15 +2334,28 @@ export function createBrokerHttpRouter(
         return;
       }
       if (method === "POST" && url.pathname === "/v1/work/move") {
-        json(response, 200, await work.move(await readRequestBody<WorkMoveRequest>(request, { maxBytes: 64 * 1024 })));
+        const body = await readRequestBody<WorkMoveRequest>(request, { maxBytes: 64 * 1024 });
+        const snapshot = currentAttributionSnapshot();
+        const parent = brokerAttributionFromMetadata(snapshot.collaborationRecords?.[body.workId]?.metadata);
+        const attribution = brokerAttributionFor({ claimedActorId: body.actorId ?? "operator", context: request.transportContext,
+          personActorIds: brokerPersonActorIds(snapshot), parent });
+        json(response, 200, await work.move({ ...body, actorId: attribution.actorId, attribution }));
         return;
       }
       if (method === "POST" && url.pathname === "/v1/work/review") {
-        json(response, 200, await work.review(await readRequestBody<WorkReviewRequest>(request, { maxBytes: 64 * 1024 })));
+        const body = await readRequestBody<WorkReviewRequest>(request, { maxBytes: 64 * 1024 });
+        const snapshot = currentAttributionSnapshot();
+        const parent = brokerAttributionFromMetadata(snapshot.collaborationRecords?.[body.workId]?.metadata);
+        const attribution = brokerAttributionFor({ claimedActorId: body.actorId ?? "operator", context: request.transportContext,
+          personActorIds: brokerPersonActorIds(snapshot), parent });
+        json(response, 200, await work.review({ ...body, actorId: attribution.actorId, attribution }));
         return;
       }
       if (method === "POST" && url.pathname === "/v1/work/claim") {
-        json(response, 200, await work.claim(await readRequestBody<WorkClaimRequest>(request, { maxBytes: 16 * 1024 })));
+        const body = await readRequestBody<WorkClaimRequest>(request, { maxBytes: 16 * 1024 });
+        const attribution = brokerAttributionFor({ claimedActorId: body.actorId ?? "operator", context: request.transportContext,
+          personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+        json(response, 200, await work.claim({ ...body, actorId: attribution.actorId }));
         return;
       }
     } catch (error) {
@@ -2044,6 +2430,7 @@ export function createBrokerHttpRouter(
         agentId?: string;
         scope?: { kind?: string; missionId?: string; projectRoot?: string };
         assignedById?: string;
+        enforceSingleHolder?: boolean;
         enforceSingleOrchestrator?: boolean;
         metadata?: Record<string, unknown>;
       }>(request);
@@ -2055,7 +2442,8 @@ export function createBrokerHttpRouter(
         roleId: body.roleId.trim(),
         agentId: body.agentId.trim(),
         scope,
-        assignedById: body.assignedById?.trim() || operatorActorId,
+        assignedById: attributedActorId(body.assignedById),
+        enforceSingleHolder: body.enforceSingleHolder,
         enforceSingleOrchestrator: body.enforceSingleOrchestrator,
         metadata: body.metadata,
       }));
@@ -2079,10 +2467,87 @@ export function createBrokerHttpRouter(
       const body = await readRequestBody<{ revokedById?: string }>(request).catch(() => ({} as { revokedById?: string }));
       json(response, 200, brokerRevokeRole(db, {
         assignmentId,
-        revokedById: body.revokedById?.trim() || operatorActorId,
+        revokedById: attributedActorId(body.revokedById),
       }));
     } catch (error) {
       badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "GET" && url.pathname === "/v1/roles/slots") {
+    try {
+      const db = deps.openRolesDb?.() ?? null;
+      if (!db) {
+        json(response, 503, { error: "roles_unavailable", detail: "control-plane roles store not open" });
+        return;
+      }
+      const roleId = url.searchParams.get("roleId")?.trim();
+      if (!roleId) throw new Error("roleId is required");
+      json(response, 200, brokerReadRoleSlots(db, roleId, roleSlotBoardCards(deps.workLifecycles), deps.runningRolePass));
+    } catch (error) {
+      badRequest(response, error);
+    }
+    return;
+  }
+
+  const rolePassMatch = method === "POST"
+    ? url.pathname.match(/^\/v1\/roles\/slots\/([^/]+)\/pass$/)
+    : null;
+  if (rolePassMatch) {
+    try {
+      if (!deps.ensureRolePass) {
+        json(response, 503, { error: "role_pass_unavailable", detail: "role passes are not running" });
+        return;
+      }
+      const result = await deps.ensureRolePass(decodeURIComponent(rolePassMatch[1] ?? ""));
+      json(response, 200, result);
+    } catch (error) {
+      if (error instanceof RolePassError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  const roleSlotWriteMatch = method === "POST"
+    ? url.pathname.match(/^\/v1\/roles\/slots\/([^/]+)$/)
+    : null;
+  if (roleSlotWriteMatch) {
+    try {
+      const db = deps.openRolesDb?.() ?? null;
+      if (!db) {
+        json(response, 503, { error: "roles_unavailable", detail: "control-plane roles store not open" });
+        return;
+      }
+      const assignmentId = decodeURIComponent(roleSlotWriteMatch[1] ?? "");
+      const body = await readRequestBody<{
+        actorId?: string;
+        expectedVersion?: number;
+        stamp?: Record<string, number>;
+        sentences?: Array<{ text: string; cites: string[] }>;
+      }>(request, { maxBytes: 256 * 1024 });
+      if (!body.actorId?.trim()) throw new Error("actorId is required");
+      const { slot } = brokerWriteRoleSlot(db, {
+        assignmentId,
+        actorId: attributedActorId(body.actorId),
+        expectedVersion: body.expectedVersion ?? -1,
+        stamp: body.stamp ?? {},
+        sentences: body.sentences ?? [],
+      });
+      deps.publishEphemeralEvent?.({
+        id: `role-slot-${slot.assignmentId}-${slot.version}`,
+        kind: "role.slot.written",
+        ts: slot.writtenAt,
+        actorId: slot.writtenById,
+        payload: { assignmentId: slot.assignmentId, roleId: slot.roleId, version: slot.version },
+      });
+      json(response, 200, { slot });
+    } catch (error) {
+      if (error instanceof RoleSlotError) {
+        json(response, error.status, { error: error.message, ...(error.currentVersion !== undefined ? { currentVersion: error.currentVersion } : {}) });
+      } else {
+        badRequest(response, error);
+      }
     }
     return;
   }
@@ -2140,7 +2605,7 @@ export function createBrokerHttpRouter(
       }
       json(response, 201, brokerAppendMissionLog(db, {
         missionId,
-        actorId: body.actorId.trim(),
+        actorId: attributedActorId(body.actorId),
         kind: body.kind as import("@openscout/protocol").ScoutMissionLogKind,
         intent: body.intent,
         status: body.status,
@@ -2372,6 +2837,21 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  // Cross-host session search (control tier): a peer in this operator's mesh
+  // asks this host to run one query over its own index. Only bounded hits
+  // leave the host, never a transcript. Same trust as starting a session
+  // here, which could read the transcripts directly; guests never reach it.
+  if (method === "GET" && url.pathname === "/v1/mesh/knowledge/search") {
+    if (request.transportContext?.guest) { json(response, 403, { error: "forbidden" }); return; }
+    if (!deps.searchSessionKnowledge) { notFound(response); return; }
+    let input: SessionKnowledgeSearchInput;
+    try { input = parseSessionKnowledgeSearchParams(url.searchParams); }
+    catch (error) { json(response, 400, { error: "invalid_search_query", detail: error instanceof Error ? error.message : String(error) }); return; }
+    try { json(response, 200, { nodeId, ...deps.searchSessionKnowledge(input) }); }
+    catch (error) { json(response, 503, { error: "session_search_unavailable", detail: error instanceof Error ? error.message : String(error) }); }
+    return;
+  }
+
   // Same local tier as repo-watch/tail reads; never starts the private web app.
   if (method === "GET" && url.pathname === "/v1/repo-diff/worktree") {
     if (request.transportContext?.transport === "remote" || request.transportContext?.guest) {
@@ -2387,7 +2867,7 @@ export function createBrokerHttpRouter(
       json(response, 403, { error: "forbidden" }); return;
     }
     if (!runtime.peek) { json(response, 503, { error: "provider_quotas_unavailable" }); return; }
-    try { json(response, 200, readProviderQuotas(runtime.peek().endpoints, nodeId, url)); }
+    try { json(response, 200, readProviderQuotas(runtime.peek!().endpoints, nodeId, url)); }
     catch (error) { json(response, error instanceof TypeError ? 400 : 503, { error: error instanceof TypeError ? "invalid_quota_query" : "provider_quotas_unavailable" }); }
     return;
   }
@@ -2400,7 +2880,9 @@ export function createBrokerHttpRouter(
   if (method === "GET" && (url.pathname === "/v1/observed-sessions" || url.pathname === "/v1/observed-sessions/resolve")) {
     if (request.transportContext?.transport === "remote" || request.transportContext?.guest) { json(response, 403, { error: "forbidden" }); return; }
     const result = readObservedSessions({ nodeId, readCache: deps.readObservedSessionCache,
-      readEndpoints: runtime.peek ? () => runtime.peek!().endpoints : undefined }, url, url.pathname.endsWith("/resolve"));
+      readEndpoints: runtime.peek ? () => runtime.peek!().endpoints : undefined,
+      nameSessions: sessionNameService ? (inventory) => sessionNameService.applyToObservedInventory(inventory) : undefined },
+      url, url.pathname.endsWith("/resolve"));
     json(response, result.status, result.body); return;
   }
 
@@ -2522,6 +3004,7 @@ export function createBrokerHttpRouter(
     deps: {
       brokerService,
       recordFlight,
+      snapshot: currentAttributionSnapshot,
     },
   })) {
     return;
@@ -2568,6 +3051,10 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/mesh/messages") {
     try {
       const bundle = await readRequestBody<MeshMessageBundle>(request);
+      const attribution = brokerAttributionFor({ claimedActorId: bundle.message.actorId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+      bundle.message = { ...bundle.message, actorId: attribution.actorId, metadata: { ...bundle.message.metadata, attribution } };
+      for (const actor of [...bundle.actors ?? [], ...bundle.agents ?? []]) assertActorMutation(actor);
       const result = await meshHttpService.receiveMessageBundle(bundle);
       json(response, result.status, result.body);
     } catch (error) {
@@ -2582,11 +3069,22 @@ export function createBrokerHttpRouter(
       if (url.pathname.endsWith("/reply")) {
         const input = await readRequestBody<import("@openscout/protocol").ScoutTaskReply>(request);
         if (!input.ref) throw new Error("mesh task replies require --ref");
-        json(response, 200, await deps.tasks.reply(input));
+        json(response, 200, await deps.tasks.reply(attributedTaskReply(input)));
       } else {
         const input = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
         if (!input.task?.ref && !input.task?.continue) throw new Error("mesh task asks require --ref or --continue");
-        json(response, 202, await deliveryAcceptanceService.accept(input));
+        const attribution = brokerAttributionFor({ claimedActorId: input.caller?.actorId ?? input.requesterId,
+          context: request.transportContext, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+        const includeRequesterId = input.requesterId !== undefined || input.caller?.actorId === undefined;
+        const applyAttribution = () => ({
+          ...input,
+          caller: { ...input.caller, actorId: attribution.actorId },
+          ...(includeRequesterId ? { requesterId: attribution.actorId } : {}),
+          messageMetadata: { ...input.messageMetadata, attribution },
+          invocationMetadata: { ...input.invocationMetadata, attribution },
+          ...(input.workItem ? { workItem: { ...input.workItem, metadata: { ...input.workItem.metadata, attribution } } } : {}),
+        });
+        json(response, 202, await deliveryAcceptanceService.accept(input, { executionPayload: applyAttribution() }));
       }
     } catch (error) { badRequest(response, error); }
     return;
@@ -2595,6 +3093,11 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/mesh/invocations") {
     try {
       const bundle = await readRequestBody<MeshInvocationBundle>(request);
+      const attribution = brokerAttributionFor({ claimedActorId: bundle.invocation.requesterId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+      bundle.invocation = { ...bundle.invocation, requesterId: attribution.actorId, metadata: { ...bundle.invocation.metadata, attribution } };
+      if (bundle.message) bundle.message = { ...bundle.message, actorId: attribution.actorId, metadata: { ...bundle.message.metadata, attribution } };
+      for (const actor of [...bundle.actors ?? [], ...bundle.agents ?? []]) assertActorMutation(actor);
       const result = await meshHttpService.receiveInvocationBundle(bundle);
       json(response, result.status, result.body);
     } catch (error) {
@@ -2678,6 +3181,18 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/mesh/collaboration/records") {
     try {
       const bundle = await readRequestBody<MeshCollaborationRecordBundle>(request);
+      const attribution = brokerAttributionFor({ claimedActorId: bundle.record.createdById, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+      bundle.record = {
+        ...bundle.record,
+        createdById: attribution.actorId,
+        ...(bundle.record.kind === "question" ? {
+          ...(bundle.record.askedById !== undefined ? { askedById: attribution.actorId } : {}),
+          ...(bundle.record.answeredById !== undefined ? { answeredById: attribution.actorId } : {}),
+        } : {}),
+        metadata: { ...bundle.record.metadata, attribution },
+      } as typeof bundle.record;
+      for (const actor of [...bundle.actors ?? [], ...bundle.agents ?? []]) assertActorMutation(actor);
       const result = await meshHttpService.receiveCollaborationRecordBundle(bundle);
       json(response, result.status, result.body);
     } catch (error) {
@@ -2689,6 +3204,10 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/mesh/collaboration/events") {
     try {
       const bundle = await readRequestBody<MeshCollaborationEventBundle>(request);
+      const attribution = brokerAttributionFor({ claimedActorId: bundle.event.actorId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
+      bundle.event = { ...bundle.event, actorId: attribution.actorId, metadata: { ...bundle.event.metadata, attribution } };
+      for (const actor of [...bundle.actors ?? [], ...bundle.agents ?? []]) assertActorMutation(actor);
       const result = await meshHttpService.receiveCollaborationEventBundle(bundle);
       json(response, result.status, result.body);
     } catch (error) {
@@ -2768,8 +3287,10 @@ export function createBrokerHttpRouter(
         metadata?: Record<string, unknown>;
       }>(request);
 
+      const attribution = brokerAttributionFor({ claimedActorId: body.requesterId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), parent: brokerAttributionFromMetadata(record.metadata) });
       const invocation = buildCollaborationInvocation(record, {
-        requesterId: body.requesterId?.trim() || operatorActorId,
+        requesterId: attribution.actorId,
         requesterNodeId: body.requesterNodeId?.trim() || nodeId,
         targetAgentId: body.targetAgentId?.trim() || undefined,
         action: body.action,
@@ -2778,7 +3299,7 @@ export function createBrokerHttpRouter(
         ensureAwake: body.ensureAwake,
         stream: body.stream,
         timeoutMs: body.timeoutMs,
-        metadata: body.metadata,
+        metadata: { ...body.metadata, attribution },
       });
 
       const result = await handleCommand({
@@ -2839,6 +3360,150 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  // Recording, lookup and dispatch share one boundary: a verified caller on this machine.
+  if (url.pathname === "/v1/manual-review/occurrences" || url.pathname === "/v1/manual-review/dispatches") {
+    const context = request.transportContext;
+    if (!context || !["loopback", "unix-socket"].includes(context.transport) || context.guest
+      || request.headers.origin !== undefined || request.headers["x-openscout-forwarded-node-id"] !== undefined) {
+      json(response, 403, { error: "local_only" });
+      return;
+    }
+  }
+
+  if (method === "GET" && url.pathname === "/v1/manual-review/occurrences") {
+    if (isManualReviewBoardScope(url.searchParams.get("scope")) && !isLocalReviewOperator(request)) {
+      json(response, 403, { error: "operator_only", detail: "Open Board review runs as the local operator." });
+      return;
+    }
+    try {
+      const occurrence = manualReviewOccurrences.lookup({
+        scope: url.searchParams.get("scope") ?? "",
+        requestId: url.searchParams.get("requestId") ?? "",
+      });
+      if (occurrence) json(response, 200, { occurrence });
+      else json(response, 404, { error: "not_found", detail: "no manual review occurrence is recorded for this scope and request ID" });
+    } catch (error) {
+      if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/manual-review/occurrences") {
+    try {
+      const body = await readRequestBody<ManualReviewOccurrenceRequest>(request, { maxBytes: 16 * 1024 });
+      // A Board review run is recorded by its own entry point, which reads the
+      // pins itself. This one takes them from the caller, so it may not write
+      // that scope or state a routine pin.
+      if (isManualReviewBoardScope(body?.scope) || body?.routine !== undefined) {
+        json(response, 403, manualReviewBoardScopeReserved);
+        return;
+      }
+      json(response, 200, await manualReviewOccurrences.record({
+        ...body,
+        requestedById: attributedActorId(body?.requestedById ?? "operator"),
+      }));
+    } catch (error) {
+      if (error instanceof ManualReviewOccurrenceError) json(response, error.status, error.body);
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/v1/manual-review/dispatches") {
+    try {
+      const body = await readRequestBody<ManualReviewDispatchRequest>(request, { maxBytes: 16 * 1024 });
+      // The reviewer of a Board review run is its routine's. A caller does not choose it here.
+      if (isManualReviewBoardScope(body?.scope)) {
+        json(response, 403, manualReviewBoardScopeReserved);
+        return;
+      }
+      // The same attribution as an ask sent through /v1/deliver. The first
+      // admitted caller's is pinned, and the ask is sent as that principal.
+      const attribution = brokerAttributionFor({ claimedActorId: body?.requestedById ?? "operator",
+        context: request.transportContext, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()) });
+      // A protected identity is written as only by its claim holder. That holds
+      // for the caller before a target is pinned, and for the pinned principal
+      // when a later caller's retry delivers the ask.
+      const claims = brokerService.assistantClaims;
+      const dispatch = () => manualReviewDispatch.dispatch(
+        { scope: body?.scope, requestId: body?.requestId, target: body?.target, attribution },
+        claims ? { admitAsk: (actorId, deliver) => claims.admit(actorId, deliver) } : {},
+      );
+      json(response, 200, await (claims ? claims.admit(attribution.actorId, dispatch) : dispatch()));
+    } catch (error) {
+      if (error instanceof ManualReviewDispatchError) json(response, error.status, error.body);
+      else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (url.pathname === "/v1/manual-review/board-routines" || url.pathname === "/v1/manual-review/board-preview"
+    || url.pathname === "/v1/manual-review/board-runs" || url.pathname === "/v1/manual-review/board-ticket"
+    || url.pathname === "/v1/manual-review/board-accept") {
+    // A routine grants a read of the board and a reviewer to start, so every
+    // one of these routes is the operator's: a caller on this machine whose
+    // request carried the local operator proof. This is decided before the
+    // body is read and before anything reaches the board.
+    const context = request.transportContext;
+    if (!isLocalReviewOperator(request)) {
+      json(response, 403, { error: "operator_only", detail: "Board review routines are read, saved and run by the verified operator on this machine." });
+      return;
+    }
+    if (!manualReviewBoard) {
+      json(response, 503, { error: "manual_review_board_unavailable", detail: "This runtime does not serve Board review routines." });
+      return;
+    }
+    try {
+      if (method === "GET" && url.pathname === "/v1/manual-review/board-ticket") {
+        if (!manualReviewBoardTickets) { notFound(response); return; }
+        json(response, 200, manualReviewBoardTickets.read(url.searchParams.get("workId") ?? ""));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/manual-review/board-routines") {
+        json(response, 200, { routines: manualReviewBoard.list({
+          connectionId: url.searchParams.get("connectionId") || undefined,
+          channel: url.searchParams.get("channel") || undefined,
+        }) });
+        return;
+      }
+      if (method !== "POST") { notFound(response); return; }
+      const body = await readRequestBody<Record<string, unknown>>(request, { maxBytes: 16 * 1024 });
+      const attribution = brokerAttributionFor({ claimedActorId: "operator",
+        context, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()) });
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-accept") {
+        if (!manualReviewBoardTickets) { notFound(response); return; }
+        json(response, 200, await manualReviewBoardTickets.accept(typeof body?.workId === "string" ? body.workId : "", attribution));
+        return;
+      }
+      if (url.pathname === "/v1/manual-review/board-ticket") { notFound(response); return; }
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-routines") {
+        json(response, 200, await manualReviewBoard.save(body as unknown as ManualReviewBoardRoutineSaveRequest, attribution));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-preview") {
+        json(response, 200, await manualReviewBoard.preview(body as unknown as ManualReviewBoardPreviewRequest));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-runs") {
+        const claims = brokerService.assistantClaims;
+        const run = () => manualReviewBoard.run(
+          body as unknown as ManualReviewBoardRunRequest,
+          attribution,
+          claims ? { admitAsk: (actorId, deliver) => claims.admit(actorId, deliver) } : {},
+        );
+        json(response, 200, await (claims ? claims.admit(attribution.actorId, run) : run()));
+        return;
+      }
+      notFound(response);
+    } catch (error) {
+      if (error instanceof ManualReviewBoardError || error instanceof ManualReviewOccurrenceError || error instanceof ManualReviewDispatchError) {
+        json(response, error.status, error.body);
+      } else badRequest(response, error);
+    }
+    return;
+  }
+
   if (durableActionHeartbeatMatch) {
     try {
       const actionId = decodeURIComponent(durableActionHeartbeatMatch[1] ?? "");
@@ -2870,7 +3535,7 @@ export function createBrokerHttpRouter(
       // The broker can die after committing canonical work but before saving its
       // receipt. Recover only from positive evidence; absence never authorizes replacement.
       if (receipt?.state === "unknown") {
-        const snapshot = runtime.snapshot();
+        const snapshot = currentAttributionSnapshot();
         if (operation === "deliver") {
           const recovered = await deliveryAcceptanceService.recoverReceipt?.(requesterId, key);
           if (recovered) receipt = await requestReceipts.recover(requesterId, key, operation, recovered);
@@ -2901,10 +3566,15 @@ export function createBrokerHttpRouter(
       const input = await readRequestBody<MessageRecord | import("@openscout/protocol").ScoutTaskReply>(request);
       if (url.pathname === "/v1/messages/reply" && ("ref" in input || "to" in input)) {
         if (!deps.tasks) throw new Error("ask-reply/1 is unavailable on this runtime");
-        json(response, 200, await deps.tasks.reply(input as import("@openscout/protocol").ScoutTaskReply));
+        json(response, 200, await deps.tasks.reply(attributedTaskReply(input as import("@openscout/protocol").ScoutTaskReply)));
         return;
       }
       let message = input as MessageRecord;
+      const snapshot = currentAttributionSnapshot();
+      const parent = brokerAttributionFromMetadata(message.replyToMessageId ? snapshot.messages?.[message.replyToMessageId]?.metadata : undefined);
+      const attribution = brokerAttributionFor({ claimedActorId: message.actorId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(snapshot), parent });
+      message = { ...message, actorId: attribution.actorId, metadata: { ...message.metadata, attribution } };
       if (message.attachments?.some(a => a.blob !== undefined)) throw new Error("attachment_inline_write_required");
       if (url.pathname === "/v1/messages/reply" && (!message.requestId || !completionReply(message))) {
         throw new Error("explicit reply requires requestId and completionReply identity");
@@ -2943,12 +3613,13 @@ export function createBrokerHttpRouter(
         throw new Error("channelId, messageId, actorId, and emoji are required");
       }
       const removing = url.pathname === "/v1/message-reactions/remove";
+      const actor = attributedActorId(actorId);
       const result = removing
-        ? await brokerService.removeMessageReaction?.({ channelId, messageId, actorId, emoji })
+        ? await brokerService.removeMessageReaction?.({ channelId, messageId, actorId: actor, emoji })
         : await brokerService.upsertMessageReaction?.({
           channelId,
           messageId,
-          actorId,
+          actorId: actor,
           emoji,
           createdAt: typeof body.createdAt === "number" ? body.createdAt : Date.now(),
         });
@@ -2992,6 +3663,21 @@ export function createBrokerHttpRouter(
     const signal = requestAbortSignal(request, response);
     try {
       const payload = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      const snapshot = currentAttributionSnapshot();
+      const parentFlight = payload.relation?.parentFlightId ? snapshot.flights?.[payload.relation.parentFlightId] : undefined;
+      const parent = brokerAttributionFromMetadata(parentFlight ? snapshot.invocations?.[parentFlight.invocationId]?.metadata : undefined)
+        ?? brokerAttributionFromMetadata(parentFlight?.metadata);
+      const attribution = brokerAttributionFor({ claimedActorId: payload.caller?.actorId ?? payload.requesterId,
+        context: request.transportContext, personActorIds: brokerPersonActorIds(snapshot), parent });
+      const includeRequesterId = payload.requesterId !== undefined || payload.caller?.actorId === undefined;
+      const applyAttribution = () => ({
+        ...payload,
+        caller: { ...payload.caller, actorId: attribution.actorId },
+        ...(includeRequesterId ? { requesterId: attribution.actorId } : {}),
+        messageMetadata: { ...payload.messageMetadata, attribution },
+        invocationMetadata: { ...payload.invocationMetadata, attribution },
+        ...(payload.workItem ? { workItem: { ...payload.workItem, metadata: { ...payload.workItem.metadata, attribution } } } : {}),
+      });
       payload.traceparent ??= typeof request.headers.traceparent === "string" ? request.headers.traceparent : undefined;
       const execute = async () => {
         if ((payload.completion || payload.relation) && payload.target
@@ -3000,7 +3686,7 @@ export function createBrokerHttpRouter(
         }
         if (
           !payload.requestId && payload.target?.kind === "route_alias"
-          && await forwardAliasIfRemote(payload.target.scope?.nodeId, url.pathname, "POST", payload)
+          && await forwardAliasIfRemote(payload.target.scope?.nodeId, url.pathname, "POST", applyAttribution())
         ) return;
         if (payload.requestId && !deps.deliveryReceiptsOwnedByService) {
           if (typeof payload.requestId !== "string") throw new Error("invalid requestId");
@@ -3010,23 +3696,29 @@ export function createBrokerHttpRouter(
         const reserveInRouter = Boolean(payload.requestId && (!deps.deliveryReceiptsOwnedByService
           || (payload.target?.kind === "route_alias" && payload.target.scope?.nodeId && forwardRouteAliasRequest)));
         const accept = async (): Promise<ScoutDeliverResponse> => {
+          const execution = applyAttribution();
           if (payload.requestId && payload.target?.kind === "route_alias" && payload.target.scope?.nodeId && forwardRouteAliasRequest) {
-            const forwarded = await forwardRouteAliasRequest({ nodeSelector: payload.target.scope.nodeId, path: url.pathname, method: "POST", body: payload });
+            const forwarded = await forwardRouteAliasRequest({ nodeSelector: payload.target.scope.nodeId, path: url.pathname, method: "POST", body: execution });
             if (forwarded) {
               if (forwarded.status >= 500) throw new Error("forwarded request outcome unknown");
               return forwarded.body as ScoutDeliverResponse;
             }
           }
           if (reserveInRouter && deps.deliveryReceiptsOwnedByService) {
-            return deliveryAcceptanceService.accept(payload, { receiptReserved: true, admissionReserved: true });
+            return deliveryAcceptanceService.accept(execution, { receiptReserved: true, admissionReserved: true });
           }
-          return brokerService.deliver ? brokerService.deliver(payload, { signal }) : deliveryAcceptanceService.accept(payload, { signal });
+          if (deps.deliveryReceiptsOwnedByService) {
+            return brokerService.deliver
+              ? brokerService.deliver(payload, { signal, executionPayload: execution })
+              : deliveryAcceptanceService.accept(payload, { signal, executionPayload: execution });
+          }
+          return brokerService.deliver ? brokerService.deliver(execution, { signal }) : deliveryAcceptanceService.accept(execution, { signal });
         };
         const result = payload.requestId && reserveInRouter
-          ? await requestReceipts.run(payload.caller?.actorId || payload.requesterId || operatorActorId,
+          ? await requestReceipts.run(attribution.actorId,
               payload.requestId, "deliver", payload, accept,
-              deps.deliveryReceiptsOwnedByService ? () => deliveryAcceptanceService.recoverReceipt(payload.caller?.actorId || payload.requesterId || operatorActorId, payload.requestId!) : undefined,
-              deps.deliveryReceiptsOwnedByService ? () => deliveryAcceptanceService.reserveCommand(payload) : undefined)
+              deps.deliveryReceiptsOwnedByService ? () => deliveryAcceptanceService.recoverReceipt(attribution.actorId, payload.requestId!) : undefined,
+              deps.deliveryReceiptsOwnedByService ? () => deliveryAcceptanceService.reserveCommand(applyAttribution()) : undefined)
           : await accept();
         throwIfAborted(signal);
         json(
@@ -3055,13 +3747,25 @@ export function createBrokerHttpRouter(
         request,
         brokerInvocationRequestSchemaFor(runtimeCatalogSnapshot?.catalog),
       );
+      const snapshot = currentAttributionSnapshot();
+      const parentFlight = payload.origin?.runningFlightId ? snapshot.flights?.[payload.origin.runningFlightId] : undefined;
+      const parent = brokerAttributionFromMetadata(parentFlight ? snapshot.invocations?.[parentFlight.invocationId]?.metadata : undefined)
+        ?? brokerAttributionFromMetadata(parentFlight?.metadata);
+      const attribution = brokerAttributionFor({ claimedActorId: payload.requesterId, context: request.transportContext,
+        personActorIds: brokerPersonActorIds(snapshot), parent });
+      const applyAttribution = () => {
+        payload.requesterId = attribution.actorId;
+        payload.metadata = { ...payload.metadata, attribution };
+      };
       payload.traceparent ??= typeof request.headers.traceparent === "string" ? request.headers.traceparent : undefined;
       const execute = async () => {
+        if (!payload.requestId) applyAttribution();
         if (
           !payload.requestId && payload.target?.kind === "route_alias"
           && await forwardAliasIfRemote(payload.target.scope?.nodeId, url.pathname, "POST", payload)
         ) return;
         const invoke = async () => {
+          applyAttribution();
           if (payload.requestId && payload.target?.kind === "route_alias" && payload.target.scope?.nodeId && forwardRouteAliasRequest) {
             const forwarded = await forwardRouteAliasRequest({ nodeSelector: payload.target.scope.nodeId, path: url.pathname, method: "POST", body: payload });
             if (forwarded) {
@@ -3075,7 +3779,7 @@ export function createBrokerHttpRouter(
           return brokerService.invokeAgent ? brokerService.invokeAgent(invocation) : handleInvocationRequest(invocation);
         };
         const result = payload.requestId
-          ? await requestReceipts.run(payload.requesterId, payload.requestId, "invoke", payload, invoke)
+          ? await requestReceipts.run(attribution.actorId, payload.requestId, "invoke", payload, invoke)
           : await invoke();
         json(response, 202, result);
       };
@@ -3120,10 +3824,23 @@ export function createBrokerHttpRouter(
 
   // Local endpoint inventory. Registration already uses POST /v1/endpoints;
   // this read avoids pretending agents-only discovery carries live sessions.
+  // Bounded live read: unfinished flights only, never history. Read one
+  // flight, finished or not, with /v1/flights/<id>.
+  if (method === "GET" && url.pathname === "/v1/flights") {
+    if (url.searchParams.get("active") !== "1") {
+      json(response, 400, { error: "flight_list_requires_active", detail: "Use /v1/flights?active=1, or /v1/flights/<id> for one flight." });
+      return;
+    }
+    const flights = runtime.peek?.().flights;
+    if (!flights) { json(response, 503, { error: "flight_inventory_unavailable" }); return; }
+    json(response, 200, { flights: Object.values(flights).filter(flight => ACTIVE_FLIGHT_LIST_STATES.has(flight.state)) });
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/v1/endpoints") {
     if (!runtime.peek) { json(response, 503, { error: "endpoint_inventory_unavailable" }); return; }
     const agentId = url.searchParams.get("agentId"), endpointId = url.searchParams.get("endpointId");
-    const all = runtime.peek().endpoints;
+    const all = runtime.peek!().endpoints;
     const endpoints = endpointId ? (all[endpointId] ? [all[endpointId]!] : []) : Object.values(all);
     json(response, 200, { endpoints: endpoints.filter(e => !agentId || e.agentId === agentId) });
     return;
@@ -3139,7 +3856,11 @@ export function createBrokerHttpRouter(
 
   // ─── External agent cards (SCO-016) ────────────────────────────────────────
   if (method === "GET" && url.pathname === "/v1/agent-cards") {
-    json(response, 200, { cards: await a2aService.listScoutAgentCards() });
+    const actorId = url.searchParams.get("agentId")?.trim();
+    const cards = actorId
+      ? await a2aService.scoutAgentCardsForActor(actorId)
+      : await a2aService.listScoutAgentCards();
+    json(response, 200, { cards });
     return;
   }
   if (method === "POST" && url.pathname === "/v1/agent-cards") {

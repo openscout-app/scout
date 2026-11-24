@@ -1,3 +1,4 @@
+import { warmWorkerContinuation } from "./host-launch-admission.js";
 import {
   createLocalAgentClient,
   type LocalAgentClient,
@@ -6,11 +7,12 @@ import {
 } from "@openscout/agent-sessions/local";
 
 import type { RuntimeTimer } from "./portable-types.js";
+import { buildManagedAgentEnvironment } from "./managed-agent-environment.js";
 import { bindManagedPermissionRequester } from "./managed-permission.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
 export interface AcpAgentInvocationOptions {
-  adapterType: "grok-acp" | "kimi-acp" | "cursor-acp" | "opencode-acp" | "devin-acp";
+  adapterType: "grok-acp" | "kimi-acp" | "cursor-acp" | "opencode-acp" | "devin-acp" | "antigravity-acp";
   label: string;
   /** Stable broker/runtime session id. It is not an ACP provider session id. */
   sessionId: string;
@@ -88,10 +90,19 @@ export function acpTurnCeilingMs(
 
 const activeAcpSessions = new Map<string, Promise<AcpPoolEntry>>();
 
+/** Only a native idle observation proves this pool entry can accept another turn. */
+export async function hasLiveAcpWorker(poolKey: string): Promise<boolean> {
+  const pending = activeAcpSessions.get(poolKey);
+  if (!pending) return false;
+  const entry = await pending.catch(() => undefined);
+  return activeAcpSessions.get(poolKey) === pending && entry?.client.nativeAttention?.observe().state === "idle";
+}
+
 function harnessForAdapter(adapterType: AcpAgentInvocationOptions["adapterType"]): LocalAgentHarness {
   if (adapterType === "grok-acp") return "grok";
   if (adapterType === "kimi-acp") return "kimi";
   if (adapterType === "opencode-acp") return "opencode";
+  if (adapterType === "antigravity-acp") return "antigravity";
   if (adapterType === "devin-acp") return "devin";
   return "cursor";
 }
@@ -100,6 +111,7 @@ function transportForAdapter(adapterType: AcpAgentInvocationOptions["adapterType
   if (adapterType === "grok-acp") return "grok_acp";
   if (adapterType === "kimi-acp") return "kimi_acp";
   if (adapterType === "opencode-acp") return "opencode_acp";
+  if (adapterType === "antigravity-acp") return "antigravity_acp";
   if (adapterType === "devin-acp") return "devin_acp";
   return "cursor_acp";
 }
@@ -130,6 +142,13 @@ async function createPoolEntry(options: AcpAgentInvocationOptions): Promise<AcpP
     sessionId: options.sessionId,
     reuseKey: options.resumeSessionId,
     adapterOptions: options.adapterOptions,
+    // ACP shells need the same exact Scout identity as Claude/Codex shells.
+    // Provider session ids are separate; the runtime session owns the sender.
+    env: buildManagedAgentEnvironment({
+      agentName: options.sessionId,
+      currentDirectory: options.cwd,
+      baseEnv: process.env,
+    }),
     warmth: "lazy",
   });
   return {
@@ -150,6 +169,7 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
   const key = resolvedPoolKey(options);
   const fingerprint = sessionFingerprint(options);
   let detachedNativeSessionId: string | undefined;
+  const continuation = warmWorkerContinuation.getStore();
   const existingPromise = activeAcpSessions.get(key);
   if (existingPromise) {
     const existing = await existingPromise;
@@ -159,14 +179,19 @@ async function entryForInvocation(options: AcpAgentInvocationOptions): Promise<A
       && existing.nativeSessionId
       && requestedNativeId !== existing.nativeSessionId,
     );
-    if (existing.fingerprint === fingerprint && !nativeIdConflict && existing.client.isAlive?.() !== false) {
+    const live = continuation?.endpointId === key
+      ? existing.client.nativeAttention?.observe().state === "idle" : existing.client.isAlive?.() !== false;
+    if (existing.fingerprint === fingerprint && !nativeIdConflict && live) {
       return existing;
     }
+    if (continuation?.endpointId === key) await continuation.reserve();
     detachedNativeSessionId = existing.nativeSessionId;
     if (activeAcpSessions.get(key) === existingPromise) {
       activeAcpSessions.delete(key);
     }
     await closeEntry(existingPromise);
+  } else if (continuation?.endpointId === key) {
+    await continuation.reserve();
   }
 
   const createdPromise = createPoolEntry({
@@ -303,4 +328,8 @@ export async function existingAcpNativeSession(poolKey: string) {
   const entry = await pending.catch(() => null);
   if (!entry || activeAcpSessions.get(poolKey) !== pending) return undefined;
   return entry.client.nativeAttention;
+}
+
+export function invokeAntigravityAcpAgent(options: Omit<AcpAgentInvocationOptions, "adapterType" | "label">) {
+  return invokeAcpAgent({ ...options, adapterType: "antigravity-acp", label: "Google Antigravity" });
 }

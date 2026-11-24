@@ -34,7 +34,7 @@ export function renderAskCommandHelp(): string {
     "", "Ask creates a task and returns on acceptance, not completion. Use scout wait <handle> to wait.",
     "  --to <agent>          recipient; repeat for one independent task/receipt per target",
     "  --project <path>      capability route; add --harness, --model, --effort, or --on <host>",
-    "  --ref <task>          follow up on unfinished work without creating another task",
+    "  --ref <task>          add context before agent dispatch; an active turn refuses --ref",
     "  --ref <task> --cancel explicitly cancel; receipt reports worker interruption",
     "  --continue <task>     successor to a completed, failed, or cancelled task",
     "  --fyi                 deliberate no-answer message; no task/work record",
@@ -44,8 +44,13 @@ export function renderAskCommandHelp(): string {
     "  --window <seconds>    default-action answer window (default 1800 seconds)",
     "  --permission          blocking operator permission request (needs --operator)",
     "  --because <reason>    why you ask; rides on any ask (operator: the blocked reason)",
-    "  --notify              operator push; on an agent ask the ask already returns on acceptance",
+    "  --notify              operator FYI: push. Agent task: tell the operator when it is done",
+    "                        (Ready, with Continue or Hold). Use it only for work the operator",
+    "                        is waiting on, not to make an ask asynchronous",
     "  --image <path>        attach PNG, JPEG, GIF, or WebP evidence",
+    "  --decision <file>     operator decision card: our JSON shape or one decision-pack",
+    "                        pack.json decision (<file>#<id> picks one). Pictures upload as",
+    "                        attachments; labels become --option. See docs/agent/decision-cards.agent.md",
     "  --prompt-file <path>  read the message from a UTF-8 file (--body-file also accepted)",
     "  --label <label>      attach a searchable task label; repeatable",
     "  --reply-mode <notify|inline|none>  notify means acceptance, NOT operator push",
@@ -71,9 +76,14 @@ export function renderAskCommandHelp(): string {
     '  scout ask --continue inv-123 "port the fix"',
     '  scout ask --operator --option yes --option no "Ship to production?"',
     '  scout ask --operator --fyi --notify "Production is down" --image ./graph.png',
+    '  scout ask --operator --decision ./card.json "Which pricing table ships?"',
     '  scout ask --channel shared --fyi "Deploy done"',
     '  scout reply --ref inv-123 "Two findings, one blocking"',
   ].join("\n");
+}
+
+function buildAskLinks(receipt: ScoutAskReceipt, env: NodeJS.ProcessEnv) {
+  return buildFlightLinks({ ...receipt.ids, workId: receipt.workPageUnavailable ? undefined : receipt.ids.workId }, env);
 }
 
 export function renderScoutAskReceipt(value: {
@@ -102,6 +112,7 @@ export function renderScoutAskReceipt(value: {
     `${pieces.join(" · ")}.`,
     delivery,
     value.replyMode === "notify" && !terminal ? "Scout will surface the completion when it arrives." : null,
+    value.receipt.workPageUnavailable ? "Work was recorded, but its page is unavailable on this broker." : null,
     value.links?.work ? `Follow the task: ${value.links.work}` : null,
     waitRef ? `Follow: scout wait ${quoteWaitReference(waitRef)} --timeout 600` : "No wait reference returned; inspect the ask receipt.",
   ].filter((line): line is string => Boolean(line)).join("\n");
@@ -365,6 +376,7 @@ export async function runAskWithOptions(
   );
   const body = await resolvePromptBody(options);
   const callback = options.callbackFile ? await readTaskCallbackFile(options.callbackFile) : undefined;
+  const decision = options.decisionFile ? await (await import("../decision-file.ts")).readDecisionFile(options.decisionFile) : undefined;
   const to = options.targetLabel;
   const target:
     | { to: string; projectPath?: never; runtimeProfile?: never; existingHandle?: never }
@@ -387,7 +399,8 @@ export async function runAskWithOptions(
   const callerSessionId = claimedSessionId(context.env);
   const receipt = await scoutAskHandler({
     requestId,
-    task: callback ? { ...(options.task ?? { version: 1 }), callback } : options.task ?? { version: 1 },
+    task: { ...(options.task ?? { version: 1 }), ...(callback ? { callback } : {}), ...(decision ? { decision: decision.decision } : {}) },
+    ...(decision?.images.length ? { decisionImages: decision.images } : {}),
     ...(options.image ? { image: await (await import("../task-image.ts")).readTaskImage(options.image) } : {}),
     completion: options.completion,
     relation: options.relation,
@@ -424,6 +437,7 @@ export async function runAskWithOptions(
       receipt,
       options.targetLabel
         ?? options.existingTargetHandle
+        ?? renderBindingRef(options.task?.continue ?? options.task?.ref)
         ?? (options.runtimeProfile ? `profile:${options.runtimeProfile}` : undefined),
     ));
   }
@@ -460,7 +474,7 @@ export async function runAskWithOptions(
         receipt,
         replyMode,
         flight,
-        links: buildFlightLinks(receipt.ids, context.env),
+        links: buildAskLinks(receipt, context.env),
         ...(options.onHost ? { onHost: options.onHost } : {}),
       },
       renderScoutAskReceipt,
@@ -504,7 +518,7 @@ export async function runAskWithOptions(
       bindingRef: renderBindingRef(receipt.ids.bindingRef),
       receipt,
       flight: completed,
-      links: buildFlightLinks(receipt.ids, context.env),
+      links: buildAskLinks(receipt, context.env),
       output: renderScoutAskInlineResult({
         conversationId: receipt.ids.conversationId ?? null,
         messageId: receipt.ids.messageId ?? null,
@@ -514,7 +528,9 @@ export async function runAskWithOptions(
         timedOut,
       }),
     },
-    (value) => [value.output, value.links.work ? `Follow the task: ${value.links.work}` : null].filter(Boolean).join("\n"),
+    (value) => [value.output,
+      value.receipt.workPageUnavailable ? "Work was recorded, but its page is unavailable on this broker." : null,
+      value.links.work ? `Follow the task: ${value.links.work}` : null].filter(Boolean).join("\n"),
   );
 }
 

@@ -1,10 +1,16 @@
+import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import type { SlackSetupReceipt } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
+import { VERCEL_BOARD_HELP, runVercelBoardCommand } from "./vercel-board.ts";
 
 export const INTEGRATION_HELP = [
+  "scout integration rex start --harness claude|codex [--project <path>] [--name <title>] [--session <rex-session-id>]",
+  "scout integration rex status [--session <rex-session-id>] [--block <rex-block-id>]",
+  "Inside Rex, --session defaults to REX_SESSION. Start returns a Scout agent ID and exact Rex window and block IDs.",
+  "Status lists the session windows. Add --block to read the foreground process, exit, and program-reported status.",
   "scout integration t3 inspect --connection <id>",
   "scout integration t3 board|refresh --connection <id> --project <t3-project-id>",
   "scout integration t3 attach --connection <id> --thread <t3-thread-id>",
@@ -19,6 +25,7 @@ export const INTEGRATION_HELP = [
   "scout integration resume <operation> --if-revision <n> --workspace <team-id>",
   "scout integration resume <operation> --if-revision <n> --confirm-workspace-authority",
   "scout integration resume <operation> --if-revision <n> --app <app-id>",
+  "scout integration connect|status|claim|promote|role|messages|handoffs|dispatcher vercel-board ...   (see scout integration vercel-board --help)",
   "",
   "Local pilot setup. Uses an existing registered project agent; does not create or install a Slack app.",
   "Authority confirmation records the human operator's confirmation; agents must not infer it.",
@@ -60,8 +67,29 @@ function parseT3IntegrationCommand(args: string[]): { path: string; body: unknow
   };
 }
 
-export function parseIntegrationCommand(args: string[], cwd: string): { path: string; body?: unknown } {
+export function parseIntegrationCommand(args: string[], cwd: string, env = process.env): { path: string; body?: unknown } {
   const [command, target, ...rest] = args;
+  if (command === "rex") {
+    if (target !== "start" && target !== "status") throw new ScoutCliError("Use scout integration rex start or status.");
+    const sessionOption = { session: { type: "string" } } as const;
+    const selectSession = (explicit?: string) => {
+      const id = explicit ?? env.REX_SESSION;
+      if (!id) throw new ScoutCliError("Outside Rex, pass --session with a full Rex session ID.");
+      return id;
+    };
+    if (target === "status") {
+      const { values } = parseArgs({ args: rest, options: { ...sessionOption, block: { type: "string" } } });
+      return { path: "/v1/integrations/rex/status", body: { sessionId: selectSession(values.session), blockId: values.block } };
+    }
+    const { values } = parseArgs({ args: rest, options: {
+      ...sessionOption, harness: { type: "string" }, name: { type: "string" }, project: { type: "string" },
+    } });
+    const sessionId = selectSession(values.session);
+    if (values.harness !== "claude" && values.harness !== "codex") throw new ScoutCliError("Choose --harness claude or codex.");
+    return { path: "/v1/integrations/rex/start", body: {
+      sessionId, harness: values.harness, name: values.name, projectPath: resolve(cwd, values.project ?? "."),
+    } };
+  }
   if (command === "t3") return parseT3IntegrationCommand([target, ...rest].filter((value): value is string => value !== undefined));
   const allowed = command === "setup"
     ? ["--project", "--agent", "--name", "--workspace", "--idempotency-key"]
@@ -123,16 +151,23 @@ export function parseIntegrationCommand(args: string[], cwd: string): { path: st
   throw new ScoutCliError("Unknown integration command. Use scout integration --help.");
 }
 
+export const VERCEL_BOARD_VERBS = new Set(["connect", "status", "claim", "promote", "role", "messages", "handoffs", "dispatcher"]);
+
 export async function runIntegrationCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
+  if (args[0] === "vercel-board") { context.output.writeText(VERCEL_BOARD_HELP); return; }
+  if (args[1] === "vercel-board" && VERCEL_BOARD_VERBS.has(args[0] ?? "")) {
+    await runVercelBoardCommand(context, [args[0]!, ...args.slice(2)]);
+    return;
+  }
   if (!args.length || args.some((arg) => ["--help", "-h", "help"].includes(arg))) { context.output.writeText(INTEGRATION_HELP); return; }
-  const request = parseIntegrationCommand(args, context.cwd);
+  const request = parseIntegrationCommand(args, context.cwd, context.env);
   const response = await fetch(new URL(request.path, resolveScoutBrokerUrl()), {
     method: request.body ? "POST" : "GET", headers: { "content-type": "application/json" },
     ...(request.body ? { body: JSON.stringify(request.body) } : {}), signal: AbortSignal.timeout(["credentials", "rotate-credentials"].includes(args[0] ?? "") ? 75_000 : 15_000),
   });
   const payload = await response.json() as SlackSetupReceipt & { error?: string; detail?: string };
   if (!response.ok) throw new ScoutCliError(payload.detail ?? payload.error ?? `Broker returned HTTP ${response.status}`);
-  if (["manifest", "t3"].includes(args[0] ?? "")) { context.output.writeValue(payload, value => JSON.stringify(value, null, 2)); return; }
+  if (["manifest", "t3", "rex"].includes(args[0] ?? "")) { context.output.writeValue(payload, value => JSON.stringify(value, null, 2)); return; }
   context.output.writeValue(payload, (receipt) => [
     `${receipt.operation.displayName}: ${receipt.operation.state} (${receipt.readiness})`,
     `Operation: ${receipt.operation.id}; revision: ${receipt.operation.revision}`,

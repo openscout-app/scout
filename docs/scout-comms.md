@@ -161,8 +161,14 @@ Use it only when no work, judgment or answer is expected. Channels are FYI-only:
 
 ### Task follow-ups and answers
 
-Use `ask --ref <task>` to add context to unfinished work. It creates no new
-task and preserves the recipient. Use `--cancel` with a reason to cancel;
+Use `ask --ref <task>` to add context before the agent starts its turn.
+Scout includes the context in the dispatch prompt. Once an agent task is
+running or waiting, Scout refuses the follow-up instead of leaving it in an
+unread inbox. Send a separate ask to the session named in the refusal, or use
+`--continue` after the task finishes. Use a new request ID for a separate ask.
+Human-owned tasks still receive follow-ups in their conversation.
+
+Use `--cancel` with a reason to cancel;
 text never cancels by itself. The receipt reports whether interruption was
 confirmed. Finished, failed and cancelled tasks require
 `ask --continue <task> "successor request"`, which starts fresh work with the
@@ -171,7 +177,8 @@ earlier outcome as context. This is distinct from active-parent `--continue-for`
 The recipient answers with `reply --ref <task> "answer"`. A final closes the
 task. `--progress` updates the work record and leaves it open; `--failed`
 closes it as failed. The first final wins. A cancelled task rejects a later
-answer. The harness final is already an automatic answer: do not answer twice.
+answer. If the ask requires a task reply, only a final reply by ref completes
+it. Otherwise the harness final turn is already the answer: do not answer twice.
 `reply --to <message>` is a conversation reply with no task lifecycle.
 
 ### Ask / Requested Reply

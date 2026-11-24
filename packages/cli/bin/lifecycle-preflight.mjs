@@ -282,7 +282,7 @@ export function parseSetupCommandOptions(args, defaultCurrentDirectory) {
     if (flag === "--context-root") currentDirectory = resolve(parsed.value);
     else if (flag === "--source-root") sourceRoots.push(resolve(parsed.value));
     else {
-      if (!["claude", "codex", "cursor", "grok", "pi", "opencode", "devin"].includes(parsed.value)) {
+      if (!["claude", "codex", "cursor", "grok", "pi", "opencode", "devin", "antigravity"].includes(parsed.value)) {
         throw new Error(`invalid default harness: ${parsed.value}`);
       }
       defaultHarness = parsed.value;
@@ -300,6 +300,8 @@ export const INSTALL_HELP = [
   "  scout install --version <tag> # install a specific release (e.g. v0.2.70)",
   "  scout install --force         # reinstall even if already up to date",
   "  scout install --no-restart    # do not relaunch Scout after installing",
+  "  scout install --all           # bring the CLI, runtime, app and web app to the release",
+  "  scout install --all --force   # also reinstall current parts and move held ones onto it",
   "  Aliases: -f = --force; --tag <tag> = --version <tag>",
   "  scout install --candidate <receipt.json> --dmg <file> # explicit local signed candidate",
   "",
@@ -314,7 +316,17 @@ export const INSTALL_HELP = [
   "  Quarantine attributes are not cleared.",
   "",
   "  The app connects to the local service from @openscout/scout.",
-  "  Install with `bun add -g @openscout/scout`.",
+  "  Install with `bun add -g @openscout/scout`, or install everything with --all.",
+  "",
+  "  --all installs, in order: the @openscout/scout package with bun, then the",
+  "  runtime service from that package, then Scout.app, then the full web app",
+  "  when one is installed. Each step after the package runs from the new",
+  "  package. The service keeps its network and mesh settings. Restarting it",
+  "  interrupts agent turns in flight.",
+  "  Without --force, a part that runs from a checkout is held and reported:",
+  "  a `scout` command linked to a checkout, or a runtime service started from",
+  "  one. --force moves it onto the release and keeps a copy of the service",
+  "  file in ~/.openscout/backup. --check reports what would change.",
   "  The normal macOS local service requires Bun 1.4.4 or newer.",
   "",
   QUICK_LINKS,

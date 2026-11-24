@@ -9,11 +9,13 @@ export type ScoutCommandName =
   | "status"
   | "quarantine"
   | "hooks"
+  | "hub"
   | "notify"
   | "operator"
   | "ask"
   | "reply"
   | "show"
+  | "post"
   | "alias"
   | "roster"
   | "broadcast"
@@ -22,6 +24,7 @@ export type ScoutCommandName =
   | "chat"
   | "config"
   | "settings"
+  | "decision"
   | "diff"
   | "down"
   | "doctor"
@@ -29,6 +32,8 @@ export type ScoutCommandName =
   | "feedback"
   | "env"
   | "flight"
+  | "work-retry"
+  | "worktrees"
   | "init"
   | "instance"
   | "inbox"
@@ -87,6 +92,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./quarantine.ts")).runQuarantineCommand;
     case "hooks":
       return (await import("./hooks.ts")).runHooksCommand;
+    case "hub":
+      return (await import("./hub.ts")).runHubCommand;
     case "status":
       return (await import("./status.ts")).runStatusCommand;
     case "reply":
@@ -95,6 +102,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./ask.ts")).runAskCommand;
     case "show":
       return (await import("./show.ts")).runShowCommand;
+    case "post":
+      return (await import("./post.ts")).runPostCommand;
     case "alias":
       return (await import("./alias.ts")).runAliasCommand;
     case "roster":
@@ -109,6 +118,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./config.ts")).runConfigCommand;
     case "settings":
       return async (context, args) => (await import("./settings.ts")).runSettingsCommand(context, args);
+    case "decision":
+      return (await import("./decision.ts")).runDecisionCommand;
     case "diff":
       return (await import("./diff.ts")).runDiffCommand;
     case "down":
@@ -125,6 +136,10 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./instance.ts")).runInstanceCommand;
     case "flight":
       return (await import("./flight.ts")).runFlightCommand;
+    case "work-retry":
+      return (await import("./work-retry.ts")).runWorkRetryCommand;
+    case "worktrees":
+      return (await import("./worktrees.ts")).runWorktreesCommand;
     case "init":
       return (await import("./init.ts")).runInitCommand;
     case "inbox":

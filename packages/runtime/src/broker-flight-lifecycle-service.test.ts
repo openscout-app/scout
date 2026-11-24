@@ -159,11 +159,13 @@ function createHarness(input: {
   invocation?: InvocationRequest;
   activeInvocationIds?: string[];
   now?: number;
+  bootedAt?: number;
   onTerminalFlight?: (input: {
     flight: FlightRecord;
     invocation?: InvocationRequest;
     previous: FlightRecord | undefined;
   }) => void | Promise<void>;
+  prepareTerminalReport?: (flight: FlightRecord, invocation?: InvocationRequest) => FlightRecord;
 } = {}) {
   const snapshot = input.snapshot ?? testSnapshot({
     agents: { "agent-1": testAgent() },
@@ -228,7 +230,9 @@ function createHarness(input: {
       forwardedFlights.push(flight);
     },
     isInvocationActive: (invocationId) => activeInvocationIds.has(invocationId),
+    bootedAt: input.bootedAt,
     onTerminalFlight: input.onTerminalFlight,
+    prepareTerminalReport: input.prepareTerminalReport,
     warn: (message) => warnings.push(message),
     now: () => input.now ?? 10_000,
   });
@@ -712,6 +716,7 @@ describe("broker flight lifecycle helpers", () => {
         error: "Stale running flight reconciled: target agent agent-1 has no registered endpoint after 120s",
         completedAt: 130_000,
         metadata: expect.objectContaining({
+          failureCause: "endpoint_lost",
           reconciledStaleFlight: true,
           reconciledReason: "target agent agent-1 has no registered endpoint after 120s",
           reconciledAt: 130_000,
@@ -761,4 +766,183 @@ test("external provider receipts are not projected to running/completed by local
   await harness.service.recordFlight(testFlight({ state: "completed", output: "done" }));
   expect(harness.updatedDeliveries).toEqual([]);
   expect(staleLocalDeliveryReason(harness.snapshot, delivery, { now: 1_000_000 })).toBeNull();
+});
+
+describe("flights superseded by a finished twin", () => {
+  // An ask that starts its target elsewhere records a placeholder flight with
+  // no dispatch, then the flight that carries the work, ~100ms later.
+  const placeholder = testFlight({
+    id: "placeholder",
+    state: "waking",
+    startedAt: 1_000,
+    summary: "Agent One waking.",
+    metadata: { dispatchOutcome: { status: "not_submitted", checkedAt: 1_000 } },
+  });
+
+  function twinHarness(flights: FlightRecord[], extra: Parameters<typeof createHarness>[0] = {}) {
+    const terminalCallbacks: string[] = [];
+    const reports: string[] = [];
+    const harness = createHarness({
+      snapshot: testSnapshot({
+        agents: { "agent-1": testAgent() },
+        invocations: { "invocation-1": testInvocation() },
+        flights: Object.fromEntries(flights.map((flight) => [flight.id, flight])),
+      }),
+      now: 50_000,
+      onTerminalFlight: ({ flight }) => { terminalCallbacks.push(flight.id); },
+      prepareTerminalReport: (flight) => {
+        if (flight.state === "completed") return flight;
+        reports.push(flight.id);
+        return { ...flight, metadata: { ...flight.metadata, terminalReport: { version: 1, status: "pending" } } };
+      },
+      ...extra,
+    });
+    return { ...harness, terminalCallbacks, reports };
+  }
+
+  test("reconciliation closes a placeholder with the outcome its twin reported, and repeats none of its effects", async () => {
+    const twin = testFlight({ id: "twin", state: "completed", startedAt: 1_100, completedAt: 9_000, output: "done", summary: "Done." });
+    const harness = twinHarness([placeholder, twin]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder).toEqual(expect.objectContaining({
+      state: "completed",
+      output: "done",
+      summary: "Done.",
+      completedAt: 9_000,
+      metadata: expect.objectContaining({ supersededByFlightId: "twin", reconciledStaleFlight: true }),
+    }));
+    expect(harness.snapshot.flights.placeholder.metadata?.workPromotion).toBeUndefined();
+    expect(harness.promoted).toEqual([]);
+    expect(harness.forwardedFlights).toEqual([]);
+    expect(harness.terminalCallbacks).toEqual([]);
+  });
+
+  test("a failed twin closes its placeholder as failed without a second failure report", async () => {
+    const twin = testFlight({ id: "twin", state: "failed", startedAt: 1_100, completedAt: 9_000, error: "boom" });
+    const harness = twinHarness([placeholder, twin]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder).toEqual(expect.objectContaining({ state: "failed", error: "boom" }));
+    expect(harness.snapshot.flights.placeholder.metadata?.terminalReport).toBeUndefined();
+    expect(harness.reports).toEqual([]);
+  });
+
+  test("the twin finishing closes its placeholder as it is recorded, and its own effects run once", async () => {
+    const running = testFlight({ id: "twin", state: "running", startedAt: 1_100 });
+    const harness = twinHarness([placeholder, running]);
+
+    await harness.service.recordFlight({ ...running, state: "completed", completedAt: 9_000, output: "done" });
+
+    expect(harness.snapshot.flights.placeholder).toEqual(expect.objectContaining({
+      state: "completed",
+      metadata: expect.objectContaining({ supersededByFlightId: "twin" }),
+    }));
+    expect(harness.promoted.map((entry) => entry.flight.id)).toEqual(["twin"]);
+    expect(harness.forwardedFlights.map((flight) => flight.id)).toEqual(["twin"]);
+    expect(harness.terminalCallbacks).toEqual(["twin"]);
+  });
+
+  test("a late result from an older attempt never closes a newer attempt that is still running", async () => {
+    const older = testFlight({ id: "older", state: "running", startedAt: 500 });
+    const newer = testFlight({ id: "newer", state: "running", startedAt: 1_000 });
+    const harness = twinHarness([older, newer], { activeInvocationIds: [] });
+
+    await harness.service.recordFlight({ ...older, state: "failed", completedAt: 9_000, error: "late" });
+
+    expect(harness.snapshot.flights.newer.state).toBe("running");
+  });
+
+  test("a twin that started on another host's earlier clock still closes the undispatched placeholder", async () => {
+    const twin = testFlight({ id: "twin", state: "completed", startedAt: 400, completedAt: 9_000, output: "done",
+      metadata: { dispatchAck: { endpointId: "endpoint-remote" } } });
+    const harness = twinHarness([placeholder, twin]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder).toEqual(expect.objectContaining({
+      state: "completed",
+      metadata: expect.objectContaining({ supersededByFlightId: "twin" }),
+    }));
+  });
+
+  test("an earlier-started finished flight never closes a dispatched flight", async () => {
+    const dispatched = testFlight({ id: "dispatched", state: "running", startedAt: 1_000,
+      metadata: { dispatchAck: { endpointId: "endpoint-1" } } });
+    const older = testFlight({ id: "older", state: "failed", startedAt: 400, completedAt: 9_000, error: "late" });
+    const harness = twinHarness([dispatched, older]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    // Stale-endpoint reconciliation may still close it, but never as a copy of the older flight.
+    expect(harness.snapshot.flights.dispatched.metadata?.supersededByFlightId).toBeUndefined();
+  });
+
+  test("reconciliation logs a closed placeholder only when it records one", async () => {
+    const twin = testFlight({ id: "twin", state: "completed", startedAt: 1_100, completedAt: 9_000, output: "done" });
+    // A flight held for a specific final reply refuses the copy, so nothing is written.
+    const held = { ...placeholder, metadata: { ...placeholder.metadata, taskFinalReplyMessageId: "reply-1" } };
+    const harness = twinHarness([held, twin]);
+
+    await harness.service.reconcileStaleWorkingFlights();
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder.state).toBe("waking");
+    expect(harness.warnings.filter((line) => line.includes("closed flight placeholder"))).toEqual([]);
+  });
+
+  test("a placeholder whose invocation is still running locally stays open", async () => {
+    const twin = testFlight({ id: "twin", state: "completed", startedAt: 1_100, completedAt: 9_000, output: "done" });
+    const harness = twinHarness([placeholder, twin], { activeInvocationIds: ["invocation-1"] });
+
+    await harness.service.reconcileStaleWorkingFlights();
+
+    expect(harness.snapshot.flights.placeholder.state).toBe("waking");
+  });
+});
+
+test("stale supersession records a typed cause and the successor without prose matching", async () => {
+  const ack = { endpointId: "endpoint-1", nodeId: "node-1", harness: "codex", sessionId: "one-session" };
+  const older = testFlight({ startedAt: 10, metadata: { dispatchAck: ack } });
+  const newer = testFlight({ id: "newer", invocationId: "newer-ask", startedAt: 20, completedAt: 30, state: "completed", output: "Done", metadata: { dispatchAck: ack } });
+  const h = createHarness({ snapshot: testSnapshot({ flights: { older, newer } }), now: 40 });
+  await h.service.reconcileStaleWorkingFlights();
+  expect(h.committedFlights[0]).toMatchObject({ state: "failed", metadata: { failureCause: "superseded", supersededByFlightId: "newer" } });
+});
+
+
+test.each([
+  { status: "submission_unknown", reason: "codex_send_boundary", turnId: undefined, state: "waiting" },
+  { status: "submitted", reason: "codex_rpc_acknowledged", turnId: "turn-original", state: "waiting" },
+  { status: "not_submitted", reason: "before_codex_send", turnId: undefined, state: "failed" },
+])("restart reconciles Codex dispatch evidence ($reason) without adopting a neighboring reply", async ({ status, reason, turnId, state }) => {
+  const ack = { endpointId: "endpoint-1", transport: "codex_app_server", sessionId: "native-thread" };
+  const flight = testFlight({ metadata: {
+    dispatchAck: { ...ack, ...(turnId ? { nativeTurnId: turnId } : {}) },
+    dispatchOutcome: { status, reason, method: "turn/start", checkedAt: 1_100 },
+  } });
+  const neighbor = testFlight({
+    id: "neighbor", invocationId: "other-ask", startedAt: 1_200, completedAt: 1_300,
+    state: "completed", output: "Answer to another ask.", metadata: { dispatchAck: ack },
+  });
+  const h = createHarness({
+    bootedAt: 2_000,
+    snapshot: testSnapshot({ flights: { [flight.id]: flight, [neighbor.id]: neighbor } }),
+  });
+
+  await h.service.reconcileStaleWorkingFlights();
+  await h.service.reconcileStaleWorkingFlights();
+
+  const current = h.snapshot.flights[flight.id];
+  expect(current.state).toBe(state);
+  expect(current.invocationId).toBe(flight.invocationId);
+  expect(current.output).toBeUndefined();
+  if (state === "waiting") {
+    expect(current.completedAt).toBeUndefined();
+    expect(current.summary).toContain("Inspect Codex session native-thread.");
+    expect(current.metadata).toEqual(flight.metadata);
+    expect(h.committedFlights).toHaveLength(1);
+  }
 });

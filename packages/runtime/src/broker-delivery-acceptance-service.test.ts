@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrokerRequestReceipts } from "./broker-request-receipts.js";
@@ -238,6 +238,7 @@ function createHarness(input: {
         agentId: "cardless-agent",
         sessionId: "session-cardless",
         harness: input.cardlessEndpointHarness ?? "codex",
+        metadata: { cardless: true },
       });
       return {
         kind: "resolved_session",
@@ -527,12 +528,26 @@ describe("broker session input receipts", () => {
       const harness = createHarness({ requestReceipts: ledger, submitSessionInput: async () => { submits++; return { ok: false, code: "not_live" }; } });
       for (const change of [{ requestId: undefined }, { body: " " }, { intent: "tell" }, { attachments: [{ id: "a", mediaType: "text/plain", url: "file:///a" }] },
         { workItem: { title: "work" } }, { execution: { session: "fork" } }, { execution: { model: "x" } },
+        { invocationMetadata: { source: "scout-web", askWorkspace: "new_worktree" } },
         { target: { kind: "session_id", sessionId: "native-1" } }, { target: { kind: "session_id", sessionId: "native-1", harness: "claude", host: "remote" } }]) {
         await expect(harness.service.accept({ ...payload, ...change } as ScoutDeliverRequest)).rejects.toThrow();
       }
       expect(submits).toBe(0);
       expect(await ledger.get("operator", payload.requestId!, "deliver")).toBeNull();
       await expect(createHarness({ submitSessionInput: async () => ({ ok: false, code: "not_live" }) }).service.accept(payload)).rejects.toThrow("session_input_unsupported");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("accepts the attribution and request id the broker router stamps on a reply", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-session-attribution-"));
+    try {
+      const submitted: string[] = [];
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory),
+        submitSessionInput: async input => { submitted.push(input.body); return { ok: true, via: "tmux", location: "pane1" }; } });
+      const stamped = { ...payload, invocationMetadata: { source: "scout-web", requestId: payload.requestId, attribution: { actorId: "operator" } } } as ScoutDeliverRequest;
+      const response = await harness.service.accept(stamped);
+      expect(response).toMatchObject({ receipt: { inputSubmitted: { state: "submitted", via: "tmux" } } });
+      expect(submitted).toEqual([payload.body]);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -637,6 +652,29 @@ describe("BrokerDeliveryAcceptanceService", () => {
       expect(await reopened.service.accept(request)).toEqual(accepted);
       expect(reopened.acceptedInvocations).toHaveLength(0);
       await expect(reopened.service.accept({ ...request, body: "different work" })).rejects.toThrow("different content");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  test("pre-attribution requester-only receipts keep empty metadata and replay the execution copy", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scout-legacy-attribution-receipt-"));
+    try {
+      const request: ScoutDeliverRequest = {
+        requestId: "legacy-requester-only", requesterId: "operator", targetAgentId: "agent-1",
+        body: "same work", intent: "tell", messageMetadata: {}, invocationMetadata: {},
+      };
+      const original = { kind: "delivery", deliveryId: "legacy-delivery" } as const;
+      // The pre-V1 fingerprint removed only top-level trace correlation.
+      const fingerprint = createHash("sha256").update(canonicalRequest(request)).digest("hex");
+      const path = createHash("sha256").update(canonicalRequest(["operator", request.requestId, "deliver"])).digest("hex");
+      await writeFile(join(directory, `${path}.json`), JSON.stringify({
+        requesterId: "operator", requestId: request.requestId, operation: "deliver", fingerprint, state: "done", result: original,
+      }));
+      const execution: ScoutDeliverRequest = { ...request, caller: { actorId: "operator" },
+        messageMetadata: { attribution: { actorId: "operator", rootActorId: "operator", source: "local-admin" } } };
+      const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory) });
+      expect(await harness.service.accept(request, { executionPayload: execution })).toEqual(original);
+      expect(harness.acceptedInvocations).toHaveLength(0);
+      expect(request.caller).toBeUndefined();
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -1845,4 +1883,19 @@ test("titles a task's default work item by its first line, and a continued task 
   expect(defaultTaskWorkItemTitle("Previous task inv-1 (completed):\nShipped.\n\nSuccessor task:\nLand the follow-up"))
     .toBe("Land the follow-up");
   expect(defaultTaskWorkItemTitle("```\n```")).toBe("```\n```");
+});
+
+test("a legacy project ask to managed tmux Claude requires a task reply, not its first turn's output", async () => {
+  const h = createHarness({ cardlessEndpointHarness: "claude" });
+  await h.service.accept({
+    requestId: "legacy-project-ask", body: "Build the deck", intent: "consult",
+    target: { kind: "project_path", projectPath: "/tmp/board" },
+    caller: { actorId: "operator", nodeId: "node-1" }, task: { version: 1 },
+    execution: { harness: "claude", session: "new" },
+  });
+  expect(h.acceptedInvocations[0]?.metadata).toMatchObject({
+    completion: { mode: "explicit" }, completionLocalNodeId: "node-1",
+    completionEndpointId: "endpoint-cardless",
+  });
+  expect(h.dispatchedInvocations[0]?.metadata?.completionFlightId).toBe("flight-1");
 });

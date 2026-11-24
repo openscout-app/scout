@@ -127,7 +127,9 @@ describe("handleBrokerHttpEntityWriteRoute", () => {
     expect(result.handled).toBe(true);
     expect(result.response.status).toBe(200);
     expect(result.body).toEqual({ ok: true, flightId: "flight-1" });
-    expect(harness.flights).toEqual([flight]);
+    expect(harness.flights).toEqual([{ ...flight, requesterId: "operator", metadata: {
+      attribution: { actorId: "operator", rootActorId: "operator", source: "system" },
+    } }]);
   });
 
   test("records flight mirrors through the authenticated mesh route", async () => {
@@ -146,7 +148,9 @@ describe("handleBrokerHttpEntityWriteRoute", () => {
     expect(result.handled).toBe(true);
     expect(result.response.status).toBe(200);
     expect(result.body).toEqual({ ok: true, flightId: "flight-mesh-1" });
-    expect(harness.flights).toEqual([flight]);
+    expect(harness.flights).toEqual([{ ...flight, requesterId: "local-unverified", metadata: {
+      attribution: { actorId: "local-unverified", rootActorId: "local-unverified", source: "unverified" },
+    } }]);
   });
 
   test("maps thread watch protocol errors through the thread-watch response shape", async () => {

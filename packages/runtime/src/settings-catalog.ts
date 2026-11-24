@@ -156,6 +156,14 @@ const USER_CONFIG_SETTING_POLICY: Record<string, SettingPolicy> = {
     risk: "apply",
     description: "Named runtime choices, as id[:Label]=<harness>[/<model>[/<effort>]] items. An id cannot reuse a harness, profile, or effort name.",
   },
+  "worktree-retire": {
+    risk: "apply",
+    description: "Whether the runtime removes agent worktrees under .scout-worktrees once they are idle, clean, and merged: on (the default) or off. It never removes a worktree with uncommitted or unmerged work.",
+  },
+  "worktree-retire-idle-hours": {
+    risk: "apply",
+    description: "How many hours an agent worktree must sit idle before the runtime may retire it. The default is 24; the minimum is 1.",
+  },
 };
 
 function catalogEntryFromUserConfigField(field: UserConfigFieldDefinition): SettingCatalogEntry {

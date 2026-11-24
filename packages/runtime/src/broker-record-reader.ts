@@ -22,7 +22,7 @@ const transports: Record<DeliveryIntent["transport"],true> = {
   local_socket:true,websocket:true,pairing_bridge:true,peer_broker:true,http:true,mcp_poll:true,devin_cloud_cli:true,webhook:true,
   telegram:true,discord:true,sms:true,email:true,tts:true,native_voice:true,claude_channel:true,
   claude_stream_json:true,codex_app_server:true,codex_exec:true,claude_resume:true,pi_rpc:true,
-  grok_acp:true,kimi_acp:true,cursor_acp:true,opencode_acp:true,devin_acp:true,tmux:true,ghostty:true,cursor_exec:true,
+  grok_acp:true,kimi_acp:true,cursor_acp:true,opencode_acp:true,antigravity_acp:true,devin_acp:true,tmux:true,ghostty:true,rex:true,cursor_exec:true,
   cursor_cli_text:true,cursor_cli_stream_json:true,cursor_sdk_local:true,
 };
 export function readableDeliveryStatus(value: unknown): value is DeliveryIntent["status"] {

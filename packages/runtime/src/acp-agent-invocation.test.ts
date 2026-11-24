@@ -5,10 +5,13 @@ import { join } from "node:path";
 
 import {
   acpTurnCeilingMs,
+  hasLiveAcpWorker,
   invokeAcpAgent,
   shutdownAcpAgentSession,
   shutdownAllAcpAgentSessions,
 } from "./acp-agent-invocation.js";
+
+import { warmWorkerContinuation } from "./host-launch-admission.js";
 
 const tempPaths = new Set<string>();
 
@@ -87,6 +90,7 @@ test("returns the provider ACP session id and loads it on a follow-up invocation
 import { appendFileSync } from "node:fs";
 import readline from "node:readline";
 const log = process.env.METHOD_LOG;
+appendFileSync(log, "identity:" + JSON.stringify({ agent: process.env.OPENSCOUT_AGENT, managed: process.env.OPENSCOUT_MANAGED_AGENT, cwd: process.env.OPENSCOUT_SETUP_CWD }) + "\\n");
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const line of rl) {
   const message = JSON.parse(line);
@@ -129,6 +133,18 @@ for await (const line of rl) {
   try {
     const first = await invokeAcpAgent(common);
     expect(first.sessionId).toBe("provider-session-42");
+    const identity = JSON.parse(readFileSync(logPath, "utf8").split("\n").find(line => line.startsWith("identity:"))!.slice("identity:".length));
+    expect(identity).toEqual({ agent: common.sessionId, managed: "1", cwd: tempRoot });
+
+    // A changed fingerprint would normally close the old client. Admission
+    // refusal must precede that close, so the original session stays usable.
+    let reservations = 0;
+    const refuse = async () => { reservations++; throw new Error("pressure hold"); };
+    expect(await hasLiveAcpWorker(common.poolKey)).toBe(true);
+    await expect(warmWorkerContinuation.run({ endpointId: common.poolKey, reserve: refuse }, async () => {
+      await invokeAcpAgent({ ...common, adapterOptions: { ...common.adapterOptions, model: "changed" } });
+    })).rejects.toThrow("pressure hold");
+    expect(reservations).toBe(1);
 
     const second = await invokeAcpAgent({ ...common, prompt: "hello again" });
     expect(second.sessionId).toBe("provider-session-42");

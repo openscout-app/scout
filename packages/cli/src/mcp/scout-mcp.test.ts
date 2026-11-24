@@ -14,7 +14,7 @@ import {
   createScoutMcpServer,
   type ScoutMcpAgentCandidate,
 } from "./scout-mcp.ts";
-import type { ScoutAskCommand } from "../lib/core/broker/ask-types.ts";
+import { ASK_ERROR_CODES, type ScoutAskCommand } from "../lib/core/broker/ask-types.ts";
 
 const openClients = new Set<Client>();
 const openServers = new Set<ReturnType<typeof createScoutMcpServer>>();
@@ -714,6 +714,29 @@ describe("createScoutMcpServer", () => {
     expect(received?.reporter?.agentId).toBeUndefined();
   });
 
+  // The output schema must accept every code the ask handler can return, or
+  // MCP turns the refusal into an output-validation error.
+  for (const code of ASK_ERROR_CODES) {
+    test(`ask returns ${code} through MCP without waiting on the original flight`, async () => {
+      const message = "Follow-up refused. Retry from the original requester.";
+      let waits = 0;
+      const { client } = await connectTestServer({
+        resolveSenderId: async () => "project-agent",
+        scoutAskHandler: async () => ({
+          ok: false, state: "failed", ids: { flightId: "flt-parent" }, error: { code, message },
+        }),
+        waitForFlight: async () => { waits++; throw new Error("must not wait"); },
+      });
+      const result = await client.callTool({ name: "ask", arguments: {
+        ref: "inv-parent", body: "More context", replyMode: "inline",
+      } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ ok: false, error: { code, message } });
+      expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining(message) })]));
+      expect(waits).toBe(0);
+    });
+  }
+
   test("ask wraps the ScoutAskHandler primitive", async () => {
     let receivedAsk: ScoutAskCommand | undefined;
     const { client } = await connectTestServer({
@@ -947,7 +970,7 @@ describe("createScoutMcpServer", () => {
     expect(receivedAsk?.harness).toBe("codex");
   });
 
-  test("ask schedules MCP reply notifications in opt-in notify mode", async () => {
+  test.each([false, true])("ask schedules opt-in notifications (work page unavailable: %s)", async (workPageUnavailable) => {
     let receivedWaitOptions: unknown;
     const { client } = await connectTestServer({
       resolveSenderId: async () => "operator.main",
@@ -955,12 +978,14 @@ describe("createScoutMcpServer", () => {
       scoutAskHandler: async () => ({
         ok: true,
         state: "queued",
+        ...(workPageUnavailable ? { workPageUnavailable: true as const } : {}),
         ids: {
           targetAgentId: "talkie.main",
           conversationId: "dm.operator.talkie",
           messageId: "msg-1",
           invocationId: "inv-1",
           flightId: "flight-1",
+          workId: "work-1",
         },
       }),
       getFlight: async () => ({
@@ -969,6 +994,7 @@ describe("createScoutMcpServer", () => {
         requesterId: "operator.main",
         targetAgentId: "talkie.main",
         state: "running",
+        metadata: { collaborationRecordId: "work-1" },
       }),
       waitForFlight: async (_baseUrl, _flightId, options) => {
         receivedWaitOptions = options;
@@ -983,6 +1009,7 @@ describe("createScoutMcpServer", () => {
       },
     }, {
       OPENSCOUT_MCP_ENABLE_NOTIFICATIONS: "1",
+      OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
     });
 
     const notificationPromise = new Promise<{
@@ -1019,7 +1046,11 @@ describe("createScoutMcpServer", () => {
       },
     });
 
+    const workUrl = workPageUnavailable ? null : "http://scout.test/work/work-1";
     expect(result.structuredContent).toMatchObject({
+      ...(workPageUnavailable ? { workPageUnavailable: true } : {}),
+      followUrl: workUrl ?? "http://scout.test/agents/talkie.main?tab=observe",
+      links: { work: workUrl },
       ok: true,
       state: "queued",
       delivery: "mcp_notification",
@@ -1030,10 +1061,15 @@ describe("createScoutMcpServer", () => {
       ids: {
         targetAgentId: "talkie.main",
         flightId: "flight-1",
+        workId: "work-1",
       },
     });
+    if (workPageUnavailable) expect(result.content).toContainEqual(expect.objectContaining({
+      text: expect.stringContaining("Work was recorded, but its page is unavailable"),
+    }));
 
     const notification = await notificationPromise;
+    expect(notification.params).toMatchObject({ workUrl, links: { work: workUrl } });
     expect(notification.params.status).toBe("completed");
     expect(notification.params.flightId).toBe("flight-1");
     expect(notification.params.output).toBe("talkie replied");
@@ -2816,4 +2852,81 @@ test("show MCP is discoverable and sends local path, caption and resolved caller
     expect(result.isError).not.toBe(true);
     expect(requests).toEqual([{ path: "/v1/shows", body: { path: "preview.mp4", caption: "The working flow", caller: { actorId: "agent-test", currentDirectory: "/tmp/openscout-test", metadata: { sessionId: "019ddb1b-test-thread", harness: "codex" } } } }]);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("post MCP carries its posting guidance and sends text, file, links and caller", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ path: string; body: any }> = [];
+  try {
+    globalThis.fetch = (async (input, init) => {
+      requests.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });
+      return Response.json({ post: { id: "post-test" } }, { status: 201 });
+    }) as typeof fetch;
+    const { client } = await connectTestServer({ resolveSenderId: async () => "agent-test" });
+    const tool = (await client.listTools()).tools.find(t => t.name === "post");
+    for (const phrase of ["Post when", "you're blocked", "Don't post", "acknowledgements", "short, plain and confident"]) expect(tool?.description).toContain(phrase);
+    const result = await client.callTool({ name: "post", arguments: { text: "The header ships", file: "shot.png", links: [{ url: "https://example.test/pr/1" }], milestone: true } });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toEqual([{ path: "/v1/posts", body: { text: "The header ships", file: "shot.png", links: [{ url: "https://example.test/pr/1" }], milestone: true, caller: { actorId: "agent-test", currentDirectory: "/tmp/openscout-test", metadata: { sessionId: "019ddb1b-test-thread", harness: "codex" } } } }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("work_retry forwards the work id and optional idempotent attempt and returns runtime diagnostics", async () => {
+  const calls: unknown[] = [];
+  const { client } = await connectTestServer({ retryWorkItem: async input => {
+    calls.push(input);
+    if (input.attempt === 2) throw new Error("Next retry attempt is 1; reuse an earlier attempt only to recover its receipt.");
+    return { workId: input.workId, attempt: input.attempt ?? 1, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" };
+  } });
+  const result = await client.callTool({ name: "work_retry", arguments: { workId: "work-1", attempt: 1 } });
+  expect(calls).toEqual([{ workId: "work-1", attempt: 1 }]);
+  expect(result.structuredContent).toEqual({ workId: "work-1", attempt: 1, requestId: "retry-key", invocationId: "new-ask", flightId: "new-flight" });
+  const refused = await client.callTool({ name: "work_retry", arguments: { workId: "work-1", attempt: 2 } });
+  expect(refused.isError).toBe(true);
+  expect(JSON.stringify(refused.content)).toContain("Next retry attempt is 1");
+  await client.callTool({ name: "work_retry", arguments: { workId: "work-1" } });
+  expect(calls.at(-1)).toEqual({ workId: "work-1" });
+});
+
+test("derived_read, derived_write and derived_pending go through their broker dependencies", async () => {
+  const calls: Array<[string, unknown]> = [];
+  const { client } = await connectTestServer({
+    resolveSenderId: async () => "agent-curator",
+    readDerivedRecord: async (query) => {
+      calls.push(["read", query]);
+      return { status: "stale", currentVersion: "r3.u200", record: { kind: "presentation", sourceVersion: "r3.u100" } } as never;
+    },
+    writeDerivedRecord: async (request) => {
+      calls.push(["write", request]);
+      return request.sourceVersion === "r3.u200"
+        ? { status: "written", record: { kind: request.kind } } as never
+        : { status: "stale", currentVersion: "r3.u200" };
+    },
+    readDerivedPending: async (limit) => {
+      calls.push(["pending", limit]);
+      return [{ workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r3.u200", status: "stale", dispatchable: true }];
+    },
+  });
+  const names = (await client.listTools()).tools.map((tool) => tool.name);
+  expect(names).toEqual(expect.arrayContaining(["derived_read", "derived_write", "derived_pending"]));
+
+  const read = await client.callTool({ name: "derived_read", arguments: { workId: "work-1", kind: "presentation" } });
+  expect(read.structuredContent).toEqual({ status: "stale", currentVersion: "r3.u200", record: { kind: "presentation", sourceVersion: "r3.u100" } });
+
+  const stale = await client.callTool({ name: "derived_write", arguments: { workId: "work-1", kind: "presentation", sourceVersion: "r3.u100", body: { primary: "shot-1" } } });
+  expect(stale.structuredContent).toEqual({ senderId: "agent-curator", status: "stale", currentVersion: "r3.u200" });
+  const written = await client.callTool({ name: "derived_write", arguments: { workId: "work-1", kind: "presentation", sourceVersion: "r3.u200", body: { primary: "shot-1" }, producerVersion: "curator@2" } });
+  expect(written.structuredContent).toEqual({ senderId: "agent-curator", status: "written", currentVersion: null });
+
+  const pending = await client.callTool({ name: "derived_pending", arguments: { limit: 5 } });
+  expect((pending.structuredContent as { pending: unknown[] }).pending).toEqual([
+    { workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r3.u200", status: "stale", dispatchable: true },
+  ]);
+
+  expect(calls).toEqual([
+    ["read", { workId: "work-1", kind: "presentation" }],
+    ["write", { workId: "work-1", kind: "presentation", sourceVersion: "r3.u100", body: { primary: "shot-1" }, producerId: "agent-curator", producerKind: "agent" }],
+    ["write", { workId: "work-1", kind: "presentation", sourceVersion: "r3.u200", body: { primary: "shot-1" }, producerId: "agent-curator", producerKind: "agent", producerVersion: "curator@2" }],
+    ["pending", 5],
+  ]);
 });

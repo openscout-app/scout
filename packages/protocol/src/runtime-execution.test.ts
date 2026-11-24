@@ -65,7 +65,7 @@ describe("runtime execution contracts", () => {
     expect(SCOUT_RUNTIME_EFFORT_CATALOG.find((entry) => entry.id === "ultra")).toEqual(
       expect.objectContaining({
         harnesses: ["codex"],
-        models: ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"],
+        models: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"],
       }),
     );
   });
@@ -224,6 +224,12 @@ describe("runtime execution contracts", () => {
       harness: "codex",
       reasoningEffort: "xhigh",
     })).toThrow("cannot encode effort without a model");
+  });
+
+  test("Antigravity accepts account-provided model IDs and keeps the native default when omitted", () => {
+    expect(isModelSelectableHarness("antigravity")).toBe(true);
+    expect(validateScoutRuntimeTuple({ harness: "antigravity", model: "gemini-fixture" })).toEqual([]);
+    expect(scoutRuntimeDefaultModel("antigravity")).toBeNull();
   });
 
   test("devin with a catalog model passes model selectability", () => {

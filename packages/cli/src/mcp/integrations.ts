@@ -1,12 +1,34 @@
+import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 /** Local setup tools are intentionally absent from the hosted MCP core catalog. */
-export function registerIntegrationTools(server: McpServer, request: (path: string, init?: RequestInit) => Promise<unknown>): void {
+export function registerIntegrationTools(server: McpServer, request: (path: string, init?: RequestInit) => Promise<unknown>,
+  context: { env: NodeJS.ProcessEnv; readonly defaultCurrentDirectory: string } = { env: process.env, defaultCurrentDirectory: process.cwd() }): void {
   const result = async (path: string, body?: unknown) => {
     const receipt = await request(path, body ? { method: "POST", body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) } : { signal: AbortSignal.timeout(15_000) });
     return { content: [{ type: "text" as const, text: JSON.stringify(receipt) }], structuredContent: receipt as Record<string, unknown> };
   };
+  const rexSession = (explicit?: string) => {
+    const id = explicit ?? context.env.REX_SESSION;
+    if (!id) throw new Error("Outside Rex, supply the full local Rex sessionId.");
+    return id;
+  };
+  server.registerTool("rex_start_agent", {
+    title: "Start an agent in a Rex window",
+    description: "Create a fresh Claude or Codex agent in a new native window in the caller's Rex session. Use when asked to create another agent here in Rex. The window opens in the background. Route work using ask with the returned agentId. If the result is uncertain, inspect rex_status before retrying.",
+    inputSchema: z.object({ harness: z.enum(["claude", "codex"]), sessionId: z.string().optional(),
+      projectPath: z.string().optional(), name: z.string().optional() }).strict(),
+    annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+  }, async ({ harness, sessionId, projectPath, name }) => result("/v1/integrations/rex/start", {
+    sessionId: rexSession(sessionId), harness, name, projectPath: resolve(context.defaultCurrentDirectory, projectPath ?? "."),
+  }));
+  server.registerTool("rex_status", {
+    title: "Read Rex session or block status",
+    description: "List windows and blocks in the caller's local Rex session, or pass a blockId to read its foreground process, exit and native program reports including progress and blocked reasons. An empty report list means no program reported status.",
+    inputSchema: z.object({ sessionId: z.string().optional(), blockId: z.string().optional() }).strict(),
+    annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+  }, async ({ sessionId, blockId }) => result("/v1/integrations/rex/status", { sessionId: rexSession(sessionId), blockId }));
   server.registerTool("integrations_setup", {
     title: "Prepare Project Slack Integration",
     description: "Prepare or resume broker-owned setup for a registered local project agent's dedicated Slack app. Does not create an app, install it, or connect credentials. Report the next action to the operator. Never infer workspace installation authority.",

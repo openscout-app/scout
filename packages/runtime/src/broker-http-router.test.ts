@@ -3,15 +3,15 @@ import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsCon
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { NativePermissionAskError } from "./native-permission.js";
 import { HarnessHooksError } from "./harness-hooks.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrokerRequestReceipts } from "./broker-request-receipts.js";
+import { BrokerRequestReceipts, canonicalRequest } from "./broker-request-receipts.js";
 import { BrokerIntegrationSetupService } from "./broker-integration-setup.js";
 import { ChatQuestionError } from "./chat-question-transition.js";
 import { clearOperatorTitle, markOperatorTitled } from "./conversation-title.js";
 import { EventEmitter } from "node:events";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, test } from "bun:test";
@@ -23,8 +23,15 @@ import {
   createBrokerHttpRouter,
   type BrokerHttpRouterDeps,
 } from "./broker-http-router.js";
+import { RolePassError } from "./role-pass-scheduler.js";
 import { migrateControlPlaneDatabaseSchema } from "./control-plane-migrations.js";
+import { SessionNameService, SessionNameStore } from "./session-names.js";
 import { nodeFingerprint, nodeKeyId } from "./node-identity.js";
+import { VercelBoardServiceError } from "./vercel-board/service.js";
+import { ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
+import { ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import { ManualReviewBoardService } from "./manual-review-board.js";
+import { ManualReviewBoardRoutineStore } from "./manual-review-board-routines.js";
 import { createRuntimeRegistrySnapshot, queryRuntimeNotificationRouting } from "./registry.js";
 import {
   TrustEndpointRateLimiter,
@@ -239,14 +246,14 @@ async function requestRouter(
     beforeBody?: () => Promise<void>;
     rawBody?: string;
     headers?: Record<string, string>;
-    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean };
+    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean };
   } = {},
 ): Promise<{ body: unknown; rawBody: string; response: FakeResponse }> {
   const request = new PassThrough() as PassThrough & {
     headers: Record<string, string>;
     method: string;
     url: string;
-    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean };
+    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean };
   };
   request.headers = { host: "broker.test", ...options.headers };
   request.method = method;
@@ -288,6 +295,28 @@ describe("createBrokerHttpRouter", () => {
     const unscoped = await requestRouter(harness, "GET", "/v1/mesh/node-state");
     expect(unscoped.response.status).toBe(200);
     expect(queries[1]).toEqual({});
+  });
+
+  test("mesh session search answers one bounded query over this host's index and refuses guests", async () => {
+    const inputs: unknown[] = [];
+    const harness = createHarness({
+      searchSessionKnowledge: (input) => {
+        inputs.push(input);
+        return { query: input.query, mode: "lexical", coverage: { kind: "bounded", suggestion: "" }, searchedHours: input.hours ?? null, hitCount: 0, hits: [] };
+      },
+    });
+    const ok = await requestRouter(harness, "GET", "/v1/mesh/knowledge/search?q=release%20notes&harness=codex&hours=48&limit=5&narrow=1",
+      { transportContext: { transport: "remote" } });
+    expect(ok.response.status).toBe(200);
+    expect(ok.body).toMatchObject({ nodeId: "node-1", query: "release notes", mode: "lexical" });
+    expect(inputs[0]).toEqual({ query: "release notes", harness: ["codex"], hours: 48, limit: 5, narrowToWarmed: true });
+    const bad = await requestRouter(harness, "GET", "/v1/mesh/knowledge/search?q=x&limit=500");
+    expect(bad.response.status).toBe(400);
+    const guest = await requestRouter(harness, "GET", "/v1/mesh/knowledge/search?q=x", { transportContext: { transport: "remote", guest: true } });
+    expect(guest.response.status).toBe(403);
+    expect(inputs).toHaveLength(1);
+    const absent = await requestRouter(createHarness(), "GET", "/v1/mesh/knowledge/search?q=x");
+    expect(absent.response.status).toBe(404);
   });
 
   test("requestId dedupes ask/send acceptance at the broker and exposes the original receipt", async () => {
@@ -616,6 +645,77 @@ describe("createBrokerHttpRouter", () => {
     expect((one.body as any).totals.total).toBe(2);
   });
 
+  test("board routes: status, error codes with the fix, local-only mutation, unavailable without the adapter", async () => {
+    const calls: string[] = [];
+    const vercelBoardService = {
+      status: async (id?: string) => { calls.push(`status:${id ?? "*"}`); return [{ id: "c1", state: "following" }]; },
+      connect: async () => { throw new VercelBoardServiceError(401, "auth_refused", "Board refused the credential.", "Store a new token and run scout board connect again."); },
+      claim: async (input: { taskId: string }) => { calls.push(`claim:${input.taskId}`); return { taskId: input.taskId }; },
+      plan: async () => { throw new Error("unexpected"); },
+    };
+    const harness = createHarness({ vercelBoardService: vercelBoardService as never });
+    expect((await requestRouter(harness, "GET", "/v1/integrations/vercel-board/status?connection=c1")).body).toEqual({ connections: [{ id: "c1", state: "following" }] });
+    const refused = await requestRouter(harness, "POST", "/v1/integrations/vercel-board/connect", { body: { url: "http://127.0.0.1:1" } });
+    expect(refused.response.status).toBe(401);
+    expect(refused.body).toEqual({ error: "auth_refused", message: "Board refused the credential.", fix: "Store a new token and run scout board connect again." });
+    expect((await requestRouter(harness, "POST", "/v1/integrations/vercel-board/claim", { body: { taskId: "7" } })).body).toEqual({ taskId: "7" });
+    const remote = await requestRouter(harness, "POST", "/v1/integrations/vercel-board/claim", {
+      body: { taskId: "8" }, transportContext: { transport: "remote", remoteAddress: "192.168.1.50" } as never,
+    });
+    expect(remote.response.status).toBe(403);
+    expect((await requestRouter(harness, "POST", "/v1/integrations/vercel-board/nope", { body: {} })).response.status).toBe(404);
+    expect(calls).toEqual(["status:c1", "claim:7"]);
+    expect((await requestRouter(createHarness(), "GET", "/v1/integrations/vercel-board/status")).response.status).toBe(503);
+  });
+
+  test("session names: set over HTTP, applied to tail discovery and observed sessions, machine-local", async () => {
+    const database = new Database(":memory:");
+    migrateControlPlaneDatabaseSchema(database as never);
+    const transcripts = [
+      { source: "claude", transcriptPath: "/t/a.jsonl", sessionId: "a", title: "kernel-panic-last-boot", cwd: "/w/a", project: "a", harness: "unattributed", mtimeMs: 2, size: 1 },
+    ];
+    const snapshot = { generatedAt: 1, processes: [], transcripts, totals: { total: 0, scoutManaged: 0, hudsonManaged: 0, unattributed: 0, transcripts: 1 } };
+    const sessionNameService = new SessionNameService({
+      store: new SessionNameStore(database as never),
+      nodeId: "node-1",
+      operatorActorId: "operator",
+      registry: () => ({ nodes: {}, endpoints: {}, collaborationRecords: {} }),
+      transcripts: () => transcripts as never,
+    });
+    const harness = createHarness({
+      sessionNameService,
+      getTailDiscovery: async () => snapshot as never,
+      readObservedSessionCache: () => ({ ...snapshot, readStatus: { initialized: true, sources: [{ harness: "claude", availability: "available", processes: "available" }] } }) as never,
+    });
+
+    const set = await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a", name: "Session names" } });
+    expect(set.response.status).toBe(200);
+    expect(set.body).toMatchObject({ action: "set", resolution: { name: "Session names", source: "operator", harnessTitle: "kernel-panic-last-boot" } });
+
+    const tail = await requestRouter(harness, "GET", "/v1/tail/discover");
+    expect((tail.body as any).transcripts[0]).toMatchObject({ title: "Session names", harnessTitle: "kernel-panic-last-boot", sessionNameSource: "operator" });
+    const observed = await requestRouter(harness, "GET", "/v1/observed-sessions");
+    expect((observed.body as any).sessions[0]).toMatchObject({ title: "Session names", titleSource: "operator", harnessTitle: "kernel-panic-last-boot" });
+    expect((await requestRouter(harness, "GET", "/v1/session-names")).body).toMatchObject({ names: [{ nativeSessionId: "a", name: "Session names" }] });
+
+    expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "nope", name: "x" } })).response.status).toBe(404);
+    expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a" } })).response.status).toBe(400);
+    const refused: Array<[unknown, string]> = [
+      [{ transport: "remote", remoteAddress: "192.168.1.50" }, "local_only"],
+      [{ transport: "loopback", guest: {} }, "local_only"],
+      [{ transport: "loopback", scoped: {} }, "access_denied"],
+    ];
+    for (const [transportContext, error] of refused) {
+      const denied = await requestRouter(harness, "POST", "/v1/session-names", {
+        body: { selector: "a", name: "x" }, transportContext: transportContext as never,
+      });
+      expect(denied.response.status).toBe(403);
+      expect(denied.body).toMatchObject({ error });
+    }
+    expect((await requestRouter(harness, "POST", "/v1/session-names", { body: { selector: "a", name: null } })).body).toMatchObject({ action: "cleared" });
+    expect((await requestRouter(createHarness(), "GET", "/v1/session-names")).response.status).toBe(503);
+  });
+
   test("tail usage reads requested sessions and refuses a request without one", async () => {
     const calls: string[][] = [];
     const harness = createHarness({
@@ -795,10 +895,14 @@ describe("createBrokerHttpRouter", () => {
     expect(question.response.status).toBe(409);
     expect(unavailable.response.status).toBe(422);
     expect(harness.deliverCalls).toHaveLength(3);
-    expect(harness.deliverCalls[0]?.payload).toEqual({
+    expect(harness.deliverCalls[0]?.payload).toMatchObject({
       target: "agent-1",
       body: "hello",
       intent: "tell",
+      caller: { actorId: "operator" },
+      requesterId: "operator",
+      messageMetadata: { attribution: { actorId: "operator", rootActorId: "operator", source: "system" } },
+      invocationMetadata: { attribution: { actorId: "operator", rootActorId: "operator", source: "system" } },
     });
     expect(harness.deliverCalls[0]?.signal).toBeInstanceOf(AbortSignal);
 
@@ -1057,6 +1161,65 @@ describe("createBrokerHttpRouter", () => {
     expect(harness.cursorBodies).toEqual([{ actorId: "agent-1", lastReadSeq: 7 }]);
   });
 
+  test("writes a role slot as its holder, announces it, and refuses a stale version", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrateControlPlaneDatabaseSchema(db);
+      const published: unknown[] = [];
+      const harness = createHarness({ openRolesDb: () => db, publishEphemeralEvent: (event) => published.push(event) });
+
+      const assigned = await requestRouter(harness, "POST", "/v1/roles/assignments", {
+        body: { roleId: "pm", agentId: "agent-pm", scope: { kind: "agent" } },
+      });
+      expect(assigned.response.status).toBe(201);
+      const assignmentId = (assigned.body as { assignment: { id: string } }).assignment.id;
+      const path = `/v1/roles/slots/${encodeURIComponent(assignmentId)}`;
+      const body = { actorId: "agent-pm", expectedVersion: 0, stamp: { "work-a": 2 }, sentences: [{ text: "One run failed.", cites: ["work-a"] }] };
+
+      const written = await requestRouter(harness, "POST", path, { body });
+      expect(written.response.status).toBe(200);
+      expect(written.body).toMatchObject({ slot: { assignmentId, version: 1, writtenById: "agent-pm" } });
+      expect(published).toEqual([expect.objectContaining({
+        kind: "role.slot.written", actorId: "agent-pm", payload: { assignmentId, roleId: "pm", version: 1 },
+      })]);
+
+      const stale = await requestRouter(harness, "POST", path, { body });
+      expect(stale.response.status).toBe(409);
+      expect(stale.body).toMatchObject({ currentVersion: 1 });
+
+      const uncited = await requestRouter(harness, "POST", path, { body: { ...body, expectedVersion: 1, sentences: [{ text: "Busy day.", cites: [] }] } });
+      expect(uncited.response.status).toBe(400);
+      expect(published).toHaveLength(1);
+
+      const read = await requestRouter(harness, "GET", "/v1/roles/slots?roleId=pm");
+      expect(read.response.status).toBe(200);
+      expect(read.body).toMatchObject({ slots: [{ assignment: { id: assignmentId }, slot: { version: 1 }, behind: null, pass: null }] });
+
+      const noPasses = await requestRouter(harness, "POST", `${path}/pass`);
+      expect(noPasses.response.status).toBe(503);
+
+      const ensured: string[] = [];
+      const passing = createHarness({
+        openRolesDb: () => db,
+        runningRolePass: () => ({ flightId: "flight-pass" }),
+        ensureRolePass: async (id) => {
+          ensured.push(id);
+          if (id !== assignmentId) throw new RolePassError(404, `No active assignment ${id} with a pass.`);
+          return { flightId: "flight-pass", started: false, behind: true };
+        },
+      });
+      const ensure = await requestRouter(passing, "POST", `${path}/pass`);
+      expect(ensure.response.status).toBe(200);
+      expect(ensure.body).toEqual({ flightId: "flight-pass", started: false, behind: true });
+      expect((await requestRouter(passing, "POST", "/v1/roles/slots/role-missing/pass")).response.status).toBe(404);
+      expect(ensured).toEqual([assignmentId, "role-missing"]);
+      const withPass = await requestRouter(passing, "GET", "/v1/roles/slots?roleId=pm");
+      expect(withPass.body).toMatchObject({ slots: [{ pass: { flightId: "flight-pass" } }] });
+    } finally {
+      db.close();
+    }
+  });
+
   test("routes assigned-role and mission-log writes through the broker database", async () => {
     const unavailable = createHarness();
     const unavailableResult = await requestRouter(
@@ -1074,7 +1237,7 @@ describe("createBrokerHttpRouter", () => {
       const catalog = await requestRouter(harness, "GET", "/v1/roles/catalog");
       expect(catalog.response.status).toBe(200);
       expect(catalog.body).toMatchObject({
-        roles: [expect.objectContaining({ id: "orchestrator" })],
+        roles: [expect.objectContaining({ id: "orchestrator" }), expect.objectContaining({ id: "pm", actions: ["slot.write"] })],
       });
 
       const assigned = await requestRouter(harness, "POST", "/v1/roles/assignments", {
@@ -1591,6 +1754,22 @@ test("endpoint inventory uses metadata-only peek, supports exact selection and n
   expect((await requestRouter(h, "GET", "/v1/endpoints")).response.status).toBe(503);
 });
 
+test("the flight list returns unfinished flights from peek and never scans a snapshot", async () => {
+  const flight = (id: string, state: string) => ({ id, invocationId: `inv-${id}`, requesterId: "operator", targetAgentId: "agent", state }) as any;
+  const flights = Object.fromEntries([flight("queued", "queued"), flight("running", "running"), flight("waiting", "waiting"),
+    flight("done", "completed"), flight("failed", "failed")].map(item => [item.id, item]));
+  const h = createHarness();
+  h.deps.runtime.snapshot = () => { throw Error("must not scan message history"); };
+  h.deps.runtime.peek = () => ({ endpoints: {}, flights });
+  const listed = await requestRouter(h, "GET", "/v1/flights?active=1");
+  expect(listed.response.status).toBe(200);
+  expect((listed.body as { flights: Array<{ id: string }> }).flights.map(item => item.id).sort()).toEqual(["queued", "running", "waiting"]);
+  // Only the bounded list is served; history is read one flight at a time.
+  expect((await requestRouter(h, "GET", "/v1/flights")).response.status).toBe(400);
+  h.deps.runtime.peek = () => ({ endpoints: {} });
+  expect((await requestRouter(h, "GET", "/v1/flights?active=1")).response.status).toBe(503);
+});
+
 test("native owner control is local-only, refuses invalid input and never invokes or discovers a replacement", async () => {
   const h = createHarness();
   const endpoint = { id: "owner", agentId: "not-owned", nodeId: "node-1", sessionId: "no-session", state: "idle",
@@ -1690,7 +1869,9 @@ test("permission decision route is machine-local and forwards the exact decision
   const harness = createHarness({ permissionService: { decide: async (...args: unknown[]) => { decisions.push(args); } } as unknown as NonNullable<BrokerHttpRouterDeps["permissionService"]> });
   const body = { requestId: "permission-1", version: "v", decision: "project" };
   const result = await requestRouter(harness, "POST", "/v1/permissions/decide", { body });
-  expect(result.response.status).toBe(200); expect(decisions).toEqual([["permission-1", "v", "project"]]);
+  expect(result.response.status).toBe(200); expect(decisions).toEqual([["permission-1", "v", "project", undefined, {
+    actorId: "operator", rootActorId: "operator", source: "system",
+  }]]);
   const remote = await requestRouter(harness, "POST", "/v1/permissions/decide", { body, transportContext: { transport: "remote" } });
   expect(remote.response.status).toBe(403); expect(decisions).toHaveLength(1);
   const invalid = await requestRouter(harness, "POST", "/v1/permissions/decide", { body: { ...body, decision: "allow-all" } });
@@ -1962,6 +2143,27 @@ test("exact message reads do not snapshot and preserve durable bytes, absence an
   expect((await requestRouter(h, "GET", "/v1/messages/unavailable")).response.status).toBe(503);
 });
 
+test("legacy requester-only delivery receipts keep their original fingerprint", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "broker-legacy-attribution-receipt-"));
+  try {
+    const body = { requestId: "legacy-requester-only", requesterId: "operator", target: "agent-1", body: "same work", intent: "tell" };
+    const original = { kind: "delivery", deliveryId: "legacy-delivery" };
+    // Pre-V1 router-owned receipts included request metadata, with no caller or attribution added.
+    const fingerprintPayload = { ...body, messageMetadata: { requestId: body.requestId, requestIntent: body.intent },
+      invocationMetadata: { requestId: body.requestId } };
+    const fingerprint = createHash("sha256").update(canonicalRequest(fingerprintPayload)).digest("hex");
+    const path = createHash("sha256").update(canonicalRequest(["operator", body.requestId, "deliver"])).digest("hex");
+    writeFileSync(join(directory, `${path}.json`), JSON.stringify({
+      requesterId: "operator", requestId: body.requestId, operation: "deliver", fingerprint, state: "done", result: original,
+    }));
+    const harness = createHarness({ requestReceipts: new BrokerRequestReceipts(directory) });
+    const result = await requestRouter(harness, "POST", "/v1/deliver", { body });
+    expect(result.response.status).toBe(202);
+    expect(result.body).toEqual(original);
+    expect(harness.deliverCalls).toHaveLength(0);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("pre-origin invocation receipts replay unchanged after upgrade and changing HTTP trace headers", async () => {
   const directory = mkdtempSync(join(tmpdir(), "broker-legacy-origin-receipt-"));
   try {
@@ -2040,4 +2242,408 @@ test("harness hooks are read, applied and removed only from this machine", async
     }
   }
   expect(calls).toHaveLength(3);
+});
+
+
+test("work retry HTTP delegates to the runtime and retains actionable conflict diagnostics", async () => {
+  const calls: unknown[] = [];
+  const h = createHarness({ workRetry: { retry: async input => {
+    calls.push(input);
+    if (input.attempt === 2) throw new (await import("./broker-work-lifecycles.js")).WorkLifecycleError(409, "Next retry attempt is 1; reuse an earlier attempt only to recover its receipt.");
+    return { ...input, requestId: "stable", invocationId: "ask", flightId: "flight" };
+  } } as BrokerHttpRouterDeps["workRetry"] });
+  const a = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1", attempt: 1 } });
+  expect(a.response.status).toBe(200); expect(a.body).toMatchObject({ requestId: "stable", flightId: "flight" });
+  expect(calls).toEqual([{ workId: "work-1", attempt: 1 }]);
+  const b = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1", attempt: 2 } });
+  expect(b.response.status).toBe(409); expect(b.body).toMatchObject({ error: expect.stringContaining("Next retry attempt is 1") });
+  const c = await requestRouter(h, "POST", "/v1/work/retry", { body: { workId: "work-1" } });
+  expect(c.response.status).toBe(200); expect(calls.at(-1)).toEqual({ workId: "work-1" });
+});
+
+describe("derived record routes", () => {
+  test("read, write against a version, refuse a stale write, and list pending", async () => {
+    const { createInMemoryControlRuntime } = await import("./broker.js");
+    const { BrokerDurableStore } = await import("./broker-durable-store.js");
+    const { BrokerDerivedRecordService } = await import("./broker-derived-records.js");
+    const { DEFAULT_WORK_LIFECYCLE, compileWorkLifecycle } = await import("@openscout/protocol");
+    const runtime = createInMemoryControlRuntime({}, { localNodeId: "node-1" });
+    await runtime.upsertCollaboration({
+      id: "work-1", kind: "work_item", title: "Ship", createdById: "operator", ownerId: "agent-1", nextMoveOwnerId: "agent-1", state: "waiting", acceptanceState: "none",
+      createdAt: 1, updatedAt: 5, waitingOn: { kind: "condition", label: "a decision" },
+    } as never);
+    const machine = compileWorkLifecycle({
+      ...DEFAULT_WORK_LIFECYCLE,
+      stations: DEFAULT_WORK_LIFECYCLE.stations.map((s) => s.id === "waiting" ? { ...s, derive: [{ kind: "presentation", instructions: "Pick." }] } : s),
+    });
+    const derivedRecords = new BrokerDerivedRecordService({
+      registry: { forRecord: () => machine },
+      durableStore: new BrokerDurableStore({
+        journal: { async appendEntries(entries) { return entries; } },
+        projection: { async applyEntries() { return []; } },
+        threadEvents: { publish() {} },
+      }),
+      runtime,
+      listWorkItems: () => Object.values(runtime.peek().collaborationRecords) as never,
+      producerActorId: "scout.deriver",
+    });
+    const h = createHarness({ derivedRecords });
+    expect((await requestRouter(h, "GET", "/v1/derived/pending")).body).toEqual({
+      pending: [{ workId: "work-1", kind: "presentation", station: "waiting", sourceVersion: "r0.u5", status: "missing", dispatchable: false }],
+    });
+    const stale = await requestRouter(h, "POST", "/v1/derived", { body: { workId: "work-1", kind: "presentation", sourceVersion: "r0.u4", body: {} } });
+    expect(stale.body).toEqual({ status: "stale", currentVersion: "r0.u5" });
+    const written = await requestRouter(h, "POST", "/v1/derived", { body: { workId: "work-1", kind: "presentation", sourceVersion: "r0.u5", body: { primary: "a" }, producerId: "agent-1" } });
+    expect(written.body).toMatchObject({ status: "written", record: { body: { primary: "a" } } });
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=presentation")).body).toMatchObject({ status: "current", record: { producer: { id: "agent-1" } } });
+    expect((await requestRouter(h, "GET", "/v1/derived/pending")).body).toEqual({ pending: [] });
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=work-1&kind=Bad")).response.status).toBe(400);
+    expect((await requestRouter(h, "GET", "/v1/derived?workId=nope&kind=presentation")).response.status).toBe(404);
+  });
+});
+
+test("board routes list boards, read one with the work board's query, 404 an unknown id, and stay local", async () => {
+  const { WorkLifecycleError } = await import("./broker-work-lifecycles.js");
+  const { meshRouteTierFor } = await import("./mesh-route-matrix.js");
+  const reads: Array<{ id: string; query: unknown }> = [];
+  const board = { board: { id: "scout.default", name: "Default", version: 1, hash: "h", description: null }, columns: [], transitions: [], cards: [] };
+  const h = createHarness({
+    boards: {
+      list: () => ({ boards: [{ id: "scout.default", name: "Default", version: 1, isDefault: true }] }),
+      read: (id: string, query: unknown) => {
+        reads.push({ id, query });
+        if (id === "nope") throw new WorkLifecycleError(404, "No lifecycle nope.");
+        return board;
+      },
+    } as never,
+  });
+  const listed = await requestRouter(h, "GET", "/v1/boards");
+  expect(listed.response.status).toBe(200);
+  expect(listed.body).toEqual({ boards: [{ id: "scout.default", name: "Default", version: 1, isDefault: true }] });
+  const read = await requestRouter(h, "GET", "/v1/boards/default?closedSince=500&limit=20");
+  expect(read.response.status).toBe(200);
+  expect(read.body).toEqual(board);
+  await requestRouter(h, "GET", "/v1/boards/scout.default?closedSince=nope");
+  expect(reads).toEqual([
+    { id: "default", query: { closedSince: 500, limit: 20 } },
+    { id: "scout.default", query: { closedSince: undefined, limit: 100 } },
+  ]);
+  const missing = await requestRouter(h, "GET", "/v1/boards/nope");
+  expect(missing.response.status).toBe(404);
+  expect(missing.body).toEqual({ error: "No lifecycle nope." });
+  expect(meshRouteTierFor("GET", "/v1/boards")).toBe("local");
+  expect(meshRouteTierFor("GET", "/v1/boards/scout.default")).toBe("local");
+  expect(meshRouteTierFor("GET", "/v1/work/board")).toBe("local");
+});
+
+test("manual review occurrences record, replay, refuse a conflict and read back over HTTP", async () => {
+  const actions = new Map<string, import("@openscout/protocol").DurableAction>();
+  const harness = createHarness({
+    manualReviewOccurrences: new ManualReviewOccurrenceService({
+      authorityCellId: "node-local",
+      runDurableWrite: (work) => work(),
+      commitEntries: async (entries) => {
+        const committed = Array.isArray(entries) ? entries : [entries];
+        for (const entry of committed) if (entry.kind === "durable.action.record") actions.set(entry.action.id, entry.action);
+        return committed;
+      },
+      getDurableAction: (actionId) => actions.get(actionId),
+      now: () => 1_000,
+    }),
+  });
+  const path = "/v1/manual-review/occurrences";
+  const body = {
+    scope: "review",
+    requestId: "run-1",
+    input: { source: "board:connection-1", id: "message-42", version: "3" },
+    artifact: { kind: "pull_request", ref: "example/repo#12", revision: "1f2e3d4c" },
+  };
+
+  const local = { transport: "loopback" as const };
+  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`, { transportContext: local })).response.status).toBe(404);
+  expect((await requestRouter(harness, "GET", `${path}?scope=review`, { transportContext: local })).response.status).toBe(400);
+
+  const created = await requestRouter(harness, "POST", path, { transportContext: local, body });
+  expect(created.response.status).toBe(200);
+  expect(created.body).toMatchObject({
+    created: true,
+    occurrence: { scope: "review", requestId: "run-1", input: body.input, artifact: body.artifact, requestedById: "local-unverified", state: "recorded" },
+  });
+  const { occurrence } = created.body as { occurrence: unknown };
+
+  expect((await requestRouter(harness, "POST", path, { transportContext: local, body })).body).toEqual({ created: false, occurrence });
+  expect((await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`, { transportContext: local })).body).toEqual({ occurrence });
+
+  for (const options of [
+    {},
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { ...local, guest: true } },
+    { transportContext: { ...local, scoped: true } },
+    { transportContext: local, headers: { origin: "https://example.test" } },
+    { transportContext: local, headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    const read = await requestRouter(harness, "GET", `${path}?scope=review&requestId=run-1`, options);
+    expect(read.response.status).toBe(403);
+    expect(read.body).not.toHaveProperty("occurrence");
+    const write = await requestRouter(harness, "POST", path, { ...options, body: { ...body, requestId: "other" } });
+    expect(write.response.status).toBe(403);
+  }
+
+  const conflict = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, artifact: { ...body.artifact, revision: "89abcdef" } } });
+  expect(conflict.response.status).toBe(409);
+  expect(conflict.body).toMatchObject({ error: "manual_review_conflict", differs: ["artifact.revision"], occurrence });
+
+  const invalid = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, artifact: { kind: "pull_request", ref: "example/repo#12" } } });
+  expect(invalid.response.status).toBe(400);
+  expect(invalid.body).toMatchObject({ error: "invalid_manual_review_request" });
+  expect(actions.size).toBe(1);
+});
+
+test("a manual review dispatch is local only, starts one ask as the attributed caller and replays its ticket", async () => {
+  const actions = new Map<string, import("@openscout/protocol").DurableAction>();
+  const stores = {
+    authorityCellId: "node-local",
+    runDurableWrite: <T>(work: () => Promise<T>) => work(),
+    commitEntries: async (entries: import("./broker-journal.js").BrokerJournalEntry | import("./broker-journal.js").BrokerJournalEntry[]) => {
+      const committed = Array.isArray(entries) ? entries : [entries];
+      for (const entry of committed) if (entry.kind === "durable.action.record") actions.set(entry.action.id, entry.action);
+      return committed;
+    },
+    getDurableAction: (actionId: string) => actions.get(actionId),
+    now: () => 1_000,
+  };
+  const asks: import("@openscout/protocol").ScoutDeliverRequest[] = [];
+  const guarded: string[] = [];
+  const harness = createHarness({
+    manualReviewOccurrences: new ManualReviewOccurrenceService(stores),
+    manualReviewDispatch: new ManualReviewDispatchService({
+      ...stores,
+      deliver: async (ask) => {
+        asks.push(ask);
+        return {
+          kind: "delivery", accepted: true, routeKind: "dm", targetAgentId: "reviewer",
+          conversation: { id: "dm-1" }, message: { id: "msg-1" },
+          flight: { id: "flight-1", invocationId: "inv-1", targetAgentId: "reviewer" },
+          workItem: { id: ask.workItem?.id },
+          receipt: { acceptedAt: 1_000 },
+        } as unknown as import("@openscout/protocol").ScoutDeliverResponse;
+      },
+    }),
+  });
+  // The real guard, protecting one identity that the test never holds a claim for.
+  const claims = new BrokerAssistantClaims(["scoutbot"]);
+  const admit = claims.admit.bind(claims);
+  claims.admit = (agentId, action) => { guarded.push(agentId ?? ""); return admit(agentId, action); };
+  harness.deps.brokerService.assistantClaims = claims;
+  const path = "/v1/manual-review/dispatches";
+  const local = { transport: "loopback" as const };
+  const run = { scope: "review", requestId: "run-1" };
+  const body = { ...run, target: { kind: "agent_id", agentId: "reviewer" } };
+
+  // Nothing is dispatched for a run that was never recorded, and dispatch does not record one.
+  expect((await requestRouter(harness, "POST", path, { transportContext: local, body })).response.status).toBe(404);
+  expect(actions.size).toBe(0);
+
+  await requestRouter(harness, "POST", "/v1/manual-review/occurrences", { transportContext: local, body: {
+    ...run,
+    input: { source: "board:connection-1", id: "message-42", version: "3" },
+    artifact: { kind: "pull_request", ref: "example/repo#12", revision: "1f2e3d4c" },
+  } });
+  expect(asks).toEqual([]);
+
+  for (const options of [
+    {},
+    { transportContext: { transport: "remote" as const } },
+    { transportContext: { ...local, guest: true } },
+    { transportContext: { ...local, scoped: true } },
+    { transportContext: local, headers: { origin: "https://example.test" } },
+    { transportContext: local, headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    const refused = await requestRouter(harness, "POST", path, { ...options, body });
+    expect(refused.response.status).toBe(403);
+    expect(refused.body).not.toHaveProperty("ticket");
+  }
+  expect((await requestRouter(harness, "GET", path, { transportContext: local })).response.status).toBe(404);
+  expect(asks).toEqual([]);
+  expect([...actions.values()][0]?.metadata?.manualReview).toMatchObject({ state: "recorded" });
+
+  const invalid = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...run, target: { kind: "channel", channel: "reviews" } } });
+  expect(invalid.response.status).toBe(400);
+  expect(invalid.body).toMatchObject({ error: "invalid_manual_review_request" });
+
+  // A protected identity cannot be pinned as the asking principal without its claim.
+  const unclaimed = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, requestedById: "scoutbot" } });
+  expect(unclaimed.response.status).toBe(409);
+  expect(unclaimed.body).toMatchObject({ error: "assistant_claim_required" });
+  expect([...actions.values()][0]?.metadata?.manualReview).toMatchObject({ state: "recorded" });
+  expect(asks).toEqual([]);
+  guarded.length = 0;
+
+  // An unverified loopback caller cannot dispatch as the operator: the claim is kept, the principal is not.
+  const attribution = { actorId: "local-unverified", rootActorId: "local-unverified", source: "unverified", claimedActorId: "operator" };
+  const started = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...body, requestedById: "operator" } });
+  expect(started.response.status).toBe(200);
+  expect(started.body).toMatchObject({
+    replayed: false,
+    ticket: { workId: asks[0]?.workItem?.id, flightId: "flight-1", invocationId: "inv-1", messageId: "msg-1", conversationId: "dm-1", targetAgentId: "reviewer" },
+    occurrence: { state: "dispatched", dispatch: { target: body.target, requestedById: "local-unverified", attribution } },
+  });
+  expect(asks).toHaveLength(1);
+  expect(asks[0]).toMatchObject({ task: { version: 1 }, caller: { actorId: "local-unverified" }, target: body.target, messageMetadata: { attribution } });
+  // Guarded once for the caller, and once for the pinned principal at delivery.
+  expect(guarded).toEqual(["local-unverified", "local-unverified"]);
+
+  const { ticket } = started.body as { ticket: unknown };
+  const replay = await requestRouter(harness, "POST", path, { transportContext: local, body });
+  expect(replay.body).toMatchObject({ replayed: true, ticket });
+  const retarget = await requestRouter(harness, "POST", path, { transportContext: local, body: { ...run, target: { kind: "agent_id", agentId: "other" } } });
+  expect(retarget.response.status).toBe(409);
+  expect(retarget.body).toMatchObject({ error: "manual_review_dispatch_conflict", differs: ["target.agentId"] });
+  expect(asks).toHaveLength(1);
+});
+
+test("Board review routes serve only the verified operator on this machine, and keep their scope to themselves", async () => {
+  const actions = new Map<string, import("@openscout/protocol").DurableAction>();
+  const stores = {
+    authorityCellId: "node-local",
+    runDurableWrite: <T>(work: () => Promise<T>) => work(),
+    commitEntries: async (entries: import("./broker-journal.js").BrokerJournalEntry | import("./broker-journal.js").BrokerJournalEntry[]) => {
+      const committed = Array.isArray(entries) ? entries : [entries];
+      for (const entry of committed) if (entry.kind === "durable.action.record") actions.set(entry.action.id, entry.action);
+      return committed;
+    },
+    getDurableAction: (actionId: string) => actions.get(actionId),
+    now: () => 1_000,
+  };
+  const asks: import("@openscout/protocol").ScoutDeliverRequest[] = [];
+  // Every read the routes cause: of this host's Board configuration, of the board, and of the project.
+  const reads: string[] = [];
+  const occurrences = new ManualReviewOccurrenceService(stores);
+  const dispatch = new ManualReviewDispatchService({
+    ...stores,
+    deliver: async (ask) => {
+      asks.push(ask);
+      return {
+        kind: "delivery", accepted: true, routeKind: "dm", targetAgentId: "reviewer",
+        conversation: { id: "dm-1" }, message: { id: "msg-1" },
+        flight: { id: "flight-1", invocationId: "inv-1", targetAgentId: "reviewer" },
+        workItem: { id: ask.workItem?.id },
+        receipt: { acceptedAt: 1_000 },
+      } as unknown as import("@openscout/protocol").ScoutDeliverResponse;
+    },
+  });
+  const board: import("./manual-review-board.js").ManualReviewBoardReads = {
+    reviewChannel: async () => { reads.push("channel"); },
+    reviewGrant: ({ itemId }) => ({
+      check: () => {},
+      read: async () => {
+        reads.push("item");
+        return { id: itemId, version: 7, pinSource: () => "/fixture/review-source" };
+      },
+    }),
+  };
+  const manualReviewBoard = new ManualReviewBoardService({
+    routines: new ManualReviewBoardRoutineStore({ ...stores, listDurableActions: (kind) => [...actions.values()].filter(action => action.kind === kind) }),
+    occurrences,
+    dispatch,
+    board: () => board,
+    project: {
+      canonical: async (projectPath) => { reads.push("project"); return projectPath; },
+      head: async () => "1f2e3d4c5b6a79880123456789abcdef01234567",
+    },
+    now: () => 1_000,
+  });
+  const harness = createHarness({ manualReviewOccurrences: occurrences, manualReviewDispatch: dispatch, manualReviewBoard });
+  const operator = { transport: "loopback" as const, operator: true as const };
+  const routine = { id: "nightly-review", name: "Review the work channel", connectionId: "c1", channel: "work", projectPath: "/projects/reviewer", harness: "codex", enabled: true, expectedVersion: 0 };
+  const routes = [
+    ["GET", "/v1/manual-review/board-routines", undefined],
+    ["POST", "/v1/manual-review/board-routines", routine],
+    ["POST", "/v1/manual-review/board-preview", { routineId: "nightly-review", itemId: "42" }],
+    ["POST", "/v1/manual-review/board-runs", { routineId: "nightly-review", itemId: "42", requestId: "run-1", routineVersion: 1, inputVersion: "7", revision: "1f2e3d4c5b6a79880123456789abcdef01234567" }],
+    ["GET", "/v1/manual-review/board-ticket?workId=sample", undefined],
+    ["POST", "/v1/manual-review/board-accept", { workId: "sample" }],
+    ["GET", "/v1/manual-review/occurrences?scope=board-review%3Anightly-review&requestId=test", undefined],
+  ] as const;
+
+  // Refused at the door: nothing is saved, and nothing is read on the caller's behalf.
+  for (const options of [
+    {},
+    { transportContext: { transport: "loopback" as const } },
+    { transportContext: { transport: "remote" as const, operator: true as const } },
+    { transportContext: { ...operator, guest: true } },
+    { transportContext: { ...operator, scoped: true } },
+    { transportContext: { ...operator, peer: true } },
+    { transportContext: operator, headers: { origin: "https://example.test" } },
+    { transportContext: operator, headers: { "x-openscout-forwarded-node-id": "peer" } },
+  ]) {
+    for (const [method, path, body] of routes) {
+      const refused = await requestRouter(harness, method, path, { ...options, body });
+      expect(refused.response.status).toBe(403);
+      expect(refused.body).not.toHaveProperty("routines");
+      expect(refused.body).not.toHaveProperty("routine");
+    }
+  }
+  expect(reads).toEqual([]);
+  expect(actions.size).toBe(0);
+
+  // A host that does not serve routines says so to the operator, and to nobody else.
+  const without = createHarness({ manualReviewOccurrences: occurrences, manualReviewDispatch: dispatch });
+  expect((await requestRouter(without, "GET", routes[0][1], { transportContext: operator })).response.status).toBe(503);
+  expect((await requestRouter(without, "GET", routes[0][1], { transportContext: { transport: "loopback" } })).response.status).toBe(403);
+
+  const saved = await requestRouter(harness, "POST", routes[1][1], { transportContext: operator, body: routine });
+  expect(saved.response.status).toBe(200);
+  expect(saved.body).toMatchObject({ created: true, routine: { id: "nightly-review", version: 1, harness: "codex" } });
+  const stale = await requestRouter(harness, "POST", routes[1][1], { transportContext: operator, body: routine });
+  expect(stale.response.status).toBe(409);
+  expect(stale.body).toMatchObject({ error: "manual_review_routine_version_conflict", routine: { version: 1 } });
+  expect((await requestRouter(harness, "POST", routes[1][1], { transportContext: operator, body: { ...routine, name: "" } })).response.status).toBe(400);
+  expect((await requestRouter(harness, "GET", `${routes[0][1]}?connectionId=c1&channel=work`, { transportContext: operator })).body)
+    .toMatchObject({ routines: [{ id: "nightly-review", version: 1 }] });
+  expect((await requestRouter(harness, "GET", `${routes[0][1]}?channel=ops`, { transportContext: operator })).body).toEqual({ routines: [] });
+
+  const preview = await requestRouter(harness, "POST", routes[2][1], { transportContext: operator, body: routes[2][2] });
+  expect(preview.body).toMatchObject({
+    routine: { id: "nightly-review", version: 1 },
+    input: { source: "vercel-board:c1:work", id: "42", version: "7" },
+    artifact: { kind: "git_commit", ref: "/projects/reviewer", revision: "1f2e3d4c5b6a79880123456789abcdef01234567" },
+  });
+
+  const started = await requestRouter(harness, "POST", routes[3][1], { transportContext: operator, body: routes[3][2] });
+  expect(started.response.status).toBe(200);
+  expect(started.body).toMatchObject({
+    replayed: false,
+    ticket: { flightId: "flight-1" },
+    occurrence: {
+      scope: "board-review:nightly-review", state: "dispatched", routine: { id: "nightly-review", version: 1 }, requestedById: "operator",
+      dispatch: { target: { kind: "project_path", projectPath: "/projects/reviewer", harness: "codex" }, attribution: { actorId: "operator", source: "local-admin" } },
+    },
+  });
+  const { occurrence, ticket } = started.body as { occurrence: unknown; ticket: unknown };
+  expect((await requestRouter(harness, "POST", routes[3][1], { transportContext: operator, body: routes[3][2] })).body).toEqual({ occurrence, ticket, replayed: true });
+  const changed = await requestRouter(harness, "POST", routes[3][1], { transportContext: operator, body: { ...routes[3][2], requestId: "run-2", inputVersion: "6" } });
+  expect(changed.response.status).toBe(409);
+  expect(changed.body).toMatchObject({ error: "manual_review_preview_changed", differs: ["input.version"] });
+  expect(asks).toHaveLength(1);
+
+  // The run reads back under its stable scope. The general entry points cannot write that scope or state a routine pin.
+  const local = { transport: "loopback" as const };
+  const lookup = "/v1/manual-review/occurrences?scope=board-review:nightly-review&requestId=run-1";
+  expect((await requestRouter(harness, "GET", lookup, { transportContext: operator })).body).toEqual({ occurrence });
+  const unverified = await requestRouter(harness, "GET", lookup, { transportContext: local });
+  expect(unverified.response.status).toBe(403);
+  expect(unverified.body).not.toHaveProperty("occurrence");
+  const pins = { input: { source: "vercel-board:c1:work", id: "42", version: "7" }, artifact: { kind: "git_commit", ref: "/projects/reviewer", revision: "89abcdef" } };
+  for (const [path, body] of [
+    ["/v1/manual-review/occurrences", { scope: "board-review:nightly-review", requestId: "run-3", ...pins }],
+    ["/v1/manual-review/occurrences", { scope: "review", requestId: "run-3", ...pins, routine: { id: "nightly-review", version: 1 } }],
+    ["/v1/manual-review/dispatches", { scope: "board-review:nightly-review", requestId: "run-1", target: { kind: "agent_id", agentId: "other" } }],
+  ] as const) {
+    const reserved = await requestRouter(harness, "POST", path, { transportContext: local, body });
+    expect(reserved.response.status).toBe(403);
+    expect(reserved.body).toMatchObject({ error: "manual_review_scope_reserved" });
+  }
+  expect([...actions.values()].filter(action => action.kind === "manual_review")).toHaveLength(1);
+  expect(asks).toHaveLength(1);
 });

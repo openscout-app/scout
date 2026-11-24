@@ -2,7 +2,7 @@
 
 export const SCOUT_RUNTIME_CATALOG_DATA = {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-11-10.2",
+  "revision": "2026-11-23.1",
   "harnesses": [
     {
       "id": "claude",
@@ -143,6 +143,48 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
       },
       "models": [
         {
+          "id": "gpt-6.2-sol",
+          "label": "6.2 Sol",
+          "enabled": true,
+          "description": "Fast, go-to model for coding and everyday work",
+          "family": "GPT",
+          "version": "6.2 Sol",
+          "contextWindowTokens": 500000,
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "defaultReasoningEffort": "low",
+          "presentation": {
+            "detail": "Latest"
+          }
+        },
+        {
+          "id": "gpt-6.2-astra",
+          "label": "6.2 Astra",
+          "enabled": true,
+          "description": "Most capable model for complex coding and professional work",
+          "family": "GPT",
+          "version": "6.2 Astra",
+          "contextWindowTokens": 272000,
+          "reasoningEfforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "defaultReasoningEffort": "low",
+          "presentation": {
+            "detail": "Most capable"
+          }
+        },
+        {
           "id": "gpt-6-astra",
           "label": "6 Astra",
           "enabled": true,
@@ -158,10 +200,7 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
             "xhigh",
             "max"
           ],
-          "defaultReasoningEffort": "low",
-          "presentation": {
-            "detail": "Most capable"
-          }
+          "defaultReasoningEffort": "low"
         },
         {
           "id": "gpt-6.1-sol",
@@ -179,10 +218,7 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
             "max",
             "ultra"
           ],
-          "defaultReasoningEffort": "medium",
-          "presentation": {
-            "detail": "Latest"
-          }
+          "defaultReasoningEffort": "medium"
         },
         {
           "id": "gpt-6.1-terra",
@@ -519,6 +555,14 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
           "version": "S 2.1 Free"
         }
       ]
+    },
+    {
+      "id": "antigravity",
+      "label": "Google Antigravity",
+      "enabled": true,
+      "allowCustomModels": true,
+      "reasoningEfforts": null,
+      "models": []
     },
     {
       "id": "pi",

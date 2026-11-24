@@ -24,16 +24,20 @@ import {
   endpointStartedAt,
 } from "./broker-endpoint-selection.js";
 import {
+  closedAsSupersededTwin,
+  isSupersededTwinCopy,
+  interruptedCodexFlight,
   isTerminalFlightState,
   staleLocalEndpointReason,
-  staleWorkingFlightReason,
+  staleWorkingFlightFailure,
+  supersedingTwinFlight,
 } from "./broker-local-invocation-helpers.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
 type FlightLifecycleRuntime = {
   snapshot(): RuntimeSnapshot;
   peek?(): Readonly<RuntimeSnapshot>;
-  upsertFlight(flight: FlightRecord): Promise<void>;
+  upsertFlight(flight: FlightRecord, options?: { preserveCurrent?: boolean }): Promise<void>;
 };
 
 type FlightLifecycleJournal = {
@@ -69,6 +73,10 @@ export type BrokerFlightLifecycleServiceOptions = {
     input: Parameters<BrokerFlightLifecycleServiceOptions["updateDeliveryStatus"]>[0],
     eligible: (current: DeliveryIntent) => boolean | Promise<boolean>,
   ) => Promise<boolean>;
+  /** Pure Ready preparation inside the flight writer (see broker-task-ready). */
+  prepareTaskReady?: (previous: FlightRecord | undefined, flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
+  /** After a committed flight write: rings and lands the work item when it entered Ready. */
+  onFlightRecorded?: (previous: FlightRecord | undefined, flight: FlightRecord, invocation: InvocationRequest | undefined) => Promise<void>;
   /** Pure preparation inside the terminal-flight writer; application runs after commit. */
   prepareWorkPromotion?: (flight: FlightRecord, invocation: InvocationRequest | undefined, previous?: FlightRecord) => FlightRecord;
   promoteInvocationFlightToWork: (
@@ -78,7 +86,7 @@ export type BrokerFlightLifecycleServiceOptions = {
   ) => Promise<void>;
   maybeForwardFlightToAuthority: (flight: FlightRecord) => Promise<void>;
   isInvocationActive: (invocationId: string) => boolean;
-  /** When this runtime process started; see `staleWorkingFlightReason`. */
+  /** When this runtime process started; see `staleWorkingFlightFailure`. */
   bootedAt?: number;
   /** Runs inside the writer; the report intent commits with terminal truth. */
   prepareTerminalReport?: (flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
@@ -272,13 +280,15 @@ function normalizeRecordedFlight(
     metadata: {
       ...(flight.metadata ?? {}),
       failureStage: "empty_completed_output",
+      failureCause: "harness_error",
     },
   };
 }
 export class BrokerFlightLifecycleService {
   constructor(private readonly options: BrokerFlightLifecycleServiceOptions) {}
 
-  readonly recordFlight = async (flight: FlightRecord, eligible?: () => boolean): Promise<void> => {
+  /** Resolves true when a record was written. */
+  readonly recordFlight = async (flight: FlightRecord, eligible?: () => boolean): Promise<boolean> => {
     const invocation = this.options.invocationFor(flight.invocationId)
       ?? this.options.runtime.snapshot().invocations[flight.invocationId];
     // Single chokepoint before journal/sqlite persistence, work-item promotion,
@@ -288,6 +298,7 @@ export class BrokerFlightLifecycleService {
     );
     let didRecordFlight = false;
     let previousFlight: FlightRecord | undefined;
+    const twinCopy = isSupersededTwinCopy(this.options.runtime.peek?.() ?? this.options.runtime.snapshot(), flightToRecord);
     await this.options.durableStore.runWrite(async () => {
       // Recheck the caller's observation after acquiring the canonical writer.
       if (eligible && !eligible()) return;
@@ -299,7 +310,9 @@ export class BrokerFlightLifecycleService {
         || previous.requesterId !== flightToRecord.requesterId)) {
         throw new Error("completion_flight_identity_mismatch");
       }
-      if (invocation && hasExplicitCompletion(invocation)) {
+      // A twin copy repeats an outcome the current flight already settled
+      // under the completion contract, so it skips the contract's gates.
+      if (invocation && hasExplicitCompletion(invocation) && !twinCopy) {
         if (!previous) throw new Error("completion_flight_unknown");
         if (this.options.journal.getCurrentFlightForInvocation
           && this.options.journal.getCurrentFlightForInvocation(invocation.id)?.id !== flightToRecord.id) return;
@@ -315,9 +328,17 @@ export class BrokerFlightLifecycleService {
             || !explicitReplyMatchesFlight(reply, invocation, previous, this.options.runtime.snapshot().flights, this.options.journal.getFlight?.bind(this.options.journal))) {
             if (flightToRecord.metadata?.completedByBrokerReply === true) return;
             const { resultReply: _result, failureStage: _failure, ...metadata } = flightToRecord.metadata ?? {};
+            // Keep the turn's own output: if no task reply ever arrives, the
+            // flight fails with it instead of losing it.
+            const awaitingFinalOutput = flightToRecord.output ?? previous.metadata?.awaitingFinalOutput;
+            // A repeated report of the same turn end keeps the clock it started.
+            const repeatedSince = previous.state === "waiting" && completion.awaitingFinal === true
+              ? previous.metadata?.awaitingFinalSince : undefined;
+            const awaitingFinalSince = typeof repeatedSince === "number" ? repeatedSince : this.now();
             flightToRecord = { ...flightToRecord, state: "waiting", completedAt: undefined, output: undefined, error: undefined,
               summary: "Execution ended; awaiting an explicit final reply.",
-              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true } } };
+              metadata: { ...metadata, completion: { ...completion, awaitingFinal: true }, awaitingFinalSince,
+                ...(awaitingFinalOutput !== undefined ? { awaitingFinalOutput } : {}) } };
           }
         }
       }
@@ -342,10 +363,16 @@ export class BrokerFlightLifecycleService {
           ...(previous.metadata?.terminalReport ? { terminalReport: previous.metadata.terminalReport } : {}),
         } };
       }
-      if (!previous?.metadata?.terminalReport) {
-        flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
+      if (twinCopy) {
+        const { terminalReport: _report, workPromotion: _promotion, ...metadata } = flightToRecord.metadata ?? {};
+        flightToRecord = { ...flightToRecord, metadata };
+      } else {
+        if (!previous?.metadata?.terminalReport) {
+          flightToRecord = this.options.prepareTerminalReport?.(flightToRecord, invocation) ?? flightToRecord;
+        }
+        flightToRecord = this.options.prepareTaskReady?.(previous, flightToRecord, invocation) ?? flightToRecord;
+        flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       }
-      flightToRecord = this.options.prepareWorkPromotion?.(flightToRecord, invocation, previous) ?? flightToRecord;
       if (previous && isDuplicateFlightUpdate(previous, flightToRecord)) {
         return;
       }
@@ -356,17 +383,19 @@ export class BrokerFlightLifecycleService {
         return;
       }
 
+      // A twin copy never becomes the invocation's current flight: the twin
+      // keeps its dispatch, pending result reply and work promotion.
       const entries = await this.options.durableStore.commitEntries(
-        { kind: "flight.record", flight: flightToRecord },
+        { kind: "flight.record", flight: flightToRecord, ...(twinCopy ? { preserveCurrent: true } : {}) },
         async () => {
-          await this.options.runtime.upsertFlight(flightToRecord);
+          await this.options.runtime.upsertFlight(flightToRecord, twinCopy ? { preserveCurrent: true } : undefined);
         },
         { enqueueProjection: false },
       );
       await this.options.durableStore.applyProjectedEntries(entries);
       didRecordFlight = true;
     });
-    if (!didRecordFlight) return;
+    if (!didRecordFlight) return false;
 
     // Start delivery before unrelated endpoint/work bookkeeping can fail. The
     // durable intent remains recoverable even when this process stops here.
@@ -376,6 +405,17 @@ export class BrokerFlightLifecycleService {
       });
     }
     await this.reconcileMessageDeliveriesForFlight(flightToRecord, invocation);
+    if (twinCopy) return true;
+    if (this.options.onFlightRecorded) {
+      try {
+        await this.options.onFlightRecorded(previousFlight, flightToRecord, invocation);
+      } catch (error) {
+        this.options.warn?.(
+          `[openscout-runtime] Ready follow-up failed for flight ${flightToRecord.id}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     if (invocation && isTerminalFlightState(flightToRecord.state)) {
       try {
         await this.options.promoteInvocationFlightToWork(
@@ -420,6 +460,11 @@ export class BrokerFlightLifecycleService {
         error instanceof Error ? error.message : String(error),
       );
     }
+
+    if (isTerminalFlightState(flightToRecord.state) && !isTerminalFlightState(previousFlight?.state ?? "queued")) {
+      await this.closeSupersededTwins(flightToRecord, invocation);
+    }
+    return true;
   };
 
   readonly reconcileStaleLocalDeliveries = async (): Promise<void> => {
@@ -471,37 +516,80 @@ export class BrokerFlightLifecycleService {
     }, { activeOnly: true });
   };
 
+  /** Closes open flights that this newly finished flight took over. */
+  private async closeSupersededTwins(twin: FlightRecord, invocation: InvocationRequest | undefined): Promise<void> {
+    // Operator-owned tasks settle through their own answer path.
+    if (invocation?.metadata?.humanOwned === true) return;
+    const snapshot = this.options.runtime.peek?.() ?? this.options.runtime.snapshot();
+    const open = Object.values(snapshot.flights).filter((flight) => (
+      flight.id !== twin.id
+      && flight.invocationId === twin.invocationId
+      && supersedingTwinFlight(snapshot, flight)?.id === twin.id
+    ));
+    if (open.length === 0 || this.options.isInvocationActive(twin.invocationId)) return;
+    for (const flight of open) {
+      try {
+        await this.recordFlight(closedAsSupersededTwin(flight, twin, this.now()));
+      } catch (error) {
+        this.options.warn?.(
+          `[openscout-runtime] failed to close flight ${flight.id} superseded by ${twin.id}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+  }
+
   readonly reconcileStaleWorkingFlights = async (): Promise<void> => {
     const snapshot = this.options.runtime.snapshot();
     const now = this.now();
 
     for (const flight of Object.values(snapshot.flights)) {
       if (snapshot.invocations[flight.invocationId]?.metadata?.humanOwned === true) continue;
-      const reason = staleWorkingFlightReason(snapshot, flight, {
+      const twin = supersedingTwinFlight(snapshot, flight);
+      if (twin && !this.options.isInvocationActive(flight.invocationId)) {
+        if (await this.recordFlight(closedAsSupersededTwin(flight, twin, now))) {
+          this.options.warn?.(`[openscout-runtime] closed flight ${flight.id}: superseded by ${twin.state} flight ${twin.id}`);
+        }
+        continue;
+      }
+      const interrupted = interruptedCodexFlight(flight, this.options.bootedAt);
+      if (interrupted && !this.options.isInvocationActive(flight.invocationId)) {
+        await this.recordFlight(interrupted, () => {
+          const current = this.options.journal.getFlight?.(flight.id)
+            ?? this.options.runtime.snapshot().flights[flight.id];
+          return !this.options.isInvocationActive(flight.invocationId) && isDeepStrictEqual(current, flight);
+        });
+        continue;
+      }
+      const failure = staleWorkingFlightFailure(snapshot, flight, {
         isInvocationActive: this.options.isInvocationActive,
         now,
         bootedAt: this.options.bootedAt,
       });
-      if (!reason) {
+      if (!failure) {
         continue;
       }
 
       const agent = snapshot.agents[flight.targetAgentId] as AgentDefinition | undefined;
+      const unrepliedOutput = flight.metadata?.awaitingFinalOutput;
       const reconciledFlight: FlightRecord = {
         ...flight,
+        ...(typeof unrepliedOutput === "string" && unrepliedOutput ? { output: unrepliedOutput } : {}),
         state: "failed",
         summary: `${agent?.displayName ?? flight.targetAgentId} did not finish cleanly.`,
-        error: `Stale running flight reconciled: ${reason}`,
+        error: `Stale running flight reconciled: ${failure.detail}`,
         completedAt: now,
         metadata: {
           ...(flight.metadata ?? {}),
+          failureCause: failure.cause,
+          supersededByFlightId: failure.supersededByFlightId,
           reconciledStaleFlight: true,
-          reconciledReason: reason,
+          reconciledReason: failure.detail,
           reconciledAt: now,
         },
       };
       await this.recordFlight(reconciledFlight);
-      this.options.warn?.(`[openscout-runtime] reconciled stale running flight ${flight.id}: ${reason}`);
+      this.options.warn?.(`[openscout-runtime] reconciled stale running flight ${flight.id}: ${failure.detail}`);
     }
   };
 

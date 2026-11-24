@@ -180,7 +180,7 @@ export class BrokerLocalEndpointResolver {
     ));
   }
 
-  async resolveLocalEndpointForInvocation(invocation: InvocationRequest): Promise<AgentEndpoint | undefined> {
+  async resolveLocalEndpointForInvocation(invocation: InvocationRequest, admitLaunch?: () => Promise<boolean>): Promise<AgentEndpoint | undefined> {
     const requestedHarness = invocation.execution?.harness;
     const targetSessionId = invocationTargetSessionId(invocation);
     const sessionPreference = invocation.execution?.session ?? "new";
@@ -205,6 +205,7 @@ export class BrokerLocalEndpointResolver {
       && invocation.ensureAwake
       && this.options.createIsolatedAgentEndpoint
     ) {
+      if (admitLaunch && !await admitLaunch()) return undefined;
       const isolatedEndpoint = await this.options.createIsolatedAgentEndpoint(invocation);
       if (isolatedEndpoint) {
         await this.options.persistEndpoint(isolatedEndpoint);
@@ -293,6 +294,7 @@ export class BrokerLocalEndpointResolver {
             await this.options.persistEndpoint(resumable);
             return resumable;
           }
+          if (isDirectLocalAgentTransport(checked.endpoint.transport) && admitLaunch && !await admitLaunch()) return undefined;
           const revived = await this.reviveExactSessionEndpoint(checked.endpoint);
           if (revived) return revived;
         } catch (error) {
@@ -357,7 +359,8 @@ export class BrokerLocalEndpointResolver {
     // there. Never spawn a replacement when that process is gone.
     const attachedLive = this.options.runtime.endpointsForAgent(invocation.targetAgentId, {
       nodeId: this.options.nodeId,
-    }).find(isAttachedLiveTerminalEndpoint);
+      includeOffline: true,
+    }).find(endpoint => (endpoint.state !== "offline" || endpoint.transport === "rex") && isAttachedLiveTerminalEndpoint(endpoint));
     if (attachedLive) {
       throw new Error(
         `live ${attachedLive.harness} session in ${describeAttachedLiveTerminal(attachedLive)} is no longer running; `
@@ -365,6 +368,7 @@ export class BrokerLocalEndpointResolver {
       );
     }
 
+    if (admitLaunch && !await admitLaunch()) return undefined;
     const binding = await this.options.ensureLocalAgentBindingOnline(invocation.targetAgentId, this.options.nodeId, {
       includeDiscovered: true,
       harness: requestedHarness,
@@ -553,8 +557,8 @@ ForInvocation` settles that debt for the transports that can be asked directly
       // Codex guards its own thread: the revive below parks on the lock.
       if (probe.held && session.harness === "claude") {
         throw new Error(
-          `session_live_unbound: Claude session ${session.sessionId} is running, but not in Herdr, Orca, tmux or a terminal `
-            + "Scout can type into; nothing was started",
+          `session_live_unbound: Claude session ${session.sessionId} is running, but not in Herdr, Orca, tmux, a terminal `
+            + "Scout can type into, or with the Scout channel; nothing was started",
         );
       }
       return null;

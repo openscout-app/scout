@@ -1,3 +1,4 @@
+import { sessionSenderCard } from "./broker-session-sender-profile.js";
 import {
   A2A_JSON_RPC_METHODS,
   A2A_LEGACY_JSON_RPC_METHODS,
@@ -22,6 +23,7 @@ import {
 } from "@openscout/protocol";
 
 import type { LocalAgentBinding } from "./local-agents.js";
+import { isSafelyDeferredDispatchFlight, supersedingFlight } from "./broker-dispatch-recovery-service.js";
 import { buildScoutAgentCard } from "./scout-agent-cards.js";
 import type { RuntimeSnapshot } from "./scout-dispatcher.js";
 
@@ -43,7 +45,13 @@ export type BrokerA2AServiceOptions = {
   createId: (prefix: string) => string;
   acceptInvocation: (invocation: InvocationRequest) => Promise<FlightRecord>;
   dispatchInvocation: (invocation: InvocationRequest) => Promise<void>;
-  recordFlight: (flight: FlightRecord) => Promise<void>;
+  recordFlight: (flight: FlightRecord, eligible?: () => boolean) => Promise<void>;
+  /** The invocation's current flight; another non-terminal flight is a superseded placeholder. */
+  currentFlightForInvocation?: (invocationId: string) => FlightRecord | undefined;
+  /** Every local executor, not only direct launches: external sessions, T3, reply recovery. */
+  isInvocationActive?: (invocationId: string) => boolean;
+  /** Cancel a superseded flight without moving the invocation's current flight. */
+  cancelSupersededFlight?: (flight: FlightRecord, summary: string) => Promise<FlightRecord | null>;
   loadRegisteredLocalAgentBindings: (
     nodeId: string,
     options: { ensureOnline: false },
@@ -237,6 +245,12 @@ export class BrokerA2AService {
 
   constructor(private readonly options: BrokerA2AServiceOptions) {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)));
+  }
+
+  async scoutAgentCardsForActor(actorId: string): Promise<ScoutAgentCard[]> {
+    const session = sessionSenderCard(this.options.runtime.snapshot(), actorId);
+    if (session) return [session];
+    return (await this.listScoutAgentCards()).filter(card => card.agentId === actorId);
   }
 
   async listScoutAgentCards(): Promise<ScoutAgentCard[]> {
@@ -515,7 +529,31 @@ export class BrokerA2AService {
     if (isA2ATerminalTaskState(state)) {
       return a2aTaskForFlight(found.flight, found.invocation);
     }
-    if (found.flight.state !== "queued" || this.options.activeInvocationTasks.has(found.flight.invocationId)) {
+    const current = this.options.currentFlightForInvocation?.(found.flight.invocationId);
+    const superseding = supersedingFlight(found.flight, current);
+    if (superseding) {
+      // The invocation runs on another flight. This one can never start, so
+      // cancelling it touches neither the current flight nor its worker. The
+      // general path below would make it current again, so it never applies.
+      const cancelled = this.options.cancelSupersededFlight
+        && (found.flight.state === "queued" || found.flight.state === "waking")
+        ? await this.options.cancelSupersededFlight(found.flight,
+          `A2A client cancelled this superseded flight; invocation ${found.flight.invocationId} continues on ${superseding.id}.`)
+        : null;
+      const latest = cancelled ?? this.taskById(taskId)?.flight ?? found.flight;
+      if (isA2ATerminalTaskState(a2aTaskStateFromFlightState(latest.state))) return a2aTaskForFlight(latest, found.invocation);
+      throw Object.assign(new Error(`A2A task ${taskId} is superseded by ${superseding.id} and could not be cancelled.`), {
+        code: -32004,
+        data: { taskId, state },
+      });
+    }
+    const active = () => this.options.activeInvocationTasks.has(found.flight.invocationId)
+      || this.options.isInvocationActive?.(found.flight.invocationId) === true;
+    // A waking flight is cancellable only with explicit evidence that nothing
+    // was submitted: a wake with no not_submitted park may already be typing.
+    const notStarted = found.flight.state === "queued"
+      || (found.flight.state === "waking" && isSafelyDeferredDispatchFlight(found.flight));
+    if (!notStarted || active()) {
       throw Object.assign(new Error(`A2A task ${taskId} is already running and cannot be cancelled by the broker yet.`), {
         code: -32004,
         data: { taskId, state },
@@ -533,7 +571,17 @@ export class BrokerA2AService {
         a2aCancelledAt: completedAt,
       },
     };
-    await this.options.recordFlight(cancelled);
-    return a2aTaskForFlight(cancelled, found.invocation);
+    const currentFlight = () => this.options.currentFlightForInvocation
+      ? this.options.currentFlightForInvocation(found.flight.invocationId)
+      : this.taskById(taskId)?.flight;
+    await this.options.recordFlight(cancelled, () => {
+      const latest = currentFlight();
+      return latest?.id === taskId && latest.state === found.flight.state && !active();
+    });
+    const recorded = currentFlight();
+    if (recorded?.id !== taskId || !isA2ATerminalTaskState(a2aTaskStateFromFlightState(recorded.state))) {
+      throw Object.assign(new Error(`A2A task ${taskId} changed before it could be cancelled.`), { code: -32004, data: { taskId } });
+    }
+    return a2aTaskForFlight(recorded, found.invocation);
   }
 }

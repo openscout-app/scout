@@ -6,6 +6,7 @@ import {
   flightCompletion,
   type ScoutRouteTarget,
 } from "@openscout/protocol";
+import { ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
 
 import {
@@ -80,6 +81,7 @@ type ScoutAskDeliveryResult = {
   sessionAlias?: string;
   executionResolution?: ScoutAskReceipt["executionResolution"];
   workItem?: ScoutAskResult["workItem"];
+  workPageUnavailable?: true;
   targetDiagnostic?: ScoutAskResult["targetDiagnostic"];
   preflightFailure?: ScoutAskResult["preflightFailure"];
 };
@@ -222,6 +224,7 @@ export function buildScoutAskReceipt(input: {
     ok,
     state,
     ...(input.result.accepted ? { recording: "recorded" as const } : {}),
+    ...(input.result.workPageUnavailable ? { workPageUnavailable: true } : {}),
     ...(typeof input.result.deliveryMessage?.metadata?.workerInterrupted === "boolean" ? { workerInterrupted: input.result.deliveryMessage.metadata.workerInterrupted } : {}),
     ...(input.result.deliveryMessage?.metadata?.notificationPolicy ? { notificationStatus:
       (input.result.deliveryMessage.metadata.notificationPolicy as { requested?: boolean }).requested ? "requested_unconfirmed" as const : "not_requested" as const } : {}),
@@ -230,6 +233,8 @@ export function buildScoutAskReceipt(input: {
     ...(parentCompletion ? { parentCompletion } : {}),
     ids: compactAskIds({
       targetAgentId: input.result.flight?.targetAgentId,
+      sessionId: typeof input.result.flight?.metadata?.targetSessionId === "string"
+        ? input.result.flight.metadata.targetSessionId : undefined,
       invocationId: input.result.flight?.invocationId,
       flightId: input.result.flight?.id,
       conversationId: input.result.conversationId,
@@ -381,11 +386,26 @@ export function buildScoutAskRoute(input: {
 }
 
 export const scoutAskHandler: ScoutAskHandler = async (command) => {
+  try {
+    return await submitAsk(command);
+  } catch (error) {
+    if (!(error instanceof ScoutBrokerHttpError) || (!command.task?.ref && !command.task?.continue)) throw error;
+    const code = error.status === 409 && (error.code === "task_followup_not_sent" || error.code === "task_followup_unauthorized")
+      ? error.code : error.status === 400 ? "invalid_request" : null;
+    if (!code) throw error;
+    let refusal: { detail?: unknown; evidence?: unknown } | null = null;
+    try { refusal = JSON.parse(error.body); } catch { /* Keep the HTTP diagnostic. */ }
+    return { ok: false, state: "failed", ids: typeof refusal?.evidence === "string" ? { flightId: refusal.evidence } : {},
+      error: { code, message: typeof refusal?.detail === "string" ? refusal.detail : error.message } };
+  }
+};
+
+const submitAsk: ScoutAskHandler = async (command) => {
   const currentDirectory = command.currentDirectory ?? process.cwd();
   if (command.task) validateTaskAsk(command.task, { to: command.to, channel: command.channel,
     capability: !command.task?.continue && Boolean(command.projectPath || command.runtimeProfile || command.existingHandle),
     execution: Boolean(command.harness || command.model || command.reasoningEffort || command.placement || command.host || command.projectPath || command.runtimeProfile),
-    relation: Boolean(command.relation) });
+    relation: Boolean(command.relation), decisionImages: command.decisionImages?.length ?? 0 });
   if (command.completion || command.relation) {
     const target = command.to?.trim();
     const exactTarget = target && /^(id|session):[^\s]+$/.test(target);
@@ -479,7 +499,7 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
     };
   }
   const taskTarget = command.task?.operator ? { kind: "agent_label" as const, label: "operator" }
-    : command.task?.ref || command.task?.continue ? { kind: "binding_ref" as const, ref: command.task.ref ?? command.task.continue! }
+    : command.task?.ref || command.task?.continue ? { kind: "binding_ref" as const, ref: (command.task.ref ?? command.task.continue!).replace(/^ref:/, "") }
     : command.channel ? { kind: "channel" as const, channel: command.channel } : undefined;
   const target = taskTarget ?? buildScoutAskRoute({
     to: requestedTo,
@@ -517,6 +537,7 @@ export const scoutAskHandler: ScoutAskHandler = async (command) => {
     task: command.task?.continue && (host || commandProjectPath)
       ? { ...command.task, successor: { host, projectPath: commandProjectPath } } : command.task,
     image: command.image,
+    decisionImages: command.decisionImages,
     attachments: command.attachments,
     requestId: command.requestId,
     completion: command.completion,

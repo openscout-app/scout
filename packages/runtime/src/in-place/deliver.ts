@@ -16,6 +16,12 @@ import { callLattices, submitLatticesComposer, type LatticesCall } from "./latti
 //   herdr    — `herdr agent prompt`, which submits through Herdr's agent surface.
 //   orca     — `orca terminal send --enter`, Orca's own terminal input.
 //   tmux     — a bracketed paste and Enter, the dispatch Scout uses for its panes.
+//   channel  — a Claude session running the Scout channel (claude-scout's
+//              `scout channel` MCP server). The words go in as a channel
+//              notification through the socket named by the session id
+//              (claude-channel-socket.ts): no terminal, pane or composer, so a
+//              session in a plain terminal tab or a background job is reached,
+//              and nothing a person is typing can be overwritten.
 //   terminal — a Claude session in a plain terminal tab, typed into by its tty
 //              through Lattices' computer-use surface.
 // A Codex thread held by the ChatGPT app's Codex (its app-server is stdio-only,
@@ -30,14 +36,19 @@ import { callLattices, submitLatticesComposer, type LatticesCall } from "./latti
 // When none finds the session live, the caller decides what happens next:
 // the phone resumes the exact session, the CLI and MCP say so and stop.
 
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { readHerdrSessions, readHerdrTopology } from "../system-probes/herdr.js";
 import { execSystemFile } from "../system-probes/exec.js";
 import { findLiveClaudeSession, type ClaudeSessionRecord } from "../claude-session-records.js";
-import { listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailComposerState } from "../local-agents.js";
+import { flightSessionTrace } from "@openscout/protocol";
+import { localEndpointProviderSessionId } from "../broker-local-endpoint-resolver.js";
+import { endpointStronglyMatchesSession } from "../broker-endpoint-selection.js";
+import type { RuntimeRegistrySnapshot } from "../registry.js";
+import { parseContinuationDialog } from "../continuation/dialog.js";
+import { SCOUT_LAUNCHED_TMUX_OPTION, buildTmuxDispatchStrategy, listScoutLaunchedTmuxSessions, sendTmuxPrompt, tmuxPaneTailBlockingHarnessDialog, tmuxPaneTailComposerState } from "../local-agents.js";
 
 import { openLineTail, type LineTail } from "./line-tail.js";
 import { readOrcaAgents, sendOrcaPrompt, type OrcaAgent } from "./orca.js";
@@ -49,12 +60,16 @@ import {
   type ProcessHostLocation,
 } from "./process-host.js";
 import { askScoutApp, type ScoutAppReply } from "./scout-app-socket.js";
+import { askClaudeChannel, isClaudeChannelSessionId, type ClaudeChannelReply } from "./claude-channel-socket.js";
 
-export type InPlaceHost = "herdr" | "orca" | "tmux" | "terminal";
-export type InPlaceVia = "herdr" | "orca" | "tmux" | "lattices" | "scout-app";
+export type InPlaceHost = "herdr" | "orca" | "tmux" | "channel" | "terminal";
+export type InPlaceVia = "herdr" | "orca" | "tmux" | "claude-channel" | "lattices" | "scout-app";
 
-/** The preferred order when more than one host holds a session. */
-export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "terminal"];
+/**
+ * The preferred order when more than one host holds a session. The channel
+ * comes before the plain terminal: it needs no keystrokes and no composer read.
+ */
+export const IN_PLACE_HOSTS: readonly InPlaceHost[] = ["herdr", "orca", "tmux", "channel", "terminal"];
 
 export type InPlaceDelivery =
   | { ok: true; via: InPlaceVia; location: string; delivered?: "draft" }
@@ -78,6 +93,17 @@ export type InPlaceDelivery =
 export type HerdrPaneMatch = { session: string; paneId: string; status: string | null; harness?: string; sessionKind?: string };
 
 export type DeliverInPlaceDeps = {
+  /** Opt-in for direct sends, not for reply routing or resume probes. */
+  managedTmuxContext?: () => Promise<{ nodeId: string; snapshot: Pick<RuntimeRegistrySnapshot, "endpoints" | "flights"> } | null>;
+  ownSessionIds?: readonly string[];
+  /**
+   * The caller's own tmux pane, from the caller's TMUX and TMUX_PANE. A pane
+   * ID is unique only within one tmux server, so the socket is part of it.
+   */
+  ownTmuxPane?: { target: string; socketPath: string | null } | null;
+  managedTmuxPane?: (session: string, pane?: string) => Promise<{ target: string; socketPath: string } | null>;
+  readTmuxTail?: (target: string, socketPath: string) => Promise<string>;
+
   findHerdrPane?: (sessionId: string, harness?: string | null) => Promise<HerdrPaneMatch | null>;
   /** Surface-bound composer read, immediately before input. Missing/failed reads refuse. */
   composerEmpty?: (place: { via: InPlaceVia; location: string }) => Promise<boolean>;
@@ -110,6 +136,8 @@ export type DeliverInPlaceDeps = {
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
+  /** Asks the session's Scout channel; injectable for tests. Never rejects. */
+  askClaudeChannel?: (request: { op: "ping"; sessionId: string } | { op: "deliver"; sessionId: string; body: string }) => Promise<ClaudeChannelReply>;
   /** Preferred host order; defaults to OPENSCOUT_IN_PLACE_ORDER, then IN_PLACE_HOSTS. */
   order?: readonly InPlaceHost[];
 };
@@ -167,6 +195,8 @@ type Candidates = {
   herdr: HerdrPaneMatch | null;
   orca: { terminalHandle: string; paneKey: string | null } | null;
   tmux: { target: string; location: string } | null;
+  /** A Scout channel answers for this exact session. */
+  channel: boolean;
   /** The Claude process, for typing into a plain terminal tab. */
   terminalPid: number | null;
   /** Claude's own record of the live process, which carries its activity. */
@@ -185,7 +215,7 @@ async function gatherInPlaceCandidates(
   deps: DeliverInPlaceDeps,
 ): Promise<GatheredCandidates> {
   const { sessionId, harness } = input;
-  const candidates: Candidates = { herdr: null, orca: null, tmux: null, terminalPid: null, claude: null, held: false };
+  const candidates: Candidates = { herdr: null, orca: null, tmux: null, channel: false, terminalPid: null, claude: null, held: false };
 
   // Herdr names the session itself when its integration is installed.
   if (input.requireExactHarness && !harness) return { ok: false, code: "session_runtime_unobserved" };
@@ -221,8 +251,9 @@ async function gatherInPlaceCandidates(
       pids.push(record.pid);
       candidates.claude = record;
       // A process whose pane could not be shown to hold it is open, but
-      // neither that pane nor its terminal is a place to type.
-      if (!record.paneUnverified) candidates.terminalPid = record.pid;
+      // neither that pane nor its terminal is a place to type. A background
+      // job has no tab of its own: its tty belongs to Claude's job runner.
+      if (!record.paneUnverified && record.kind !== "bg") candidates.terminalPid = record.pid;
       if (record.tmux && !record.paneUnverified) {
         candidates.tmux = {
           target: record.tmux.pane ?? record.tmux.session,
@@ -233,6 +264,16 @@ async function gatherInPlaceCandidates(
   }
   if (!harness || harness === "codex") {
     pids.push(...await (deps.codexThreadPids ?? codexThreadHolderPids)(sessionId).catch(() => []));
+  }
+  // A channel's answer counts only beside Claude's own record of the session:
+  // the record must be live, not Scout's copy, and held by the very process
+  // the channel runs in. A channel left naming a session its process has
+  // moved on from (/clear, /resume), or running in Scout's background copy,
+  // is never taken for the operator's session.
+  if (candidates.claude && isClaudeChannelSessionId(sessionId)
+    && !(deps.ownSessionIds ?? []).includes(sessionId)) {
+    const ping = await claudeChannel(deps)({ op: "ping", sessionId }).catch(() => null);
+    candidates.channel = ping?.ok === true && ping.hostPid === candidates.claude.pid;
   }
   candidates.held = pids.length > 0;
   for (const pid of pids) {
@@ -326,6 +367,9 @@ export async function probeInPlace(
         activity = draft === undefined ? "unknown" : draft ? "composing" : "idle";
       }
       return { live: true, via: "tmux", location: candidates.tmux.location, activity };
+    }
+    if (host === "channel" && candidates.channel) {
+      return { live: true, via: "claude-channel", location: channelLocation(sessionId), activity: await harnessActivity() };
     }
   }
 
@@ -453,6 +497,96 @@ async function typeWithEmptyComposer(
   return typeAt(place, before, type);
 }
 
+async function findMarkedTmuxPane(session: string, pane?: string): Promise<{ target: string; socketPath: string } | null> {
+  const { stdout } = await execSystemFile("tmux", [
+    "list-panes", "-s", "-t", session, "-F",
+    `#{session_name}|#{${SCOUT_LAUNCHED_TMUX_OPTION}}|#{pane_id}|#{pane_dead}|#{socket_path}`,
+  ], { timeoutMs: 2_000, maxStdoutBytes: 64 * 1024 });
+  const matches = stdout.trim().split("\n").map(line => line.split("|"))
+    .filter(([name, marked, id, dead, socket]) => name === session && marked === "1"
+      && dead === "0" && /^%\d+$/.test(id ?? "") && (!pane || pane === id) && socket?.startsWith("/"));
+  const match = matches.length === 1 ? matches[0] : undefined;
+  // Pane IDs are scoped to a server. The actuator may run in scoutd, which
+  // does not inherit the caller's TMUX environment, so pass the observed socket.
+  return match ? { target: match[2]!, socketPath: match[4]! } : null;
+}
+
+/** Without the caller's socket, a matching pane ID is treated as its own. */
+async function isOwnTmuxPane(
+  pane: { target: string; socketPath: string },
+  own: DeliverInPlaceDeps["ownTmuxPane"],
+): Promise<boolean> {
+  if (!own || own.target !== pane.target) return false;
+  if (!own.socketPath) return true;
+  const canonical = (path: string) => realpath(path).catch(() => path);
+  return (await canonical(own.socketPath)) === (await canonical(pane.socketPath));
+}
+
+async function deliverToManagedTmux(
+  input: { sessionId: string; harness: string | null; body: string },
+  deps: DeliverInPlaceDeps,
+  before?: BeforeKeystroke,
+): Promise<InPlaceDelivery | null> {
+  const context = await deps.managedTmuxContext?.().catch(() => null);
+  if (!context) return null;
+  const { sessionId, harness, body } = input;
+  const { snapshot, nodeId } = context;
+  const matches = Object.values(snapshot.endpoints).filter(endpoint => {
+    if (endpoint.nodeId !== nodeId || endpoint.transport !== "tmux"
+      || (endpoint.harness !== "claude" && endpoint.harness !== "codex")
+      || (harness && harness !== endpoint.harness)
+      || !["idle", "active", "working", "waiting"].includes(endpoint.state)) return false;
+    // Do not accept a card ID as a session unless it is the endpoint's own session ID.
+    if ((endpoint.agentId !== sessionId || endpoint.sessionId === sessionId || endpoint.metadata?.cardless === true)
+      && endpointStronglyMatchesSession(endpoint, sessionId)) return true;
+    // An active dispatch can observe the native ID before its endpoint alias
+    // is refreshed. Tie that observation to both the endpoint and its session.
+    if (localEndpointProviderSessionId(endpoint)) return false;
+    return Object.values(snapshot.flights).some(flight => {
+      if (flight.state !== "running" && flight.state !== "waiting") return false;
+      const trace = flightSessionTrace(flight).at(-1);
+      const ack = flight.metadata?.dispatchAck as { executionResolution?: { sessionId?: string } } | undefined;
+      return trace?.endpointId === endpoint.id && trace.nodeId === nodeId
+        && trace.harness === endpoint.harness && trace.sessionId === endpoint.sessionId
+        && ack?.executionResolution?.sessionId === sessionId;
+    });
+  });
+  if (matches.some(endpoint => deps.ownSessionIds?.some(id => endpointStronglyMatchesSession(endpoint, id)))) {
+    return { ok: false, code: "not_live" };
+  }
+  const panes = new Map<string, { target: string; socketPath: string; location: string; harness: "claude" | "codex"; waiting: boolean }>();
+  for (const endpoint of matches) {
+    const session = typeof endpoint.metadata?.tmuxSession === "string" ? endpoint.metadata.tmuxSession : endpoint.sessionId;
+    if (!session || session.startsWith("flat-")) continue;
+    const surface = await (deps.managedTmuxPane ?? findMarkedTmuxPane)(session, endpoint.pane).catch(() => null);
+    if (!surface) continue;
+    const key = JSON.stringify([surface.socketPath, surface.target]);
+    const previous = panes.get(key);
+    if (previous && previous.harness !== endpoint.harness) return { ok: false, code: "session_ambiguous" };
+    panes.set(key, { ...surface, location: `tmux ${session} · ${surface.target}`,
+      harness: endpoint.harness as "claude" | "codex", waiting: endpoint.state === "waiting" || Boolean(previous?.waiting) });
+  }
+  if (panes.size > 1) return { ok: false, code: "session_ambiguous" };
+  const pane = [...panes.values()][0];
+  if (!pane) return null;
+  if (await isOwnTmuxPane(pane, deps.ownTmuxPane)) return { ok: false, code: "not_live" };
+  const place = { via: "tmux" as const, location: pane.location };
+  if (pane.waiting) return { ok: false, code: "session_blocked", ...place };
+  const tail = await (deps.readTmuxTail ?? captureTmuxComposerTail)(pane.target, pane.socketPath).catch(() => null);
+  if (tail && (parseContinuationDialog(tail).live || tmuxPaneTailBlockingHarnessDialog(tail))) {
+    return { ok: false, code: "session_blocked", ...place };
+  }
+  const draft = tail === null ? undefined : tmuxPaneTailComposerState(tail);
+  if (draft === undefined) return { ok: false, code: "in_place_failed", ...place, nothingSent: true,
+    detail: "Cannot observe the tmux composer; unsent text could be overwritten. Nothing was typed." };
+  if (draft) return { ok: false, code: "busy", ...place, detail: "The composer holds unsent text. Nothing was typed." };
+  return typeAt(place, before, async () => {
+    if (deps.promptTmux) return deps.promptTmux(pane.target, body);
+    const result = await sendTmuxPrompt(pane.target, body, buildTmuxDispatchStrategy(pane.harness, body), pane.socketPath);
+    if (!result.submitted) throw new Error("the pane did not accept the prompt");
+  });
+}
+
 export async function deliverInPlace(
   input: {
     sessionId: string;
@@ -503,7 +637,11 @@ export async function deliverInPlace(
       }
       return typeAt({ via: "tmux", location }, before, () => (deps.promptTmux ?? promptTmuxPane)(target, body));
     }
+    if (host === "channel" && candidates.channel) return deliverToClaudeChannel(sessionId, body, candidates, deps, before);
   }
+
+  const managed = await deliverToManagedTmux({ sessionId, harness, body }, deps, before);
+  if (managed) return managed;
 
   // A Codex thread open in the ChatGPT app: nothing above can reach it.
   if (harness === "codex") {
@@ -543,6 +681,47 @@ export async function deliverInPlace(
   const ownTty = await (deps.selfTty ?? callerTty)().catch(() => null);
   if (tty === ownTty) return { ok: false, code: "not_live" };
   return typeWithEmptyComposer({ via: "lattices", location: `terminal ${tty}` }, deps, before, () => (deps.typeIntoTty ?? typeIntoTtyWithLattices)(tty, body));
+}
+
+function channelLocation(sessionId: string): string {
+  return `Claude channel ${sessionId.slice(0, 8)}`;
+}
+
+/**
+ * The channel puts the words beside the conversation, not in the composer, so
+ * no composer read is needed and a busy turn takes them at its next step. A
+ * session sitting at a permission prompt or a question is still refused: the
+ * operator answers that first.
+ */
+async function deliverToClaudeChannel(
+  sessionId: string,
+  body: string,
+  candidates: Candidates,
+  deps: DeliverInPlaceDeps,
+  before?: BeforeKeystroke,
+): Promise<InPlaceDelivery> {
+  const place = { via: "claude-channel" as const, location: channelLocation(sessionId) };
+  if (candidates.claude?.status === "waiting") return { ok: false, code: "session_blocked", ...place };
+  try {
+    await before?.(place);
+  } catch (error) {
+    return { ok: false, code: "in_place_failed", ...place, nothingSent: true, detail: errorText(error) };
+  }
+  const reply = await claudeChannel(deps)({ op: "deliver", sessionId, body })
+    .catch((error): ClaudeChannelReply => ({ ok: false, code: "channel_no_answer", message: errorText(error) }));
+  if (reply.ok) return { ok: true, ...place };
+  return {
+    ok: false,
+    code: "in_place_failed",
+    ...place,
+    detail: reply.message,
+    // Only silence after the words were written leaves them possibly delivered.
+    ...(reply.code === "channel_no_answer" ? {} : { nothingSent: true as const }),
+  };
+}
+
+function claudeChannel(deps: DeliverInPlaceDeps): NonNullable<DeliverInPlaceDeps["askClaudeChannel"]> {
+  return deps.askClaudeChannel ?? ((request) => askClaudeChannel(request));
 }
 
 async function promptHerdrCandidate(
@@ -629,11 +808,16 @@ async function tmuxDraft(target: string, deps: DeliverInPlaceDeps): Promise<stri
 }
 
 async function readTmuxComposerDraft(target: string): Promise<string | null | undefined> {
+  return tmuxPaneTailComposerState(await captureTmuxComposerTail(target));
+}
+
+async function captureTmuxComposerTail(target: string, socketPath?: string): Promise<string> {
   // `-e` keeps the escape sequences, which tell typed text from a suggestion.
   const { stdout } = await execSystemFile("tmux", [
+    ...(socketPath ? ["-S", socketPath] : []),
     "capture-pane", "-p", "-e", "-t", target, "-S", `-${TMUX_COMPOSER_TAIL_LINES}`,
   ], { timeoutMs: 2_000, maxStdoutBytes: 256 * 1024 });
-  return tmuxPaneTailComposerState(stdout);
+  return stdout;
 }
 
 /**

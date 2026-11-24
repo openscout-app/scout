@@ -4,7 +4,7 @@ import { ATTACHMENT_LIMITS, type AttachmentReadResult, type ConversationDefiniti
 import { AttachmentBlobStore, attachmentHash } from "./attachment-blob-store.js";
 import { AttachmentError, blobRefSchema, decodeAttachment, imageMimes, isTextMime, postWithAttachmentsSchema, readAttachmentSchema, validateAttachmentBytes } from "./attachment-contract.js";
 import { isIdempotentMessageRetry } from "./broker-message-idempotency.js";
-export type AttachmentPrincipal = { actorId: string; nodeId: string };
+export type AttachmentPrincipal = { actorId: string; nodeId: string; attribution?: import("@openscout/protocol").ScoutAttribution };
 export type BrokerAttachmentServiceOptions = {
   nodeId: string;
   store?: AttachmentBlobStore;
@@ -74,18 +74,27 @@ export class BrokerAttachmentService {
   };
   /** Bind an inline task image to its canonical message before the task/message transaction. */
   async withTaskImage<T>(message: MessageRecord, upload: import("@openscout/protocol").AttachmentUpload, commit: () => Promise<T>): Promise<T> {
+    return this.withTaskImages(message, [{ id: `${message.id}.image`, upload }], commit);
+  }
+
+  /** Bind several inline images (task evidence, decision pictures) in one blob transaction. */
+  async withTaskImages<T>(message: MessageRecord, uploads: ReadonlyArray<{ id: string; upload: import("@openscout/protocol").AttachmentUpload }>,
+    commit: () => Promise<T>): Promise<T> {
+    if (!uploads.length) return commit();
     this.assertLocalActor({ actorId: message.actorId, nodeId: this.options.nodeId });
     this.member(message.conversationId, { actorId: message.actorId, nodeId: this.options.nodeId });
-    const parsed = postWithAttachmentsSchema.shape.attachments.element.parse(upload);
-    if (!imageMimes.has(parsed.mediaType)) throw new AttachmentError("invalid_task_image", 400);
-    const bytes = decodeAttachment(parsed.data); validateAttachmentBytes(bytes, parsed.mediaType);
+    const prepared = uploads.map(({ id, upload }) => {
+      const parsed = postWithAttachmentsSchema.shape.attachments.element.parse(upload);
+      if (!imageMimes.has(parsed.mediaType)) throw new AttachmentError("invalid_task_image", 400);
+      const bytes = decodeAttachment(parsed.data); validateAttachmentBytes(bytes, parsed.mediaType);
+      return { id, fileName: parsed.fileName, bytes, ref: { sha256: attachmentHash(bytes), mediaType: parsed.mediaType, byteSize: bytes.length } };
+    });
     if (this.uploadActive) throw new AttachmentError("attachments_busy");
     this.uploadActive = true;
     try {
-      const ref = { sha256: attachmentHash(bytes), mediaType: parsed.mediaType, byteSize: bytes.length };
-      return await this.available().withBlobs([{ ref, bytes }], async () => {
-        message.attachments = [...(message.attachments ?? []), { id: `${message.id}.image`, mediaType: ref.mediaType,
-          fileName: parsed.fileName, blob: ref }];
+      return await this.available().withBlobs(prepared.map(({ ref, bytes }) => ({ ref, bytes })), async () => {
+        message.attachments = [...(message.attachments ?? []), ...prepared.map(({ id, ref, fileName }) => ({
+          id, mediaType: ref.mediaType, fileName, blob: ref }))];
         this.admitted.add(message);
         try { return await commit(); } finally { this.admitted.delete(message); }
       });
@@ -119,7 +128,7 @@ export class BrokerAttachmentService {
       originNodeId: this.options.nodeId, class: "agent", body: request.body,
       ...(request.replyToMessageId ? { replyToMessageId: request.replyToMessageId } : {}),
       visibility: conversation.visibility, policy: "durable", createdAt: (this.options.now ?? Date.now)(),
-      metadata: { clientMessageId: id, ...(notifyOperator ? {
+      metadata: { clientMessageId: id, ...(principal.attribution ? { attribution: principal.attribution } : {}), ...(notifyOperator ? {
         source: "scout-notify", operatorSignal: { kind: "notify", blocking: false, replyExpectation: "none" },
         operatorSignalId: id, relayChannel: "dm", relayTarget: notifyOperator,
         relayTargetIds: principal.actorId === notifyOperator ? [] : [notifyOperator], relayMessageId: id,

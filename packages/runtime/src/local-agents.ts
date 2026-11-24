@@ -1,5 +1,9 @@
+import { isDirectLocalAgentTransport } from "./local-agent-transports.js";
+import { macHostLaunchAdmission, warmWorkerContinuation } from "./host-launch-admission.js";
+import { FailedRunError, failureCauseForError } from "./failed-run-error.js";
 import { receiveTransportLiveness } from "./local-endpoint-liveness.js";
 import { hasExplicitCompletion } from "@openscout/protocol";
+import { turnCredentialForInvocation } from "./turn-credentials.js";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { isA2AHttpEndpoint } from "./a2a-http-endpoint.js";
 import { hasManagedPermissionContext, type ManagedPermissionPrompt } from "./managed-permission.js";
@@ -15,6 +19,8 @@ import { fileURLToPath } from "node:url";
 
 import type { SessionState } from "@openscout/agent-sessions";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
+import { isRexSurface, sendRexPrompt } from "./rex-terminal.js";
+import { resolveExecutableFromSearch } from "./tool-resolution.js";
 import { resolveCodexExecutableInventory } from "@openscout/agent-sessions/codex-executable";
 import type {
   AgentCapability,
@@ -67,7 +73,7 @@ import { invokeKimiAcpAgent } from "./kimi-acp-invocation.js";
 import { invokeCursorAcpAgent } from "./cursor-acp-invocation.js";
 import { invokeOpencodeAcpAgent } from "./opencode-acp-invocation.js";
 import { invokeDevinAcpAgent } from "./devin-acp-invocation.js";
-import { shutdownAcpAgentSession } from "./acp-agent-invocation.js";
+import { invokeAntigravityAcpAgent, shutdownAcpAgentSession } from "./acp-agent-invocation.js";
 import { findHarnessEntry } from "./harness-catalog.js";
 
 import {
@@ -124,6 +130,7 @@ import {
   writeRelayAgentOverrides as writeRelayAgentOverridesToDisk,
   type RelayAgentOverride,
   type ResolvedRelayAgentConfig,
+  resolveRuntimeScoutCliInvocation,
 } from "./setup.js";
 import {
   relayAgentLogsDirectory,
@@ -172,10 +179,11 @@ import {
   describeAttachedLiveTerminal,
   isAttachedLiveTerminalEndpoint,
   isAttachedLiveTerminalEndpointAlive,
+  attachedLiveTerminalExitedError,
   isAttachedLiveTerminalEndpointAliveSnapshot,
   sendGhosttyPrompt,
 } from "./live-terminal-session.js";
-import { buildMultiplexerServerEnvironment } from "./instance.js";
+import { buildMultiplexerServerEnvironment, buildUserSpawnEnvironment, isProdOpenScoutInstance, OPENSCOUT_CLIENT_INSTANCE_ENV_KEY } from "./instance.js";
 
 const MODULE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 const OPENSCOUT_REPO_ROOT = resolve(MODULE_DIRECTORY, "..", "..", "..");
@@ -499,11 +507,30 @@ export function resolveLocalAgentScoutCliPath(moduleDirectory = MODULE_DIRECTORY
   return resolve(moduleDirectory, "..", "..", "..", "packages", "cli", "bin", "scout.mjs");
 }
 
+/**
+ * The CLI entry agents run with Bun. A checkout's packages/cli/bin/scout.mjs runs
+ * only a built dist/main.mjs and otherwise exits with "Bun entry is missing", so
+ * an unbuilt checkout gives agents the CLI's source entry. Published bundles keep
+ * their installed bin/scout.mjs.
+ */
+export function resolveLocalAgentBunScoutEntry(moduleDirectory = MODULE_DIRECTORY): string {
+  const cli = resolveLocalAgentScoutCliPath(moduleDirectory);
+  const cliRoot = dirname(dirname(cli));
+  const source = join(cliRoot, "src", "main.ts");
+  if (existsSync(join(cliRoot, "dist", "main.mjs")) || !existsSync(source)) return cli;
+  return source;
+}
+
 function legacyNodeBrokerRelayCommand(): string {
   return `node ${JSON.stringify(resolveLocalAgentScoutCliPath())}`;
 }
 
 function brokerRelayCommand(): string {
+  return `bun ${JSON.stringify(resolveLocalAgentBunScoutEntry())}`;
+}
+
+/** The Bun command earlier prompts used, so a prompt generated with it still reads as generated. */
+function previousBunBrokerRelayCommand(): string {
   return `bun ${JSON.stringify(resolveLocalAgentScoutCliPath())}`;
 }
 
@@ -634,7 +661,7 @@ function buildLocalAgentTmuxProtocolPrompt(context: LocalAgentSystemPromptTempla
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
     "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
-    `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
+    `  - For asynchronous work, use ${context.relayCommand} ask (it returns on acceptance); do not downgrade the work to send merely to avoid blocking. Add --notify only when the operator is waiting on that work: it marks the task Ready for them`,
     "  - When replying to an [ask:<id>] request, include the same [ask:<id>] tag in your reply",
     "  - For prior Codex/Claude/Kimi session work, use scout search (explicit index then query) before grepping ~/.codex, ~/.claude, or ~/.kimi-code",
     "  - Use the CLI commands above when recent context is needed before responding",
@@ -666,7 +693,7 @@ function buildLocalAgentDirectProtocolPrompt(context: LocalAgentSystemPromptTemp
     "  - Treat known offline / on-demand agents as wakeable: use send or ask first and let the broker wake them; only surface ambiguity or unknown-target failures to the operator",
     "  - Use ask --fyi only for news where no reply or task is expected; use ask for replies, judgment, investigation, review, implementation, or ownership",
     "  - If the meaning is 'do this and get back to me,' or you are unsure, use ask",
-    `  - For asynchronous work, use ${context.relayCommand} ask --notify; do not downgrade the work to send merely to avoid blocking`,
+    `  - For asynchronous work, use ${context.relayCommand} ask (it returns on acceptance); do not downgrade the work to send merely to avoid blocking. Add --notify only when the operator is waiting on that work: it marks the task Ready for them`,
     "  - Do not curl broker HTTP endpoints to read messages",
     `  - Follow the scout skill at ${context.scoutSkill} for agent-to-agent communication`,
   ].join("\n");
@@ -777,6 +804,7 @@ export function renderLocalAgentSystemPromptTemplate(
     || options.transport === "pi_rpc"
     || options.transport === "grok_acp"
     || options.transport === "kimi_acp"
+    || options.transport === "antigravity_acp"
     || options.transport === "devin_acp"
     ? buildLocalAgentDirectProtocolPrompt(context)
     : buildLocalAgentTmuxProtocolPrompt(context);
@@ -887,7 +915,7 @@ function legacyLocalAgentSystemPromptCandidates(
   projectName: string,
   projectPath: string,
 ): string[] {
-  const relayCommandBases = ["openscout relay", brokerRelayCommand(), legacyNodeBrokerRelayCommand()];
+  const relayCommandBases = ["openscout relay", brokerRelayCommand(), previousBunBrokerRelayCommand(), legacyNodeBrokerRelayCommand()];
   const projectPathCandidates = projectPath.endsWith("/") ? [projectPath, projectPath.slice(0, -1)] : [projectPath, `${projectPath}/`];
   const candidates = new Set<string>();
 
@@ -907,7 +935,7 @@ function generatedLocalAgentSystemPromptCandidates(
   projectPath: string,
 ): string[] {
   const baseContext = buildLocalAgentTemplateContext(agentId, projectName, projectPath);
-  const relayCommands = [brokerRelayCommand(), legacyNodeBrokerRelayCommand()];
+  const relayCommands = [...new Set([brokerRelayCommand(), previousBunBrokerRelayCommand(), legacyNodeBrokerRelayCommand()])];
   const transportModes: Array<RelayRuntimeTransport | undefined> = [
     undefined,
     "tmux",
@@ -916,6 +944,7 @@ function generatedLocalAgentSystemPromptCandidates(
     "pi_rpc",
     "grok_acp",
     "kimi_acp",
+    "antigravity_acp",
     "devin_acp",
   ];
   const candidates = new Set<string>();
@@ -1028,9 +1057,22 @@ function normalizeTmuxSessionName(value: string | undefined, agentId: string): s
   return normalized || fallback.replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "") || "relay-agent";
 }
 
+const acpAdapterByTransport = {
+  grok_acp: "grok-acp",
+  kimi_acp: "kimi-acp",
+  cursor_acp: "cursor-acp",
+  opencode_acp: "opencode-acp",
+  devin_acp: "devin-acp",
+  antigravity_acp: "antigravity-acp",
+} as const;
+
+function isLazyAcpTransport(transport: string | undefined): transport is "grok_acp" | "kimi_acp" | "devin_acp" | "antigravity_acp" {
+  return transport === "grok_acp" || transport === "kimi_acp" || transport === "devin_acp" || transport === "antigravity_acp";
+}
+
 function normalizeLocalAgentHarness(value: string | undefined): AgentHarness {
-  if (value === "codex" || value === "claude" || value === "grok" || value === "grok-acp" || value === "kimi" || value === "pi" || value === "cursor" || value === "opencode" || value === "devin") {
-    return value;
+  if (SUPPORTED_LOCAL_AGENT_HARNESSES.includes(value as AgentHarness)) {
+    return value as AgentHarness;
   }
   return DEFAULT_LOCAL_AGENT_HARNESS;
 }
@@ -1069,6 +1111,8 @@ function normalizeLocalAgentTransport(value: string | undefined, harness: AgentH
     return "cursor_acp";
   }
 
+  if (harness === "antigravity") return "antigravity_acp";
+
   if (harness === "devin") {
     return "devin_acp";
   }
@@ -1097,7 +1141,7 @@ function normalizeLocalAgentTransport(value: string | undefined, harness: AgentH
     return "pi_rpc";
   }
 
-  if (value === "grok_acp" || value === "kimi_acp" || value === "cursor_acp" || value === "opencode_acp" || value === "devin_acp") {
+  if (value === "grok_acp" || value === "kimi_acp" || value === "cursor_acp" || value === "opencode_acp" || value === "antigravity_acp" || value === "devin_acp") {
     return value;
   }
 
@@ -1151,6 +1195,7 @@ export const DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS = [
   "mcp__scout__invocations_get",
   "mcp__scout__invocations_wait",
   "mcp__scout__work_update",
+  "mcp__scout__work_retry",
   "mcp__scout__work_move",
   "mcp__scout__work_review",
   "mcp__scout__work_lifecycle",
@@ -1201,6 +1246,31 @@ export function normalizeGrokRuntimeLaunchArgs(value: unknown): string[] {
     "--allowedTools",
     DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS.join(","),
   ];
+}
+
+/**
+ * A Claude agent launched by a non-prod instance gets a `scout` MCP server that
+ * reaches the runtime that launched it. Without one, Claude loads the user's
+ * `scout` server, which is the prod runtime's shared MCP: that runtime does not
+ * know this instance's tasks, so the agent's reply fails with "unknown task". A
+ * `--mcp-config` server named `scout` replaces the user's one for that session.
+ * Prod agents keep the shared MCP. Codex gets the same from codex-launch-config.
+ */
+export function claudeInstanceScoutMcpArgs(
+  env: NodeJS.ProcessEnv,
+  invocation: string | null,
+  launchArgs: string[] = [],
+): string[] {
+  const instance = buildUserSpawnEnvironment(env)[OPENSCOUT_CLIENT_INSTANCE_ENV_KEY];
+  if (!instance || isProdOpenScoutInstance(instance) || !invocation) return [];
+  if (launchArgs.some((arg) => arg === "--mcp-config" || arg.startsWith("--mcp-config=") || arg === "--strict-mcp-config")) return [];
+  const scout = {
+    type: "stdio",
+    command: "/bin/sh",
+    args: ["-c", `exec ${invocation} mcp`],
+    env: { [OPENSCOUT_CLIENT_INSTANCE_ENV_KEY]: instance },
+  };
+  return ["--mcp-config", JSON.stringify({ mcpServers: { scout } })];
 }
 
 function normalizeRequestedModel(value: string | undefined): string | undefined {
@@ -1583,25 +1653,9 @@ function overrideHarnessProfile(
 }
 
 function normalizeManagedHarness(value: string | undefined, fallback: ManagedAgentHarness): ManagedAgentHarness {
-  return value === "codex"
-    ? "codex"
-    : value === "claude"
-      ? "claude"
-      : value === "cursor"
-        ? "cursor"
-        : value === "devin"
-          ? "devin"
-          : value === "grok"
-            ? "grok"
-            : value === "grok-acp"
-              ? "grok-acp"
-              : value === "kimi"
-                ? "kimi"
-                : value === "pi"
-                  ? "pi"
-                  : value === "opencode"
-                    ? "opencode"
-                    : fallback;
+  return MANAGED_AGENT_HARNESSES.includes(value as ManagedAgentHarness)
+    ? value as ManagedAgentHarness
+    : fallback;
 }
 
 function normalizeLocalHarnessProfiles(agentId: string, record: LocalAgentRecord): RelayHarnessProfiles {
@@ -2269,18 +2323,11 @@ export async function shutdownLocalSessionEndpoint(endpoint: AgentEndpoint): Pro
     || endpoint.transport === "kimi_acp"
     || endpoint.transport === "cursor_acp"
     || endpoint.transport === "opencode_acp"
+    || endpoint.transport === "antigravity_acp"
     || endpoint.transport === "devin_acp"
   ) {
     await shutdownAcpAgentSession({
-      adapterType: endpoint.transport === "grok_acp"
-        ? "grok-acp"
-        : endpoint.transport === "kimi_acp"
-          ? "kimi-acp"
-          : endpoint.transport === "opencode_acp"
-            ? "opencode-acp"
-            : endpoint.transport === "devin_acp"
-              ? "devin-acp"
-              : "cursor-acp",
+      adapterType: acpAdapterByTransport[endpoint.transport],
       sessionId: endpointRuntimeInstanceId(endpoint),
       poolKey: endpoint.id,
     });
@@ -2851,6 +2898,19 @@ function attachedCodexSandbox(endpoint: AgentEndpoint): CodexSandboxMode | undef
     : undefined;
 }
 
+/**
+ * The Codex thread a launch of this endpoint must resume, or undefined when
+ * the launch may start its own thread (Scoutbot owns its threads). With a
+ * thread id the launch uses requireExistingThread, so it never starts a
+ * different thread in its place.
+ */
+export function codexEndpointResumeThreadId(endpoint: AgentEndpoint): string | undefined {
+  if (endpoint.metadata?.source === "scoutbot") return undefined;
+  return endpointMetadataString(endpoint, "threadId")
+    ?? endpointMetadataString(endpoint, "externalSessionId")
+    ?? undefined;
+}
+
 export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): CodexAppServerSessionOptions & {
   agentName: string;
   sessionId: string;
@@ -2865,11 +2925,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
   const agentName = endpointAgentName(endpoint);
   const runtimeDirectory = relayAgentRuntimeDirectory(agentName);
   const ownsSessionThread = endpoint.metadata?.source === "scoutbot";
-  const threadId = ownsSessionThread
-    ? undefined
-    : endpointMetadataString(endpoint, "threadId")
-      ?? endpointMetadataString(endpoint, "externalSessionId")
-      ?? undefined;
+  const threadId = codexEndpointResumeThreadId(endpoint);
 
   return withScoutReplyContextEnvironment({
     agentName,
@@ -3038,6 +3094,7 @@ function isLocalAgentRecordOnline(agentName: string, record: LocalAgentRecord): 
     || normalizedRecord.transport === "kimi_acp"
     || normalizedRecord.transport === "cursor_acp"
     || normalizedRecord.transport === "opencode_acp"
+    || normalizedRecord.transport === "antigravity_acp"
     || normalizedRecord.transport === "devin_acp") {
     return areHarnessBinariesAvailable(normalizedRecord);
   }
@@ -3095,6 +3152,7 @@ export function isLocalAgentEndpointAlive(endpoint: AgentEndpoint): boolean {
     || endpoint.transport === "kimi_acp"
     || endpoint.transport === "cursor_acp"
     || endpoint.transport === "opencode_acp"
+    || endpoint.transport === "antigravity_acp"
     || endpoint.transport === "devin_acp"
   ) {
     return endpoint.state !== "offline";
@@ -3354,6 +3412,7 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
   if (!invocation.conversationId || !invocation.messageId) {
     return null;
   }
+  const turn = turnCredentialForInvocation(invocation);
 
   return {
     mode: "broker_reply",
@@ -3367,6 +3426,7 @@ export function buildScoutReplyContext(agentName: string, invocation: Invocation
       completion: { invocationId: invocation.id, flightId: invocation.metadata.completionFlightId, revision: 0 },
     } : {}),
     action: invocation.action,
+    ...(turn ? { turn } : {}),
   };
 }
 
@@ -3561,7 +3621,7 @@ function buildScoutReplyContextPrompt(context: ScoutReplyContext | null): string
   const replyInstruction = context?.completion ? [
     "> This ask requires explicit completion. Use `reply` with ref and progress=true for updates.",
     "> Before your final, call `current_reply_context` for the current flight and revision; wait for all joined work to settle.",
-    "> Submit `reply` with the task ref, and a new stable requestId. Reuse that requestId only for an identical retry.",
+    "> Submit `reply` with the task ref and a new stable requestId, or run `scout reply --ref <invocationId> \"<final result>\"`.",
     "> Your plain final assistant output does not complete this ask. Use `ask` with relation to opt child work into the parent's completion obligations.",
   ] : context?.replyPath === "mcp_reply"
     ? [
@@ -3819,11 +3879,16 @@ export async function sendTmuxPrompt(
   sessionName: string,
   prompt: string,
   strategy?: TmuxDispatchStrategy,
+  socketPath?: string,
 ): Promise<TmuxPromptDispatchResult> {
-  if (hasManagedPermissionContext()) {
+  // A socket-bound direct send must not use the broker's managed permission
+  // responder, which addresses panes on the broker's default socket.
+  const run = (args: string[], options: Parameters<typeof execSystemFile>[2]) =>
+    execSystemFile("tmux", socketPath ? ["-S", socketPath, ...args] : args, options);
+  if (!socketPath && hasManagedPermissionContext()) {
     const before = await captureTmuxPaneTail(sessionName, 80);
     if (parseTmuxPermission(before)) {
-      const cwd = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
+      const cwd = (await run(["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
       await handleManagedTmuxPermission(sessionName, cwd, before);
     }
   }
@@ -3832,38 +3897,38 @@ export async function sendTmuxPrompt(
   let bufferOwned = true;
   try {
     if (effectiveStrategy.pre && effectiveStrategy.pre.length > 0) {
-      await execSystemFile("tmux", ["send-keys", "-t", sessionName, ...effectiveStrategy.pre], { timeoutMs: 2_000 });
+      await run(["send-keys", "-t", sessionName, ...effectiveStrategy.pre], { timeoutMs: 2_000 });
     }
-    await execSystemFile("tmux", ["load-buffer", "-b", bufferName, "-"], {
+    await run(["load-buffer", "-b", bufferName, "-"], {
       input: prompt,
       timeoutMs: 5_000,
       maxStdoutBytes: 64 * 1024,
       maxStderrBytes: 64 * 1024,
     });
-    await execSystemFile("tmux", buildTmuxPasteBufferArgs(bufferName, sessionName), { timeoutMs: 2_000 });
+    await run(buildTmuxPasteBufferArgs(bufferName, sessionName), { timeoutMs: 2_000 });
     // paste-buffer -d deletes the buffer after consumption; no manual cleanup needed.
     bufferOwned = false;
 
     // Let the target PTY drain the bracketed paste before the submit chord lands —
     // without this gap, the submit keys can race the paste tail and get swallowed.
     await tmuxDispatchSleep(TMUX_PASTE_DRAIN_MS);
-    await execSystemFile("tmux", ["send-keys", "-t", sessionName, ...effectiveStrategy.submit], { timeoutMs: 2_000 });
+    await run(["send-keys", "-t", sessionName, ...effectiveStrategy.submit], { timeoutMs: 2_000 });
 
     // Sample twice: a fast probe at ~250ms catches the common-case clear; a
     // slower probe at ~1s catches harnesses that take a beat to flush the
     // composer after submit (e.g. while showing a "thinking…" placeholder).
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_FIRST_SAMPLE_MS)) {
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_FIRST_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 0 };
     }
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_SECOND_SAMPLE_MS)) {
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_SECOND_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 0 };
     }
 
     // Still stuck — retry with a bare Enter. Covers the case where the submit chord
     // landed while the harness was in a transient state (popup, suggestion menu)
     // that absorbed it.
-    await execSystemFile("tmux", ["send-keys", "-t", sessionName, "Enter"], { timeoutMs: 2_000 });
-    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_RETRY_SAMPLE_MS)) {
+    await run(["send-keys", "-t", sessionName, "Enter"], { timeoutMs: 2_000 });
+    if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_RETRY_SAMPLE_MS, socketPath)) {
       return { submitted: true, retries: 1 };
     }
 
@@ -3871,27 +3936,28 @@ export async function sendTmuxPrompt(
     // deadline sized by what the pane is actually doing: a visibly busy harness
     // gets the long grace period, an idle one stays close to the old budget.
     const deadlineAt = Date.now()
-      + tmuxVerifyDeadlineMs(await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES));
+      + tmuxVerifyDeadlineMs(await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath));
     while (Date.now() < deadlineAt) {
-      if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_POLL_MS)) {
+      if (await dispatchVerifiedAfter(sessionName, effectiveStrategy, TMUX_VERIFY_POLL_MS, socketPath)) {
         return { submitted: true, retries: 1 };
       }
     }
 
     throw new DispatchStalledError({
       sessionName,
-      paneTail: (await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES)).slice(0, 2_000),
+      paneTail: (await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath)).slice(0, 2_000),
       retries: 1,
     });
   } catch (error) {
     if (bufferOwned) {
       try {
-        await execSystemFile("tmux", ["delete-buffer", "-b", bufferName], { timeoutMs: 2_000 });
+        await run(["delete-buffer", "-b", bufferName], { timeoutMs: 2_000 });
       } catch {
         // Ignore cleanup failures after a tmux delivery error.
       }
     }
-    throw error;
+    if (error instanceof DispatchStalledError || error instanceof DeliveryBlockedError) throw error;
+    throw new FailedRunError(failureCauseForError(error, "harness_start"), error instanceof Error ? error.message : String(error), { cause: error });
   }
 }
 
@@ -3907,16 +3973,17 @@ async function dispatchVerifiedAfter(
   sessionName: string,
   strategy: TmuxDispatchStrategy,
   delayMs: number,
+  socketPath?: string,
 ): Promise<boolean> {
   await tmuxDispatchSleep(delayMs);
-  const paneTail = await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES);
+  const paneTail = await captureTmuxPaneTail(sessionName, TMUX_CAPTURE_TAIL_LINES, socketPath);
   if (!paneTail) {
     // Capture failed (session gone, tmux unavailable). Treat as verified to avoid
     // throwing a spurious stall — the broker's normal error paths will surface any
     // real session loss.
     return true;
   }
-  if (hasManagedPermissionContext()) {
+  if (!socketPath && hasManagedPermissionContext()) {
     const fullTail = await captureTmuxPaneTail(sessionName, 80);
     if (parseTmuxPermission(fullTail)) {
       const cwd = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
@@ -3926,12 +3993,13 @@ async function dispatchVerifiedAfter(
   return strategy.verify(paneTail);
 }
 
-async function captureTmuxPaneTail(sessionName: string, lines: number): Promise<string> {
+async function captureTmuxPaneTail(sessionName: string, lines: number, socketPath?: string): Promise<string> {
   return await captureTmuxPane(sessionName, {
     start: `-${lines}`,
     end: "-",
     joinWrapped: false,
     maxAgeMs: 0,
+    socketPath,
   }) ?? "";
 }
 
@@ -3966,7 +4034,7 @@ export async function waitForReadyComposer(options: {
   let previousTail: string | undefined;
   while (now() < deadline) {
     if (!options.isAlive()) {
-      throw new Error(`tmux session ${options.sessionName} exited before ${options.harnessLabel} was ready.`);
+      throw new FailedRunError("harness_start", `tmux session ${options.sessionName} exited before ${options.harnessLabel} was ready.`);
     }
 
     paneTail = await options.captureTail();
@@ -3999,7 +4067,7 @@ export async function waitForReadyComposer(options: {
 
   const elapsed = now() - startedAt;
   const tail = stripTerminalControlSequences(paneTail).trim().split(/\r?\n/).slice(-20).join("\n").trim();
-  throw new Error(
+  throw new FailedRunError("harness_start",
     `tmux session ${options.sessionName} did not show a ready ${options.harnessLabel} composer within ${elapsed}ms.`
       + (tail ? `\nRecent pane tail:\n${tail}` : ""),
   );
@@ -4011,7 +4079,9 @@ async function handleManagedTmuxPermission(sessionId: string, projectRoot: strin
   if (!parseTmuxPermission(observed, projectRoot)) return false;
   const target = (await execSystemFile("tmux", ["display-message", "-p", "-t", sessionId, "#{pane_id}"], { timeoutMs: 2_000 })).stdout.trim();
   if (!/^%\d+$/.test(target)) throw new Error("Could not bind permission to a live tmux pane");
-  return waitForTmuxPermission({ sessionId, projectRoot,
+  const currentCwd = async () => (await execSystemFile("tmux", ["display-message", "-p", "-t", target, "#{pane_current_path}"], { timeoutMs: 2_000 })).stdout.trim();
+  const cwd = await currentCwd();
+  return waitForTmuxPermission({ sessionId, projectRoot, cwd, currentCwd,
     text: observed,
     capture: () => captureTmuxPaneTail(target, 80),
     alive: () => isLocalAgentSessionAliveAsync(sessionId),
@@ -4450,7 +4520,10 @@ function buildLocalAgentLaunchCommand(
   const harness = normalizeLocalAgentHarness(record.harness);
   const extraArgs = shellQuoteArguments(
     harness === "claude"
-      ? normalizeClaudeRuntimeLaunchArgs(record.launchArgs)
+      ? [
+        ...normalizeClaudeRuntimeLaunchArgs(record.launchArgs),
+        ...claudeInstanceScoutMcpArgs(process.env, resolveRuntimeScoutCliInvocation(), normalizeLocalAgentLaunchArgs(record.launchArgs)),
+      ]
       : harness === "grok"
         ? normalizeGrokRuntimeLaunchArgs(record.launchArgs)
         : normalizeLaunchArgsForHarness(harness, record.launchArgs),
@@ -4681,6 +4754,9 @@ export function areHarnessBinariesAvailable(record: Pick<LocalAgentRecord, "harn
   if (record.transport === "kimi_acp") binaries.add("kimi");
   if (record.transport === "cursor_acp") binaries.add("cursor-agent");
   if (record.transport === "opencode_acp") binaries.add("opencode");
+  if (record.transport === "antigravity_acp") {
+    return resolveExecutableFromSearch({ names: ["agy"], extraDirectories: ["~/.local/bin"] }) !== null;
+  }
   if (record.transport === "devin_acp") binaries.add("devin");
 
   if (record.transport === "tmux") {
@@ -4718,7 +4794,7 @@ async function ensureLocalAgentOnline(agentName: string, record: LocalAgentRecor
 async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentRecord): Promise<LocalAgentRecord> {
   const normalizedRecord = normalizeLocalAgentRecord(agentName, record);
   if (isLocalAgentRecordOnline(agentName, normalizedRecord)) {
-    if (normalizedRecord.transport === "grok_acp" || normalizedRecord.transport === "kimi_acp" || normalizedRecord.transport === "devin_acp") {
+    if (isLazyAcpTransport(normalizedRecord.transport)) {
       // ACP workers are broker-owned and lazy: keep the durable local-agent
       // record and binding, then let the first delivery create/reuse the ACP
       // process. Do not fall through to the tmux launcher below.
@@ -4753,6 +4829,9 @@ async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentR
   await mkdir(agentRuntimeDir, { recursive: true });
   await mkdir(logsDir, { recursive: true });
 
+  if (isDirectLocalAgentTransport(normalizedRecord.transport)) {
+    await warmWorkerContinuation.getStore()?.reserve();
+  }
   if (normalizedRecord.transport === "codex_app_server") {
     await writeFile(join(agentRuntimeDir, "prompt.txt"), systemPrompt);
     await ensureCodexAppServerAgentOnline(buildCodexAgentSessionOptions(agentName, normalizedRecord, systemPrompt));
@@ -4806,6 +4885,10 @@ async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentR
     invalidateTmuxSessions({ reason: "local-agent.online-recheck" });
     return normalizedRecord;
   }
+
+  // A live tmux continuation can lose its session between dispatch and this
+  // authoritative probe. Reserve before resetting files or creating the pane.
+  await warmWorkerContinuation.getStore()?.reserve();
 
   const initialMessage = buildLocalAgentInitialMessage(projectName, agentName);
   const bootstrapPrompt = buildLocalAgentBootstrapPrompt(normalizeLocalAgentHarness(normalizedRecord.harness), systemPrompt, initialMessage);
@@ -4999,10 +5082,12 @@ export async function restartLocalAgent(
   agentId: string,
   options: { previousSessionId?: string | null } = {},
 ): Promise<LocalAgentRecord | null> {
-  const registry = await readLocalAgentRegistry();
-  const record = registry[agentId];
-  if (!record) {
-    return null;
+  let record = (await readLocalAgentRegistry())[agentId];
+  if (!record) return null;
+  if (macHostLaunchAdmission) {
+    await macHostLaunchAdmission.wait(() => true, async reason => { console.warn(`Waiting to restart ${agentId}: ${reason}.`); });
+    record = (await readLocalAgentRegistry())[agentId];
+    if (!record) return null;
   }
 
   const normalizedRecord = normalizeLocalAgentRecord(agentId, record);
@@ -5037,14 +5122,10 @@ export async function restartLocalAgent(
         sessionId: sessionName,
       });
     }
-  } else if (normalizedRecord.transport === "grok_acp" || normalizedRecord.transport === "kimi_acp" || normalizedRecord.transport === "devin_acp") {
+  } else if (isLazyAcpTransport(normalizedRecord.transport)) {
     for (const sessionName of sessionsToStop) {
       await shutdownAcpAgentSession({
-        adapterType: normalizedRecord.transport === "grok_acp"
-          ? "grok-acp"
-          : normalizedRecord.transport === "devin_acp"
-            ? "devin-acp"
-            : "kimi-acp",
+        adapterType: acpAdapterByTransport[normalizedRecord.transport],
         sessionId: sessionName,
         poolKey: localAgentAcpPoolKey(agentId, normalizedRecord),
       });
@@ -5522,6 +5603,7 @@ export async function startLocalAgent(input: StartLocalAgentInput): Promise<Scou
   }
 
   let deferWarmupToInvocation = false;
+  let alreadyOnline = false;
   if (shouldEnsureOnline) {
     const currentOverride = (await readRelayAgentOverrides())[targetAgentId];
     if (currentOverride) {
@@ -5533,10 +5615,14 @@ export async function startLocalAgent(input: StartLocalAgentInput): Promise<Scou
       // not keep a foreground CLI process alive as the session host; let the
       // broker-owned invocation path start the adapter on first work instead.
       deferWarmupToInvocation = currentRecord.transport === "pi_rpc";
+      alreadyOnline = isLocalAgentRecordOnline(targetAgentId, currentRecord);
     }
   }
 
   if (shouldEnsureOnline && !deferWarmupToInvocation) {
+    if (!alreadyOnline && macHostLaunchAdmission) {
+      await macHostLaunchAdmission.wait(() => true, async reason => { console.warn(`Waiting to start ${targetAgentId}: ${reason}.`); });
+    }
     await ensureLocalAgentBindingOnline(targetAgentId, process.env.OPENSCOUT_NODE_ID ?? "local", {
       includeDiscovered: false,
       currentDirectory,
@@ -5593,14 +5679,10 @@ export async function stopLocalAgent(agentId: string): Promise<ScoutLocalAgentSt
         sessionId: sessionName,
       });
     }
-  } else if (normalizedRecord.transport === "grok_acp" || normalizedRecord.transport === "kimi_acp" || normalizedRecord.transport === "devin_acp") {
+  } else if (isLazyAcpTransport(normalizedRecord.transport)) {
     for (const sessionName of sessionsToStop) {
       await shutdownAcpAgentSession({
-        adapterType: normalizedRecord.transport === "grok_acp"
-          ? "grok-acp"
-          : normalizedRecord.transport === "devin_acp"
-            ? "devin-acp"
-            : "kimi-acp",
+        adapterType: acpAdapterByTransport[normalizedRecord.transport],
         sessionId: sessionName,
         poolKey: localAgentAcpPoolKey(agentId, normalizedRecord),
       });
@@ -6125,6 +6207,7 @@ export type LocalAgentInvocationHooks = {
   onSessionObserved?: (metadata: Record<string, unknown>) => Promise<void> | void;
   /** What the delivery is waiting on, in one sentence, for the task's record. */
   onProgress?: (summary: string) => Promise<void> | void;
+  onCodexSubmission?: CodexAppServerInvocationOptions["onSubmission"];
   /** False once the task was cancelled or finished another way; delivery stops. */
   shouldContinue?: () => boolean;
   /** Where an earlier runtime left a delivery into an open session, if one started it. */
@@ -6432,6 +6515,7 @@ export async function invokeLocalAgentEndpoint(
       ...buildCodexEndpointSessionOptions(endpoint),
       prompt,
       replyContext,
+      onSubmission: hooks.onCodexSubmission,
     });
 
     return {
@@ -6548,18 +6632,20 @@ export async function invokeLocalAgentEndpoint(
     };
   }
 
-  if (!existing && endpoint.transport === "devin_acp") {
+  if (!existing && (endpoint.transport === "devin_acp" || endpoint.transport === "antigravity_acp")) {
+    const isAntigravity = endpoint.transport === "antigravity_acp";
+    const invoke = isAntigravity ? invokeAntigravityAcpAgent : invokeDevinAcpAgent;
     const cwd = endpoint.cwd ?? endpoint.projectRoot ?? process.cwd();
     const sessionId = endpointRuntimeInstanceId(endpoint);
     const model = endpointMetadataString(endpoint, "model");
-    const result = await invokeDevinAcpAgent({
+    const result = await invoke({
       sessionId,
       poolKey: endpoint.id,
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
       ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
-      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Devin ACP"),
+      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? (isAntigravity ? "Google Antigravity" : "Devin ACP")),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
       ...(model ? { adapterOptions: { model } } : {}),
@@ -6662,6 +6748,7 @@ export async function invokeLocalAgentEndpoint(
       ),
       prompt,
       replyContext,
+      onSubmission: hooks.onCodexSubmission,
     });
 
     return {
@@ -6716,6 +6803,7 @@ export async function invokeLocalAgentEndpoint(
     || onlineRecord.transport === "kimi_acp"
     || onlineRecord.transport === "cursor_acp"
     || onlineRecord.transport === "opencode_acp"
+    || onlineRecord.transport === "antigravity_acp"
     || onlineRecord.transport === "devin_acp"
   ) {
     const commonOptions = {
@@ -6730,6 +6818,7 @@ export async function invokeLocalAgentEndpoint(
       hardCeilingMs: invocation.execution?.turnBudgetMs,
     };
     const endpointModel = endpointMetadataString(endpoint, "model");
+    const modelOptions = endpointModel ? { adapterOptions: { model: endpointModel } } : {};
     const grokAdapterOptions = grokAcpAdapterOptions(
       endpointModel,
       endpointMetadataString(endpoint, "reasoningEffort"),
@@ -6742,16 +6831,12 @@ export async function invokeLocalAgentEndpoint(
       : onlineRecord.transport === "kimi_acp"
         ? await invokeKimiAcpAgent(commonOptions)
         : onlineRecord.transport === "opencode_acp"
-          ? await invokeOpencodeAcpAgent({
-            ...commonOptions,
-            ...(endpointModel ? { adapterOptions: { model: endpointModel } } : {}),
-          })
-          : onlineRecord.transport === "devin_acp"
-            ? await invokeDevinAcpAgent({
-              ...commonOptions,
-              ...(endpointModel ? { adapterOptions: { model: endpointModel } } : {}),
-            })
-            : await invokeCursorAcpAgent(commonOptions);
+          ? await invokeOpencodeAcpAgent({ ...commonOptions, ...modelOptions })
+          : onlineRecord.transport === "antigravity_acp"
+            ? await invokeAntigravityAcpAgent({ ...commonOptions, ...modelOptions })
+            : onlineRecord.transport === "devin_acp"
+              ? await invokeDevinAcpAgent({ ...commonOptions, ...modelOptions })
+              : await invokeCursorAcpAgent(commonOptions);
     return {
       output: result.output,
       externalSessionId: result.sessionId,
@@ -6896,7 +6981,7 @@ export async function waitForLocalAgentReply(input: {
     if (input.exitedError && Date.now() >= nextLivenessCheckAt) {
       nextLivenessCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
       const exited = await input.exitedError();
-      if (exited) throw new Error(exited);
+      if (exited) throw new FailedRunError("endpoint_lost", exited);
     }
     if (input.blockedError && Date.now() >= nextBlockedCheckAt) {
       nextBlockedCheckAt = Date.now() + TMUX_REPLY_LIVENESS_INTERVAL_MS;
@@ -6934,7 +7019,11 @@ async function invokeAttachedLiveTerminalEndpoint(
   const flightId = createLocalAgentFlightId();
   const askedAt = nowSeconds();
   const nudge = buildLocalAgentNudge(agentRuntimeId, invocation, flightId);
-  if (endpoint.transport === "ghostty") {
+  if (endpoint.transport === "rex") {
+    const surface = endpoint.metadata?.terminalSurface;
+    if (!isRexSurface(surface)) throw new Error("Missing Rex block address");
+    await sendRexPrompt(surface, Number(endpoint.metadata?.livePid), harness, nudge);
+  } else if (endpoint.transport === "ghostty") {
     await sendGhosttyPrompt(String(endpoint.metadata?.ghosttyTerminalId), nudge);
   } else {
     // Only Claude exposes stable composer markers; every other TUI is judged by
@@ -6951,8 +7040,8 @@ async function invokeAttachedLiveTerminalEndpoint(
     flightId,
     askedAt,
     timeoutSeconds: invocation.timeoutMs ? Math.max(30, Math.floor(invocation.timeoutMs / 1000)) : 300,
-    exitedError: async () => await isAttachedLiveTerminalEndpointAlive(endpoint) ? null : goneError,
-    blockedError: harness === "claude" && endpoint.transport !== "ghostty"
+    exitedError: () => attachedLiveTerminalExitedError(endpoint, goneError),
+    blockedError: harness === "claude" && endpoint.transport === "tmux"
       ? async () => claudeLoginBlockedError(await captureTmuxPaneTail(endpoint.pane!, 40).catch(() => ""))
       : undefined,
   });

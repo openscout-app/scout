@@ -5,6 +5,8 @@ import { AttachmentError, postWithAttachmentsSchema, readAttachmentSchema } from
 import type { BrokerAttachmentService } from "./broker-attachment-service.js";
 import { badRequest, json, readRequestBody } from "./broker-http-helpers.js";
 import type { HostWebRequest, HostWebResponse } from "./host-web-request.js";
+import type { RuntimeSnapshot } from "./scout-dispatcher.js";
+import { brokerAttributionFor, brokerAttributionFromMetadata, brokerPersonActorIds } from "./broker-attribution.js";
 export const ATTACHMENT_READ_PATH = "/v1/attachments/read";
 const actorId = z.string().min(1).max(256);
 export const attachmentPostHttpSchema = postWithAttachmentsSchema.extend({ actorId }).strict();
@@ -19,6 +21,7 @@ export type AttachmentHttpDeps = {
   /** Protected local ingress currently buffers at most 16 MiB before routing. */
   uploadRequestBytes?: number;
   nodeId: string;
+  snapshot?: () => RuntimeSnapshot;
   peerNode: (keyId: string) => string | undefined;
   forward?: (input: HostWebRequest & { nodeId: string }) => Promise<HostWebResponse>;
   notifyOperator?: (input: z.infer<typeof attachmentNotifyHttpSchema>, principal: { actorId: string; nodeId: string }) => Promise<unknown>;
@@ -30,6 +33,11 @@ export function attachmentHttpError(response: RuntimeHttpResponseLike, error: un
 function local(request: RuntimeHttpRequestLike) {
   const context = request.transportContext;
   if (!context || context.transport === "remote" || context.peer || context.guest || context.scoped) throw new AttachmentError("attachment_forbidden", 403);
+}
+function principalFor(request: RuntimeHttpRequestLike, actorId: string, nodeId: string, snapshot?: RuntimeSnapshot, parent?: import("@openscout/protocol").ScoutAttribution) {
+  const attribution = brokerAttributionFor({ claimedActorId: actorId, context: request.transportContext,
+    personActorIds: brokerPersonActorIds(snapshot ?? ({ actors: {} } as RuntimeSnapshot)), parent });
+  return { actorId: attribution.actorId, nodeId, attribution };
 }
 const uploads = new WeakSet<AttachmentHttpDeps>();
 export async function handleAttachmentRoute(request: RuntimeHttpRequestLike, response: RuntimeHttpResponseLike, url: URL, deps: AttachmentHttpDeps): Promise<boolean> {
@@ -54,13 +62,15 @@ export async function handleAttachmentRoute(request: RuntimeHttpRequestLike, res
       const input = attachmentNotifyHttpSchema.safeParse(raw);
       if (!input.success) throw new AttachmentError("invalid_attachment_request", 400);
       if (!deps.notifyOperator) throw new AttachmentError("attachments_unavailable");
-      json(response, 200, await deps.notifyOperator(input.data, { actorId: input.data.actorId, nodeId: deps.nodeId }));
+      json(response, 200, await deps.notifyOperator(input.data, principalFor(request, input.data.actorId, deps.nodeId, deps.snapshot?.())));
       return true;
     }
     const parsed = (post ? attachmentPostHttpSchema : attachmentReadHttpSchema).safeParse(raw);
     if (!parsed.success) throw new AttachmentError("invalid_attachment_request", 400);
     const { actorId, ...input } = parsed.data;
-    const principal = { actorId, nodeId: deps.nodeId };
+    const replyToMessageId = post && "replyToMessageId" in input ? input.replyToMessageId : undefined;
+    const parent = brokerAttributionFromMetadata(replyToMessageId ? deps.snapshot?.().messages?.[replyToMessageId]?.metadata : undefined);
+    const principal = principalFor(request, actorId, deps.nodeId, deps.snapshot?.(), parent);
     const result = post ? await deps.service.postWithAttachments(input as Parameters<BrokerAttachmentService["postWithAttachments"]>[0], principal)
       : await deps.service.read(input as Parameters<BrokerAttachmentService["read"]>[0], principal);
     json(response, 200, result);
@@ -95,7 +105,7 @@ export async function executeHostAttachmentRead(raw: unknown, request: RuntimeHt
     }
     if (!deps.service) throw new AttachmentError("attachments_unavailable");
     const { actorId, ...read } = input.body;
-    return { status: 200, body: await deps.service.read(read, { actorId, nodeId }) };
+    return { status: 200, body: await deps.service.read(read, principalFor(request, actorId, nodeId, deps.snapshot?.())) };
   } catch (error) {
     return { status: error instanceof AttachmentError ? error.status : 503, body: { error: error instanceof AttachmentError ? error.code : "attachment_unavailable" } };
   }

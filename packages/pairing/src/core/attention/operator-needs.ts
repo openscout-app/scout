@@ -37,6 +37,25 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/** The actor the runtime records for a local sender that claims a person without proving it. */
+const UNVERIFIED_LOCAL_ACTOR_ID = "local-unverified";
+
+/**
+ * Whether a message is the operator speaking. Without a local admin key, the
+ * runtime records a web or phone message that claims the operator as
+ * `local-unverified` and keeps the claim in `attribution.claimedActorId`.
+ * Those are the operator's replies. A sender with its own identity (an agent,
+ * a scoped principal) never speaks for the operator, whatever it claims.
+ */
+function speaksForOperator(message: OperatorNeedMessage, operators: ReadonlySet<string>): boolean {
+  if (operators.has(message.actorId)) return true;
+  if (message.actorId !== UNVERIFIED_LOCAL_ACTOR_ID) return false;
+  const attribution = message.metadata?.attribution;
+  if (!attribution || typeof attribution !== "object" || Array.isArray(attribution)) return false;
+  const claimed = (attribution as Record<string, unknown>).claimedActorId;
+  return typeof claimed === "string" && operators.has(claimed);
+}
+
 export function pendingOperatorNeeds(input: {
   messages: Iterable<OperatorNeedMessage>;
   operatorIds: readonly string[];
@@ -49,7 +68,7 @@ export function pendingOperatorNeeds(input: {
   const lastOperatorReply = new Map<string, number>();
 
   for (const message of input.messages) {
-    if (operators.has(message.actorId)) {
+    if (speaksForOperator(message, operators)) {
       const previous = lastOperatorReply.get(message.conversationId) ?? 0;
       if (message.createdAt > previous) lastOperatorReply.set(message.conversationId, message.createdAt);
       continue;

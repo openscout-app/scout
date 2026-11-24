@@ -28,6 +28,8 @@ export function isIdempotentMessageRetry(
     && JSON.stringify(existing.mentions ?? []) === JSON.stringify(incoming.mentions ?? [])
     && JSON.stringify(existing.attachments ?? []) === JSON.stringify(incoming.attachments ?? [])
     && JSON.stringify(existing.speech ?? null) === JSON.stringify(incoming.speech ?? null)
+    // Typed points are part of what the reply says: a retry with other points is a different reply.
+    && isDeepStrictEqual(existing.metadata?.replyPoints ?? null, incoming.metadata?.replyPoints ?? null)
   );
 }
 

@@ -140,7 +140,7 @@ function requireNodeState(value: unknown, nodeId: string): MeshNodeStateReport {
   return report;
 }
 
-function isTimeoutError(error: unknown): boolean {
+export function isTimeoutError(error: unknown): boolean {
   for (let current = error, depth = 0; current && depth < 5; current = (current as { cause?: unknown }).cause, depth += 1) {
     const name = (current as { name?: unknown }).name;
     if (name === "TimeoutError") return true;
@@ -150,7 +150,7 @@ function isTimeoutError(error: unknown): boolean {
 }
 
 /** Bound the whole machine read, including card probes, URL retries and JSON. */
-async function withinDeadline<T>(timeoutMs: number, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withinDeadline<T>(timeoutMs: number, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -166,6 +166,59 @@ async function withinDeadline<T>(timeoutMs: number, read: (signal: AbortSignal) 
     clearTimeout(timer);
     controller.abort();
   }
+}
+
+/**
+ * One signed GET to a peer broker, trying each advertised URL in dial order
+ * inside the caller's deadline. Trust errors stop the walk: another URL of the
+ * same host would fail the same pin. Non-2xx answers carry `label`.
+ */
+export async function readMeshPeerJson<T>(
+  node: NodeDefinition,
+  path: string,
+  options: {
+    peerFetch: MeshPeerFetch;
+    signal: AbortSignal;
+    timeoutMs: number;
+    label: string;
+    /** Runs per URL, so an invalid answer moves on to the next route. */
+    parse: (value: unknown) => T;
+    /** Append the peer's `detail` or `error` to a non-2xx message. */
+    errorDetail?: boolean;
+  },
+): Promise<T> {
+  const { peerFetch, signal, timeoutMs, label, parse } = options;
+  const urls = httpMeshUrlsForNode(node);
+  let error: unknown = new Error("no mesh broker URL advertised");
+  const deadline = performance.now() + timeoutMs;
+  for (const [index, url] of urls.entries()) {
+    signal.throwIfAborted();
+    // Reserve a fair share of the existing whole-machine deadline for
+    // every remaining route, including card verification and body reads.
+    const remaining = urls.length - index;
+    const candidateMs = Math.max(1, Math.floor((deadline - performance.now()) / remaining));
+    try {
+      const readCandidate = async (candidateSignal: AbortSignal) => {
+        const response = await peerFetch(url, path, {
+          signal: candidateSignal,
+          headers: { accept: "application/json" },
+        });
+        if (!response.ok) {
+          const detail = options.errorDetail
+            ? await response.json().then((body) => (body as { detail?: unknown })?.detail ?? (body as { error?: unknown })?.error).catch(() => null)
+            : await response.body?.cancel();
+          throw new Error(`${label} HTTP ${response.status}${response.status === 403 || response.status === 404 ? " (denied or unsupported)" : ""}${typeof detail === "string" && detail ? `: ${detail.slice(0, 200)}` : ""}`);
+        }
+        return parse(await response.json());
+      };
+      return remaining === 1 ? await readCandidate(signal)
+        : await withinDeadline(candidateMs, (candidateSignal) => readCandidate(AbortSignal.any([signal, candidateSignal])));
+    } catch (cause) {
+      if (isMeshPeerTrustError(cause)) throw cause;
+      error = cause;
+    }
+  }
+  throw error;
 }
 
 export type ScoutRecentDeps = {
@@ -245,35 +298,9 @@ export async function loadMachineNodeStates(
     try {
       const report = await withinDeadline(timeoutMs, async (signal) => {
         if (identity.local) return requireNodeState(await readLocal(path, signal), node.id);
-        const urls = httpMeshUrlsForNode(node);
-        let error: unknown = new Error("no mesh broker URL advertised");
-        const deadline = performance.now() + timeoutMs;
-        for (const [index, url] of urls.entries()) {
-          signal.throwIfAborted();
-          // Reserve a fair share of the existing whole-machine deadline for
-          // every remaining route, including card verification and body reads.
-          const remaining = urls.length - index;
-          const candidateMs = Math.max(1, Math.floor((deadline - performance.now()) / remaining));
-          try {
-            const readCandidate = async (candidateSignal: AbortSignal) => {
-              const response = await peerFetch(url, path, {
-                signal: candidateSignal,
-                headers: { accept: "application/json" },
-              });
-              if (!response.ok) {
-                await response.body?.cancel();
-                throw new Error(`node-state HTTP ${response.status}${response.status === 403 || response.status === 404 ? " (denied or unsupported)" : ""}`);
-              }
-              return requireNodeState(await response.json(), node.id);
-            };
-            return remaining === 1 ? await readCandidate(signal)
-              : await withinDeadline(candidateMs, (candidateSignal) => readCandidate(AbortSignal.any([signal, candidateSignal])));
-          } catch (cause) {
-            if (isMeshPeerTrustError(cause)) throw cause;
-            error = cause;
-          }
-        }
-        throw error;
+        return await readMeshPeerJson(node, path, {
+          peerFetch, signal, timeoutMs, label: "node-state", parse: (value) => requireNodeState(value, node.id),
+        });
       });
       return { ...identity, status: "ok", report };
     } catch (error) {

@@ -22,7 +22,7 @@ test('all default tools have SDK discovery and real HTTP-backed handlers', async
   const f=fixture();const server=f.adapter.server(), client=new Client({name:'test',version:'1'});const[a,b]=InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(a),client.connect(b)]);
   try {expect((await client.listTools()).tools.map(t=>t.name).sort()).toEqual([...SCOUT_MCP_CORE_TOOL_NAMES].sort());} finally {await client.close();await server.close();}
-  const cases: Record<string,any> = {sessions_attach:{nativeSessionId:'native'},sessions_get:{sessionId:'s'},sessions_poll:{sessionId:'s'},sessions_ack:{sessionId:'s',deliveryId:'d'},whoami:{},feedback_send:{note:'feedback'},messages_inbox:{},messages_channel:{channel:'room'},broker_feed:{},tail_events:{},current_reply_context:{},reply:{body:'answer',to:'m'},agents_search:{query:'Target'},agents_resolve:{label:'target'},ask:{to:'id:target',body:'work',requestId:'request',workItem:{title:'task'}},invocations_get:{flightId:'f'},invocations_wait:{flightId:'f',timeoutSeconds:1},labels_brief:{label:'label'},labels_feed:{label:'label'},work_update:{work:{workId:'w',state:'working'}},work_move:{workId:'w',to:'doing'},work_review:{workId:'w',moveId:'mv',revision:1,verdict:'confirm'},work_lifecycle:{workId:'w'}};
+  const cases: Record<string,any> = {sessions_attach:{nativeSessionId:'native'},sessions_get:{sessionId:'s'},sessions_poll:{sessionId:'s'},sessions_ack:{sessionId:'s',deliveryId:'d'},whoami:{},feedback_send:{note:'feedback'},messages_inbox:{},messages_channel:{channel:'room'},broker_feed:{},tail_events:{},current_reply_context:{},reply:{body:'answer',to:'m'},agents_search:{query:'Target'},agents_resolve:{label:'target'},ask:{to:'id:target',body:'work',requestId:'request',workItem:{title:'task'}},invocations_get:{flightId:'f'},invocations_wait:{flightId:'f',timeoutSeconds:1},labels_brief:{label:'label'},labels_feed:{label:'label'},work_update:{work:{workId:'w',state:'working'}},work_move:{workId:'w',to:'doing'},work_review:{workId:'w',moveId:'mv',revision:1,verdict:'confirm'},work_retry:{workId:'w',attempt:1},work_lifecycle:{workId:'w'}};
   for(const name of SCOUT_MCP_CORE_TOOL_NAMES) {const result=await f.adapter.call(name,cases[name]);expect(result).toBeDefined();}
   expect(f.calls.every(c=>c.url.origin==='http://127.0.0.1:1234')).toBe(true);
   expect(f.calls.find(c=>c.url.pathname==='/v1/external-sessions/attach')?.body.ownerId).toBe('sender');
@@ -102,6 +102,15 @@ test('external HTTP replies derive stable delivery keys and keep progress separa
   await f.adapter.call('reply',{...args,progress:true});
   expect(f.calls[0]!.body.requestId).toBe(f.calls[1]!.body.requestId);
   expect(f.calls[2]!.body.requestId).not.toBe(f.calls[0]!.body.requestId);
+});
+
+test('a reply with points is refused when the runtime lacks reply-points/1, on both reply paths', async () => {
+  const points=[{stance:'claim',text:'Keep Home on the shipped Feed'}];
+  for (const route of [{}, {sessionId:'session',deliveryId:'delivery'}]) {
+    const f=fixture();
+    await expect(f.adapter.call('reply',{ref:'task',body:'done',points,...route})).rejects.toThrow('reply-points/1');
+    expect(f.calls.map(c=>c.url.pathname)).toEqual(['/v1/node']);
+  }
 });
 
 test.each([

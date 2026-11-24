@@ -1,5 +1,14 @@
 export type ScoutId = string;
 
+export type ScoutAttributionSource = "local-admin" | "scoped" | "system" | "unverified";
+
+export interface ScoutAttribution {
+  actorId: ScoutId;
+  rootActorId: ScoutId;
+  source: ScoutAttributionSource;
+  claimedActorId?: ScoutId;
+}
+
 export type ActorKind =
   | "person"
   | "helper"
@@ -84,9 +93,11 @@ export type DeliveryTransport =
   | "kimi_acp"
   | "cursor_acp"
   | "opencode_acp"
+  | "antigravity_acp"
   | "devin_acp"
   | "tmux"
   | "ghostty"
+  | "rex"
   | "cursor_exec"
   | "cursor_cli_text"
   | "cursor_cli_stream_json"

@@ -1,4 +1,4 @@
-import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, SCOUT_TASKS_CAPABILITY, agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
+import { CHANNEL_ID_PREFIX, EMPTY_SESSION_TASK_LINK, REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY,agentRosterTag, resolveSessionTaskLink, type SessionTaskLink, flightSessionTrace, workClaimOf, workClaimStatus, type AgentRosterListResult, type AgentRosterTag, type ScoutTaskReply, type AttachmentUpload, type WorkClaimConflict, type WorkClaimRequest, type WorkClaimResponse } from "@openscout/protocol";
 import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts";
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
@@ -69,11 +69,19 @@ import {
   systemChannelNaturalKey,
 } from "@openscout/protocol";
 import type {
+  DerivedPendingItem,
+  DerivedRead,
+  DerivedWriteRequest,
+  DerivedWriteResponse,
   WorkLifecycleSummary,
   WorkMoveRecord,
   WorkMoveRequest,
   WorkMoveResponse,
   WorkReviewRequest,
+  VercelBoardPlanRequest,
+  VercelBoardPlanResponse,
+  VercelBoardDispatcherStatus,
+  VercelBoardDispatchRunResponse,
   WorkReviewResponse,
 } from "@openscout/protocol";
 import {
@@ -479,6 +487,7 @@ export type ScoutAskResult = {
   sessionAlias?: string;
   executionResolution?: import("@openscout/protocol").ScoutExecutionResolution;
   workItem?: ScoutTrackedWorkItem;
+  workPageUnavailable?: true;
   unresolvedTarget?: string;
   targetDiagnostic?: ScoutAskTargetDiagnostic;
   preflightFailure?: {
@@ -1898,6 +1907,35 @@ export async function loadScoutBrokerContext(
 ): Promise<ScoutBrokerContext | null> {
   const result = await loadScoutBrokerContextResult(baseUrl);
   return result.ok ? result.context : null;
+}
+
+/**
+ * Node, endpoints and unfinished flights only. Direct session input runs in
+ * the shared MCP process, so it must not read the unscoped snapshot.
+ */
+export async function loadScoutLiveSessionContext(
+  baseUrl = resolveScoutBrokerUrl(),
+): Promise<{ nodeId: string; endpoints: Record<string, AgentEndpoint>; flights: Record<string, FlightRecord> } | null> {
+  try {
+    const [node, endpointList, flightList] = await Promise.all([
+      brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node),
+      brokerReadJson<{ endpoints?: AgentEndpoint[] }>(baseUrl, scoutBrokerPaths.v1.endpoints),
+      // A runtime without the bounded list still matches endpoints by session ID.
+      brokerReadJson<{ flights?: FlightRecord[] }>(baseUrl, `${scoutBrokerPaths.v1.flights}?active=1`)
+        .catch((error: unknown) => {
+          if (error instanceof ScoutBrokerHttpError && (error.status === 404 || error.status === 405)) return { flights: [] };
+          throw error;
+        }),
+    ]);
+    if (!node?.id) return null;
+    return {
+      nodeId: node.id,
+      endpoints: Object.fromEntries((endpointList.endpoints ?? []).map(endpoint => [endpoint.id, endpoint])),
+      flights: Object.fromEntries((flightList.flights ?? []).map(flight => [flight.id, flight])),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function requireScoutBrokerContext(
@@ -4427,6 +4465,7 @@ function defaultAskExecutionSession(
 export async function deliverScoutAsk(input: {
   task?: import("@openscout/protocol").ScoutTaskAsk;
   image?: AttachmentUpload;
+  decisionImages?: AttachmentUpload[];
   attachments?: OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;
@@ -4545,6 +4584,7 @@ export async function deliverScoutAsk(input: {
     intent: input.task ? "task_ask" : input.completion || input.relation ? "explicit_consult" : "consult",
     ...(input.task ? { task: input.task } : {}),
     ...(input.image ? { image: input.image } : {}),
+    ...(input.decisionImages?.length ? { decisionImages: input.decisionImages } : {}),
     ...(input.attachments?.length ? { attachments: normalizeOutgoingAttachments(input.attachments, input.requestId) } : {}),
     ...(input.completion ? { completion: input.completion } : {}),
     ...(input.relation ? { relation: input.relation } : {}),
@@ -4606,6 +4646,7 @@ export async function deliverScoutAsk(input: {
     sessionAlias: delivery.receipt?.sessionAlias ?? delivery.sessionAlias,
     executionResolution: delivery.receipt?.executionResolution,
     workItem,
+    ...(delivery.workPageUnavailable ? { workPageUnavailable: true } : {}),
   };
 }
 
@@ -5906,8 +5947,37 @@ export async function moveScoutWorkItem(input: WorkMoveRequest): Promise<WorkMov
   }
 }
 
+/** The Board dispatcher's settings, decisions and held claims. Read-only. */
+export async function readScoutBoardDispatcher(connectionId: string): Promise<VercelBoardDispatcherStatus> {
+  return brokerReadJson<VercelBoardDispatcherStatus>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${new URLSearchParams({ connection: connectionId })}`);
+}
+
+/** Why the dispatcher would or would not claim one Board task now. Claims nothing. */
+export async function explainScoutBoardDispatch(connectionId: string, taskId: string): Promise<VercelBoardDispatchRunResponse> {
+  return brokerReadJson<VercelBoardDispatchRunResponse>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.vercelBoardDispatcher}?${new URLSearchParams({ connection: connectionId, explain: taskId })}`);
+}
+
+/** The Board planning path: creates Board tasks only. Work items appear when the connected runtime projects them. */
+export async function planScoutBoardTasks(input: VercelBoardPlanRequest): Promise<VercelBoardPlanResponse> {
+  return brokerPostJson<VercelBoardPlanResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.vercelBoardPlan, input);
+}
+
 export async function reviewScoutWorkMove(input: WorkReviewRequest): Promise<WorkReviewResponse> {
   return brokerPostJson<WorkReviewResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workReview, input);
+}
+
+export async function readScoutDerivedRecord(input: { workId: string; kind: string }): Promise<DerivedRead> {
+  const query = `?workId=${encodeURIComponent(input.workId)}&kind=${encodeURIComponent(input.kind)}`;
+  return brokerReadJson<DerivedRead>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.derived}${query}`);
+}
+
+export async function writeScoutDerivedRecord(input: DerivedWriteRequest): Promise<DerivedWriteResponse> {
+  return brokerPostJson<DerivedWriteResponse>(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.derived, input);
+}
+
+export async function readScoutDerivedPending(limit?: number): Promise<DerivedPendingItem[]> {
+  const query = limit ? `?limit=${limit}` : "";
+  return (await brokerReadJson<{ pending: DerivedPendingItem[] }>(resolveScoutBrokerUrl(), `${scoutBrokerPaths.v1.derivedPending}${query}`)).pending;
 }
 
 export async function readScoutWorkLifecycles(workId?: string): Promise<{
@@ -5928,5 +5998,13 @@ export async function replyToScoutTask(input: ScoutTaskReply): Promise<unknown> 
   const baseUrl = resolveScoutBrokerUrl();
   const node = await brokerReadJson<ScoutBrokerNodeRecord>(baseUrl, scoutBrokerPaths.v1.node);
   if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`Broker requires ${SCOUT_TASKS_CAPABILITY}; upgrade the runtime before replying`);
+  // An older runtime accepts the reply but drops points it does not know.
+  if (input.points?.length && !node.capabilities.includes(REPLY_POINTS_CAPABILITY)) {
+    throw new Error(`Broker does not advertise ${REPLY_POINTS_CAPABILITY}; send the reply without points or upgrade the runtime`);
+  }
   return brokerPostJson(baseUrl, "/v1/messages/reply", input);
+}
+
+export async function retryScoutWorkItem(input: import("@openscout/protocol").WorkRetryRequest): Promise<import("@openscout/protocol").WorkRetryResponse> {
+  return brokerPostJson(resolveScoutBrokerUrl(), scoutBrokerPaths.v1.workRetry, input);
 }

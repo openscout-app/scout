@@ -52,8 +52,10 @@ export const SCOUT_USER_SPAWN_STRIPPED_ENV_KEYS: readonly string[] = [
   "OPENSCOUT_INSTANCE_ROOT",
   "OPENSCOUT_INSTANCE_PORT_BASE",
   "OPENSCOUT_INSTANCE_MESH",
+  "OPENSCOUT_INSTANCE_HOST_LABEL",
   "OPENSCOUT_HOME",
   "OPENSCOUT_CONTROL_HOME",
+  "OPENSCOUT_ATTRIBUTION_KEY_FILE",
   "OPENSCOUT_SUPPORT_DIRECTORY",
   "OPENSCOUT_RELAY_HUB",
   "OPENSCOUT_SCOUT_HOME",
@@ -115,6 +117,7 @@ const SCOUT_SPAWN_MARKER_ENV_KEYS = [
   "OPENSCOUT_INSTANCE_ROOT",
   "OPENSCOUT_INSTANCE_PORT_BASE",
   "OPENSCOUT_INSTANCE_MESH",
+  "OPENSCOUT_INSTANCE_HOST_LABEL",
 ] as const;
 
 /**
@@ -133,6 +136,8 @@ export function scoutUserSpawnEnvironment(base: NodeJS.ProcessEnv = process.env)
   // Fail safe: an invalid spawner name strips everything, like non-prod.
   const keys = normalized === "prod" ? SCOUT_SPAWN_MARKER_ENV_KEYS : SCOUT_USER_SPAWN_STRIPPED_ENV_KEYS;
   for (const key of keys) delete env[key];
+  delete env.OPENSCOUT_ATTRIBUTION_KEY_FILE;
+  delete env.OPENSCOUT_OPERATOR_ATTRIBUTION_HANDOFF_FILE;
   env.OPENSCOUT_CLIENT_INSTANCE = instance;
   return env;
 }

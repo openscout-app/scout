@@ -11,7 +11,6 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   SCOUT_MISSION_LOG_APPEND,
   SCOUT_ORCHESTRATOR_ROLE_ID,
-  activeRoleHoldersForMission,
   agentMayWriteMissionLog,
   scoutRoleDefinition,
   validateMissionLogEntryFields,
@@ -58,7 +57,13 @@ export type AssignRoleInput = {
   agentId: string;
   scope: ScoutRoleAssignmentScope;
   assignedById: string;
-  /** Default true: one active orchestrator per mission when role is orchestrator. */
+  /**
+   * Default true: refuse a second active holder where the role's definition
+   * names this scope kind in singleHolder (orchestrator: one per mission;
+   * pm: one in all). False allows several.
+   */
+  enforceSingleHolder?: boolean;
+  /** Older name for enforceSingleHolder, still read when that is absent. */
   enforceSingleOrchestrator?: boolean;
   metadata?: Record<string, unknown>;
   id?: string;
@@ -256,30 +261,26 @@ export function assignRole(
   return runInTransaction(db, () => {
     const now = input.assignedAt ?? Date.now();
     const scope = scopeColumns(input.scope);
-    const enforceSingle =
-      input.enforceSingleOrchestrator
-      ?? input.roleId === SCOUT_ORCHESTRATOR_ROLE_ID;
+    const enforceSingle = input.enforceSingleHolder ?? input.enforceSingleOrchestrator ?? true;
 
-    if (
-      enforceSingle
-      && input.roleId === SCOUT_ORCHESTRATOR_ROLE_ID
-      && input.scope.kind === "mission"
-    ) {
-      const holders = activeRoleHoldersForMission(
-        listRoleAssignments(db, {
-          missionId: input.scope.missionId,
-          roleId: SCOUT_ORCHESTRATOR_ROLE_ID,
-          activeOnly: true,
-          includeStanding: false,
-        }),
-        input.scope.missionId,
-        SCOUT_ORCHESTRATOR_ROLE_ID,
-        { includeStanding: false },
-      ).filter((agentId) => agentId !== input.agentId);
+    if (enforceSingle && definition.singleHolder?.includes(input.scope.kind)) {
+      const holders = (db
+        .query(
+          `SELECT DISTINCT agent_id FROM role_assignments
+           WHERE active = 1 AND role_id = ? AND scope_kind = ?
+             AND IFNULL(mission_id, '') = IFNULL(?, '')
+             AND IFNULL(project_root, '') = IFNULL(?, '')
+             AND agent_id != ?`,
+        )
+        .all(input.roleId, scope.scopeKind, scope.missionId, scope.projectRoot, input.agentId) as Array<{ agent_id: string }>)
+        .map((row) => row.agent_id);
 
       if (holders.length > 0) {
+        const where = input.scope.kind === "mission"
+          ? `mission ${input.scope.missionId}`
+          : input.scope.kind === "project" ? `project ${input.scope.projectRoot}` : "this runtime";
         throw new Error(
-          `mission ${input.scope.missionId} already has orchestrator(s): ${holders.join(", ")}. Revoke first or pass enforceSingleOrchestrator: false.`,
+          `${where} already has ${definition.id}(s): ${holders.join(", ")}. Revoke first or pass enforceSingleHolder: false.`,
         );
       }
     }

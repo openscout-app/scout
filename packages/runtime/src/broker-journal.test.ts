@@ -576,6 +576,20 @@ test("pending result index replaces flights and reconstructs only undelivered re
   expect([...restored.pendingInvocationResultFlights()]).toEqual([next]);
 });
 
+test("a sibling flight recorded without becoming current leaves the current flight's result pending", async () => {
+  const { journal, journalPath } = createJournal();
+  await journal.load();
+  const twin = { ...sampleFlight(), state: "completed" as const, metadata: { resultReply: { status: "pending" } } };
+  await journal.appendEntries({ kind: "flight.record", flight: twin });
+  const copy = { ...sampleFlight(), id: "flight-placeholder", state: "completed" as const, metadata: { supersededByFlightId: twin.id } };
+  await journal.appendEntries({ kind: "flight.record", flight: copy, preserveCurrent: true });
+  expect([...journal.pendingInvocationResultFlights()]).toEqual([twin]);
+  expect(journal.getCurrentFlightForInvocation(twin.invocationId)?.id).toBe(twin.id);
+  const restored = new FileBackedBrokerJournal(journalPath); await restored.load();
+  expect([...restored.pendingInvocationResultFlights()].map(flight => flight.id)).toEqual([twin.id]);
+  expect(restored.getCurrentFlightForInvocation(twin.invocationId)?.id).toBe(twin.id);
+});
+
 test("complete delivery traversal yields and excludes later appends without freezing replacements", async () => {
   const { journal } = createJournal();
   await journal.load();
@@ -1577,4 +1591,19 @@ test("task indexes replay, exclude closed history and retain only queued follow-
   const closed = new FileBackedBrokerJournal(journalPath); await closed.load();
   expect([...closed.openOperatorTasks()]).toEqual([]);
   expect(await closed.pendingTaskFollowups(task.id)).toEqual([]);
+});
+
+test("latest collaboration events name the newest event of each asked record", async () => {
+  const { journal, journalPath } = createJournal();
+  const event = (id: string, recordId: string, at: number) => JSON.stringify({
+    kind: "collaboration.event.record", event: { id, recordId, recordKind: "work_item", kind: "progressed", actorId: "agent-1", at },
+  });
+  writeFileSync(journalPath, [
+    event("a-1", "rec-a", 10), event("a-3", "rec-a", 30), event("a-2", "rec-a", 20),
+    event("b-1", "rec-b", 5), event("b-tie", "rec-b", 5), event("c-1", "rec-c", 99),
+  ].join("\n") + "\n", "utf8");
+  await journal.load();
+  const latest = journal.latestCollaborationEvents(new Set(["rec-a", "rec-b", "rec-missing"]));
+  expect([...latest.entries()].map(([recordId, e]) => [recordId, e.id]).sort()).toEqual([["rec-a", "a-3"], ["rec-b", "b-tie"]]);
+  expect(journal.latestCollaborationEvents(new Set()).size).toBe(0);
 });

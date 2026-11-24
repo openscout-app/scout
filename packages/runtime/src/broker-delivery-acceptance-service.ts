@@ -1,6 +1,9 @@
+import { manualReviewDeliveryGuard } from "./manual-review-dispatch.js";
+import { sessionSenderMetadata } from "./broker-session-sender-profile.js";
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
 import { decodeAttachment, imageMimes, postWithAttachmentsSchema, validateAttachmentBytes } from "./attachment-contract.js";
-import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY } from "@openscout/protocol";
+import { validateTaskAsk, taskNotificationPolicy, sessionTaskHeadline, SCOUT_TASKS_CAPABILITY, applyDecisionToTask, normalizeDecisionCard } from "@openscout/protocol";
+import { bindDecisionCard, decisionPictureAttachmentId } from "./decision-card-binding.js";
 import { isExternalSessionEndpoint } from "./external-session-transport.js";
 import { acceptSessionInput, recoverSessionInputDelivery, validateSessionInputRequest, type SessionInputDeliveryOptions } from "./broker-session-input-delivery.js";
 import { BrokerCommandAdmission } from "./broker-storage-pressure.js";
@@ -27,6 +30,7 @@ import {
   type ScoutDispatchUnavailableTarget,
   type ScoutOwnedRuntimeCatalog,
   type ScoutReturnAddress,
+  TASK_READY_NOTIFY_KEY,
 } from "@openscout/protocol";
 
 import {
@@ -99,6 +103,8 @@ type ChannelAttentionPointerInput = {
 
 export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions & {
   withTaskImage?: <T>(message: MessageRecord, image: NonNullable<ScoutDeliverRequest["image"]>, commit: () => Promise<T>) => Promise<T>;
+  /** Binds the task image and a decision card's pictures in one transaction. */
+  withTaskImages?: <T>(message: MessageRecord, uploads: Array<{ id: string; upload: NonNullable<ScoutDeliverRequest["image"]> }>, commit: () => Promise<T>) => Promise<T>;
   recoverTaskFollowup?: (actor: string, requestId: string) => Promise<ScoutDeliverResponse | null>;
   taskAsk?: (payload: ScoutDeliverRequest) => Promise<ScoutDeliverResponse | null>;
   checkTaskPeer?: (payload: ScoutDeliverRequest) => void;
@@ -199,6 +205,7 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
     createdAt: number;
   }) => Promise<DeliveryWorkItemResolution>;
   deliveryWorkItemResolutionForTell: (payload: ScoutDeliverRequest) => DeliveryWorkItemResolution;
+  workPageAvailable?: () => boolean;
   prepareDeliveryWorkItemIfNeeded?: BrokerDeliveryAcceptanceServiceOptions["recordDeliveryWorkItemIfNeeded"];
   postConversationMessage: (message: MessageRecord) => Promise<unknown>;
   acceptInvocation: (invocation: InvocationRequest, message?: MessageRecord, workItem?: DeliveryWorkItemResolution["pendingCreation"]) => Promise<FlightRecord>;
@@ -347,32 +354,46 @@ export class BrokerDeliveryAcceptanceService {
 
   async accept(
     payload: ScoutDeliverRequest,
-    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean } = {},
+    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean; executionPayload?: ScoutDeliverRequest } = {},
+  ): Promise<ScoutDeliverResponse> {
+    const response = await this.acceptDelivery(payload, options);
+    // This is live read-model status, not part of the durable receipt. In
+    // particular, a retry should get a usable link after projection recovers.
+    if (response.kind === "delivery" && response.workItem && this.options.workPageAvailable?.() === false) {
+      return { ...response, workPageUnavailable: true };
+    }
+    return response;
+  }
+
+  private async acceptDelivery(
+    payload: ScoutDeliverRequest,
+    options: { signal?: AbortSignal; receiptReserved?: boolean; admissionReserved?: boolean; executionPayload?: ScoutDeliverRequest } = {},
   ): Promise<ScoutDeliverResponse> {
     throwIfAborted(options.signal);
-    validateTaskDelivery(payload, this.options.operatorActorId);
-    this.options.checkTaskPeer?.(payload);
-    validateSessionInputRequest(payload);
-    if (payload.sessionDelivery && (!this.options.requestReceipts || !this.options.submitSessionInput || !this.options.upsertSessionInputActor)) {
+    const execution = options.executionPayload ?? payload;
+    validateTaskDelivery(execution, this.options.operatorActorId);
+    this.options.checkTaskPeer?.(execution);
+    validateSessionInputRequest(execution);
+    if (execution.sessionDelivery && (!this.options.requestReceipts || !this.options.submitSessionInput || !this.options.upsertSessionInputActor)) {
       throw new Error("session_input_unsupported: broker requires durable session input receipts");
     }
     const admission = this.options.commandAdmission ?? this.defaultAdmission;
     if (options.receiptReserved) {
-      const release = options.admissionReserved ? undefined : admission.reserve(payload);
-      try { return await this.acceptCommand(payload); } finally { release?.(); }
+      const release = options.admissionReserved ? undefined : admission.reserve(execution);
+      try { return await this.acceptCommand(execution); } finally { release?.(); }
     }
-    if (payload.requestId && this.options.requestReceipts) {
-      const { requesterId } = callerContextForDelivery(payload, {
+    if (execution.requestId && this.options.requestReceipts) {
+      const { requesterId } = callerContextForDelivery(execution, {
         operatorActorId: this.options.operatorActorId, nodeId: this.options.nodeId,
       });
       // Both transport paths enter this boundary. Once reserved, caller abort
       // stops waiting; it cannot interrupt the broker-owned durable command.
-      return this.options.requestReceipts.run(requesterId, payload.requestId, "deliver", payload,
-        () => this.acceptCommand(payload),
-        async () => this.recoverReceipt(requesterId, payload.requestId!), () => admission.reserve(payload));
+      return this.options.requestReceipts.run(requesterId, execution.requestId, "deliver", payload,
+        () => this.acceptCommand(execution),
+        async () => this.recoverReceipt(requesterId, execution.requestId!), () => admission.reserve(execution));
     }
-    const release = admission.reserve(payload);
-    try { return await this.acceptCommand(payload, options); } finally { release(); }
+    const release = admission.reserve(execution);
+    try { return await this.acceptCommand(execution, options); } finally { release(); }
   }
 
   /** Router-owned receipts must reserve capacity before writing their unknown ledger entry. */
@@ -413,6 +434,12 @@ export class BrokerDeliveryAcceptanceService {
     payload: ScoutDeliverRequest,
     options: { signal?: AbortSignal } = {},
   ): Promise<ScoutDeliverResponse> {
+    const reviewGuard = (payload as ScoutDeliverRequest & { [manualReviewDeliveryGuard]?: () => void })[manualReviewDeliveryGuard];
+    try { reviewGuard?.(); }
+    catch (error) {
+      // The reservation exists but this command has not performed any effects.
+      throw new RetryablePreEffectFailure(error instanceof Error ? error.message : "The Board review grant changed.");
+    }
     // acceptCommand runs only after the caller's original command is fingerprinted
     // and reserved. Inject native-reply policy into a private execution copy:
     // old receipts with an absent/false flag must keep replaying the same bytes.
@@ -435,7 +462,14 @@ export class BrokerDeliveryAcceptanceService {
     if (payload.task) {
       const special = await this.options.taskAsk?.(payload);
       if (special) return special;
-      const task = payload.task;
+      // A card's labels are the task's options and its default is the task's
+      // default action, so every older reader of those fields agrees with it.
+      // Long fields are clipped here, once, so the stored card and the task agree.
+      if (payload.task.decision) {
+        const decision = normalizeDecisionCard(payload.task.decision);
+        payload = { ...payload, task: applyDecisionToTask({ ...payload.task, decision }, decision) };
+      }
+      const task = payload.task!;
       const policy = task.operator ? taskNotificationPolicy(task) : undefined;
       payload = { ...payload, intent: task.fyi ? "tell" : "consult", ensureAwake: task.fyi ? false : payload.ensureAwake,
         ...(task.fyi ? { workItem: undefined, collaborationRecordId: undefined, execution: undefined, invocationMetadata: undefined } :
@@ -676,7 +710,9 @@ export class BrokerDeliveryAcceptanceService {
           policy: "durable",
           createdAt,
           metadata: {
-            ...(payload.messageMetadata ?? {}),
+            ...(conversation.kind === "channel"
+              ? sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata)
+              : payload.messageMetadata),
           ...(payload.task && payload.requestId ? { requestId: payload.requestId, requestIntent: payload.task.fyi ? "tell" : "consult" } : {}),
             ...(labels.length ? { labels } : {}),
             relayChannel: conversation.kind === "direct" ? "dm" : conversation.id.replace(/^channel\./, ""),
@@ -748,6 +784,9 @@ export class BrokerDeliveryAcceptanceService {
           ...(operatorSignal
             ? { operatorSignal, operatorSignalId: messageId }
             : {}),
+          ...(payload.task?.decision && !payload.task.fyi
+            ? { decisionCard: bindDecisionCard(payload.task.decision, messageId, payload.decisionImages ?? []) }
+            : {}),
           relayChannel: deliveryChannel || (conversation.kind === "direct" ? "dm" : "shared"),
           relayTarget: this.options.operatorActorId,
           relayTargetIds: notifyTargets,
@@ -786,7 +825,9 @@ export class BrokerDeliveryAcceptanceService {
         flight = await this.acceptInvocation(invocation, message, payload, work.pendingCreation);
       } else await this.postMessage(message, payload);
       if (operatorSignal) {
-        if (operatorSignal.kind === "need") await this.options.recordOperatorNeed?.(message, operatorSignal);
+        // A need and a consult (an ask with a default) get a question record,
+        // which holds their decision card. An FYI waits on nobody.
+        if (operatorSignal.kind !== "notify") await this.options.recordOperatorNeed?.(message, operatorSignal);
         const requesterAgent = snapshot.agents[requesterId];
         const requesterActor = snapshot.actors[requesterId];
         const requesterEndpoint = Object.values(snapshot.endpoints)
@@ -984,7 +1025,7 @@ export class BrokerDeliveryAcceptanceService {
         policy: "durable",
         createdAt,
         metadata: {
-          ...(payload.messageMetadata ?? {}),
+          ...sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata),
           ...(payload.task && payload.requestId ? { requestId: payload.requestId, requestIntent: payload.task.fyi ? "tell" : "consult" } : {}),
           ...(labels.length ? { labels } : {}),
           relayChannel: deliveryChannel,
@@ -1031,16 +1072,22 @@ export class BrokerDeliveryAcceptanceService {
       && !requestedTargetSessionId
       && ((execution?.session ?? "new") === "new" || execution?.session === "fork")
       && Boolean(this.options.createCardlessProjectSession);
+    if (reviewGuard && !shouldCreateCardlessProjectSession) {
+      throw new RetryablePreEffectFailure("A Board review requires a fresh local native session.");
+    }
     if (projectHost && !shouldCreateCardlessProjectSession) {
       throw new Error(
         `--on ${projectHost} starts a fresh session in ${projectPath}; it cannot continue or target an existing session or agent. `
         + "Drop --to/--session to start fresh there, or address the existing session as sess.<token>@<host>.",
       );
     }
+    reviewGuard?.();
     const resolved = shouldCreateCardlessProjectSession
       ? await this.options.createCardlessProjectSession!({
           projectPath: projectPath!,
-          ...(projectHost ? { host: projectHost } : {}),
+          // Explicitly name this node to prevent the project resolver from
+          // falling back to a mesh peer if the local directory disappears.
+          ...(reviewGuard ? { host: this.options.nodeId } : projectHost ? { host: projectHost } : {}),
           execution,
           projectAgent: payload.projectAgent,
           ...(askWorkspaceFromPayload(payload) === "new_worktree" ? { workspace: "new_worktree" as const } : {}),
@@ -1108,6 +1155,9 @@ export class BrokerDeliveryAcceptanceService {
           label: resolved.session.label,
           endpoint: resolved.session.endpoint as AgentEndpoint | undefined,
         };
+    if (reviewGuard && (!target.endpoint || target.endpoint.nodeId !== this.options.nodeId || isExternalSessionEndpoint(target.endpoint))) {
+      throw new Error("A Board review requires a local native session that can read its pinned source file.");
+    }
     if (payload.task) {
       const snapshot = this.options.runtimeSnapshot();
       const endpoint = target.endpoint ?? this.options.homeEndpointForAgent(snapshot, target.actorId);
@@ -1225,7 +1275,9 @@ export class BrokerDeliveryAcceptanceService {
       createdAt: reusableMessage?.createdAt ?? createdAt,
       metadata: {
         ...(reusableMessage?.metadata ?? {}),
-        ...(payload.messageMetadata ?? {}),
+        ...(conversation.kind === "channel"
+          ? sessionSenderMetadata(snapshot, requesterId, requesterNodeId, payload.messageMetadata)
+          : payload.messageMetadata),
         deliveryRequestId: requestId,
         ...(payload.requestId ? { requestId: payload.requestId, requestIntent: payload.intent } : {}),
         ...(labels.length ? { labels } : {}),
@@ -1299,6 +1351,20 @@ export class BrokerDeliveryAcceptanceService {
       };
     }
 
+    // A managed Claude terminal can yield at an interim turn boundary (for
+    // example, while background work is running). Only a task reply may
+    // finish a local structured ask to that session.
+    const managedClaudeEndpoint = target.endpoint;
+    const needsTaskReply = payload.task && payload.intent === "consult"
+      && requesterNodeId === this.options.nodeId && conversation.authorityNodeId === this.options.nodeId
+      && managedClaudeEndpoint?.nodeId === this.options.nodeId
+      && managedClaudeEndpoint.harness === "claude" && managedClaudeEndpoint.transport === "tmux"
+      && managedClaudeEndpoint.metadata?.cardless === true
+      && !isExternalSessionEndpoint(managedClaudeEndpoint) && !sessionFork
+      && execution?.session !== "fork";
+    const completion = payload.completion ?? (needsTaskReply ? { mode: "explicit" as const } : undefined);
+    if (needsTaskReply && !completionEndpointId) completionEndpointId = managedClaudeEndpoint.id;
+
     const invocationMetadata = {
       ...(typeof payload.messageMetadata?.source === "string" && payload.invocationMetadata?.source === undefined
         ? { source: payload.messageMetadata.source }
@@ -1335,7 +1401,7 @@ export class BrokerDeliveryAcceptanceService {
       requesterId,
       requesterNodeId,
       targetAgentId: target.actorId,
-      ...((payload.completion || payload.relation) ? { targetNodeId: this.options.nodeId } : {}),
+      ...((completion || payload.relation) ? { targetNodeId: this.options.nodeId } : {}),
       action: payload.intent === "tell" ? "wake" : "consult",
       task: payload.body.trim(),
       ...(collaborationRecordId ? { collaborationRecordId } : {}),
@@ -1353,12 +1419,15 @@ export class BrokerDeliveryAcceptanceService {
       metadata: {
         ...invocationMetadata,
         ...(payload.task ? { taskVersion: 1, taskHomeNodeId: this.options.nodeId } : {}),
+        // notify on a task ask: the operator wants to hear when it is done (Ready).
+        ...(payload.task?.notify && !payload.task.operator && !payload.task.fyi
+          ? { [TASK_READY_NOTIFY_KEY]: { on: true, byId: requesterId, at: createdAt } } : {}),
         ...(payload.task?.because ? { because: payload.task.because } : {}),
         ...(payload.task?.callback ? { callback: payload.task.callback } : {}),
         ...(replyToSessionId ? { replyToSessionId } : {}),
-        completion: payload.completion,
+        completion,
         completionRelation: payload.relation,
-        completionLocalNodeId: payload.completion || payload.relation ? this.options.nodeId : undefined,
+        completionLocalNodeId: completion || payload.relation ? this.options.nodeId : undefined,
         completionEndpointId,
         ...(labels.length ? { labels } : {}),
         ...(receiptSessionId ? { targetSessionId: receiptSessionId } : {}),
@@ -1396,8 +1465,9 @@ export class BrokerDeliveryAcceptanceService {
     // The original receipt and initial flight are recoverable from the same
     // atomic journal frame, even if the process dies before receipt-file save.
     throwIfAborted(options.signal);
+    if (reviewGuard) Object.defineProperty(invocation, manualReviewDeliveryGuard, { value: reviewGuard });
     const flight = await this.acceptInvocation(invocation, message, payload, workResolution.pendingCreation);
-    if (payload.completion) invocation.metadata = { ...invocation.metadata, completionFlightId: flight.id };
+    if (completion) invocation.metadata = { ...invocation.metadata, completionFlightId: flight.id };
     this.options.dispatchAcceptedInvocation(invocation).catch((error) => {
       this.options.warn?.(`[openscout-runtime] background dispatch failed for invocation ${invocation.id}:`, error);
     });
@@ -1415,19 +1485,26 @@ export class BrokerDeliveryAcceptanceService {
         message.metadata = { ...message.metadata, taskFyiReceipt: { kind: "delivery", accepted: true, routeKind, conversationId: conversation.id, receipt } };
       }
     }
-    if (payload.image) {
-      if (!this.options.withTaskImage) throw new Error("task image uploads are unavailable");
-      return this.options.withTaskImage(message, payload.image, () => this.options.postConversationMessage(message));
-    }
-    return this.options.postConversationMessage(message);
+    return this.withImages(message, payload, () => this.options.postConversationMessage(message));
   }
   private async acceptInvocation(invocation: InvocationRequest, message: MessageRecord, payload: ScoutDeliverRequest,
     work: DeliveryWorkItemResolution["pendingCreation"]): Promise<FlightRecord> {
+    return this.withImages(message, payload, () => this.options.acceptInvocation(invocation, message, work));
+  }
+  private withImages<T>(message: MessageRecord, payload: ScoutDeliverRequest, commit: () => Promise<T>): Promise<T> {
+    const pictures = message.metadata?.decisionCard ? payload.decisionImages ?? [] : [];
+    if (pictures.length) {
+      if (!this.options.withTaskImages) throw new Error("decision picture uploads are unavailable");
+      return this.options.withTaskImages(message, [
+        ...(payload.image ? [{ id: `${message.id}.image`, upload: payload.image }] : []),
+        ...pictures.map((upload, index) => ({ id: decisionPictureAttachmentId(message.id, index), upload })),
+      ], commit);
+    }
     if (payload.image) {
       if (!this.options.withTaskImage) throw new Error("task image uploads are unavailable");
-      return this.options.withTaskImage(message, payload.image, () => this.options.acceptInvocation(invocation, message, work));
+      return this.options.withTaskImage(message, payload.image, commit);
     }
-    return this.options.acceptInvocation(invocation, message, work);
+    return commit();
   }
 
   private now(): number {
@@ -1448,6 +1525,15 @@ export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActor
     const upload = postWithAttachmentsSchema.shape.attachments.element.parse(payload.image);
     if (!imageMimes.has(upload.mediaType)) throw new Error("task evidence must be an image");
     validateAttachmentBytes(decodeAttachment(upload.data), upload.mediaType);
+  }
+  if (payload.decisionImages !== undefined) {
+    if (!task.decision) throw new Error("decision images need a --decision card");
+    if (!Array.isArray(payload.decisionImages) || payload.decisionImages.length > 3) throw new Error("a decision card carries at most 3 pictures");
+    for (const image of payload.decisionImages) {
+      const upload = postWithAttachmentsSchema.shape.attachments.element.parse(image);
+      if (!imageMimes.has(upload.mediaType)) throw new Error("a decision picture must be an image");
+      validateAttachmentBytes(decodeAttachment(upload.data), upload.mediaType);
+    }
   }
   // The ask client always sends the rendered label of this same ref (`ref:<id>`).
   // That label is the route itself. A different label, agent, session, channel,
@@ -1470,6 +1556,7 @@ export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActor
     execution: Boolean(payload.execution?.harness || payload.execution?.model || payload.execution?.reasoningEffort || payload.execution?.placement
       || payload.projectAgent || payload.execution?.targetSessionId || payload.execution?.session),
     relation: Boolean(payload.relation),
+    decisionImages: payload.decisionImages?.length ?? 0,
   });
 }
 

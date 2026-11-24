@@ -45,10 +45,10 @@ import type { RuntimePresetConfig } from "./user-config.js";
 import { collectUserLevelProjectRootHints, encodeClaudeProjectsSlug } from "./user-project-hints.js";
 import { isProdOpenScoutInstance, resolveOpenScoutInstanceName } from "./instance.js";
 
-export type RelayRuntimeTransport = "claude_stream_json" | "codex_app_server" | "pi_rpc" | "grok_acp" | "kimi_acp" | "cursor_acp" | "opencode_acp" | "devin_acp" | "tmux" | "cursor_exec";
+export type RelayRuntimeTransport = "claude_stream_json" | "codex_app_server" | "pi_rpc" | "grok_acp" | "kimi_acp" | "cursor_acp" | "opencode_acp" | "antigravity_acp" | "devin_acp" | "tmux" | "cursor_exec";
 export type TelegramBridgeMode = "auto" | "webhook" | "polling";
 export const SCOUT_AGENT_ID = "scout";
-export const MANAGED_AGENT_HARNESSES = ["claude", "codex", "cursor", "devin", "grok", "grok-acp", "kimi", "pi", "opencode"] as const;
+export const MANAGED_AGENT_HARNESSES = ["claude", "codex", "cursor", "devin", "antigravity", "grok", "grok-acp", "kimi", "pi", "opencode"] as const;
 export type ManagedAgentHarness = typeof MANAGED_AGENT_HARNESSES[number];
 
 export type RelayHarnessProfile = {
@@ -554,6 +554,7 @@ const PROJECT_HARNESS_MARKERS: Record<ManagedAgentHarness, readonly string[]> = 
     ".cursor",
     ".cursorrules",
   ],
+  antigravity: [],
   devin: [
     ".devin",
   ],
@@ -682,6 +683,7 @@ function normalizeManagedHarness(
   if (value === "cursor") {
     return "cursor";
   }
+  if (value === "antigravity") return "antigravity";
   if (value === "devin") {
     return "devin";
   }
@@ -1004,6 +1006,8 @@ function normalizeTransport(
     return "cursor_acp";
   }
 
+  if (harness === "antigravity") return "antigravity_acp";
+
   if (harness === "devin") {
     return "devin_acp";
   }
@@ -1036,7 +1040,7 @@ function normalizeTransport(
     return "pi_rpc";
   }
 
-  if (value === "grok_acp" || value === "kimi_acp" || value === "cursor_acp" || value === "opencode_acp" || value === "devin_acp") {
+  if (value === "grok_acp" || value === "kimi_acp" || value === "cursor_acp" || value === "opencode_acp" || value === "antigravity_acp" || value === "devin_acp") {
     return value;
   }
 
@@ -1704,6 +1708,7 @@ async function detectHarnessMarkers(projectRoot: string): Promise<Record<Managed
     claude: [],
     codex: [],
     cursor: [],
+    antigravity: [],
     devin: [],
     grok: [],
     "grok-acp": [],

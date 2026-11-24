@@ -10,6 +10,7 @@ import type { CollaborationEvent, CollaborationRecord } from "./collaboration.js
 import type { ScoutDispatchRecord } from "./scout-dispatch.js";
 import type { PresenceBeat } from "./presence.js";
 import type { ObservedActivity } from "./observed-status.js";
+import type { VercelBoardHandoff } from "./vercel-board.js";
 
 export const OPENSCOUT_CONTROL_EVENT_VERSION = 1 as const;
 
@@ -121,8 +122,28 @@ export type MeshBridgeLifecycleEvent = ControlEventBase<"mesh.bridge.lifecycle",
   phase: "requested" | "failed";
 }>;
 
+/**
+ * A hand-off on a Vercel Board, live. Ephemeral: the connected host's mirror of
+ * the board's task events is its record, and a replay derives from it.
+ */
+export type VercelBoardHandoffEvent = ControlEventBase<"vercel_board.handoff", {
+  handoff: VercelBoardHandoff;
+}>;
+
+/**
+ * A role wrote its slot. Ephemeral: the slot row is the record; a reader that
+ * missed this reads the slot.
+ */
+export type RoleSlotWrittenEvent = ControlEventBase<"role.slot.written", {
+  assignmentId: ScoutId;
+  roleId: string;
+  version: number;
+}>;
+
 export type ControlEvent =
   | MeshBridgeLifecycleEvent
+  | RoleSlotWrittenEvent
+  | VercelBoardHandoffEvent
   | NodeUpsertedEvent
   | ActorRegisteredEvent
   | AgentRegisteredEvent
@@ -154,6 +175,8 @@ export type ControlEvent =
  */
 export const EPHEMERAL_CONTROL_EVENT_KINDS: ReadonlySet<ControlEvent["kind"]> = new Set<ControlEvent["kind"]>([
   "presence.updated",
+  "vercel_board.handoff",
+  "role.slot.written",
 ]);
 
 /** True when the event must never be persisted or backlogged. */

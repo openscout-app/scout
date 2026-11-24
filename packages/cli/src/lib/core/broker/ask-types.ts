@@ -15,6 +15,8 @@ export type ScoutAskSenderContext = {
 type ScoutAskCommandBase = {
   task?: import("@openscout/protocol").ScoutTaskAsk;
   image?: import("@openscout/protocol").AttachmentUpload;
+  /** Pictures for task.decision, in the order its options index them. */
+  decisionImages?: import("@openscout/protocol").AttachmentUpload[];
   attachments?: import("./service.ts").OutgoingAttachmentInput[];
   requestId?: string;
   completion?: ScoutCompletionRequest;
@@ -79,8 +81,13 @@ export type ScoutAskNextCall = {
   reason: string;
 };
 
+export const ASK_ERROR_CODES = [
+  "broker_unreachable", "invalid_request", "preflight_failed", "target_unroutable",
+  "task_followup_not_sent", "task_followup_unauthorized",
+] as const;
+
 export type ScoutAskError = {
-  code: "broker_unreachable" | "invalid_request" | "preflight_failed" | "target_unroutable";
+  code: (typeof ASK_ERROR_CODES)[number];
   message: string;
   /** The runtime's own refusal code, such as session_live_unbound, when it gave one. */
   reason?: string;
@@ -91,6 +98,7 @@ export type ScoutAskReceipt = {
   state: ScoutAskState;
   ids: {
     targetAgentId?: string;
+    sessionId?: string;
     invocationId?: string;
     flightId?: string;
     conversationId?: string;
@@ -103,6 +111,7 @@ export type ScoutAskReceipt = {
   executionResolution?: ScoutExecutionResolution;
   workerInterrupted?: boolean;
   recording?: "recorded";
+  workPageUnavailable?: true;
   notificationStatus?: "not_requested" | "requested_unconfirmed";
   completion?: ScoutCompletionState & { invocationId: string; flightId: string };
   parentCompletion?: { flightId: string; revision: number };

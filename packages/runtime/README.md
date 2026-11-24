@@ -345,3 +345,28 @@ The existing authorized image-mode read supports the 25 MiB image admission
 budget. Text inspection remains limited to 256 KiB. See the
 [attachment read contract](../../docs/attachments.md) for authority, bounded
 file/response buffering and read backpressure.
+
+## Start an agent in a Rex window
+
+From an agent running inside Rex, use the local Scout MCP tool `rex_start_agent`
+with `harness: "claude"` or `harness: "codex"`. For example, ask your agent
+to “open a new Claude window here called Reviewer.” Scout uses the caller's
+`REX_SESSION` and working directory. Rex creates a background window and
+Scout registers the child. Use the returned `agentId` with Scout's `ask`.
+
+The CLI exposes the same operations:
+
+```sh
+scout integration rex start --harness claude --name Reviewer --json
+scout integration rex status --json
+scout integration rex status --block <full-block-id> --json
+```
+
+Outside Rex, pass the full session ID using `--session` or the MCP
+`sessionId` field. Use `rex_status` to list windows, blocks, and their Scout
+addresses, or supply a `blockId` for its foreground process, exit result and
+timestamped program reports. Programs that implement OSC 7501 can report
+progress, completion and blocked reasons. An empty report list means the
+program has supplied no status. Reads are on demand. A launch receipt
+confirms the observed harness process. If its window shows a startup dialog,
+resolve it in Rex before sending work.

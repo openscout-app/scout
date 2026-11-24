@@ -29,5 +29,5 @@ test("verification requires a signed, fresh challenge with a 2xx exact echo", as
     expect(payload.type).toBe("verification"); expect(ids.has(payload.challenge)).toBe(false); ids.add(payload.challenge);
     return { status: 200, body: JSON.stringify({ challenge: payload.challenge }) };
   });
-  for (const status of [200, 302, 410]) await expect(verifyWebhook("https://example.com", "sub_1", secret, async () => ({ status, body: '{"challenge":"wrong"}' }))).rejects.toMatchObject({ code: -32015, reason: "challenge_failed" });
+  for (const status of [200, 302, 410]) await expect(verifyWebhook("https://example.com", "sub_1", secret, async () => ({ status, body: '{"challenge":"wrong"}' }))).rejects.toMatchObject({ code: -32027, data: { reason: status === 410 ? "http_4xx" : "challenge_failed" } });
 });

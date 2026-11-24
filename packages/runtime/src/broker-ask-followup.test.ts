@@ -5,7 +5,7 @@ import { createBrokerDaemonTestHarness } from "./test-helpers/broker-daemon-harn
 const broker = createBrokerDaemonTestHarness();
 
 describe("ask follow-up handles", () => {
-  test("an ask can be followed up through every receipt handle", async () => {
+  test("every receipt handle resolves to the same running task", async () => {
     const harness = await broker.startBroker();
     const scoutSessionId = "session-followup-handles";
     const relayAgentId = `${scoutSessionId}-relay`;
@@ -109,14 +109,13 @@ describe("ask follow-up handles", () => {
       ["scout session", scoutSessionId],
       ["native session", `session:claude:${storedNative}`],
     ] as const;
+    const running = await broker.waitFor(
+      () => broker.getJson<{ flight: { state: string } }>(harness.baseUrl, `/v1/invocations/${invocationId}`),
+      result => result.flight.state === "running",
+    );
+    expect(running.flight.state).toBe("running");
     for (const [name, ref] of handles) {
-      const followup = await broker.postJson<{
-        kind: string;
-        accepted: boolean;
-        targetAgentId?: string;
-        flight?: { invocationId: string };
-        message?: { metadata?: { taskFollowup?: { invocationId?: string } } };
-      }>(harness.baseUrl, "/v1/deliver", {
+      const followup = await broker.postJsonStatus(harness.baseUrl, "/v1/deliver", {
         requestId: `ask-followup-${name.replaceAll(" ", "-")}`,
         caller: { actorId: "operator", nodeId: harness.nodeId },
         target: { kind: "binding_ref", ref },
@@ -125,11 +124,9 @@ describe("ask follow-up handles", () => {
         body: `Follow up through the ${name}`,
         task: { version: 1, ref },
       });
-      expect(followup.kind, name).toBe("delivery");
-      expect(followup.accepted, name).toBe(true);
-      expect(followup.flight?.invocationId, name).toBe(invocationId);
-      expect(followup.message?.metadata?.taskFollowup?.invocationId, name).toBe(invocationId);
-      expect(followup.targetAgentId, name).toBe(scoutSessionId);
+      expect(followup, name).toMatchObject({ status: 409, body: {
+        error: "task_followup_not_sent", detail: expect.stringContaining(invocationId), evidence: asked.flight!.id,
+      } });
     }
 
     const afterRefs = await broker.getJson<{ invocations: Record<string, { id: string }> }>(harness.baseUrl, "/v1/snapshot");

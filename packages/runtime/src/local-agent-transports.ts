@@ -1,4 +1,4 @@
-export type DirectLocalAgentTransport = "codex_app_server" | "claude_stream_json" | "pi_rpc" | "grok_acp" | "kimi_acp" | "cursor_acp" | "opencode_acp" | "devin_acp";
+export type DirectLocalAgentTransport = "codex_app_server" | "claude_stream_json" | "pi_rpc" | "grok_acp" | "kimi_acp" | "cursor_acp" | "opencode_acp" | "antigravity_acp" | "devin_acp";
 
 const directLocalAgentTransports = new Set<string>([
   "codex_app_server",
@@ -8,6 +8,7 @@ const directLocalAgentTransports = new Set<string>([
   "kimi_acp",
   "cursor_acp",
   "opencode_acp",
+  "antigravity_acp",
   "devin_acp",
 ]);
 
@@ -21,5 +22,5 @@ export function isBrokerRunnableLocalAgentTransport(
   transport: string | null | undefined,
 ): boolean {
   // "ghostty" is only ever an attached live terminal; its delivery never spawns.
-  return transport === "tmux" || transport === "ghostty" || isDirectLocalAgentTransport(transport);
+  return transport === "tmux" || transport === "ghostty" || transport === "rex" || isDirectLocalAgentTransport(transport);
 }

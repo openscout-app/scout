@@ -39,6 +39,48 @@ The apps adopt the notification policy after core lands.
 A receipt confirms durable recording separately from an unconfirmed push
 request. Device permissions, settings and transport still determine delivery.
 
+## Ready: tasks the operator is waiting on
+
+The operator marks a task they want to hear about when it is done. The mark is
+`notify` on an agent task: `scout ask --to <agent> --notify`, or MCP `ask` with
+`notify=true`. An agent that dispatches work on the operator's behalf can set
+it too. The operator, or the task's asker, can set or clear it later on a task
+that has not finished with `POST /v1/tasks/notify` `{ ref, notify }`. Unmarked
+tasks behave as before. Use the mark only for work the operator is waiting on;
+an ask already returns on acceptance, so `--notify` is not how to make an ask
+asynchronous.
+
+When a marked task's flight finishes (a final reply, or a reply waiting on
+review), the flight writer records Ready on the flight:
+
+- `metadata.ready`: `{ state: "ready", at, summary, nodeId }`. `summary` is the
+  first prose line of the agent's reply.
+- `metadata.nextMoveOwnerId`: the operator.
+
+The runtime decides this from the flight's state, never from the reply's
+wording. Ready is separate from done and stays until the operator acts. When
+the task has a work item, the item also lands in `review` with
+`acceptanceState: "pending"` and the operator as the next move.
+
+The runtime that wrote Ready sends one push through the operator attention
+service, keyed by the flight id, so a flight rings once. If the agent has an
+open operator question or permission, that request owns the ping and Ready
+does not ring.
+
+The operator has two moves, both through `POST /v1/tasks/ready/decide`
+`{ ref, decision }`. The route is machine-local and operator-only.
+
+- `continue`: "Continue" goes into the same session. An open task gets a
+  follow-up that starts its next turn. A finished task gets a successor in the
+  same session, still marked `notify`, and bound to the same work item. The
+  next move goes back to the agent, and the work item returns to `working`
+  with an `accepted` event.
+- `hold`: Ready leaves the operator's list but stays on the flight
+  (`heldAt`) and findable. The work item gets a `dismissed` event. A later
+  change to the work item brings it back (`taskReadyListed`).
+
+Ready is not the board station `ready` (planned and ready to start).
+
 ## Alertable Events
 
 Session attention already covers:
@@ -199,6 +241,41 @@ pending live callback, records an actuation attempt, rejects duplicate/stale
 answers, and sends only to that process. The Requests page and Scoutbot share
 this API through `useRequestActions`. No background resume, fork, or project hook
 is installed.
+
+Operator decisions and dismissal require a verified local operator proof. Set
+`OPENSCOUT_ATTRIBUTION_KEY_FILE` on the runtime and CLI to an owner-only key, or
+use the existing local-admin key. Unauthenticated requests receive 403 with
+`operator_attribution_required`; loopback alone does not establish operator
+identity. Actuation metadata records the verified `attribution`, including the
+acting actor and the original root actor. Automatic supervisor decisions use the
+`system` source, and unsigned person claims become `local-unverified` instead of
+being credited to the operator.
+
+Managed requests first consult the permission supervisor, which uses the same
+`$OPENSCOUT_HOME/continuation-policy.json` project grants as Herdr continuation.
+With no grant, the default `ask` level changes nothing. A `workspace` grant lets
+the supervisor answer **Allow once** for exact local reads, tests, builds, checks, and
+plain relative in-project edits. Package scripts are limited to named test, lint,
+typecheck, check, and build families; an arbitrary `run` script is not a workspace
+read or check. Higher grant levels keep their existing risk meaning for in-project
+operations; outside filesystem effects always escalate. Unknown prompts,
+unrecognized or broader `Yes` choices, sensitive or outside paths, and requests
+without an exact one-time allow choice stay with the operator. The supervisor
+never chooses a session-wide or persistent project grant or a denial.
+
+Grant resolution checks both the recorded project root and the actual working
+directory, including any narrower grant. Codex requests must carry an absolute
+working directory inside that project. Claude tmux requests read the live pane
+directory and check it before and after the final prompt capture.
+
+A successful automatic decision skips the operator notification and settles the
+record with `answeredById: "permission-supervisor"`. Its actuation metadata records
+the grant, risk, and reason. Delivery still goes through the same live-prompt
+revalidation and no-replay protection as an operator decision. A failed automatic
+delivery notifies the operator of the uncertain outcome without replaying it. If
+the operator is already answering, the supervisor yields to that decision. This
+slice covers Scout-managed requests through `wait`; native Claude requests through
+`raise` keep their existing human-only path.
 
 A runtime restart loses the live callback. Each record names the node that wrote
 it, and the runtime reconciles the open records of its own node that no process

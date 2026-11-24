@@ -1,9 +1,12 @@
+import { invocationWorkId, isFailedWork, projectWorkFlight } from "./broker-failed-work.js";
 import { createHash } from "node:crypto";
 import { isTerminalFlightState } from "./broker-local-invocation-helpers.js";
 
 import {
+  taskReadyOf,
   assertValidCollaborationEvent,
   assertValidCollaborationRecord,
+  rolePassAssignmentId,
   type CollaborationEvent,
   type CollaborationPriority,
   type CollaborationRecord,
@@ -13,6 +16,7 @@ import {
 } from "@openscout/protocol";
 
 import type { BrokerJournalEntry } from "./broker-journal.js";
+import { planReadyWorkItem, TASK_READY_PRIOR_ACCEPTANCE_KEY } from "./broker-task-ready.js";
 
 type DurableStore = {
   runWrite<T>(work: () => Promise<T>): Promise<T>;
@@ -45,7 +49,9 @@ export type BrokerWorkItemStoreOptions = {
   createId: (prefix: string) => string;
   /** Journal state remains canonical even if the runtime apply callback failed. */
   durableFlight?: (flightId: string) => FlightRecord | undefined;
+  durableCurrentFlight?: (invocationId: string) => FlightRecord | undefined;
   durableWorkItem?: (workId: string) => CollaborationRecord | undefined;
+  newestFlightForWork?: (workId: string) => FlightRecord | undefined;
   /** Gives a runtime-driven state change its lifecycle placement and ledger move. */
   placeWorkChange?: (
     before: CollaborationRecord,
@@ -53,6 +59,8 @@ export type BrokerWorkItemStoreOptions = {
     context: { now: number; actorId: string; moveId: string },
   ) => { record: CollaborationRecord; move?: unknown };
   warn?: (message: string, error: unknown) => void;
+  /** Ready work waits on the operator, whoever asked for it. */
+  operatorActorId?: string;
 };
 
 export type RecordDeliveryWorkItemInput = {
@@ -67,18 +75,6 @@ export type RecordDeliveryWorkItemInput = {
 function metadataStringValue(metadata: Record<string, unknown> | undefined, key: string): string | null {
   const value = metadata?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function compactWorkSummary(value: string | undefined, maxLength = 320): string | undefined {
-  const normalized = value
-    ?.replace(/\s+/gu, " ")
-    .trim();
-  if (!normalized) {
-    return undefined;
-  }
-  return normalized.length <= maxLength
-    ? normalized
-    : `${normalized.slice(0, maxLength - 3).trimEnd()}...`;
 }
 
 function normalizeScoutLabels(labels: string[] | undefined): string[] {
@@ -198,18 +194,6 @@ export function existingDeliveryWorkItemMatches(
     && metadataContainsDeliveryWorkItemValues(existing.metadata, proposed.metadata);
 }
 
-function invocationCollaborationRecordId(invocation: InvocationRequest): string | undefined {
-  const nested = invocation.context?.["collaboration"];
-  const nestedRecordId =
-    nested && typeof nested === "object" && !Array.isArray(nested)
-      ? metadataStringValue(nested as Record<string, unknown>, "recordId")
-      : undefined;
-  return invocation.collaborationRecordId?.trim()
-    || metadataStringValue(invocation.metadata, "collaborationRecordId")
-    || metadataStringValue(invocation.context, "collaborationRecordId")
-    || nestedRecordId
-    || undefined;
-}
 
 export type WorkPromotionIntent = {
   version: 1;
@@ -236,7 +220,9 @@ function workRecordHash(record: CollaborationRecord): string {
 
 function workItemProtected(record: CollaborationRecord): boolean {
   return record.kind !== "work_item" || record.state === "done" || record.state === "cancelled"
-    || record.acceptanceState === "accepted";
+    || record.acceptanceState === "accepted"
+    // Board owns a Board item's state: its custodian settles the task, and the result returns as an event.
+    || record.externalContext?.source.adapterId === "vercel-board";
 }
 
 export class BrokerWorkItemStore {
@@ -253,7 +239,7 @@ export class BrokerWorkItemStore {
     if (previous?.metadata?.workPromotion !== undefined) {
       return { ...flight, metadata: { ...metadata, workPromotion: previous.metadata.workPromotion } };
     }
-    const workId = invocation && invocationCollaborationRecordId(invocation);
+    const workId = invocation && invocationWorkId(invocation);
     if (!invocation || !workId || !isTerminalFlightState(flight.state)) return { ...flight, metadata };
     const record = this.options.durableWorkItem ? this.options.durableWorkItem(workId) : this.options.runtime.collaborationRecord(workId);
     if (record && workItemProtected(record)) return { ...flight, metadata };
@@ -342,6 +328,8 @@ export class BrokerWorkItemStore {
   };
 
   readonly deliveryWorkItemResolutionForTell = (payload: ScoutDeliverRequest): DeliveryWorkItemResolution => {
+    // A role pass never links a card: its end would move the card and start another pass.
+    if (rolePassAssignmentId(payload.invocationMetadata)) return { record: null };
     const collaborationRecordId = payload.collaborationRecordId?.trim();
     return {
       record: null,
@@ -371,8 +359,10 @@ export class BrokerWorkItemStore {
       if (intent.expectedRecordHash === null) throw new Error("Work item baseline unavailable; automatic promotion held");
       const record = this.options.durableWorkItem ? this.options.durableWorkItem(intent.workId) : this.options.runtime.collaborationRecord(intent.workId);
       if (!record) throw new Error(`Work item ${intent.workId} is unavailable; promotion remains pending`);
-      const current = this.options.runtime.flightForInvocation(flight.invocationId);
-      if (current?.id !== flight.id || record.kind !== "work_item" || workItemProtected(record)
+      const latest = this.options.newestFlightForWork?.(intent.workId) ?? flight;
+      const current = this.options.durableCurrentFlight?.(latest.invocationId) ?? this.options.runtime.flightForInvocation(latest.invocationId);
+      if (current?.id !== latest.id || record.kind !== "work_item" || workItemProtected(record)
+        || (latest.id !== flight.id && record.metadata?.lastFlightId === latest.id && record.metadata?.lastFlightState === latest.state)
         || record.updatedAt > intent.at || workRecordHash(record) !== intent.expectedRecordHash) {
         const acknowledged = { ...flight, metadata: { ...flight.metadata,
           workPromotion: { ...intent, status: "superseded", settledAt: Date.now() },
@@ -384,64 +374,10 @@ export class BrokerWorkItemStore {
       // Reconstruct only from durable identifiers; no execution or network work.
       const invocation = { id: flight.invocationId, conversationId: intent.conversationId, messageId: intent.messageId };
       const now = intent.at;
-      const requiresReview = flight.state === "completed"
-        && record.acceptanceState !== "none";
-      const nextState = flight.state === "completed"
-        ? requiresReview ? "review" : "done"
-        : flight.state === "cancelled"
-        ? "cancelled"
-        : "waiting";
-      const nextEventKind = flight.state === "completed"
-        ? requiresReview ? "review_requested" : "done"
-        : flight.state === "cancelled"
-        ? "cancelled"
-        : "waiting";
-      const nextMoveOwnerId = requiresReview
-        ? record.requestedById ?? record.createdById
-        : flight.state === "failed"
-        ? record.requestedById ?? record.ownerId
-        : record.nextMoveOwnerId;
-      const summary = compactWorkSummary(flight.output)
-        ?? compactWorkSummary(flight.error)
-        ?? compactWorkSummary(flight.summary)
-        ?? `${flight.targetAgentId} completed.`;
-      const promotedRecord: CollaborationRecord = {
-        ...record,
-        state: nextState,
-        acceptanceState: requiresReview ? "pending" : record.acceptanceState,
-        nextMoveOwnerId,
-        summary: record.summary ?? summary,
-        updatedAt: now,
-        progress: {
-          ...(record.progress ?? {}),
-          summary,
-          completedSteps: flight.state === "completed" ? 1 : record.progress?.completedSteps,
-          totalSteps: flight.state === "completed" ? 1 : record.progress?.totalSteps,
-        },
-        reviewRequestedAt: requiresReview ? now : record.reviewRequestedAt,
-        completedAt: nextState === "done" || nextState === "cancelled"
-          ? record.completedAt ?? now
-          : undefined,
-        ...(flight.state === "failed"
-          ? {
-              waitingOn: {
-                kind: "actor" as const,
-                label: "Decide whether to retry the failed execution",
-                ...(nextMoveOwnerId ? { targetId: nextMoveOwnerId } : {}),
-                metadata: {
-                  invocationId: invocation.id,
-                  flightId: flight.id,
-                },
-              },
-            }
-          : { waitingOn: undefined }),
-        metadata: {
-          ...(record.metadata ?? {}),
-          lastInvocationId: invocation.id,
-          lastFlightId: flight.id,
-          lastFlightState: flight.state,
-        },
-      };
+      const promotedRecord = projectWorkFlight(record, latest, now, { operatorActorId: this.options.operatorActorId });
+      const nextEventKind = latest.state === "completed" ? promotedRecord.state === "review" ? "review_requested" : "done"
+        : latest.state === "failed" ? "waiting" : latest.state === "cancelled" ? "cancelled" : "progressed";
+      const summary = promotedRecord.progress?.summary;
 
       const placed = this.options.placeWorkChange?.(record, promotedRecord, {
         now, actorId: flight.targetAgentId, moveId: `${intent.eventId}:move`,
@@ -457,9 +393,10 @@ export class BrokerWorkItemStore {
         summary,
         metadata: {
           source: "broker",
-          invocationId: invocation.id,
-          flightId: flight.id,
-          flightState: flight.state,
+          invocationId: latest.invocationId,
+          flightId: latest.id,
+          flightState: latest.state,
+          ...(latest.id !== flight.id ? { supersededFlightId: flight.id } : {}),
           conversationId: invocation.conversationId,
           messageId: invocation.messageId,
           ...(placed?.move ? { workMove: placed.move } : {}),
@@ -490,9 +427,82 @@ export class BrokerWorkItemStore {
     await this.options.durableStore.applyProjectedEntries(entries);
   };
 
+  /** Startup uses stable caller-owned pages. No timer and no text inference. */
+  readonly reconcileFailedWorkItems = async (records: Iterable<CollaborationRecord>): Promise<void> => {
+    for (const candidate of records) {
+      try {
+        const entries = await this.options.durableStore.runWrite(async () => {
+          const record = this.options.durableWorkItem?.(candidate.id) ?? this.options.runtime.collaborationRecord(candidate.id);
+          const latest = this.options.newestFlightForWork?.(candidate.id);
+          if (!record || !latest || !isFailedWork(record, latest) || workItemProtected(record)) return [];
+          const now = Math.max(record.updatedAt, latest.completedAt ?? latest.startedAt ?? 0);
+          const projected = projectWorkFlight(record, latest, now, { operatorActorId: this.options.operatorActorId });
+          if (sameDeliveryWorkItemValue(record, projected)) return [];
+          const eventId = `work-failed-reconcile-${createHash("sha256").update(JSON.stringify([record.id, latest.id, latest.state])).digest("hex").slice(0, 32)}`;
+          const placed = this.options.placeWorkChange?.(record, projected, { now, actorId: latest.targetAgentId, moveId: `${eventId}:move` });
+          const next = placed?.record ?? projected;
+          const event: CollaborationEvent = { id: eventId, recordId: record.id, recordKind: "work_item",
+            kind: next.state === "review" ? "review_requested" : next.state === "working" ? "progressed" : next.state as "waiting" | "done" | "cancelled",
+            actorId: latest.targetAgentId, at: now, summary: projected.progress?.summary,
+            metadata: { source: "failed_run_reconciliation", flightId: latest.id, ...(placed?.move ? { workMove: placed.move } : {}) } };
+          assertValidCollaborationRecord(next);
+          assertValidCollaborationEvent(event, next);
+          return this.options.durableStore.commitEntries([
+            { kind: "collaboration.record", record: next }, { kind: "collaboration.event.record", event },
+          ], async () => { await this.options.runtime.upsertCollaboration(next); await this.options.runtime.appendCollaborationEvent(event); }, { enqueueProjection: false });
+        });
+        await this.options.durableStore.applyProjectedEntries(entries);
+      } catch (error) {
+        this.options.warn?.(`[openscout-runtime] failed-work repair ${candidate.id} skipped:`, error);
+      }
+    }
+  };
+
+  /**
+   * A Ready flight that is still open (waiting on review) has no terminal
+   * promotion. Land its work item in review here, once.
+   */
+  readonly landReadyWorkItem = async (flight: FlightRecord, invocation: InvocationRequest | undefined): Promise<void> => {
+    const ready = taskReadyOf(flight);
+    const operatorActorId = this.options.operatorActorId;
+    const workId = invocation && invocationWorkId(invocation);
+    if (!ready || !operatorActorId || !workId || isTerminalFlightState(flight.state)) return;
+    const entries = await this.options.durableStore.runWrite(async () => {
+      const record = this.options.runtime.collaborationRecord(workId);
+      if (!record || record.kind !== "work_item" || workItemProtected(record)) return [];
+      const planned = planReadyWorkItem(record, { operatorActorId, summary: ready.summary, now: ready.at, flightId: flight.id });
+      if (!planned) return [];
+      const placed = this.options.placeWorkChange?.(record, planned, { now: ready.at, actorId: flight.targetAgentId, moveId: `${flight.id}:ready:move` });
+      const nextRecord = placed?.record ?? planned;
+      const event: CollaborationEvent = {
+        id: `work-ready-${flight.id}`, recordId: nextRecord.id, recordKind: "work_item", kind: "review_requested",
+        actorId: flight.targetAgentId, at: ready.at, summary: ready.summary || "Ready.",
+        metadata: { source: "scout-ready", flightId: flight.id, invocationId: flight.invocationId, ...(placed?.move ? { workMove: placed.move } : {}) },
+      };
+      assertValidCollaborationRecord(nextRecord);
+      assertValidCollaborationEvent(event, nextRecord);
+      return this.options.durableStore.commitEntries(
+        [{ kind: "collaboration.record", record: nextRecord }, { kind: "collaboration.event.record", event }],
+        async (retained) => {
+          for (const entry of retained) {
+            if (entry.kind === "collaboration.record") await this.options.runtime.upsertCollaboration(entry.record);
+            else if (entry.kind === "collaboration.event.record") await this.options.runtime.appendCollaborationEvent(entry.event);
+          }
+        },
+        { enqueueProjection: false },
+      );
+    });
+    await this.options.durableStore.applyProjectedEntries(entries);
+  };
+
+  /** The work item a task's invocation points at. */
+  readonly workIdForInvocation = (invocation: InvocationRequest | undefined): string | undefined =>
+    invocation ? invocationWorkId(invocation) : undefined;
+
   private buildDeliveryWorkItem(input: RecordDeliveryWorkItemInput): CollaborationRecord | null {
     const workItem = input.payload.workItem;
-    if (!workItem?.title?.trim()) {
+    // A role pass never becomes a card, or the pass would trigger itself.
+    if (!workItem?.title?.trim() || rolePassAssignmentId(input.payload.invocationMetadata)) {
       return null;
     }
     const source =

@@ -1,5 +1,5 @@
 import { captureRegistries } from "./broker-registry-capture.js";
-import { isAttachedLiveTerminalEndpoint, isAttachedLiveTerminalEndpointAlive } from "./live-terminal-session.js";
+import { isAttachedLiveTerminalEndpoint, isAttachedLiveTerminalEndpointAlive, isAttachedLiveTerminalEndpointAliveSnapshot } from "./live-terminal-session.js";
 import type {
   ActorIdentity,
   AgentDefinition,
@@ -53,6 +53,7 @@ const managedLocalSessionTransports = new Set<AgentEndpoint["transport"]>([
   "pi_rpc",
   "grok_acp",
   "kimi_acp",
+  "antigravity_acp",
   "devin_acp",
   "tmux",
 ]);
@@ -472,14 +473,18 @@ export class BrokerLocalAgentSyncService {
         continue;
       }
 
-      if (endpoint.transport === "ghostty" && isAttachedLiveTerminalEndpoint(endpoint)) {
-        if (endpoint.state !== "offline" && !await isAttachedLiveTerminalEndpointAlive(endpoint)) {
+      if ((endpoint.transport === "ghostty" || endpoint.transport === "rex") && isAttachedLiveTerminalEndpoint(endpoint)) {
+        if (endpoint.state === "offline") continue;
+        // An unreachable Rex server is not evidence that its harness exited.
+        const alive = endpoint.transport === "rex" ? isAttachedLiveTerminalEndpointAliveSnapshot(endpoint)
+          : await isAttachedLiveTerminalEndpointAlive(endpoint);
+        if (!alive) {
           await this.options.persistEndpoint({
             ...endpoint,
             state: "offline",
             metadata: {
               ...(endpoint.metadata ?? {}),
-              lastError: "attached Ghostty terminal or its harness is gone",
+              lastError: endpoint.transport === "rex" ? "attached Rex harness is gone" : "attached Ghostty terminal or its harness is gone",
               lastFailedAt: this.now(),
             },
           });

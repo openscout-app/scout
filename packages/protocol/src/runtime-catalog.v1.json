@@ -1,6 +1,6 @@
 {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-11-10.2",
+  "revision": "2026-11-23.1",
   "harnesses": [
     {
       "id": "claude",
@@ -33,8 +33,10 @@
       "defaultReasoningEffort": "medium",
       "presentation": { "short": "Codex", "monogram": "◈" },
       "models": [
-        { "id": "gpt-6-astra", "label": "6 Astra", "enabled": true, "default": true, "description": "Most capable for complex reasoning, coding, computer use, research, and document creation", "family": "GPT", "version": "6 Astra", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"], "defaultReasoningEffort": "low", "presentation": { "detail": "Most capable" } },
-        { "id": "gpt-6.1-sol", "label": "6.1 Sol", "enabled": true, "description": "Complex coding, computer use, and professional work at a lower cost than Astra", "family": "GPT", "version": "6.1 Sol", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "medium", "presentation": { "detail": "Latest" } },
+        { "id": "gpt-6.2-sol", "label": "6.2 Sol", "enabled": true, "description": "Fast, go-to model for coding and everyday work", "family": "GPT", "version": "6.2 Sol", "contextWindowTokens": 500000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "low", "presentation": { "detail": "Latest" } },
+        { "id": "gpt-6.2-astra", "label": "6.2 Astra", "enabled": true, "description": "Most capable model for complex coding and professional work", "family": "GPT", "version": "6.2 Astra", "contextWindowTokens": 272000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "low", "presentation": { "detail": "Most capable" } },
+        { "id": "gpt-6-astra", "label": "6 Astra", "enabled": true, "default": true, "description": "Most capable for complex reasoning, coding, computer use, research, and document creation", "family": "GPT", "version": "6 Astra", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"], "defaultReasoningEffort": "low" },
+        { "id": "gpt-6.1-sol", "label": "6.1 Sol", "enabled": true, "description": "Complex coding, computer use, and professional work at a lower cost than Astra", "family": "GPT", "version": "6.1 Sol", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "medium" },
         {"id": "gpt-6.1-terra", "label": "6.1 Terra", "enabled": true, "family": "GPT", "version": "6.1 Terra", "contextWindowTokens": 1050000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultReasoningEffort": "medium"},
         { "id": "gpt-6-sol", "label": "6 Sol", "enabled": true, "description": "Complex coding and agentic workflows", "family": "GPT", "version": "6 Sol", "contextWindowTokens": 272000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "presentation": { "detail": "Coding" } },
         { "id": "gpt-6-luna", "label": "6 Luna", "enabled": true, "description": "Efficient focused coding and repeatable tasks", "family": "GPT", "version": "6 Luna", "contextWindowTokens": 272000, "reasoningEfforts": ["low", "medium", "high", "xhigh", "max"], "presentation": { "detail": "Efficient" } },
@@ -96,6 +98,7 @@
         { "id": "opencode/laguna-s-2.1-free", "label": "Laguna S 2.1 (free)", "enabled": true, "family": "Laguna", "version": "S 2.1 Free" }
       ]
     },
+    { "id": "antigravity", "label": "Google Antigravity", "enabled": true, "allowCustomModels": true, "reasoningEfforts": null, "models": [] },
     { "id": "pi", "label": "Pi", "enabled": true, "allowCustomModels": true, "reasoningEfforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max"], "models": [] },
     {
       "id": "devin",
