@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { registerSharedScoutMcpClient, resolveScoutMcpCodexLaunch } from "../../codex-launch-config.js";
+import { registerSharedScoutMcpClient, resolveScoutMcpCodexLaunch, type ProfiledScoutMcp } from "../../codex-launch-config.js";
 import { resolveCodexExecutable } from "../../codex-executable.js";
 import { redactSecrets } from "../../secret-redaction.js";
 import { writeCodexMetadata } from "./codex-metadata-file.js";
@@ -111,6 +111,8 @@ export type CodexAppServerSessionOptions = {
   /** Final child-process environment. When omitted, process.env plus env overrides is used. */
   processEnv?: Record<string, string | undefined>;
   launchArgs?: string[];
+  /** Use a dedicated stdio server with this Scout MCP profile and tool allowlist. */
+  profiledScoutMcp?: ProfiledScoutMcp;
   approvalPolicy?: CodexAppServerApprovalPolicy;
   sandbox?: CodexAppServerSandboxMode;
   threadId?: string;
@@ -1271,6 +1273,7 @@ export class CodexAppServerTransport {
       requireExistingThread: options.requireExistingThread === true,
       env: normalizeEnvironmentOverrides(options.env),
       launchArgs: normalizeCodexAppServerLaunchArgs(options.launchArgs),
+      profiledScoutMcp: options.profiledScoutMcp,
       connection: resolveCodexAppServerConnectionConfig(options.connection),
       threadName: options.threadName?.trim() || null,
     });
@@ -1346,6 +1349,9 @@ export class CodexAppServerTransport {
     const handlers = this.connectionHandlers(() => connection);
     let daemonVersion: Promise<CodexAppServerDaemonVersion | null> | null = null;
     if (connectionConfig.mode === "attach") {
+      if (this.options.profiledScoutMcp) {
+        throw new Error("A dedicated Scout MCP profile requires a private Codex app-server; use foreground or background placement instead of attached.");
+      }
       // `codex app-server daemon version` only describes the default control
       // socket, and it is read-only: it never starts or restarts the daemon.
       if (connectionConfig.socketPath === defaultCodexAppServerControlSocketPath()) {
@@ -1379,6 +1385,7 @@ export class CodexAppServerTransport {
         currentDirectory: this.options.cwd,
         env,
         codexExecutable,
+        profiledScoutMcp: this.options.profiledScoutMcp,
       });
       signal.throwIfAborted();
       if (scoutMcp.unknownReason) {
@@ -1388,8 +1395,9 @@ export class CodexAppServerTransport {
         executable: codexExecutable,
         args: [
           "app-server",
-          ...scoutMcp.args,
+          ...(this.options.profiledScoutMcp ? [] : scoutMcp.args),
           ...launchArgs,
+          ...(this.options.profiledScoutMcp ? scoutMcp.args : []),
         ],
         cwd: this.options.cwd,
         env,

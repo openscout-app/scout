@@ -171,4 +171,33 @@ describe("codexHomeScoutMcpEntry with the real Codex CLI", () => {
     expect(await entry('[mcp_servers.scout]\ncommand = "scout"\nargs = ["mcp"]\n')).toBe("command");
     expect(await entry()).toBeNull();
   });
+
+  test.skipIf(!codex)("loads a required stdio profile without mixing it with the configured Scout transport", async () => {
+    for (const config of [undefined, `[mcp_servers.scout]\nurl = "${SHARED_URL}"\n`,
+      '[mcp_servers.scout]\ncommand = "scout"\nargs = ["mcp"]\n']) {
+      const home = codexHome(config);
+      const env = {
+        ...process.env, CODEX_HOME: home, OPENSCOUT_CLI_BIN: process.execPath,
+        OPENSCOUT_MCP_SHARED_URL: SHARED_URL, OPENSCOUT_SETUP_CWD: home,
+      };
+      const launch = await resolveScoutMcpCodexLaunch({
+        currentDirectory: home, env, codexExecutable: codex,
+        profiledScoutMcp: { profile: "sessions", enabledTools: ["sessions_search"] },
+      });
+      expect(launch.usesUrl).toBe(false);
+      expect(launch.args).toContain("mcp_servers.scout_role.required=true");
+      const get = async (name: string) => {
+        const proc = Bun.spawn([codex!, ...launch.args, "mcp", "get", name, "--json"], { env, cwd: home, stderr: "pipe" });
+        const [status, stdout, stderr] = await Promise.all([proc.exited, proc.stdout.text(), proc.stderr.text()]);
+        expect({ status, stderr }).toMatchObject({ status: 0 });
+        return JSON.parse(stdout);
+      };
+      expect(await get("scout_role")).toMatchObject({
+        enabled: true,
+        transport: { type: "stdio", args: ["mcp", "--context-root", home, "--profile", "sessions"] },
+        enabled_tools: ["sessions_search"],
+      });
+      if (config) expect(await get("scout")).toMatchObject({ enabled: false });
+    }
+  });
 });

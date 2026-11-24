@@ -2,9 +2,13 @@ import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SCOUT_MCP_CORE_TOOL_CATALOG, SCOUT_MCP_LOCAL_DEFAULT_TOOLS } from "@openscout/protocol";
+import { SCOUTBOT_ROLE_CONFIG } from "@openscout/runtime/scoutbot-role";
+import { buildCodexEndpointSessionOptions } from "@openscout/runtime/local-agents";
+import { resolveScoutMcpCodexLaunch } from "../../../agent-sessions/src/codex-launch-config.ts";
 import portableTools from "../../../mesh-extension/src/core-tools.json";
 
 import { LOCAL_MCP_TOOL_GROUPS } from "./local-tool-profile.ts";
+import { parseMcpCommandOptions } from "../cli/commands/mcp.ts";
 import { SCOUT_READ_ONLY_TOOLS } from "../lib/core/setup/agent-guide.ts";
 import { createScoutMcpServer } from "./scout-mcp.ts";
 import { SCOUT_MCP_CORE_TOOLS } from "./mesh-bridge.ts";
@@ -53,20 +57,82 @@ test("mcp:core catalog matches the tools the hosted bridge registers", () =>
 // quoted or call-shaped references to single-word tools such as `where`.
 const catalog: string[] = [...SCOUT_MCP_LOCAL_DEFAULT_TOOLS, ...Object.values(LOCAL_MCP_TOOL_GROUPS).flat(), "invocations_ask"];
 const toolPrefixes = new Set([...catalog, "notify_", "consult_"].filter(n => n.includes("_")).map(n => n.split("_")[0]));
-test.each([["hosted", hosted], ["local default", { env: {} }]] as const)(
+
+function mentionedTools(text: string): string[] {
+  const names = [...text.matchAll(/\b([a-z]+_[a-z_]+)\b|`([a-z]+)`|\b([a-z]+)\(|\b(?:[Uu]se|[Cc]all) ([a-z]+)\b/g)]
+    .map(match => match[1] ?? match[2] ?? match[3] ?? match[4]!);
+  return [...new Set(names.filter(name => catalog.includes(name) || (name.includes("_") && toolPrefixes.has(name.split("_")[0]!))))];
+}
+
+test.each([
+  ["hosted", hosted],
+  ["local default", { env: {} }],
+  ...Object.keys(LOCAL_MCP_TOOL_GROUPS).map(group => [`local ${group}`, { env: { OPENSCOUT_MCP_PROFILE: group } }] as const),
+] as const)(
   "%s descriptions never direct callers to an unavailable tool", (_, options) => withClient(options, async client => {
     const { tools } = await client.listTools();
     const exposed = new Set(tools.map((tool) => tool.name));
     for (const tool of tools) {
-      for (const match of (tool.description ?? "").matchAll(/\b([a-z]+_[a-z_]+)\b|`([a-z]+)`|\b([a-z]+)\(|\b(?:[Uu]se|[Cc]all) ([a-z]+)\b/g)) {
-        const name = match[1] ?? match[2] ?? match[3] ?? match[4]!;
-        if ((name.includes("_") && toolPrefixes.has(name.split("_")[0]!)) || catalog.includes(name)) {
-          expect({ tool: tool.name, mentions: name, exposed: exposed.has(name) }).toEqual({ tool: tool.name, mentions: name, exposed: true });
-        }
+      for (const name of mentionedTools(tool.description ?? "")) {
+        expect({ tool: tool.name, mentions: name, exposed: exposed.has(name) }).toEqual({ tool: tool.name, mentions: name, exposed: true });
       }
     }
   }),
 );
+
+test.each([
+  ["a normal local launch", undefined],
+  ["a launch with shared HTTP configured", "http://127.0.0.1:49100/mcp"],
+] as const)("Scoutbot can call every granted and prompted tool in %s", async (_, sharedUrl) => {
+  const options = buildCodexEndpointSessionOptions({
+    id: "endpoint.scoutbot", agentId: "scoutbot", nodeId: "node",
+    transport: "codex_app_server", harness: "codex", state: "idle", cwd: "/tmp",
+    metadata: sharedUrl
+      ? {
+          source: "scout-isolated-agent-session", isolatedExecution: true, threadId: "existing-thread",
+          systemPrompt: "Old prompt with messages_send.",
+          launchArgs: ["-c", 'mcp_servers.scout.enabled_tools=["messages_send"]'],
+          model: "gpt-6-astra", reasoningEffort: "high",
+        }
+      : { source: "scoutbot", systemPrompt: SCOUTBOT_ROLE_CONFIG.systemPrompt },
+  });
+  const env = {
+    ...options.env,
+    OPENSCOUT_CLI_BIN: process.execPath,
+    OPENSCOUT_MCP_SHARED_URL: sharedUrl,
+    OPENSCOUT_MCP_PROFILE: "default",
+  };
+  const launch = await resolveScoutMcpCodexLaunch({
+    currentDirectory: options.cwd,
+    profiledScoutMcp: options.profiledScoutMcp,
+    env,
+    codexExecutable: "/bin/codex",
+    mcpGet: async () => sharedUrl
+      ? { status: 0, stdout: JSON.stringify({ transport: { type: "streamable_http", url: sharedUrl } }), stderr: "" }
+      : { status: 1, stdout: "", stderr: "No MCP server named scout" },
+  });
+  expect(launch.usesUrl).toBe(false);
+  expect(launch.args.includes("mcp_servers.scout.enabled=false")).toBe(Boolean(sharedUrl));
+  if (sharedUrl) {
+    expect(options.threadId).toBe("existing-thread");
+    expect(options.launchArgs.some(arg => arg.startsWith("mcp_servers.scout."))).toBe(false);
+    expect(options.launchArgs).toEqual(expect.arrayContaining(['model="gpt-6-astra"', 'model_reasoning_effort="high"']));
+  }
+
+  const configValue = (key: string) => JSON.parse(launch.args.find(arg => arg.startsWith(`${key}=`))!.slice(key.length + 1));
+  const argv: string[] = configValue("mcp_servers.scout_role.args");
+  expect(argv[0]).toBe("mcp");
+  const { profile } = parseMcpCommandOptions(argv.slice(1), options.cwd, env);
+  const allowlist: string[] = configValue("mcp_servers.scout_role.enabled_tools");
+  expect(allowlist.sort()).toEqual([...SCOUTBOT_ROLE_CONFIG.grants.read, ...SCOUTBOT_ROLE_CONFIG.grants.write].sort());
+  await withClient({ env, toolFilter: profile?.includes }, async client => {
+    const { tools } = await client.listTools();
+    const registered = new Map(tools.map(tool => [tool.name, tool]));
+    for (const name of allowlist) expect(registered.has(name)).toBe(true);
+    for (const name of mentionedTools(options.systemPrompt)) expect(allowlist).toContain(name);
+    for (const name of SCOUTBOT_ROLE_CONFIG.grants.read) expect(registered.get(name)?.annotations?.readOnlyHint).toBe(true);
+  });
+});
 
 test("default, additive groups and full partition the actual local registrations", async () => {
   const names = (env: NodeJS.ProcessEnv) => withClient({ env }, async c => (await c.listTools()).tools.map(t => t.name).sort());

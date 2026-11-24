@@ -169,7 +169,7 @@ function resolveScoutMcpCommand(options: {
 export type CodexScoutMcpEntry = "url" | "command" | null | "unknown";
 
 /** Runs `codex mcp get scout --json`; injectable for tests. */
-export type CodexMcpGet = (codexExecutable: string, env: Record<string, string | undefined>) => Promise<{
+export type CodexMcpGet = (codexExecutable: string, env: Record<string, string | undefined>, cwd?: string) => Promise<{
   status: number | null;
   stdout: string;
   stderr: string;
@@ -178,7 +178,7 @@ export type CodexMcpGet = (codexExecutable: string, env: Record<string, string |
 const CODEX_MCP_GET_TIMEOUT_MS = 5_000;
 
 // Async, so a launch never blocks the runtime's event loop on Codex.
-const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => new Promise((resolve) => {
+const runCodexMcpGet: CodexMcpGet = (codexExecutable, env, cwd) => new Promise((resolve) => {
   let stdout = "";
   let stderr = "";
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -192,6 +192,7 @@ const runCodexMcpGet: CodexMcpGet = (codexExecutable, env) => new Promise((resol
   try {
     const child = spawn(codexExecutable, ["mcp", "get", "scout", "--json"], {
       env: env as NodeJS.ProcessEnv,
+      cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
     timer = setTimeout(() => {
@@ -217,8 +218,9 @@ export async function codexHomeScoutMcpEntry(
   env: Record<string, string | undefined>,
   codexExecutable: string,
   mcpGet: CodexMcpGet = runCodexMcpGet,
+  cwd?: string,
 ): Promise<CodexScoutMcpEntry> {
-  const result = await mcpGet(codexExecutable, env);
+  const result = await mcpGet(codexExecutable, env, cwd);
   if (result.status === 0) {
     try {
       const type = (JSON.parse(result.stdout) as { transport?: { type?: string } }).transport?.type;
@@ -241,6 +243,11 @@ export type ScoutMcpCodexLaunch = {
   unknownReason: string | null;
 };
 
+export type ProfiledScoutMcp = {
+  profile: string;
+  enabledTools: string[];
+};
+
 /**
  * How a Scout-started Codex app-server gets Scout MCP. The Codex home's own
  * `scout` entry wins: with a url entry there are no overrides (stdio keys on
@@ -250,29 +257,57 @@ export type ScoutMcpCodexLaunch = {
  * Scout MCP runs over stdio for this app-server. When Codex can't report the
  * entry, nothing is added, so a url entry is never mixed with stdio keys.
  * Without `codexExecutable` the home is not asked and stdio is used.
+ * A role that requires a profile always gets its own stdio server instead.
  */
 export async function resolveScoutMcpCodexLaunch(options: {
   currentDirectory: string;
   env?: Record<string, string | undefined>;
   codexExecutable?: string | null;
   mcpGet?: CodexMcpGet;
+  profiledScoutMcp?: ProfiledScoutMcp;
 }): Promise<ScoutMcpCodexLaunch> {
   const env = options.env ?? process.env;
   const homeEntry = options.codexExecutable
-    ? await codexHomeScoutMcpEntry(env, options.codexExecutable, options.mcpGet)
-    : "command";
+    ? await codexHomeScoutMcpEntry(env, options.codexExecutable, options.mcpGet, options.profiledScoutMcp ? options.currentDirectory : undefined)
+    : null;
+  const unknownReason = homeEntry === "unknown"
+    ? `\`${options.codexExecutable} mcp get scout --json\` did not report the scout MCP entry for CODEX_HOME=${env.CODEX_HOME ?? "~/.codex"}`
+    : null;
+  if (options.profiledScoutMcp) {
+    const { profile, enabledTools } = options.profiledScoutMcp;
+    if (unknownReason) throw new Error(`Cannot launch the dedicated Scout MCP profile: ${unknownReason}. Check the Codex MCP configuration and retry.`);
+    const resolved = resolveScoutMcpCommand({ currentDirectory: options.currentDirectory, env });
+    if (!resolved) throw new Error(`Scout MCP profile "${profile}" requires the Scout CLI; install Scout or set OPENSCOUT_CLI_BIN.`);
+    // Codex merges config layers. Reusing the "scout" name could leave a
+    // configured URL on the stdio entry, or expose a second, unfiltered server.
+    return {
+      args: [
+        // An absent server cannot be disabled with a transport-less entry.
+        ...(homeEntry ? ["-c", "mcp_servers.scout.enabled=false"] : []),
+        "-c", "mcp_servers.scout_role.enabled=true",
+        "-c", "mcp_servers.scout_role.required=true",
+        "-c", `mcp_servers.scout_role.command=${JSON.stringify(resolved.command)}`,
+        "-c", `mcp_servers.scout_role.args=${JSON.stringify([...resolved.args, "--profile", profile])}`,
+        "-c", `mcp_servers.scout_role.cwd=${JSON.stringify(resolved.cwd)}`,
+        "-c", `mcp_servers.scout_role.enabled_tools=${JSON.stringify(enabledTools)}`,
+        "-c", 'mcp_servers.scout_role.default_tools_approval_mode="approve"',
+      ],
+      usesUrl: false,
+      unknownReason: null,
+    };
+  }
   if (homeEntry === "url") {
     return { args: [], usesUrl: true, unknownReason: null };
   }
-  if (homeEntry === "unknown") {
+  if (unknownReason) {
     return {
       args: [],
       usesUrl: false,
-      unknownReason: `\`${options.codexExecutable} mcp get scout --json\` did not report the scout MCP entry for CODEX_HOME=${env.CODEX_HOME ?? "~/.codex"}; Scout added no MCP overrides and left that home's config as it is`,
+      unknownReason: `${unknownReason}; Scout added no MCP overrides and left that home's config as it is`,
     };
   }
   const sharedUrl = env.OPENSCOUT_MCP_SHARED_URL?.trim();
-  if (!homeEntry && sharedUrl) {
+  if (options.codexExecutable && !homeEntry && sharedUrl) {
     return { args: ["-c", `mcp_servers.scout.url=${JSON.stringify(sharedUrl)}`], usesUrl: true, unknownReason: null };
   }
 
