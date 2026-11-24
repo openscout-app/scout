@@ -194,7 +194,13 @@ describe("codexHomeScoutMcpEntry with the real Codex CLI", () => {
       };
       expect(await get("scout_role")).toMatchObject({
         enabled: true,
-        transport: { type: "stdio", args: ["mcp", "--context-root", home, "--profile", "sessions"] },
+        transport: {
+          type: "stdio", args: ["mcp", "--context-root", home, "--profile", "sessions"], env: null,
+          env_vars: expect.arrayContaining([
+            "OPENSCOUT_CLIENT_INSTANCE", "OPENSCOUT_REPLY_CONTEXT_FILE",
+            "OPENSCOUT_HOME", "OPENSCOUT_BROKER_URL", "OPENSCOUT_AGENT",
+          ]),
+        },
         enabled_tools: ["sessions_search"],
       });
       if (config) expect(await get("scout")).toMatchObject({ enabled: false });

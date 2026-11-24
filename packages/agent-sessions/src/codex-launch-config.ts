@@ -248,6 +248,19 @@ export type ProfiledScoutMcp = {
   enabledTools: string[];
 };
 
+// Codex starts stdio MCP servers with a short default environment. Forward
+// names from the filtered harness environment, not values or service markers.
+const PROFILED_SCOUT_MCP_ENV_VARS = [
+  "OPENSCOUT_CLIENT_INSTANCE",
+  "OPENSCOUT_REPLY_CONTEXT_FILE", "OPENSCOUT_AGENT", "OPENSCOUT_SESSION_ID",
+  "OPENSCOUT_HOME", "OPENSCOUT_SUPPORT_DIRECTORY", "OPENSCOUT_CONTROL_HOME",
+  "OPENSCOUT_SCOUT_HOME", "OPENSCOUT_RELAY_HUB",
+  "OPENSCOUT_BROKER_URL", "OPENSCOUT_BROKER_INTERNAL_URL", "OPENSCOUT_BROKER_HOST",
+  "OPENSCOUT_BROKER_PORT", "OPENSCOUT_BROKER_SOCKET_PATH", "OPENSCOUT_BROKER_SOCKET_ONLY",
+  "OPENSCOUT_WEB_PUBLIC_ORIGIN", "OPENSCOUT_WEB_HOST", "OPENSCOUT_WEB_PORT",
+  "SCOUT_WEB_HOST", "SCOUT_WEB_PORT",
+] as const;
+
 /**
  * How a Scout-started Codex app-server gets Scout MCP. The Codex home's own
  * `scout` entry wins: with a url entry there are no overrides (stdio keys on
@@ -257,7 +270,8 @@ export type ProfiledScoutMcp = {
  * Scout MCP runs over stdio for this app-server. When Codex can't report the
  * entry, nothing is added, so a url entry is never mixed with stdio keys.
  * Without `codexExecutable` the home is not asked and stdio is used.
- * A role that requires a profile always gets its own stdio server instead.
+ * Scoutbot uses its own stdio server for `sessions,terminals`, even when shared
+ * HTTP is configured. Its discovery tools must not widen the 14-tool default.
  */
 export async function resolveScoutMcpCodexLaunch(options: {
   currentDirectory: string;
@@ -289,6 +303,7 @@ export async function resolveScoutMcpCodexLaunch(options: {
         "-c", `mcp_servers.scout_role.command=${JSON.stringify(resolved.command)}`,
         "-c", `mcp_servers.scout_role.args=${JSON.stringify([...resolved.args, "--profile", profile])}`,
         "-c", `mcp_servers.scout_role.cwd=${JSON.stringify(resolved.cwd)}`,
+        "-c", `mcp_servers.scout_role.env_vars=${JSON.stringify(PROFILED_SCOUT_MCP_ENV_VARS)}`,
         "-c", `mcp_servers.scout_role.enabled_tools=${JSON.stringify(enabledTools)}`,
         "-c", 'mcp_servers.scout_role.default_tools_approval_mode="approve"',
       ],
