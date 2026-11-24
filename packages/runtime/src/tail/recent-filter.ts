@@ -1,7 +1,7 @@
 import type { TailEvent } from "./types.js";
 export type TailRecentFilter = { sources?: string[]; kinds?: string[]; sessionId?: string; project?: string; cwd?: string; query?: string };
 
-function normalizedFilterSet(values: string[] | undefined): Set<string> | null {
+export function normalizedFilterSet(values: string[] | undefined): Set<string> | null {
   const normalized = values
     ?.map((value) => value.trim().toLowerCase())
     .filter(Boolean);

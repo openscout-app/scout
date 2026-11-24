@@ -28,6 +28,7 @@ import { KimiSource } from "./kimi-source.js";
 import { OpenCodeSource } from "./opencode-source.js";
 import { ManagedAgentsSource } from "./managed-agents-source.js";
 import { PiSource } from "./pi-source.js";
+import { normalizedFilterSet } from "./recent-filter.js";
 import { sessionRegistryKey } from "./registry.js";
 import type {
   DiscoveredProcess,
@@ -1550,7 +1551,7 @@ export const __testing = {
 
 export async function readRecentLiveEvents(
   limit = 500,
-  options?: { kinds?: TailEventKind[] },
+  options?: { kinds?: TailEventKind[]; sources?: string[]; sessionId?: string },
 ): Promise<TailEvent[]> {
   // This is a snapshot read, not an ingestion trigger. The subscriber-owned
   // watcher loop keeps the event rings current through the bounded demand
@@ -1558,11 +1559,15 @@ export async function readRecentLiveEvents(
   // inventory-refresh semantics. Coupling every HTTP read to watcher pumping
   // made one `/tail/recent` request stat every retained transcript.
   const kinds = options?.kinds?.length ? new Set(options.kinds) : null;
-  if (!kinds) return snapshotRecentEvents(limit);
-  const source = kinds.size === 1 && kinds.has("assistant")
+  const sourceFilter = normalizedFilterSet(options?.sources);
+  const sessionId = options?.sessionId?.trim();
+  if (!kinds && !sourceFilter && !sessionId) return snapshotRecentEvents(limit);
+  const source = kinds?.size === 1 && kinds.has("assistant")
     ? assistantBuffer
     : aggregateBuffer.recent(AGGREGATE_BUFFER_LIMIT);
-  return source.filter((event) => kinds.has(event.kind)).slice(-limit);
+  return source.filter((event) => (!kinds || kinds.has(event.kind))
+    && (!sourceFilter || sourceFilter.has(event.source))
+    && (!sessionId || event.sessionId === sessionId)).slice(-limit);
 }
 
 async function readRecentTranscriptLines(
@@ -1800,6 +1805,7 @@ export async function readRecentTranscriptEvents(
   limit = 50,
   options?: {
     discovery?: DiscoverySnapshot | null;
+    sources?: string[];
     perTranscriptLineLimit?: number;
     kinds?: TailEventKind[];
     perTranscriptKindLimit?: number;
@@ -1825,12 +1831,14 @@ export async function readRecentTranscriptEvents(
   const kindQuota = kinds
     ? Math.max(1, options?.perTranscriptKindLimit ?? limit)
     : undefined;
+  const sourceFilter = normalizedFilterSet(options?.sources);
   const allowedPaths = options?.discovery?.transcripts
     ? new Set(options.discovery.transcripts.map((transcript) => transcript.transcriptPath))
     : null;
   const activeWatchers = [...watchers.values()]
     .filter((watcher) => (
-      (!allowedPaths || allowedPaths.has(watcher.transcriptPath))
+      (!sourceFilter || sourceFilter.has(watcher.source.name))
+      && (!allowedPaths || allowedPaths.has(watcher.transcriptPath))
       && (options?.since === undefined || watcher.transcript.mtimeMs >= options.since)
     ))
     .sort((left, right) => right.transcript.mtimeMs - left.transcript.mtimeMs)
@@ -1850,7 +1858,8 @@ export async function readRecentTranscriptEvents(
   if (options?.discovery?.transcripts?.length) {
     const discoveryTranscripts = [...options.discovery.transcripts]
       .filter((transcript) => (
-        !seenTranscriptPaths.has(transcript.transcriptPath)
+        (!sourceFilter || sourceFilter.has(transcript.source))
+        && !seenTranscriptPaths.has(transcript.transcriptPath)
         && (options.since === undefined || transcript.mtimeMs >= options.since)
       ))
       .sort((left, right) => right.mtimeMs - left.mtimeMs)
@@ -1979,6 +1988,7 @@ export async function readTailEventsForSession(
     discovery?: DiscoverySnapshot;
     limit?: number;
     forceDiscovery?: boolean;
+    sources?: string[];
     /** Exact Tail history also supports Claude/Codex; Observe keeps its own adapters. */
     includeAllSources?: boolean;
   },
@@ -1988,11 +1998,13 @@ export async function readTailEventsForSession(
 
   const discovery = options?.discovery
     ?? await getTailDiscovery(options?.forceDiscovery ?? false);
-  const allowsSource = (source: string) => Boolean(options?.includeAllSources) || NATIVE_TAIL_SOURCES.has(source);
+  const sourceFilter = normalizedFilterSet(options?.sources);
+  const allowsSource = (source: string) => (!sourceFilter || sourceFilter.has(source))
+    && (Boolean(options?.includeAllSources) || NATIVE_TAIL_SOURCES.has(source));
   const transcript = discovery.transcripts.find(
     (candidate) => allowsSource(candidate.source)
       && transcriptMatchesSessionRef(candidate, normalizedRef),
-  ) ?? locateTranscriptOutsideDiscovery(normalizedRef, Boolean(options?.includeAllSources), allowsSource);
+  ) ?? locateTranscriptOutsideDiscovery(normalizedRef, sources.filter(source => allowsSource(source.name)));
   if (!transcript) return null;
 
   const limit = options?.limit ?? 2_000;
@@ -2062,18 +2074,17 @@ const locatedTranscripts = new Map<string, { transcript: DiscoveredTranscript | 
  */
 function locateTranscriptOutsideDiscovery(
   normalizedRef: string,
-  includeAllSources: boolean,
-  allowsSource: (source: string) => boolean,
+  candidates: TranscriptSource[],
 ): DiscoveredTranscript | null {
-  const key = `${includeAllSources ? "all" : "native"}\u0000${normalizedRef}`;
+  const key = `${candidates.map(source => source.name).join(",")}\u0000${normalizedRef}`;
   const now = Date.now();
   const cached = locatedTranscripts.get(key);
   const ttl = cached?.transcript ? LOCATED_TRANSCRIPT_TTL_MS : LOCATED_TRANSCRIPT_MISS_TTL_MS;
   if (cached && now - cached.checkedAt < ttl) return cached.transcript;
 
   let transcript: DiscoveredTranscript | null = null;
-  for (const source of sources) {
-    if (!source.findTranscript || !allowsSource(source.name)) continue;
+  for (const source of candidates) {
+    if (!source.findTranscript) continue;
     try {
       transcript = source.findTranscript(normalizedRef);
     } catch {

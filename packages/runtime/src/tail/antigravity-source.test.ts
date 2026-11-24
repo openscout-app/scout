@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AntigravitySource } from "./antigravity-source.js";
-import { readTailEventsForSession } from "./service.js";
+import { brokerRouter } from "../broker-trpc-router.js";
+import { __testing, readTailEventsForSession } from "./service.js";
 import type { DiscoveredProcess, DiscoverySnapshot } from "./types.js";
 
 test("Antigravity discovery and history preserve native identity across conversations in one workspace", async () => {
@@ -53,12 +54,29 @@ test("Antigravity discovery and history preserve native identity across conversa
     expect(await readTailEventsForSession("transcript", { discovery })).toBeNull();
     expect((await readTailEventsForSession(join(logPath(second), "transcript.jsonl"), { discovery }))?.transcript.sessionId).toBe(second);
 
+    // Exercise the same recent query that scout tail uses, with another harness
+    // occupying the newest slot and a file-backed conversation outside discovery.
+    const caller = brokerRouter.createCaller({});
+    await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
+    const reply = a!.events.at(-1)!;
+    __testing.pushEvent(reply);
+    __testing.pushEvent({ ...reply, id: "newer", source: "codex", ts: reply.ts + 1 });
+    const filter = { limit: 1, sources: ["antigravity"] };
+    expect((await caller.tail.recent(filter)).events.map(event => event.id)).toEqual([reply.id]);
+    expect((await caller.tail.recent({ ...filter, transcripts: true })).events).toHaveLength(1);
     const old = new Date(0);
     utimesSync(join(logPath(first), "transcript.jsonl"), old, old);
     expect((await AntigravitySource.discoverTranscripts([], "hot")).map(t => t.sessionId)).toEqual([second]);
-    expect(AntigravitySource.findTranscript?.(first)?.sessionId).toBe(first);
+    __testing.resetTailEventBuffers();
+    await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
+    const exact = { ...filter, transcripts: true, sessionId: first };
+    expect((await caller.tail.recent(exact)).events[0]?.sessionId).toBe(first);
+    expect((await caller.tail.recent({ ...exact, sources: ["other"] })).events).toEqual([]);
     expect(AntigravitySource.findTranscript?.("../" + first)).toBeNull();
   } finally {
+    __testing.clearWatchers();
+    __testing.resetDiscovery();
+    __testing.resetTailEventBuffers();
     if (previous === undefined) delete process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT;
     else process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = previous;
     rmSync(root, { recursive: true, force: true });
