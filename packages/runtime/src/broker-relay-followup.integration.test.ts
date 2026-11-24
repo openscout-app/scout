@@ -66,6 +66,14 @@ test("a tmux turn can finish without reading its inbox; the sender gets a refusa
     // The refusal names who may follow up; it never suggests claiming their identity.
     expect(detail as string).not.toContain("--as");
   }
+  const continuation = await broker.postJsonStatus(relay.baseUrl, "/v1/deliver", {
+    ...request, caller: relay.caller, requestId: "continue-active", task: { version: 1, continue: ref },
+  });
+  expect(continuation.status).toBe(400);
+  const continuationDetail = JSON.stringify(continuation.body);
+  expect(continuationDetail).toContain(`--to session:claude:${relay.session}`);
+  expect(continuationDetail).toContain("not context for the active turn");
+  expect(continuationDetail).not.toContain("--ref");
   const response = await send();
   // The relay answers only the original prompt; it never polls Scout's inbox.
   await relay.answerTask();
