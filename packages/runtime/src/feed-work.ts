@@ -44,6 +44,7 @@ export type FeedWorkRow = {
   operator_at: number | string | null;
   harness: string | null;
   session_id: string | null;
+  endpoint_id: string | null;
   cwd: string | null;
   project_root: string | null;
   branch: string | null;
@@ -105,6 +106,8 @@ export function queryFeedWork(db: ControlPlaneSqliteDatabase, read: ScoutFeedWor
           CASE WHEN json_valid(i.execution_resolution_json) THEN json_extract(i.execution_resolution_json, '$.sessionId') END,
           CASE WHEN json_valid(i.execution_json) THEN json_extract(i.execution_json, '$.targetSessionId') END
         ) AS turn_session,
+        -- The trace entry's endpoint stays put when its session id is promoted mid-run, so a feed can join the turns.
+        CASE WHEN json_valid(i.flight_metadata_json) THEN json_extract(i.flight_metadata_json, '$.sessionTrace[#-1].endpointId') END AS turn_endpoint,
         COALESCE(
           CASE WHEN json_valid(i.flight_metadata_json) THEN json_extract(i.flight_metadata_json, '$.taskFinalReplyMessageId') END,
           (SELECT m.id FROM messages m
@@ -124,7 +127,7 @@ export function queryFeedWork(db: ControlPlaneSqliteDatabase, read: ScoutFeedWor
       ${operatorLine("id")} AS operator_id,
       ${operatorLine("body")} AS operator_body,
       ${operatorLine("created_at")} AS operator_at,
-      ep.harness, r.turn_session AS session_id, ep.cwd, ep.project_root,
+      ep.harness, r.turn_session AS session_id, r.turn_endpoint AS endpoint_id, ep.cwd, ep.project_root,
       CASE WHEN json_valid(ep.metadata_json) THEN json_extract(ep.metadata_json, '$.branch') END AS branch,
       -- Where the ask was sent from: its own message, by the requester, naming this work item.
       -- Written with the work item, so a minute either side bounds the scan of a long conversation.
@@ -217,6 +220,7 @@ export function projectFeedWorkRow(row: FeedWorkRow, operatorIds: readonly strin
     ownerName: row.owner_name,
     harness: row.harness ?? null,
     sessionId: row.session_id ?? null,
+    endpointId: row.endpoint_id ?? null,
     conversationId: row.conversation_id,
     parentId: row.parent_id,
     parentTitle: row.parent_title,
