@@ -139,9 +139,14 @@ async function configuredFetchSource(
     for (const spec of refspecs) {
       if (spec.startsWith("^")) continue;
       const [source, target, extra] = spec.replace(/^\+/, "").split(":");
-      if (!source || !target || extra !== undefined || source.includes("*") !== target.includes("*")) continue;
-      const captured = matchRefspec(target, destination);
+      if (!target || extra !== undefined) continue;
+      const shorthand = target.startsWith("remotes/");
+      const captured = matchRefspec(shorthand ? `refs/${target}` : target, destination);
       if (captured === undefined) continue;
+      // A shorthand destination or an implicit remote HEAD can compete with
+      // a fully qualified mapping. Leave the tracking ref alone in either case.
+      if (!source || shorthand) return undefined;
+      if (source.includes("*") !== target.includes("*")) continue;
       const ref = source.replace("*", () => captured);
       if (ref.includes("*")) continue;
       if (match && (match.remote !== remote || match.source !== ref)) return undefined;

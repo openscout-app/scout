@@ -244,7 +244,13 @@ describe("resolveSessionWorkspace", () => {
     expect(git(root, "rev-parse", "refs/remotes/upstream/integration")).toBe(tip);
   });
 
-  test.each(["absent", "excluded", "ambiguous"])("keeps the cached configured base when its fetch mapping is %s", async (kind) => {
+  test.each([
+    ["absent", undefined],
+    ["excluded", "^refs/heads/ma*"],
+    ["ambiguous", "+refs/heads/integration:refs/remotes/upstream/integration"],
+    ["ambiguous with a shorthand destination", "+refs/heads/integration:remotes/upstream/integration"],
+    ["ambiguous with an empty source", ":refs/remotes/upstream/integration"],
+  ])("keeps the cached configured base when its fetch mapping is %s", async (_kind, extraRefspec) => {
     const remote = makeGitRepo();
     const root = makeGitRepo();
     const destination = "refs/remotes/upstream/integration";
@@ -255,9 +261,8 @@ describe("resolveSessionWorkspace", () => {
     git(remote, "switch", "-q", "-c", "integration");
     commit(remote, "decoy tip");
 
-    if (kind === "absent") git(root, "config", "--unset-all", "remote.upstream.fetch");
-    if (kind === "excluded") git(root, "config", "--add", "remote.upstream.fetch", "^refs/heads/ma*");
-    if (kind === "ambiguous") git(root, "config", "--add", "remote.upstream.fetch", `+refs/heads/integration:${destination}`);
+    if (extraRefspec) git(root, "config", "--add", "remote.upstream.fetch", extraRefspec);
+    else git(root, "config", "--unset-all", "remote.upstream.fetch");
 
     const workspace = await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" });
 
