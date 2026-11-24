@@ -77,7 +77,8 @@
   },
   "scripts": {
     "check": "tsc -p tsconfig.json",
-    "test": "bun test --isolate ./src",
+    "test": "bun test --isolate ./src && bun run test:node",
+    "test:node": "bun run --cwd ../protocol build && bun run --cwd ../runtime build && bun run build && node --test test/node-exports.test.mjs",
     "build": "rm -rf dist && tsc -p tsconfig.build.json"
   },
   "dependencies": {

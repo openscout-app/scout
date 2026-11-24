@@ -41,7 +41,8 @@ import {
   resolveOpenScoutPairingHome,
   selectInstanceAwareEntrypoint,
 } from "@openscout/runtime/config";
-import { resolveBunExecutable as resolveResolvedBunExecutable } from "@openscout/runtime/harnesses";
+// The emitted host entrypoint loads in Node; the harnesses facade loads bun:sqlite.
+import { resolveBunExecutable as resolveResolvedBunExecutable } from "@openscout/runtime/tool-resolution";
 
 import { coalesce } from "./coalesce.ts";
 
