@@ -3,6 +3,8 @@ import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } f
 import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
 import { handleShowRoute, type ShowHttpDeps } from "./broker-shows-http.js";
 import { handlePostRoute, type PostHttpDeps } from "./broker-posts-http.js";
+import { handleRoutineRoute, type RoutineHttpDeps } from "./broker-routines-http.js";
+import { handleWorktreeRetirementRoute, type WorktreeRetirementHttpDeps } from "./broker-worktree-retirement-http.js";
 import { handleFeedWorkRoute, type FeedWorkHttpDeps } from "./broker-feed-work-http.js";
 import { RoleSlotError } from "./role-slots-store.js";
 import { RolePassError } from "./role-pass-scheduler.js";
@@ -41,9 +43,10 @@ import type { IntegrationSlackEvents } from "./integration-slack-events.js";
 import type { IntegrationSlackDeliveryService } from "./integration-slack-delivery.js";
 import { BrokerIntegrationSetupService, IntegrationSetupError } from "./broker-integration-setup.js";
 import { deckLanes } from "./deck-lanes.js";
+import { parseSessionKnowledgeSearchParams, type SessionKnowledgeSearchInput, type SessionKnowledgeSearchResult } from "./knowledge/session-search.js";
 import { isAllowedHostWebRequest, type HostWebRequest, type HostWebResponse } from "./host-web-request.js";
 import { ChatQuestionError } from "./chat-question-transition.js";
-import { ChatMessageCorrectionError } from "@openscout/protocol";
+import { ChatMessageCorrectionError, TurnCredentialError, isManualReviewBoardScope, type TurnCredentialClaims } from "@openscout/protocol";
 import type { BrokerExternalSessionService } from "./broker-external-session-service.js";
 import type { BrokerT3Service } from "./t3/broker-service.js";
 import { T3RpcError } from "./t3/rpc-client.js";
@@ -67,6 +70,9 @@ import type {
   InboxClaimRequest,
   InboxNackRequest,
   InvocationRequest,
+  ManualReviewBoardPreviewRequest,
+  ManualReviewBoardRoutineSaveRequest,
+  ManualReviewBoardRunRequest,
   ManualReviewDispatchRequest,
   ManualReviewOccurrenceRequest,
   MessageRecord,
@@ -118,6 +124,9 @@ import type {
 } from "./broker-durable-action-http-service.js";
 import { ManualReviewOccurrenceError, type ManualReviewOccurrenceService } from "./manual-review-occurrences.js";
 import { ManualReviewDispatchError, type ManualReviewDispatchService } from "./manual-review-dispatch.js";
+import type { ManualReviewBoardTickets } from "./manual-review-board-ticket.js";
+import type { ManualReviewBoardService } from "./manual-review-board.js";
+import { ManualReviewBoardError } from "./manual-review-board-routines.js";
 import {
   a2aJson,
   badRequest as writeBadRequest,
@@ -135,6 +144,7 @@ import {
   throwIfAborted,
 } from "./broker-http-helpers.js";
 import { WorkLifecycleError, type BrokerWorkLifecycleService } from "./broker-work-lifecycles.js";
+import type { BrokerBoardService } from "./broker-boards.js";
 import { WorkClaimConflictError } from "./broker-work-claims.js";
 import type { DerivedWriteRequest, WorkClaimRequest, WorkLifecycle, WorkMoveRequest, WorkReviewRequest } from "@openscout/protocol";
 import { DerivedRecordError, type BrokerDerivedRecordService } from "./broker-derived-records.js";
@@ -193,6 +203,18 @@ import { normalizeConversationTitle } from "./conversation-title.js";
 
 const ACTIVE_FLIGHT_LIST_STATES = new Set(["queued", "waking", "running", "waiting"]);
 
+function isLocalReviewOperator(request: RuntimeHttpRequestLike): boolean {
+  const context = request.transportContext;
+  return !!context && ["loopback", "unix-socket"].includes(context.transport) && context.operator === true
+    && !context.guest && !context.scoped && !context.peer
+    && request.headers.origin === undefined && request.headers["x-openscout-forwarded-node-id"] === undefined;
+}
+
+const manualReviewBoardScopeReserved = {
+  error: "manual_review_scope_reserved",
+  detail: "Runs in a board-review scope are recorded and dispatched by the Board review entry point, which reads their pins and their reviewer itself.",
+} as const;
+
 function badRequest(response: RuntimeHttpResponseLike, error: unknown): void {
   if (error instanceof TaskClosedError) json(response, 409, { ...error.toJSON(), detail: error.message });
   else if (error instanceof ProvenRequestFailure) json(response, 409, { error: error.code, detail: error.message, evidence: error.evidence });
@@ -244,6 +266,8 @@ const CHANNEL_INVITE_COMMAND_KINDS = new Set<string>([
 export type BrokerHttpRouterDeps = {
   /** Work lifecycles: stations, moves and reviews. */
   workLifecycles?: BrokerWorkLifecycleService;
+  /** Boards: a lifecycle's columns and its cards with their content. */
+  boards?: BrokerBoardService;
   workRetry?: import("./broker-work-retry.js").BrokerWorkRetryService;
   derivedRecords?: BrokerDerivedRecordService;
   tasks?: import("./broker-tasks.js").BrokerTaskService;
@@ -251,10 +275,18 @@ export type BrokerHttpRouterDeps = {
   readRepoDiff?: RepoDiffRead;
   shows?: ShowHttpDeps;
   posts?: PostHttpDeps;
+  /** Checks a turn credential this runtime issued, including that its flight is still live. */
+  verifyTurnCredential?: (credential: unknown) => TurnCredentialClaims;
+  /** Scheduled routines that post to the Feed (/v1/routines). */
+  routines?: RoutineHttpDeps;
+  /** Retirement of idle, clean, merged agent worktrees (/v1/worktrees/retirement). */
+  worktreeRetirement?: WorktreeRetirementHttpDeps;
   /** Work items as a feed reads them (GET /v1/feed/work). */
   feedWork?: FeedWorkHttpDeps;
   attachments?: AttachmentHttpDeps;
   readObservedSessionCache?: ObservedSessionReadDeps["readCache"];
+  /** One bounded query over this host's own session index (GET /v1/mesh/knowledge/search). */
+  searchSessionKnowledge?: (input: SessionKnowledgeSearchInput) => SessionKnowledgeSearchResult;
   herdrWorkspaces?: Omit<HerdrWorkspacesReadDeps, "nodeId">;
   encodedSnapshotBodies?: boolean;
   onSnapshotFlushedBytes?: (bytes: number) => void;
@@ -300,6 +332,9 @@ export type BrokerHttpRouterDeps = {
   durableActionHttpService: BrokerDurableActionHttpService;
   manualReviewOccurrences: ManualReviewOccurrenceService;
   manualReviewDispatch: ManualReviewDispatchService;
+  /** Saved Board review routines, their preview and their runs. Absent in hosts that do not serve them; the routes then answer 503. */
+  manualReviewBoard?: ManualReviewBoardService;
+  manualReviewBoardTickets?: ManualReviewBoardTickets;
   controlStreams: BrokerControlStreamService;
   managedSessionHttpService: BrokerManagedSessionHttpService;
   meshDiscoveryService: BrokerMeshDiscoveryService;
@@ -587,6 +622,8 @@ export function createBrokerHttpRouter(
     durableActionHttpService,
     manualReviewOccurrences,
     manualReviewDispatch,
+    manualReviewBoard,
+    manualReviewBoardTickets,
     controlStreams,
     managedSessionHttpService,
     meshDiscoveryService,
@@ -678,6 +715,22 @@ export function createBrokerHttpRouter(
     json(response, 503, { error: "access_unavailable" }); return;
   }
   if (request.transportContext?.scoped) { json(response, 403, { error: "access_denied" }); return; }
+  if (method === "POST" && url.pathname === "/v1/access/turn") {
+    const context = request.transportContext;
+    if (context && (!["unix-socket", "loopback"].includes(context.transport) || context.guest || context.peer)) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    if (!deps.verifyTurnCredential) { json(response, 503, { error: "turn_credentials_unavailable" }); return; }
+    const body = await readRequestBody<{ credential?: unknown }>(request, { maxBytes: 8 * 1024 });
+    try {
+      const claims = deps.verifyTurnCredential(body?.credential);
+      json(response, 200, { live: true, claims });
+    } catch (error) {
+      const code = error instanceof TurnCredentialError ? error.code : "malformed_turn_credential";
+      json(response, code === "malformed_turn_credential" ? 400 : 403, { live: false, error: code });
+    }
+    return;
+  }
   if (method === "GET" && url.pathname === "/v1/terminal-hosts/herdr/workspaces") {
     // Same machine-local boundary as observed sessions. No CLI/web forwarding,
     // guest/scoped grants or origin-bearing browser requests can initiate probes.
@@ -945,6 +998,8 @@ export function createBrokerHttpRouter(
   }
   if (await handleShowRoute(request, response, url, deps.shows ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
   if (await handlePostRoute(request, response, url, deps.posts ?? { snapshot: () => ({ agents: {}, endpoints: {} }) })) return;
+  if (await handleRoutineRoute(request, response, url, deps.routines ?? {})) return;
+  if (await handleWorktreeRetirementRoute(request, response, url, deps.worktreeRetirement ?? {})) return;
   if (handleFeedWorkRoute(request, response, url, deps.feedWork ?? {})) return;
   if (await handleAttachmentRoute(request, response, url, deps.attachments ?? { nodeId, peerNode: () => undefined })) return;
   const aliasItemMatch = method === "PATCH" || method === "DELETE"
@@ -1058,6 +1113,13 @@ export function createBrokerHttpRouter(
         json(response, 200, { connections: await board.status(url.searchParams.get("connection") ?? undefined) });
         return;
       }
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/dispatcher") {
+        const connectionId = url.searchParams.get("connection") ?? "";
+        const explain = url.searchParams.get("explain");
+        // Explaining reads one task from the board and decides it; it never claims.
+        json(response, 200, explain !== null ? await board.runDispatcher({ connectionId, actorId: "", explain }) : await board.dispatcherStatus(connectionId));
+        return;
+      }
       const number = (name: string) => { const raw = url.searchParams.get(name); return raw === null || !/^\d+$/.test(raw) ? undefined : Number(raw); };
       if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/messages") {
         json(response, 200, await board.messages({ connectionId: url.searchParams.get("connection") ?? "", channel: url.searchParams.get("channel") ?? "", limit: number("limit") }));
@@ -1076,6 +1138,8 @@ export function createBrokerHttpRouter(
       const input = await readRequestBody<Record<string, any>>(request, { maxBytes: 256 * 1024 });
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/connect") { json(response, 200, await board.connect(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/claim") { json(response, 200, await board.claim(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/dispatcher") { json(response, 200, await board.setDispatch(input as any)); return; }
+      if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/dispatcher/run") { json(response, 200, await board.runDispatcher(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/plan") { json(response, 200, await board.plan(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/promote") { json(response, 200, await board.promote(input as any)); return; }
       if (method === "POST" && url.pathname === "/v1/integrations/vercel-board/roles") { json(response, 200, await board.declareRole(input as any)); return; }
@@ -1106,6 +1170,7 @@ export function createBrokerHttpRouter(
         ? await service.reply({ ownerId: input.ownerId, sessionId: string("sessionId"), deliveryId: string("deliveryId"), replyToken: typeof input.replyToken === "string" ? input.replyToken : undefined, body: string("body"),
           ...(typeof input.ref === "string" ? { ref: input.ref, requestId: string("requestId"), progress: input.progress === true,
             failed: input.failed === true, image: input.image as import("@openscout/protocol").ScoutTaskReply["image"],
+            ...(input.points !== undefined ? { points: input.points as import("@openscout/protocol").ScoutTaskReply["points"] } : {}),
             attachments: input.attachments as import("@openscout/protocol").ScoutTaskReply["attachments"] } : {}) })
         : url.pathname.endsWith("/poll")
         ? await service.poll({ ownerId: input.ownerId, sessionId: string("sessionId"), cursor: typeof input.cursor === "string" ? input.cursor : undefined, limit: typeof input.limit === "number" ? input.limit : undefined })
@@ -2226,6 +2291,25 @@ export function createBrokerHttpRouter(
     }
   }
 
+  const boardMatch = method === "GET" ? url.pathname.match(/^\/v1\/boards\/([^/]+)$/) : null;
+  if (deps.boards && (boardMatch || (method === "GET" && url.pathname === "/v1/boards"))) {
+    try {
+      if (!boardMatch) {
+        json(response, 200, deps.boards.list());
+        return;
+      }
+      const closedSince = Number(url.searchParams.get("closedSince"));
+      json(response, 200, deps.boards.read(decodeURIComponent(boardMatch[1]!), {
+        closedSince: Number.isFinite(closedSince) && closedSince > 0 ? closedSince : undefined,
+        limit: parseLimit(url),
+      }));
+    } catch (error) {
+      if (error instanceof WorkLifecycleError) json(response, error.status, { error: error.message });
+      else badRequest(response, error);
+    }
+    return;
+  }
+
   if (deps.workLifecycles && url.pathname.startsWith("/v1/work/")) {
     const work = deps.workLifecycles;
     try {
@@ -2755,6 +2839,21 @@ export function createBrokerHttpRouter(
     return;
   }
 
+  // Cross-host session search (control tier): a peer in this operator's mesh
+  // asks this host to run one query over its own index. Only bounded hits
+  // leave the host, never a transcript. Same trust as starting a session
+  // here, which could read the transcripts directly; guests never reach it.
+  if (method === "GET" && url.pathname === "/v1/mesh/knowledge/search") {
+    if (request.transportContext?.guest) { json(response, 403, { error: "forbidden" }); return; }
+    if (!deps.searchSessionKnowledge) { notFound(response); return; }
+    let input: SessionKnowledgeSearchInput;
+    try { input = parseSessionKnowledgeSearchParams(url.searchParams); }
+    catch (error) { json(response, 400, { error: "invalid_search_query", detail: error instanceof Error ? error.message : String(error) }); return; }
+    try { json(response, 200, { nodeId, ...deps.searchSessionKnowledge(input) }); }
+    catch (error) { json(response, 503, { error: "session_search_unavailable", detail: error instanceof Error ? error.message : String(error) }); }
+    return;
+  }
+
   // Same local tier as repo-watch/tail reads; never starts the private web app.
   if (method === "GET" && url.pathname === "/v1/repo-diff/worktree") {
     if (request.transportContext?.transport === "remote" || request.transportContext?.guest) {
@@ -3274,6 +3373,10 @@ export function createBrokerHttpRouter(
   }
 
   if (method === "GET" && url.pathname === "/v1/manual-review/occurrences") {
+    if (isManualReviewBoardScope(url.searchParams.get("scope")) && !isLocalReviewOperator(request)) {
+      json(response, 403, { error: "operator_only", detail: "Open Board review runs as the local operator." });
+      return;
+    }
     try {
       const occurrence = manualReviewOccurrences.lookup({
         scope: url.searchParams.get("scope") ?? "",
@@ -3291,6 +3394,13 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/manual-review/occurrences") {
     try {
       const body = await readRequestBody<ManualReviewOccurrenceRequest>(request, { maxBytes: 16 * 1024 });
+      // A Board review run is recorded by its own entry point, which reads the
+      // pins itself. This one takes them from the caller, so it may not write
+      // that scope or state a routine pin.
+      if (isManualReviewBoardScope(body?.scope) || body?.routine !== undefined) {
+        json(response, 403, manualReviewBoardScopeReserved);
+        return;
+      }
       json(response, 200, await manualReviewOccurrences.record({
         ...body,
         requestedById: attributedActorId(body?.requestedById ?? "operator"),
@@ -3305,6 +3415,11 @@ export function createBrokerHttpRouter(
   if (method === "POST" && url.pathname === "/v1/manual-review/dispatches") {
     try {
       const body = await readRequestBody<ManualReviewDispatchRequest>(request, { maxBytes: 16 * 1024 });
+      // The reviewer of a Board review run is its routine's. A caller does not choose it here.
+      if (isManualReviewBoardScope(body?.scope)) {
+        json(response, 403, manualReviewBoardScopeReserved);
+        return;
+      }
       // The same attribution as an ask sent through /v1/deliver. The first
       // admitted caller's is pinned, and the ask is sent as that principal.
       const attribution = brokerAttributionFor({ claimedActorId: body?.requestedById ?? "operator",
@@ -3321,6 +3436,72 @@ export function createBrokerHttpRouter(
     } catch (error) {
       if (error instanceof ManualReviewDispatchError) json(response, error.status, error.body);
       else badRequest(response, error);
+    }
+    return;
+  }
+
+  if (url.pathname === "/v1/manual-review/board-routines" || url.pathname === "/v1/manual-review/board-preview"
+    || url.pathname === "/v1/manual-review/board-runs" || url.pathname === "/v1/manual-review/board-ticket"
+    || url.pathname === "/v1/manual-review/board-accept") {
+    // A routine grants a read of the board and a reviewer to start, so every
+    // one of these routes is the operator's: a caller on this machine whose
+    // request carried the local operator proof. This is decided before the
+    // body is read and before anything reaches the board.
+    const context = request.transportContext;
+    if (!isLocalReviewOperator(request)) {
+      json(response, 403, { error: "operator_only", detail: "Board review routines are read, saved and run by the verified operator on this machine." });
+      return;
+    }
+    if (!manualReviewBoard) {
+      json(response, 503, { error: "manual_review_board_unavailable", detail: "This runtime does not serve Board review routines." });
+      return;
+    }
+    try {
+      if (method === "GET" && url.pathname === "/v1/manual-review/board-ticket") {
+        if (!manualReviewBoardTickets) { notFound(response); return; }
+        json(response, 200, manualReviewBoardTickets.read(url.searchParams.get("workId") ?? ""));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/manual-review/board-routines") {
+        json(response, 200, { routines: manualReviewBoard.list({
+          connectionId: url.searchParams.get("connectionId") || undefined,
+          channel: url.searchParams.get("channel") || undefined,
+        }) });
+        return;
+      }
+      if (method !== "POST") { notFound(response); return; }
+      const body = await readRequestBody<Record<string, unknown>>(request, { maxBytes: 16 * 1024 });
+      const attribution = brokerAttributionFor({ claimedActorId: "operator",
+        context, personActorIds: brokerPersonActorIds(currentAttributionSnapshot()) });
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-accept") {
+        if (!manualReviewBoardTickets) { notFound(response); return; }
+        json(response, 200, await manualReviewBoardTickets.accept(typeof body?.workId === "string" ? body.workId : "", attribution));
+        return;
+      }
+      if (url.pathname === "/v1/manual-review/board-ticket") { notFound(response); return; }
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-routines") {
+        json(response, 200, await manualReviewBoard.save(body as unknown as ManualReviewBoardRoutineSaveRequest, attribution));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-preview") {
+        json(response, 200, await manualReviewBoard.preview(body as unknown as ManualReviewBoardPreviewRequest));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/manual-review/board-runs") {
+        const claims = brokerService.assistantClaims;
+        const run = () => manualReviewBoard.run(
+          body as unknown as ManualReviewBoardRunRequest,
+          attribution,
+          claims ? { admitAsk: (actorId, deliver) => claims.admit(actorId, deliver) } : {},
+        );
+        json(response, 200, await (claims ? claims.admit(attribution.actorId, run) : run()));
+        return;
+      }
+      notFound(response);
+    } catch (error) {
+      if (error instanceof ManualReviewBoardError || error instanceof ManualReviewOccurrenceError || error instanceof ManualReviewDispatchError) {
+        json(response, error.status, error.body);
+      } else badRequest(response, error);
     }
     return;
   }

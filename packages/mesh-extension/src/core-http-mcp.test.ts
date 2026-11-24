@@ -104,6 +104,15 @@ test('external HTTP replies derive stable delivery keys and keep progress separa
   expect(f.calls[2]!.body.requestId).not.toBe(f.calls[0]!.body.requestId);
 });
 
+test('a reply with points is refused when the runtime lacks reply-points/1, on both reply paths', async () => {
+  const points=[{stance:'claim',text:'Keep Home on the shipped Feed'}];
+  for (const route of [{}, {sessionId:'session',deliveryId:'delivery'}]) {
+    const f=fixture();
+    await expect(f.adapter.call('reply',{ref:'task',body:'done',points,...route})).rejects.toThrow('reply-points/1');
+    expect(f.calls.map(c=>c.url.pathname)).toEqual(['/v1/node']);
+  }
+});
+
 test.each([
   ['already_answered', 'task already has a final reply'],
   ['completed', 'task is already completed'],

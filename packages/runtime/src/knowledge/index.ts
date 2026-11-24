@@ -4,3 +4,4 @@ export * from "./store.js";
 export * from "./session-indexer.js";
 
 export * from "./settings.js";
+export * from "./session-search.js";

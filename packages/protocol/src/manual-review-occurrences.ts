@@ -56,6 +56,16 @@ export interface ManualReviewArtifactRevision {
   observedAt?: number;
 }
 
+/**
+ * The saved routine a run came from, pinned at the version it had when the
+ * run was requested. A routine's version never names different content twice,
+ * so the pin says which reviewer and which source the run was admitted for.
+ */
+export interface ManualReviewRoutinePin {
+  id: string;
+  version: number;
+}
+
 export interface ManualReviewOccurrenceRequest {
   /** Namespace for `requestId`, such as the routine or the surface that asks. */
   scope: string;
@@ -63,6 +73,8 @@ export interface ManualReviewOccurrenceRequest {
   requestId: string;
   input: ManualReviewInput;
   artifact: ManualReviewArtifactRevision;
+  /** Present only on a run a saved routine started. The runtime sets it; a caller of the general entry point cannot. */
+  routine?: ManualReviewRoutinePin;
   /** The requesting actor as the caller reports it. The runtime resolves the stored value. */
   requestedById?: ScoutId;
 }
@@ -150,6 +162,8 @@ export interface ManualReviewOccurrence {
   requestId: string;
   input: ManualReviewInput;
   artifact: ManualReviewArtifactRevision;
+  /** The routine version the run was admitted for, when a saved routine started it. */
+  routine?: ManualReviewRoutinePin;
   requestedById: ScoutId;
   state: ManualReviewOccurrenceState;
   /** Present in every state but `recorded`. */
@@ -175,7 +189,9 @@ export type ManualReviewPinnedField =
   | "input.version"
   | "artifact.kind"
   | "artifact.ref"
-  | "artifact.revision";
+  | "artifact.revision"
+  | "routine.id"
+  | "routine.version";
 
 /**
  * The answer when a request reuses a scope and request ID with different
@@ -236,6 +252,7 @@ export interface ManualReviewStoredOccurrence {
   requestId: string;
   input: ManualReviewInput;
   artifact: ManualReviewArtifactRevision;
+  routine?: ManualReviewRoutinePin;
   requestedById: ScoutId;
   state: ManualReviewOccurrenceState;
   dispatch?: ManualReviewDispatch;
@@ -243,6 +260,15 @@ export interface ManualReviewStoredOccurrence {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A routine pin as stored: the routine's ID and a version that was saved, which starts at 1. */
+function routinePinErrors(value: unknown): string[] {
+  if (!isObject(value)) return ["routine must be an object"];
+  const errors: string[] = [];
+  if (!identifying(value.id)) errors.push("routine.id must be a non-empty string with no surrounding whitespace");
+  if (!Number.isSafeInteger(value.version) || (value.version as number) < 1) errors.push("routine.version must be a positive integer");
+  return errors;
 }
 
 function identifying(value: unknown): value is string {
@@ -285,6 +311,7 @@ export function validateManualReviewOccurrenceRequest(request: unknown): string[
       errors.push("artifact.observedAt must be a non-negative finite timestamp");
     }
   }
+  if (request.routine !== undefined) errors.push(...routinePinErrors(request.routine));
   if (request.requestedById !== undefined && !identifying(request.requestedById)) {
     errors.push("requestedById must be a non-empty string with no surrounding whitespace");
   }
@@ -445,8 +472,8 @@ function storedDispatchOf(state: unknown, stored: unknown): ManualReviewDispatch
 
 /** The pinned fields on which a request and a recorded occurrence disagree. */
 export function manualReviewPinnedDifferences(
-  recorded: Pick<ManualReviewOccurrence, "input" | "artifact">,
-  requested: Pick<ManualReviewOccurrenceRequest, "input" | "artifact">,
+  recorded: Pick<ManualReviewOccurrence, "input" | "artifact" | "routine">,
+  requested: Pick<ManualReviewOccurrenceRequest, "input" | "artifact" | "routine">,
 ): ManualReviewPinnedField[] {
   const differs: ManualReviewPinnedField[] = [];
   if (recorded.input.source !== requested.input.source) differs.push("input.source");
@@ -455,6 +482,9 @@ export function manualReviewPinnedDifferences(
   if (recorded.artifact.kind !== requested.artifact.kind) differs.push("artifact.kind");
   if (recorded.artifact.ref !== requested.artifact.ref) differs.push("artifact.ref");
   if (recorded.artifact.revision !== requested.artifact.revision) differs.push("artifact.revision");
+  // A run with a routine pin and one without are different runs, whatever else they share.
+  if (recorded.routine?.id !== requested.routine?.id) differs.push("routine.id");
+  if (recorded.routine?.version !== requested.routine?.version) differs.push("routine.version");
   return differs;
 }
 
@@ -472,7 +502,7 @@ export function manualReviewOccurrenceOf(action: DurableAction | null | undefine
   const dispatch = storedDispatchOf(stored.state, stored.dispatch);
   if (dispatch === null) return null;
   const state = stored.state as ManualReviewOccurrenceState;
-  const { scope, requestId, input, artifact } = stored as unknown as ManualReviewStoredOccurrence;
+  const { scope, requestId, input, artifact, routine } = stored as unknown as ManualReviewStoredOccurrence;
   return {
     id: action.id,
     scope,
@@ -484,6 +514,7 @@ export function manualReviewOccurrenceOf(action: DurableAction | null | undefine
       revision: artifact.revision,
       ...(artifact.observedAt !== undefined ? { observedAt: artifact.observedAt } : {}),
     },
+    ...(routine ? { routine: { id: routine.id, version: routine.version } } : {}),
     requestedById: stored.requestedById,
     state,
     ...(dispatch ? { dispatch } : {}),

@@ -41,9 +41,10 @@ export class BrokerDurableActionHttpService {
     }
     await this.deps.runDurableWrite(async () => {
       // This write replaces the record under the ID. A manual review occurrence
-      // is written once, by its own service, and never replaced from here.
+      // and a saved review routine are written by their own services, and never
+      // replaced from here.
       if (isManualReviewAction(action) || isManualReviewAction(this.deps.getDurableAction(action.id))) {
-        throw new Error("manual review occurrences are recorded through the manual review entry point");
+        throw new Error("manual review records are written through the manual review entry points");
       }
       await this.deps.commitEntries(
         { kind: "durable.action.record", action },

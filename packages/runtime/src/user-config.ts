@@ -22,6 +22,7 @@ export type CommsChannel = "here" | "mobile" | "here+mobile";
 export type CommsVerbosity = "terse" | "normal" | "detailed";
 export type CommsTone = "direct" | "warm" | "formal";
 export type ProvisionalAgentNamesMode = "replace" | "extend";
+export type WorktreeRetireMode = "on" | "off";
 
 export type OpenScoutUserConfig = {
   name?: string;
@@ -59,6 +60,10 @@ export type OpenScoutUserConfig = {
   runtimeShortlist?: string[];
   /** Named `<harness>[/<model>[/<effort>]]` tuples shown as one-tap presets. */
   runtimePresets?: RuntimePresetConfig[];
+  /** The runtime's periodic sweep of idle, clean, merged agent worktrees. Default `on`. */
+  worktreeRetire?: WorktreeRetireMode;
+  /** Hours a Scout worktree must sit idle before the sweep retires it. Default 24. */
+  worktreeRetireIdleHours?: number;
 };
 
 export type RuntimePresetConfig = {

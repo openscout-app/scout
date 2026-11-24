@@ -9,6 +9,7 @@ export type ScoutCommandName =
   | "status"
   | "quarantine"
   | "hooks"
+  | "hub"
   | "notify"
   | "operator"
   | "ask"
@@ -32,6 +33,7 @@ export type ScoutCommandName =
   | "env"
   | "flight"
   | "work-retry"
+  | "worktrees"
   | "init"
   | "instance"
   | "inbox"
@@ -90,6 +92,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./quarantine.ts")).runQuarantineCommand;
     case "hooks":
       return (await import("./hooks.ts")).runHooksCommand;
+    case "hub":
+      return (await import("./hub.ts")).runHubCommand;
     case "status":
       return (await import("./status.ts")).runStatusCommand;
     case "reply":
@@ -134,6 +138,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./flight.ts")).runFlightCommand;
     case "work-retry":
       return (await import("./work-retry.ts")).runWorkRetryCommand;
+    case "worktrees":
+      return (await import("./worktrees.ts")).runWorktreesCommand;
     case "init":
       return (await import("./init.ts")).runInitCommand;
     case "inbox":

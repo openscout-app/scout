@@ -36,8 +36,13 @@ type ClaimInput = {
   taskId: string; workId: string; agentId: string; startedBy: string;
   /** The role profile to claim as. Absent means the connection's own profile. */
   profile?: string;
+  /** The dispatch policy that chose this claim, when the runtime did. */
+  policy?: string;
   dependencyContext?: { channel: string; owner: string; needs: string[]; lines: string[] };
 };
+
+/** The detail on a held task the swarm returned to the pool. The dispatcher's history reads it. */
+export const VERCEL_BOARD_RETURNED_DETAIL = "returned to the pool";
 
 export interface VercelBoardCustodyDeps {
   connection: Pick<VercelBoardConnectionConfig, "id" | "principal" | "profile">;
@@ -48,6 +53,11 @@ export interface VercelBoardCustodyDeps {
   flight(flightId: string): Pick<FlightRecord, "state" | "output" | "error" | "summary" | "metadata"> | undefined;
   cancelFlight?(flightId: string, reason: string): Promise<void>;
   notify?(notice: VercelBoardCustodyNotice): Promise<void> | void;
+  /**
+   * Whether a task Scout holds for a person goes back to the pool when the
+   * hold is lifted on the board (the swarm). Otherwise it waits for the flight.
+   */
+  returnsToPool?(message: VercelBoardWireMessage): boolean;
   now?: () => number;
   leaseSeconds?: number;
   firstLeaseSeconds?: number;
@@ -283,6 +293,7 @@ export class VercelBoardCustody {
     if (blocked) {
       // Held for a person: only a cancel or someone else's claim ends Scout's part. A lifted hold waits for the flight.
       if (task.state === "canceled") await this.lostBlocked(blocked, `canceled${task.reason ? `: ${task.reason}` : ""}`);
+      else if (task.state === "ready" && task.epoch === blocked.epoch && this.deps.returnsToPool?.(message)) await this.returnToPool(blocked);
       else if (task.state === "claimed" && task.epoch !== blocked.epoch) await this.lostBlocked(blocked, `claimed by ${task.claim ? vercelBoardPrincipalOf(task.claim.actor) : "another worker"}`);
       return;
     }
@@ -296,6 +307,20 @@ export class VercelBoardCustody {
     // A settle in flight can race the feed. The settle resolves itself.
     if (task.epoch === row.epoch && (task.state === "completed" || task.state === "failed")) return;
     await this.lost(row, cause);
+  }
+
+  /**
+   * The operator answered on the board and lifted the hold: the task is back
+   * in the pool for the next free agent of its role. The waiting flight is
+   * stopped, since its question was answered there.
+   */
+  private async returnToPool(row: VercelBoardCustodyRow): Promise<void> {
+    const { connection, store } = this.deps;
+    store.updateCustody(connection.id, row.attemptId, { state: "settled", detail: `${VERCEL_BOARD_RETURNED_DETAIL}: the hold was lifted on the board` });
+    if (row.flightId && this.deps.cancelFlight) {
+      try { await this.deps.cancelFlight(row.flightId, "The operator answered on the board; the task went back to the pool for the next free agent."); }
+      catch { /* the row is settled either way; a flight that will not stop finishes on its own */ }
+    }
   }
 
   private async lostBlocked(row: VercelBoardCustodyRow, cause: string): Promise<void> {

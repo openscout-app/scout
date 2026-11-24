@@ -92,6 +92,7 @@ export type {
 } from "./adapters/claude-code/pending-tool-call.js";
 export { createAdapter as createCodexAdapter } from "./adapters/codex/index.js";
 export { createAdapter as createCursorAcpAdapter } from "./adapters/cursor-acp/index.js";
+export { createAdapter as createAntigravityAcpAdapter } from "./adapters/antigravity-acp/adapter.js";
 export { createAdapter as createDevinAcpAdapter } from "./adapters/devin-acp/index.js";
 export {
   CodexObservedTopologyTracker,
@@ -147,3 +148,5 @@ export { createAdapter as createOpenclawAcpAdapter } from "./adapters/openclaw-a
 
 export { shapeAttentionContext, attentionContextBeforeBlock } from "./attention-context.js";
 export type { AttentionContext } from "./attention-context.js";
+
+export { claudeMirrorRoot, claudeProjectFolder, claudeProjectsRoot } from "./claude-projects.js";

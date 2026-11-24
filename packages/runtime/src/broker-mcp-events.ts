@@ -31,6 +31,7 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+const termination = JSON.stringify({ type: "terminated", error: { code: -32024, message: "Access revoked" } });
 const hash = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
 type Sub = { id: string; principal: string; name: string; args: string; url: string; secret: string; previous_secret: string | null; rotate_until: number; expires_at: number; verified_at: number; created_at: number };
 
@@ -44,6 +45,7 @@ export interface BrokerMcpEventResources {
 export class BrokerMcpEvents {
   private nextPrune = 0;
   private readonly pending = new Map<string, Promise<unknown>>();
+  private readonly verifications = new Map<string, { until: number; at: Promise<number> }>();
   constructor(private readonly db: ControlPlaneSqliteDatabase, private readonly resources: BrokerMcpEventResources,
     private readonly options: { now?: () => number; post?: WebhookPost } = {}) {
     db.exec(`CREATE TABLE IF NOT EXISTS mcp_event_subscriptions (
@@ -58,18 +60,41 @@ export class BrokerMcpEvents {
       CREATE TABLE IF NOT EXISTS mcp_event_seen (id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS mcp_event_seen_expiry ON mcp_event_seen(expires_at);`);
   }
+  private verifyDestination(principal: McpEventPrincipal, url: string, id: string, secret: string) {
+    // The challenge confirms a destination for this principal, across its event names and filters.
+    const key = canonical([principal, url]);
+    const now = this.now();
+    for (const [entry, check] of this.verifications) if (check.until <= now) this.verifications.delete(entry);
+    const cached = this.verifications.get(key);
+    if (cached) return cached.at;
+    const check = { until: Infinity, at: verifyWebhook(url, id, secret, this.options.post).then(() => {
+      const at = this.now();
+      check.until = at + 5 * 60_000;
+      return at;
+    }, (error) => {
+      this.verifications.delete(key);
+      throw error;
+    }) };
+    this.verifications.set(key, check);
+    return check.at;
+  }
   private now() { return this.options.now?.() ?? Date.now(); }
   list() { return { events: MCP_EVENT_DEFINITIONS }; }
   private identity(principal: McpEventPrincipal, input: unknown, subscribe: boolean) {
     const p = mcpEventPrincipalSchema.parse(principal);
     const schema = z.object({
-      name: z.enum(["flight.completed", "work.waiting", "message.created"]), arguments: z.record(z.string(), z.unknown()).default({}),
-      delivery: z.object({ mode: z.literal("webhook"), url: z.string().max(2048), secret: z.string().optional() }).strict(),
-      ttlMs: z.number().int().positive().nullable().optional(), cursor: z.null().optional(),
+      name: z.string(), arguments: z.record(z.string(), z.unknown()).default({}),
+      delivery: z.object({ mode: z.string().optional(), url: z.string().max(2048), secret: z.string().optional() }).strict(),
+      ttlMs: z.number().int().positive().nullable().optional(), cursor: z.string().nullable().optional(), maxAgeMs: z.number().int().nonnegative().optional(),
       _meta: z.record(z.string(), z.unknown()).optional(),
     }).strict();
     const params = schema.parse(input);
-    const def = definitions.find((d) => d.name === params.name)!;
+    const def = definitions.find((d) => d.name === params.name);
+    if (!def) throw new McpEventError(-32023, "Unknown event", { kind: "event" });
+    if (subscribe && !params.delivery.mode) throw new McpEventError(-32602, "A delivery mode is required");
+    if (params.delivery.mode && params.delivery.mode !== "webhook") {
+      throw new McpEventError(-32026, "This event supports webhook delivery", { feature: "deliveryMode", value: params.delivery.mode });
+    }
     const field = params.arguments[def.field];
     if (Object.keys(params.arguments).some((k) => k !== def.field) ||
       (field !== undefined && (typeof field !== "string" || !field.trim() || field.length > 512)) || (def.required && !field)) {
@@ -97,28 +122,25 @@ export class BrokerMcpEvents {
   async subscribe(principal: McpEventPrincipal, input: unknown) {
     const { p, params, url, id } = this.identity(principal, input, true);
     const task = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
-      if (!this.authorized(p, params.name, params.arguments)) throw new McpEventError(-32602, "Event resource is not accessible");
+      if (!this.authorized(p, params.name, params.arguments)) throw new McpEventError(-32024, "Event resource is not accessible");
       const secret = params.delivery.secret!;
       const old = this.db.query<Sub>("SELECT * FROM mcp_event_subscriptions WHERE id = ?").get(id);
       const now = this.now();
       const activeCount = this.db.query<{ count: number }>("SELECT COUNT(*) AS count FROM mcp_event_subscriptions WHERE principal = ? AND expires_at > ?").get(canonical(p), now)?.count ?? 0;
-      if ((!old || old.expires_at <= now) && activeCount >= 100) throw new McpEventError(-32602, "Subscription limit reached");
-      const needsVerification = !old || old.secret !== secret || old.expires_at <= now || old.verified_at + 5 * 60_000 <= now;
-      if (needsVerification) {
-        await verifyWebhook(url, id, secret, this.options.post);
-      }
-      if (!this.authorized(p, params.name, params.arguments)) throw new McpEventError(-32602, "Event resource is not accessible");
+      if ((!old || old.expires_at <= now) && activeCount >= 100) throw new McpEventError(-32025, "Subscription limit reached", { limit: "subscriptions", max: 100 });
+      const verifiedAt = await this.verifyDestination(p, url, id, secret);
+      if (!this.authorized(p, params.name, params.arguments)) throw new McpEventError(-32024, "Event resource is not accessible");
       const at = this.now();
       const expires = at + Math.min(params.ttlMs ?? 86_400_000, 7 * 86_400_000);
       const count = this.db.query<{ count: number }>("SELECT COUNT(*) AS count FROM mcp_event_subscriptions WHERE principal = ? AND expires_at > ?").get(canonical(p), at)?.count ?? 0;
-      if ((!old || old.expires_at <= at) && count >= 100) throw new McpEventError(-32602, "Subscription limit reached");
+      if ((!old || old.expires_at <= at) && count >= 100) throw new McpEventError(-32025, "Subscription limit reached", { limit: "subscriptions", max: 100 });
       if (old && old.expires_at <= at) this.db.query("DELETE FROM mcp_event_outbox WHERE subscription_id = ?").run(id);
       this.db.query(`INSERT INTO mcp_event_subscriptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET secret=excluded.secret, previous_secret=excluded.previous_secret,
         rotate_until=excluded.rotate_until, expires_at=excluded.expires_at, verified_at=excluded.verified_at, created_at=excluded.created_at`)
         .run(id, canonical(p), params.name, canonical(params.arguments), url, secret,
           old && old.expires_at > at && old.secret !== secret ? old.secret : old && old.rotate_until > at ? old.previous_secret : null,
-          old && old.expires_at > at && old.secret !== secret ? at + 60_000 : old?.rotate_until ?? 0, expires, needsVerification ? at : old.verified_at, old && old.expires_at > at ? old.created_at : at);
+          old && old.expires_at > at && old.secret !== secret ? at + 60_000 : old?.rotate_until ?? 0, expires, verifiedAt, old && old.expires_at > at ? old.created_at : at);
       if (params.name === "work.waiting") {
         const work = this.resources.work(String(params.arguments.work_id));
         if (work?.kind === "work_item") this.db.query("INSERT INTO mcp_event_source_states VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state").run(`work:${work.id}`, work.state);
@@ -130,7 +152,12 @@ export class BrokerMcpEvents {
   }
   async unsubscribe(principal: McpEventPrincipal, input: unknown) {
     const { id } = this.identity(principal, input, false);
-    const task = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(() => { this.remove(id); return {}; });
+    const task = (this.pending.get(id) ?? Promise.resolve()).catch(() => {}).then(() => {
+      const active = this.db.query("SELECT id FROM mcp_event_subscriptions WHERE id = ? AND expires_at > ?").get(id, this.now());
+      if (!active) throw new McpEventError(-32023, "Unknown subscription", { kind: "subscription" });
+      this.remove(id);
+      return {};
+    });
     this.pending.set(id, task);
     try { return await task; } finally { if (this.pending.get(id) === task) this.pending.delete(id); }
   }
@@ -200,36 +227,54 @@ export class BrokerMcpEvents {
     for (const row of rows) {
       const principal = JSON.parse(row.principal) as McpEventPrincipal;
       if (principal.ownerKey !== ownerKey || principal.node !== node) continue;
-      const event = JSON.parse(row.body);
-      const flight = row.name === "flight.completed" ? this.resources.flight(event.data.flight_id) : undefined;
-      if ((row.name === "flight.completed" && !flight) || !this.authorized(principal, row.name, JSON.parse(row.args), flight)) {
-        if (row.name === "flight.completed" && !JSON.parse(row.args).flight_id) this.db.query("DELETE FROM mcp_event_outbox WHERE id = ?").run(row.job_id);
-        else this.remove(row.id);
+      const allowed = this.deliveryAllowed(row, principal);
+      if (!allowed && row.name === "flight.completed" && !JSON.parse(row.args).flight_id) {
+        // One inaccessible flight cannot end a subscription to the caller's other flights.
+        this.db.query("DELETE FROM mcp_event_outbox WHERE id = ?").run(row.job_id);
         continue;
       }
       const lease = randomUUID();
       this.db.query("UPDATE mcp_event_outbox SET lease = ?, lease_until = ? WHERE id = ?").run(lease, now + 60_000, row.job_id);
       return { id: row.job_id, lease, subscriptionId: row.id, principal, url: row.url, secret: row.secret,
-        ...(row.previous_secret && row.rotate_until > now ? { previousSecret: row.previous_secret } : {}), body: row.body };
+        ...(row.previous_secret && row.rotate_until > now ? { previousSecret: row.previous_secret } : {}), body: allowed ? row.body : termination };
     }
     return null;
   }
-  isActive(id: string, lease: string): boolean { return Boolean(this.prepare(id, lease)); }
-  prepare(id: string, lease: string): McpEventDelivery | null {
-    const row = this.db.query<Sub & { body: string }>(`SELECT s.*, o.body FROM mcp_event_outbox o JOIN mcp_event_subscriptions s ON s.id = o.subscription_id
-      WHERE o.id = ? AND o.lease = ? AND o.lease_until > ? AND s.expires_at > ?`).get(id, lease, this.now(), this.now());
-    if (!row) return null;
+  private deliveryAllowed(row: Sub & { body: string }, principal: McpEventPrincipal) {
     const flight = row.name === "flight.completed" ? this.resources.flight(JSON.parse(row.body).data.flight_id) : undefined;
+    return (row.name !== "flight.completed" || Boolean(flight)) && this.authorized(principal, row.name, JSON.parse(row.args), flight);
+  }
+  private leasedRow(id: string, lease: string) {
+    return this.db.query<Sub & { body: string }>(`SELECT s.*, o.body FROM mcp_event_outbox o JOIN mcp_event_subscriptions s ON s.id = o.subscription_id
+      WHERE o.id = ? AND o.lease = ? AND o.lease_until > ? AND s.expires_at > ?`).get(id, lease, this.now(), this.now());
+  }
+  isActive(id: string, lease: string): boolean {
+    const row = this.leasedRow(id, lease);
+    return Boolean(row && this.deliveryAllowed(row, JSON.parse(row.principal)));
+  }
+  prepare(id: string, lease: string, revoked = false): McpEventDelivery | null {
+    const row = this.leasedRow(id, lease);
+    if (!row) return null;
     const principal = JSON.parse(row.principal) as McpEventPrincipal;
-    if ((row.name === "flight.completed" && !flight) || !this.authorized(principal, row.name, JSON.parse(row.args), flight)) return null;
+    let body = row.body;
+    if (revoked || !this.deliveryAllowed(row, principal)) {
+      if (!revoked && row.name === "flight.completed" && !JSON.parse(row.args).flight_id) {
+        this.db.query("DELETE FROM mcp_event_outbox WHERE id = ?").run(id);
+        return null;
+      }
+      // Revoke before returning a final, data-free envelope to the verified destination.
+      this.remove(row.id);
+      id = `msg_terminated_${randomUUID()}`;
+      body = termination;
+    }
     return { id, lease, subscriptionId: row.id, principal, url: row.url, secret: row.secret,
-      ...(row.previous_secret && row.rotate_until > this.now() ? { previousSecret: row.previous_secret } : {}), body: row.body };
+      ...(row.previous_secret && row.rotate_until > this.now() ? { previousSecret: row.previous_secret } : {}), body };
   }
   settle(id: string, lease: string, status: number, revoked = false) {
     const job = this.db.query<{ subscription_id: string; attempts: number }>("SELECT * FROM mcp_event_outbox WHERE id = ? AND lease = ?").get(id, lease);
     if (!job) return {};
-    if (revoked || status === 410) { this.remove(job.subscription_id); return {}; }
-    if ((status >= 200 && status < 300) || status === 413 || (status >= 300 && status < 500 && status !== 408 && status !== 429) || job.attempts >= 7) {
+    if (revoked) { this.remove(job.subscription_id); return {}; }
+    if ((status >= 200 && status < 300) || status === 413 || (status >= 300 && status < 500 && status !== 408 && status !== 425 && status !== 429) || job.attempts >= 7) {
       this.db.query("DELETE FROM mcp_event_outbox WHERE id = ? AND lease = ?").run(id, lease);
     } else {
       this.db.query("UPDATE mcp_event_outbox SET attempts = attempts + 1, next_at = ?, lease = NULL, lease_until = 0 WHERE id = ? AND lease = ?")

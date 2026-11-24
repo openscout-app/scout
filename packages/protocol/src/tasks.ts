@@ -1,4 +1,5 @@
 import { FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH, parseReplyWaitingOn } from "./invocations.js";
+import { replyPointProblems, type ReplyPointInput } from "./reply-points.js";
 import { applyDecisionToTask, normalizeDecisionCard, validateDecisionCard, type DecisionCardSubmission } from "./decision-cards.js";
 /** Versioned ask/reply semantics. Old peers must be refused before dispatch. */
 export const SCOUT_TASKS_CAPABILITY = "ask-reply/1";
@@ -57,6 +58,8 @@ export type ScoutTaskReply = {
   failed?: boolean;
   /** The work is blocked: the task stays open and its flight waits on this. */
   waitingOn?: import("./invocations.js").ReplyWaitingOn;
+  /** Typed points the reply makes. See reply-points.ts. The runtime stores them as `metadata.replyPoints`. */
+  points?: ReplyPointInput[];
   metadata?: import("./common.js").MetadataMap;
   attachments?: import("./messages.js").MessageAttachment[];
   image?: import("./attachments.js").AttachmentUpload;
@@ -105,7 +108,7 @@ export function validateTaskDecision(task: ScoutTaskAsk, decisionImages?: number
   if (problems.length) throw new Error(`--decision is not valid:\n- ${problems.join("\n- ")}`);
   applyDecisionToTask(task, decision!);
 }
-export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed" | "waitingOn">): void {
+export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "progress" | "failed" | "waitingOn" | "points">): void {
   if (Number(Boolean(reply.ref)) + Number(Boolean(reply.to)) !== 1) throw new Error("reply requires exactly one of --ref <task> or --to <message>");
   if (Number(Boolean(reply.progress)) + Number(Boolean(reply.failed)) + Number(reply.waitingOn !== undefined) > 1) {
     throw new Error("--progress, --failed and --waiting-on cannot be combined");
@@ -114,6 +117,8 @@ export function validateTaskReply(reply: Pick<ScoutTaskReply, "ref" | "to" | "pr
   if (reply.waitingOn !== undefined && !parseReplyWaitingOn(reply.waitingOn)) {
     throw new Error(`--waiting-on takes permission, question or review, and a summary of up to ${FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH} characters`);
   }
+  const pointProblems = replyPointProblems(reply.points);
+  if (pointProblems.length) throw new Error(`reply points are not valid:\n- ${pointProblems.join("\n- ")}`);
 }
 export function taskNotificationPolicy(task: ScoutTaskAsk): ScoutNotificationPolicy {
   return { requested: !task.fyi || Boolean(task.notify), priority: task.defaultAction ? "normal" : "interrupting" };

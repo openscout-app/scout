@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/hub/reporter-source.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "the reporter text runs inside a vendor sandbox, not in the runtime: it hands each hook's send to a detached node child and falls back to curl when fetch cannot reach the inbox",
+  "owner": "runtime"
+}

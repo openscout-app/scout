@@ -19,6 +19,8 @@ export interface VercelBoardFollowerDeps {
   missing?(ids: string[]): Promise<void>;
   /** After the commit: the hand-offs the read recorded for the first time. */
   published?(rows: VercelBoardTaskEventRow[]): void;
+  /** After the commit: the task roots the copy now holds at a newer version. The dispatcher wakes on a ready one. */
+  committed?(channel: string, roots: VercelBoardWireMessage[]): void;
   /** A channel enters a backfill or a re-read, or ends one. */
   phase?(channel: string, state: VercelBoardMirrorState): void;
   now?: () => number;
@@ -139,7 +141,10 @@ export class VercelBoardFollower {
     const newer = [...roots.values()].filter(root => root.version > (mirror.version(connection.id, root.id) ?? -1));
     if (!newer.length) return 0;
     await this.deps.apply(newer.filter(root => root.task));
-    return newer.filter(root => mirror.upsert(connection.id, root, vercelBoardOriginOf(root, connection))).length;
+    const changed = newer.filter(root => mirror.upsert(connection.id, root, vercelBoardOriginOf(root, connection)));
+    const changedRoots = changed.filter(root => root.task && root.re === null);
+    if (changedRoots.length) this.deps.committed?.(channel, changedRoots);
+    return changed.length;
   }
 
   private async commit(channel: string, from: string | null, to: string, read: Read, delta: boolean): Promise<number> {
@@ -158,6 +163,7 @@ export class VercelBoardFollower {
       },
     });
     if (recorded.length) this.deps.published?.(recorded);
+    if (roots.length) this.deps.committed?.(channel, roots);
     return changed;
   }
 }

@@ -79,6 +79,12 @@
       "import": "./dist/agent-workspace.js",
       "default": "./dist/agent-workspace.js"
     },
+    "./agent-workspace-retirement": {
+      "bun": "./src/agent-workspace-retirement.ts",
+      "types": "./dist/agent-workspace-retirement.d.ts",
+      "import": "./dist/agent-workspace-retirement.js",
+      "default": "./dist/agent-workspace-retirement.js"
+    },
     "./control-plane-agents": {
       "bun": "./src/control-plane-agents.ts",
       "types": "./dist/control-plane-agents.d.ts",
@@ -204,6 +210,12 @@
       "types": "./dist/shared-mcp.d.ts",
       "import": "./dist/shared-mcp.js",
       "default": "./dist/shared-mcp.js"
+    },
+    "./hub": {
+      "bun": "./src/hub/index.ts",
+      "types": "./dist/hub/index.d.ts",
+      "import": "./dist/hub/index.js",
+      "default": "./dist/hub/index.js"
     },
     "./support-paths": {
       "bun": "./src/support-paths.ts",
@@ -608,7 +620,7 @@
   ],
   "scripts": {
     "build": "bun run --cwd ../agent-sessions build && rm -rf dist && node_modules/.bin/tsc -p tsconfig.json && node scripts/stage-extension-channel.mjs",
-    "broker": "node ./bin/openscout-runtime.mjs broker",
+    "broker": "bun ./bin/openscout-runtime.mjs broker",
     "service": "node ./bin/openscout-runtime.mjs service",
     "discover": "node ./bin/openscout-runtime.mjs discover",
     "db:generate": "bunx drizzle-kit generate --config drizzle.config.ts",
@@ -627,6 +639,7 @@
     "postpublish": "node ../../scripts/restore-publish-manifest.mjs ."
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
     "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",

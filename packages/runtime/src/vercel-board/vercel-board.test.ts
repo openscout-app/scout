@@ -1,12 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import type { CollaborationEvent, CollaborationRecord, ConversationDefinition, FlightRecord, ScoutDeliverRequest, ScoutDeliverResponse, VercelBoardHandoffEvent, WorkItemRecord } from "@openscout/protocol";
 import { vercelBoardCanHeader, validateVercelBoardConnectionConfig } from "@openscout/protocol";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openControlPlaneSqliteDatabase, type ControlPlaneSqliteTransactionalDatabase } from "../sqlite-adapter.js";
 import { migrateControlPlaneDatabaseSchema } from "../control-plane-migrations.js";
 import { FakeVercelBoard } from "../test-support/fake-vercel-board.js";
+import { LEAST_BUSY_POLICY, installPolicyExtension } from "../test-support/vercel-board-policy-extension.js";
 import { VercelBoardHttpTransport } from "./client.js";
 import { VercelBoardCustody } from "./custody.js";
 import { VercelBoardFollower } from "./follower.js";
@@ -15,6 +16,9 @@ import { VercelBoardLockError, VercelBoardRuntimeLock } from "./runtime-lock.js"
 import { VercelBoardOutbox, VercelBoardOutboxError } from "./outbox.js";
 import { vercelBoardActorId, vercelBoardTaskWorkItem, vercelBoardWorkId, mergeBoardProjection } from "./projection.js";
 import { BrokerVercelBoardService, VercelBoardServiceError, vercelBoardRoomId } from "./service.js";
+import { VercelBoardLead, type VercelBoardLeadNotice } from "./lead.js";
+import type { VercelBoardPlanEventRow } from "./mirror.js";
+import type { VercelBoardLeadRow } from "./store.js";
 import { VercelBoardCursorConflictError, VercelBoardStore } from "./store.js";
 import { parseVercelBoardMessage, type VercelBoardWireMessage } from "./wire.js";
 
@@ -440,7 +444,7 @@ test("a lapsed lock nobody took is still this runtime's: a stall past the TTL re
 
 // ---- service ------------------------------------------------------------------
 
-function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void) {
+function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => void, options: { dispatchOnEvents?: boolean; extensionEnv?: NodeJS.ProcessEnv } = {}) {
   const cancelled: { id: string; reason: string }[] = [];
   const time = clock();
   const board = new FakeVercelBoard({ now: time.now });
@@ -454,7 +458,8 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   const rooms = new Map<string, ConversationDefinition>();
   const live: VercelBoardHandoffEvent[] = [];
   const service = new BrokerVercelBoardService({
-    nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now, fetch: (url, init) => {
+    nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: dir, autoStart: false, now: time.now,
+    ...(options.dispatchOnEvents ? { dispatchOnEvents: true } : {}), ...(options.extensionEnv ? { extensionEnv: options.extensionEnv } : {}), fetch: (url, init) => {
       beforeFetch?.(String(url), board);
       return board.fetch(url, init);
     },
@@ -487,7 +492,7 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
   cleanup.push(() => { void service.stop(); });
   const connect = (extra: Record<string, unknown> = {}) => service.connect({ url: URL_, id: "c1", channels: ["work"], credential: { backend: "env", key: "VERCEL_BOARD_TEST_TOKEN" }, ...extra });
   const workItems = () => [...records.values()].filter(record => record.kind === "work_item");
-  return { time, board, service, db, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled };
+  return { time, board, service, db, records, events, deliveries, flights, rooms, live, connect, workItems, cancelled, dir };
 }
 
 test("connect reads the principal, makes the channels and a room for each, and is verified only after the probe task completes", async () => {
@@ -1033,4 +1038,438 @@ test("only sync-enabled channels publish plans and one attributed settlement rep
   expect(local.noSync).toBe(true);
   expect(local.tasks.every(task => task.noSync === true)).toBe(true);
   expect((await h.service.status("c1"))[0]).toMatchObject({ syncChannels: ["work"] });
+});
+
+// ---- dispatch policies ----------------------------------------------------
+
+async function dispatchHarness(extra: Record<string, unknown>, options: { dispatchOnEvents?: boolean; extensionEnv?: NodeJS.ProcessEnv } = {}) {
+  const h = serviceHarness(undefined, options);
+  await h.connect(extra);
+  await h.service.pump("c1");
+  const actor = (role: string) => `${h.board.principal}+${role}`;
+  const claimed = (id: string) => h.board.task(id)!.state === "claimed";
+  return { ...h, actor, claimed, reviewer: actor("reviewer"), builder: actor("builder") };
+}
+
+test("by default a channel is manual and a self-serve channel is role-only, with every guard on", async () => {
+  const h = await dispatchHarness({ channels: ["work", "ops"], selfServe: ["work"] });
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status).toMatchObject({ enabled: true, policy: "manual", wakes: { events: true, sweepMs: 5_000 } });
+  expect(status.channels).toEqual([
+    { channel: "work", policy: "role-only", steps: ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role", "pick:first"], guardsRemoved: [], mirrored: true, swarm: true },
+    { channel: "ops", policy: "manual", steps: ["manual"], guardsRemoved: [], mirrored: true, swarm: true },
+  ]);
+  expect((await h.service.status("c1"))[0]!.dispatcher).toEqual({ enabled: true, channels: [
+    { channel: "work", policy: "role-only", guardsRemoved: [], relaxed: false, swarm: true },
+    { channel: "ops", policy: "manual", guardsRemoved: [], relaxed: false, swarm: true },
+  ] });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const ops = h.board.createTask({ channel: "ops", text: "Review ops", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  expect(h.board.task(ops)!.state).toBe("ready");
+  const why = (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: ops })).decisions[0]!;
+  expect(why).toMatchObject({ outcome: "skip", policy: "manual", step: "manual" });
+});
+
+test("manual on a self-serve channel turns the role match off", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"], dispatch: { channels: { work: { policy: "manual" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const task = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(task)!.state).toBe("ready");
+  expect(h.deliveries).toEqual([]);
+});
+
+test("role-only as the connection default claims a role-kept operator task, and names nothing else", async () => {
+  const h = await dispatchHarness({ dispatch: { policy: "role-only" } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const open = h.board.createTask({ channel: "work", text: "Anyone", as: null });
+  const review = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.task(open)!.state).toBe("ready");
+  expect(h.deliveries.at(-1)!.body).toContain(`because the task is kept for that role and you declared it`);
+  const why = (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: open })).decisions[0]!;
+  expect(why).toMatchObject({ outcome: "skip", step: "match:role", reason: "kept for no role" });
+});
+
+test("label-matched claims only a labelled task, for the agent its capability maps to", async () => {
+  const h = await dispatchHarness({ dispatch: {
+    channels: { work: { policy: "label-matched", labels: ["area"] } },
+    capabilities: { "area=docs": ["agent-docs"], "area=api": ["agent-api"] },
+  } });
+  const plain = h.board.createTask({ channel: "work", text: "No label", as: null });
+  const docs = h.board.createTask({ channel: "work", text: "Fix the guide", as: null, labels: { area: "docs" } });
+  const css = h.board.createTask({ channel: "work", text: "Fix the colours", as: null, labels: { area: "css" } });
+  await h.service.pump("c1");
+  expect(h.board.task(docs)!.claim!.actor).toBe(h.actor("scout"));
+  expect(h.board.message(docs)!.labels["scout.agent"]).toBe("agent-docs");
+  expect([plain, css].map(id => h.board.task(id)!.state)).toEqual(["ready", "ready"]);
+  expect(h.deliveries.at(-1)!.body).toContain("under the label-matched dispatch policy the operator set for channel work");
+  const why = (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: css })).decisions[0]!;
+  expect(why).toMatchObject({ outcome: "skip", step: "match:capability" });
+});
+
+test("trusted-channel gives an open operator task to any free agent, and a role task to that role", async () => {
+  const h = await dispatchHarness({ dispatch: { channels: { work: { policy: "trusted-channel" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const review = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  const open = h.board.createTask({ channel: "work", text: "Anyone", as: null });
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.message(review)!.labels["scout.agent"]).toBe("agent-review");
+  expect(h.board.task(open)!.claim!.actor).toBe(h.actor("scout"));
+  expect(h.board.message(open)!.labels["scout.agent"]).toBe("agent-build");
+});
+
+test("without an opt-in, no policy takes synced text, another owner's task, or one the board has seen claimed", async () => {
+  const h = await dispatchHarness({ syncChannels: ["work"], dispatch: { channels: { work: { policy: "trusted-channel" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  // Board text from Slack, GitHub or Linear: by a platform user, and even under the operator's own principal.
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", owner: "slack:user:U1", by: "slack:user:U1", from: "slack" });
+  const linkedSlack = h.board.createTask({ channel: "work", text: "Operator's own Slack message", as: null, from: "slack" });
+  const github = h.board.createTask({ channel: "work", text: "From GitHub", as: null, from: "github" });
+  const linear = h.board.createTask({ channel: "work", text: "From Linear", as: null, from: "linear" });
+  const stranger = h.board.createTask({ channel: "work", text: "Mine", owner: "local:user:stranger" });
+  const released = h.board.createTask({ channel: "work", text: "Let go", as: null });
+  h.board.claimAs(released, "local:user:stranger", 1);
+  h.time.advance(2_000);
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  for (const id of [slack, linkedSlack, github, linear, stranger, released]) expect(h.board.task(id)!.state).toBe("ready");
+  expect(h.deliveries).toEqual([]);
+  const reason = async (id: string) => (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: id })).decisions[0]!;
+  expect(await reason(linkedSlack)).toMatchObject({ step: "guard:not-synced" });
+  expect(await reason(github)).toMatchObject({ step: "guard:not-synced" });
+  expect(await reason(stranger)).toMatchObject({ step: "guard:operator-authored" });
+  expect(await reason(released)).toMatchObject({ step: "guard:first-claim" });
+});
+
+test("trusting any author still leaves synced text alone: each sync key needs its own opt-in", async () => {
+  const h = await dispatchHarness({ dispatch: { channels: { work: { policy: "trusted-channel", trust: { authors: "any", anyEpoch: true } } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", owner: "slack:user:U1", by: "slack:user:U1", from: "slack" });
+  await h.service.pump("c1");
+  expect(h.board.task(slack)!.state).toBe("ready");
+  expect((await h.service.dispatcherStatus("c1")).recent.find(decision => decision.taskId === slack)).toMatchObject({ outcome: "skip", step: "guard:not-synced" });
+});
+
+test("each guard relaxes only by an explicit setting, per channel or per label, and status shows it", async () => {
+  const h = await dispatchHarness({ dispatch: { channels: { work: { policy: "trusted-channel" } } } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-b", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-c", role: "builder", actorId: "operator" });
+  const stranger = h.board.createTask({ channel: "work", text: "Mine", owner: "local:user:stranger" });
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", as: null, from: "slack" });
+  const released = h.board.createTask({ channel: "work", text: "Let go", as: null, labels: { "retry-ok": "yes" } });
+  const releasedPlain = h.board.createTask({ channel: "work", text: "Let go too", as: null });
+  for (const id of [released, releasedPlain]) h.board.claimAs(id, "local:user:stranger", 1);
+  h.time.advance(2_000);
+  await h.service.pump("c1");
+  expect(h.deliveries).toEqual([]);
+  const status = await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { work: {
+    policy: "trusted-channel", trust: { authors: "any", synced: ["slack"] }, labelTrust: [{ label: "retry-ok", trust: { anyEpoch: true } }],
+  } } } });
+  expect(status.channels[0]).toMatchObject({ trust: { authors: "any", synced: ["slack"] }, labelTrust: [{ label: "retry-ok", trust: { anyEpoch: true } }], guardsRemoved: [] });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.channels[0]).toMatchObject({ relaxed: true });
+  await h.service.pump("c1");
+  expect([stranger, slack, released].every(h.claimed)).toBe(true);
+  expect(h.board.task(releasedPlain)!.state).toBe("ready"); // no label, no epoch opt-in
+});
+
+test("dispatch settings are the operator's, are checked before they are saved, and persist", async () => {
+  const h = await dispatchHarness({});
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "agent-a", dispatch: { policy: "trusted-channel" } })).rejects.toMatchObject({ status: 403 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { work: { steps: ["guard:not-synced", "pick:frist"] } } } }))
+    .rejects.toMatchObject({ status: 400, code: "invalid_dispatch" });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { elsewhere: { policy: "role-only" } } } })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { policy: "eager" } })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { channels: { work: { trust: { authors: "everyone" } } } } as never })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.runDispatcher({ connectionId: "c1", actorId: "agent-a" })).rejects.toMatchObject({ status: 403 });
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { policy: "role-only" } });
+  const saved = JSON.parse(readFileSync(join(h.dir, "connections.json"), "utf8")) as { connections?: { id: string; dispatch?: unknown }[] } | { id: string; dispatch?: unknown }[];
+  const list = Array.isArray(saved) ? saved : saved.connections ?? [];
+  expect(list.find(entry => entry.id === "c1")?.dispatch).toEqual({ policy: "role-only" });
+});
+
+test("a custom chain may drop a default guard, and status names the guard it dropped", async () => {
+  const h = await dispatchHarness({ dispatch: {
+    policies: { "any-author": ["guard:not-synced", "guard:first-claim", "resolve:for", "match:role-or-any", "pick:first"] },
+    channels: { work: { policy: "any-author" } },
+  } });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status.channels[0]).toMatchObject({ policy: "any-author", guardsRemoved: ["guard:operator-authored"] });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.channels[0]).toMatchObject({ relaxed: true, guardsRemoved: ["guard:operator-authored"] });
+  const stranger = h.board.createTask({ channel: "work", text: "Mine", owner: "local:user:stranger" });
+  const slack = h.board.createTask({ channel: "work", text: "From Slack", owner: "slack:user:U1", by: "slack:user:U1", from: "slack" });
+  await h.service.pump("c1");
+  expect(h.claimed(stranger)).toBe(true);
+  expect(h.board.task(slack)!.state).toBe("ready");
+});
+
+test("the dispatcher claims and starts an agent on the task.ready event, without waiting for the sweep", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] }, { dispatchOnEvents: true });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const build = h.board.createTask({ channel: "work", text: "Build", as: null });
+  const review = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null, needs: [build] });
+  await h.service.pump("c1", { dispatch: false });
+  expect(h.board.task(review)!.state).toBe("waiting");
+  h.board.completeAs(build, "local:user:teammate", "Built.");
+  // Only the follower's read runs: the task.ready event wakes the dispatcher.
+  await h.service.pump("c1", { dispatch: false });
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.deliveries.at(-1)).toMatchObject({ target: { kind: "agent_id", agentId: "agent-review" } });
+  expect(h.deliveries.at(-1)!.body).toContain(`Scout's runtime matched you to Board task ${review} as reviewer`);
+
+  const quiet = await dispatchHarness({ selfServe: ["work"] });
+  await quiet.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const idle = quiet.board.createTask({ channel: "work", text: "Review", for: quiet.reviewer, as: null });
+  await quiet.service.pump("c1", { dispatch: false });
+  expect(quiet.board.task(idle)!.state).toBe("ready"); // events off: only a pass claims
+});
+
+test("a claim that ends frees its agent, and the same sweep hands it the next ready task", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] }, { dispatchOnEvents: true });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const first = h.board.createTask({ channel: "work", text: "Review A", for: h.reviewer, as: null });
+  const second = h.board.createTask({ channel: "work", text: "Review B", for: h.reviewer, as: null });
+  await h.service.pump("c1", { dispatch: false });
+  expect([first, second].map(id => h.board.task(id)!.state)).toEqual(["claimed", "ready"]);
+  h.flights.set("flight-1", { id: "flight-1", state: "completed", output: "Done.", metadata: { completedByBrokerReply: true } } as FlightRecord);
+  await h.service.pump("c1"); // the custody tick settles the first; the pass after it claims the second
+  expect(h.board.task(first)!.state).toBe("completed");
+  expect(h.board.task(second)!.claim!.actor).toBe(h.reviewer);
+});
+
+test("pausing the dispatcher stops new claims and keeps the held claim renewing", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "reviewer", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-b", role: "reviewer", actorId: "operator" });
+  const held = h.board.createTask({ channel: "work", text: "Review A", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  expect(h.claimed(held)).toBe(true);
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { enabled: false } });
+  const next = h.board.createTask({ channel: "work", text: "Review B", for: h.reviewer, as: null });
+  const until = h.board.task(held)!.claim!.until;
+  h.time.advance(30_000);
+  await h.service.pump("c1");
+  expect(h.board.task(next)!.state).toBe("ready");
+  expect(h.board.task(held)!.claim!.until).toBeGreaterThan(until);
+  expect((await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: next })).decisions[0]).toMatchObject({ reason: "the dispatcher is paused for this connection" });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.enabled).toBe(false);
+});
+
+test("status shows each held claim's lease, when it was renewed and when the next renewal is due, never its token", async () => {
+  const h = await dispatchHarness({ selfServe: ["work"] });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const task = h.board.createTask({ channel: "work", text: "Review", for: h.reviewer, as: null });
+  await h.service.pump("c1");
+  const claimedAt = h.time.now();
+  let [claim] = (await h.service.status("c1"))[0]!.claims!;
+  expect(claim).toMatchObject({ taskId: task, agentId: "agent-review", profile: "reviewer", state: "held", epoch: 1, leaseSeconds: 60, renewedAt: claimedAt, renewDueAt: claimedAt + 20_000, startedBy: "scout:vercel-board-matcher", flightId: "flight-1" });
+  h.time.advance(25_000);
+  await h.service.pump("c1");
+  [claim] = (await h.service.status("c1"))[0]!.claims!;
+  expect(claim).toMatchObject({ leaseSeconds: 300, renewedAt: claimedAt + 25_000, renewDueAt: claimedAt + 25_000 + 100_000 });
+  const token = h.board.message(task)!.task!.claim!.token;
+  const shown = JSON.stringify([await h.service.status("c1"), await h.service.dispatcherStatus("c1")]);
+  expect(shown).not.toContain(token);
+  expect((await h.service.dispatcherStatus("c1")).claims).toEqual((await h.service.status("c1"))[0]!.claims!);
+});
+
+test("an operator puts a pinned external policy in a channel's chain, and the runtime refuses an unpinned one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scout-board-ext-"));
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  const ext = installPolicyExtension(root, "board-policy", LEAST_BUSY_POLICY, { "counts.json": JSON.stringify({ "agent-a": 4, "agent-b": 0 }) });
+  const dispatch = {
+    external: { "least-busy": { extension: "board-policy", digest: ext.digest() } },
+    policies: { balanced: ["guard:not-synced", "guard:operator-authored", "guard:first-claim", "resolve:for", "match:role-or-any", "external:least-busy"] },
+    channels: { work: { policy: "balanced" } },
+  };
+  const h = await dispatchHarness({ dispatch }, { extensionEnv: ext.env });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-a", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-b", role: "builder", actorId: "operator" });
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status.steps).toContain("external:least-busy");
+  expect(status.channels[0]).toMatchObject({ channel: "work", policy: "balanced", guardsRemoved: [] });
+  const task = h.board.createTask({ channel: "work", text: "Anyone", as: null });
+  await h.service.pump("c1");
+  expect(h.board.message(task)!.labels["scout.agent"]).toBe("agent-b");
+  expect(h.deliveries.at(-1)!.body).toContain("under the balanced dispatch policy");
+
+  const unpinned = { ...dispatch, external: { "least-busy": { extension: "board-policy", digest: "f".repeat(64) } } };
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: unpinned })).rejects.toMatchObject({ status: 400, code: "invalid_dispatch" });
+  const saved = JSON.parse(readFileSync(join(h.dir, "connections.json"), "utf8"));
+  const list = (Array.isArray(saved) ? saved : saved.connections ?? []) as { id: string; dispatch?: typeof dispatch }[];
+  expect(list.find(entry => entry.id === "c1")?.dispatch?.external["least-busy"].digest).toBe(ext.digest());
+});
+
+// ---- the agent swarm for operator plans -----------------------------------
+
+async function swarmHarness(extra: Record<string, unknown> = {}) {
+  const h = await dispatchHarness(extra);
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build", role: "builder", actorId: "operator" });
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-review", role: "reviewer", actorId: "operator" });
+  const flightOf = (agentId: string, nth = 0) => {
+    const index = h.deliveries.map((delivery, i) => [delivery, i] as const)
+      .filter(([delivery]) => (delivery.target as { agentId?: string } | undefined)?.agentId === agentId && !delivery.body.startsWith("Lead update")).at(nth)?.[1];
+    if (index === undefined) throw new Error(`no delivery to ${agentId}`);
+    return `flight-${index + 1}`;
+  };
+  const leadUpdates = () => h.deliveries.filter(delivery => delivery.body.startsWith("Lead update"));
+  const plan = (tasks: { key?: string; text: string; for?: string; needs?: { key: string }[] }[], lead: string | undefined = "agent-lead") =>
+    h.service.plan({ connectionId: "c1", channel: "work", planningTaskId: "work-plan-1", requestId: "req-1", actorId: "operator", tasks, ...(lead ? { lead } : {}) });
+  return { ...h, flightOf, leadUpdates, plan };
+}
+const done = (output: string) => ({ state: "completed", output, metadata: { completedByBrokerReply: true } }) as unknown as FlightRecord;
+
+test("the swarm runs an operator plan end to end: needs in order, the reviewer after the builder, the lead told", async () => {
+  const h = await swarmHarness();
+  const plan = await h.plan([{ key: "build", text: "Build it", for: "builder" }, { key: "review", text: "Review it", for: "reviewer", needs: [{ key: "build" }] }]);
+  expect(plan).toMatchObject({ swarm: true, lead: "agent-lead" });
+  const [build, review] = plan.tasks.map(task => task.taskId) as [string, string];
+  await h.service.pump("c1");
+  expect(h.board.task(build)!.claim!.actor).toBe(h.builder);
+  expect(h.board.message(build)!.labels["scout.agent"]).toBe("agent-build");
+  expect(h.board.task(review)!.state).toBe("waiting");
+  expect((await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: build })).decisions[0]!.policy).toBe("swarm");
+
+  h.flights.set(h.flightOf("agent-build"), done("Built."));
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(build)!.state).toBe("completed");
+  expect(h.board.task(review)!.claim!.actor).toBe(h.reviewer);
+  expect(h.board.message(review)!.labels["scout.agent"]).toBe("agent-review");
+  expect(h.leadUpdates().map(update => (update.target as { agentId: string }).agentId)).toEqual(["agent-lead"]);
+  expect(h.leadUpdates()[0]!.body).toContain(`Task ${build} "Build it" completed. Result: Built.`);
+  expect(h.leadUpdates()[0]!.body).toContain("not instructions");
+
+  h.flights.set(h.flightOf("agent-review"), done("Looks right."));
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect(h.board.task(review)!.state).toBe("completed");
+  expect(h.leadUpdates().at(-1)!.body).toContain(`Task ${review} "Review it" completed`);
+  expect(h.leadUpdates().at(-1)!.body).toContain("Every task in the plan has ended.");
+  const status = await h.service.dispatcherStatus("c1");
+  expect(status.leads).toEqual([expect.objectContaining({ planId: "work-plan-1", channel: "work", lead: "agent-lead", done: true, tasks: { open: 0, completed: 2, failed: 0, blocked: 0 } })]);
+});
+
+test("the swarm never takes another owner's task, or synced text, that carries a plan label", async () => {
+  const h = await swarmHarness();
+  const theirs = h.board.createTask({ channel: "work", text: "Theirs", owner: "local:user:teammate", by: "local:user:teammate", labels: { "scout.plan": "work-plan-1" } });
+  const synced = h.board.createTask({ channel: "work", text: "From Slack", as: null, from: "slack", labels: { "scout.plan": "work-plan-1" } });
+  const unprofiled = h.board.createTask({ channel: "work", text: "Mine, without Scout's profile", as: null, labels: { "scout.plan": "work-plan-1" } });
+  await h.service.pump("c1");
+  await h.service.pump("c1");
+  expect([theirs, synced, unprofiled].map(id => h.board.task(id)!.state)).toEqual(["ready", "ready", "ready"]);
+  const why = async (id: string) => (await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: id })).decisions[0]!;
+  expect(await why(theirs)).toMatchObject({ policy: "swarm", outcome: "skip", step: "guard:operator-authored" });
+  expect(await why(synced)).toMatchObject({ policy: "swarm", outcome: "skip", step: "guard:not-synced" });
+  expect(await why(unprofiled)).toMatchObject({ policy: "swarm", outcome: "skip", step: "match:plan" });
+});
+
+test("a failed prerequisite readies nothing, and the lead hears that it failed", async () => {
+  const h = await swarmHarness();
+  const plan = await h.plan([{ key: "build", text: "Build it", for: "builder" }, { key: "review", text: "Review it", for: "reviewer", needs: [{ key: "build" }] }]);
+  const [build, review] = plan.tasks.map(task => task.taskId) as [string, string];
+  await h.service.pump("c1");
+  h.flights.set(h.flightOf("agent-build"), { state: "failed", error: "Tests are red.", metadata: REPLIED } as unknown as FlightRecord);
+  for (let i = 0; i < 3; i++) await h.service.pump("c1");
+  expect(h.board.task(build)).toMatchObject({ state: "failed", reason: "Tests are red." });
+  expect(h.board.task(review)!.state).toBe("waiting");
+  expect(h.deliveries.some(delivery => (delivery.target as { agentId?: string }).agentId === "agent-review")).toBe(false);
+  expect(h.leadUpdates()).toHaveLength(1);
+  expect(h.leadUpdates()[0]!.body).toContain(`Task ${build} "Build it" failed: Tests are red. Tasks that need it stay waiting.`);
+  expect((await h.service.dispatcherStatus("c1")).leads[0]).toMatchObject({ done: false, tasks: { open: 1, failed: 1 } });
+});
+
+test("needs_input holds the task; when the operator answers on the board it goes back to the pool", async () => {
+  const h = await swarmHarness();
+  await h.service.declareRole({ connectionId: "c1", agentId: "agent-build-2", role: "builder", actorId: "operator" });
+  const plan = await h.plan([{ key: "build", text: "Build it", for: "builder" }]);
+  const build = plan.tasks[0]!.taskId;
+  await h.service.pump("c1");
+  const first = h.flightOf("agent-build");
+  h.flights.set(first, { id: first, ...asking("Which branch?") } as unknown as FlightRecord);
+  await h.service.pump("c1");
+  expect(h.board.task(build)).toMatchObject({ state: "blocked", blocked: { kind: "needs_input", reason: "Which branch?" } });
+  await h.service.pump("c1");
+  expect(h.leadUpdates().at(-1)!.body).toContain("waits on the operator: Which branch? The operator answers it; do not answer it yourself.");
+
+  h.board.liftHold(build);
+  await h.service.pump("c1");
+  expect(h.cancelled).toEqual([{ id: first, reason: "The operator answered on the board; the task went back to the pool for the next free agent." }]);
+  expect(h.board.task(build)).toMatchObject({ state: "claimed", epoch: 2 });
+  expect(h.board.task(build)!.claim!.actor).toBe(h.builder);
+  expect((await h.service.dispatcherStatus("c1")).claims).toEqual([expect.objectContaining({ taskId: build, state: "held", epoch: 2 })]);
+  await h.service.pump("c1");
+  expect(h.leadUpdates().at(-1)!.body).toContain("the operator answered, and it is moving again.");
+});
+
+test("the operator turns the swarm off per channel or connection, and planned tasks wait for the channel's policy", async () => {
+  const h = await swarmHarness();
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { swarm: { channels: { work: false } } } });
+  expect((await h.service.dispatcherStatus("c1")).channels[0]).toMatchObject({ channel: "work", policy: "manual", swarm: false });
+  expect((await h.service.status("c1"))[0]!.dispatcher!.channels[0]).toMatchObject({ swarm: false });
+  const plan = await h.plan([{ text: "Build it", for: "builder" }]);
+  expect(plan.swarm).toBe(false);
+  await h.service.pump("c1");
+  expect(h.board.task(plan.tasks[0]!.taskId)!.state).toBe("ready");
+  expect((await h.service.runDispatcher({ connectionId: "c1", actorId: "", explain: plan.tasks[0]!.taskId })).decisions[0]).toMatchObject({ policy: "manual", outcome: "skip" });
+
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { swarm: { enabled: false } } });
+  expect(await h.service.dispatcherStatus("c1")).toMatchObject({ swarm: false });
+  await h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: {} });
+  await h.service.pump("c1");
+  expect(h.board.task(plan.tasks[0]!.taskId)!.claim!.actor).toBe(h.builder);
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "operator", dispatch: { swarm: { channels: { elsewhere: false } } } })).rejects.toMatchObject({ status: 400 });
+  await expect(h.service.setDispatch({ connectionId: "c1", actorId: "agent-build", dispatch: { swarm: { enabled: true } } })).rejects.toMatchObject({ status: 403 });
+});
+
+test("the lead loop wakes on an event that lands while it is telling the lead, and tells it next", async () => {
+  const rows: VercelBoardLeadRow[] = [{ planId: "p1", channel: "work", lead: "agent-lead", cursor: 0, done: false, lastNoticeAt: null, lastError: null, createdAt: 1 }];
+  const events: VercelBoardPlanEventRow[] = [];
+  const event = (seq: number, taskId: string, kind: "completed" | "claimed"): VercelBoardPlanEventRow => ({
+    connectionId: "c1", cursor: String(seq), channel: "work", taskId, kind, at: seq, actor: null, to: null, epoch: 1, detail: {}, derived: false, seq, title: `Task ${taskId}`,
+  });
+  const store = {
+    plans: () => rows,
+    updatePlan: (_c: string, _p: string, patch: Partial<VercelBoardLeadRow>) => { Object.assign(rows[0]!, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined))); },
+    followPlan: () => undefined,
+  };
+  const mirror = {
+    planEvents: (_c: string, _p: string, after: number) => events.filter(row => row.seq > after),
+    planCounts: () => ({ open: 1, completed: events.filter(row => row.kind === "completed").length, failed: 0, blocked: 0 }),
+    lastEventSeq: () => 0,
+  };
+  const told: VercelBoardLeadNotice[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const lead = new VercelBoardLead({
+    connectionId: "c1", store: store as never, mirror: mirror as never, swarm: () => true,
+    tell: async notice => { told.push(notice); if (told.length === 1) await gate; },
+  });
+  events.push(event(1, "a", "claimed"), event(2, "a", "completed"));
+  const first = lead.pass();
+  await Promise.resolve();
+  expect(told).toHaveLength(1);
+  // Busy telling the lead: a completed event arrives and wakes the loop.
+  events.push(event(3, "b", "completed"));
+  const second = lead.pass();
+  release();
+  await Promise.all([first, second]);
+  expect(told.map(notice => notice.events.map(row => row.taskId))).toEqual([["a"], ["b"]]);
+  expect(told.map(notice => notice.from)).toEqual([1, 3]);
+  expect(rows[0]!.cursor).toBe(3);
+  // A failed telling keeps the cursor, and the next pass tells it again.
+  events.push(event(4, "c", "completed"));
+  const failing = new VercelBoardLead({ connectionId: "c1", store: store as never, mirror: mirror as never, swarm: () => true, tell: async () => { throw new Error("route down"); } });
+  await failing.pass();
+  expect(rows[0]).toMatchObject({ cursor: 3, lastError: "route down" });
+  await lead.pass();
+  expect(told.at(-1)!.events.map(row => row.taskId)).toEqual(["c"]);
+  expect(rows[0]).toMatchObject({ cursor: 4, lastError: null });
 });

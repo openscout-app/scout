@@ -53,6 +53,7 @@ const managedLocalSessionTransports = new Set<AgentEndpoint["transport"]>([
   "pi_rpc",
   "grok_acp",
   "kimi_acp",
+  "antigravity_acp",
   "devin_acp",
   "tmux",
 ]);

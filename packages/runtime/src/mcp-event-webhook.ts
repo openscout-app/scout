@@ -6,7 +6,12 @@ import ipaddr from "ipaddr.js";
 import { Webhook } from "standardwebhooks";
 
 export class McpEventError extends Error {
-  constructor(readonly code: number, message: string, readonly reason?: string) { super(message); }
+  readonly data?: Record<string, unknown>;
+  constructor(readonly code: number, message: string, detail?: Record<string, unknown> | string) {
+    super(message);
+    this.data = typeof detail === "string" ? { reason: detail } : detail;
+  }
+  get reason(): string | undefined { return typeof this.data?.reason === "string" ? this.data.reason : undefined; }
 }
 
 export function parseWebhookUrl(value: unknown): URL {
@@ -47,7 +52,7 @@ export const postWebhook: WebhookPost = async (rawUrl, body, headers) => {
     lookup(hostname, { all: true }).then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
   });
   if (!addresses.length || addresses.some(({ address }) => !isPublicWebhookAddress(address))) {
-    throw new McpEventError(-32015, "Callback address is not public", "invalid_url");
+    throw new McpEventError(-32602, "Callback address is not public");
   }
   const address = addresses[0]!;
   const destination = new URL(url);
@@ -90,17 +95,23 @@ export function webhookHeaders(id: string, subscriptionId: string, body: string,
 
 export async function verifyWebhook(url: string, subscriptionId: string, secret: string, post: WebhookPost = postWebhook) {
   const challenge = randomUUID();
-  const id = `verify_${randomUUID()}`;
+  const id = `msg_verification_${randomUUID()}`;
   const body = JSON.stringify({ type: "verification", challenge });
   try {
     const response = await post(url, body, webhookHeaders(id, subscriptionId, body, secret));
-    const actual = JSON.parse(response.body)?.challenge;
+    if (response.status >= 400) throw new McpEventError(-32027, "Callback verification failed", { reason: response.status >= 500 ? "http_5xx" : "http_4xx" });
+    let actual: unknown;
+    try { actual = JSON.parse(response.body)?.challenge; } catch { /* The receiver did not echo the challenge. */ }
     if (response.status < 200 || response.status >= 300 || typeof actual !== "string" ||
       Buffer.byteLength(actual) !== Buffer.byteLength(challenge) || !timingSafeEqual(Buffer.from(actual), Buffer.from(challenge))) {
-      throw new Error("challenge failed");
+      throw new McpEventError(-32027, "Callback verification failed", { reason: "challenge_failed" });
     }
   } catch (error) {
     if (error instanceof McpEventError) throw error;
-    throw new McpEventError(-32015, "Callback verification failed", error instanceof Error && error.name === "TimeoutError" ? "timeout" : "challenge_failed");
+    const code = String((error as NodeJS.ErrnoException)?.code ?? "");
+    let reason = "connection_refused";
+    if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) || code === "ETIMEDOUT") reason = "timeout";
+    else if (/TLS|CERT|SSL/.test(code)) reason = "tls_error";
+    throw new McpEventError(-32027, "Callback verification failed", { reason });
   }
 }

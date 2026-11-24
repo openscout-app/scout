@@ -321,7 +321,7 @@ export class BrokerExternalSessionService {
     if (!receipt) throw new Error("external_delivery_not_found");
     return { deliveryId: receipt.id, status: receipt.status };
   }
-  async reply(input: { ownerId: string; sessionId: string; deliveryId: string; replyToken?: string; body: string; ref?: string; requestId?: string; progress?: boolean; failed?: boolean; attachments?: ScoutTaskReply["attachments"]; image?: ScoutTaskReply["image"]; authorize?: () => void }) {
+  async reply(input: { ownerId: string; sessionId: string; deliveryId: string; replyToken?: string; body: string; ref?: string; requestId?: string; progress?: boolean; failed?: boolean; points?: ScoutTaskReply["points"]; attachments?: ScoutTaskReply["attachments"]; image?: ScoutTaskReply["image"]; authorize?: () => void }) {
     const endpoint = this.ownedEndpoint(input.ownerId, input.sessionId);
     if (typeof input.body !== "string" || !input.body.trim() || input.body.length > 100_000) throw new Error("invalid_reply_body");
     if (endpoint.transport !== "mcp_poll" && (typeof input.replyToken !== "string" || input.replyToken.length > 256)) throw new Error("invalid_reply_token");
@@ -332,7 +332,7 @@ export class BrokerExternalSessionService {
       const invocation = delivery.invocationId ? this.deps.invocation(delivery.invocationId) : undefined;
       if (!invocation?.conversationId || !invocation.messageId) throw new Error("external_reply_invocation_missing");
       if (input.ref) {
-        validateTaskReply({ ref: input.ref, progress: input.progress, failed: input.failed });
+        validateTaskReply({ ref: input.ref, progress: input.progress, failed: input.failed, points: input.points });
         if (input.ref !== invocation.id) throw new Error("external_reply_task_mismatch");
         if (!input.requestId?.trim() || !this.deps.replyTask) throw new Error("external task reply requires requestId and ask-reply/1");
         const messageId = taskMessageId(endpoint.agentId, input.requestId);
@@ -346,7 +346,7 @@ export class BrokerExternalSessionService {
         try {
           result = await this.deps.replyTask({ ref: invocation.id, senderId: endpoint.agentId,
             requestId: input.requestId, body: input.body, progress: input.progress, failed: input.failed,
-            attachments: input.attachments, image: input.image });
+            ...(input.points ? { points: input.points } : {}), attachments: input.attachments, image: input.image });
         } catch (error) {
           const flight = this.deps.flight(invocation.id);
           // Preserve an observed committed claim after an uncertain apply/ack.

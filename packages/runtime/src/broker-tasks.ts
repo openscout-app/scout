@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, SCOUT_TASKS_CAPABILITY, validateTaskReply,
+import { flightCompletion, flightSessionTrace, parseScoutComposerRouteTarget, REPLY_POINTS_CAPABILITY, replyPointsRecord, SCOUT_TASKS_CAPABILITY, validateTaskReply,
   type AgentHarness, type FlightRecord, type InvocationRequest, type MessageRecord, type ScoutDeliverRequest,
   type ScoutDeliverResponse, type ScoutTaskReply, parseReplyWaitingOn, flightWaitingOn } from "@openscout/protocol";
 import { ProvenRequestFailure } from "./broker-request-receipts.js";
@@ -48,9 +48,15 @@ function claimedFollowupSession(payload: ScoutDeliverRequest): FollowupSession |
 /** Inbox notification is not input to an already-dispatched harness turn. */
 /**
  * Keys only the runtime may write on a reply message. A client's reply
- * metadata never carries them, so a client cannot plant a decision answer.
+ * metadata never carries them, so a client cannot plant a decision answer or
+ * points that skipped validation.
  */
-const RUNTIME_REPLY_METADATA_KEYS = ["decisionAnswer"] as const;
+const RUNTIME_REPLY_METADATA_KEYS = ["decisionAnswer", "replyPoints"] as const;
+
+/** The typed points a reply carries, as the runtime stores them. Ids hang off the reply message id. */
+function replyPointsMetadata(messageId: string, points: ScoutTaskReply["points"]): Record<string, unknown> {
+  return points?.length ? { replyPoints: replyPointsRecord(messageId, points) } : {};
+}
 
 export function clientReplyMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!metadata) return {};
@@ -196,6 +202,9 @@ export class BrokerTaskService {
     const home = this.home(task);
     const node = this.options.snapshot().nodes[home];
     if (!node?.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`task home ${home} does not advertise ${SCOUT_TASKS_CAPABILITY}; upgrade that runtime before dispatch`);
+    if (kind === "reply" && (payload as ScoutTaskReply).points?.length && !node.capabilities.includes(REPLY_POINTS_CAPABILITY)) {
+      throw new Error(`task home ${home} does not advertise ${REPLY_POINTS_CAPABILITY}; send the reply without points or upgrade that runtime`);
+    }
     if (!this.options.forward) throw new Error(`task ${task.invocation.id} is remote; home node ${home} is unavailable`);
     return this.options.forward(home, kind, kind === "ask" ? taskHomeAskPayload(payload as ScoutDeliverRequest, task.invocation.id) : payload);
   }
@@ -369,7 +378,8 @@ export class BrokerTaskService {
         actorId: input.senderId, originNodeId: this.options.nodeId, class: "agent", body: input.body, attachments: input.attachments,
         audience: { notify: [invocation.requesterId], reason: "thread_reply" },
         visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-        metadata: { ...clientReplyMetadata(input.metadata), ...extra.metadata, clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
+        metadata: { ...clientReplyMetadata(input.metadata), ...extra.metadata, ...replyPointsMetadata(taskMessageId(input.senderId, input.requestId), input.points),
+          clientMessageId: taskMessageId(input.senderId, input.requestId), source: "scout-reply",
           completionReply: { invocationId: invocation.id, flightId: flight.id, revision: flightCompletion(flight)?.revision ?? 0,
             kind: input.waitingOn ? "blocked" : input.progress ? "progress" : "final",
             ...(input.waitingOn ? { waitingOn: parseReplyWaitingOn(input.waitingOn) } : {}), ...(input.failed ? { outcome: "failed" } : {}) } } }, input.image);
@@ -382,7 +392,8 @@ export class BrokerTaskService {
       conversationId: message.conversationId, replyToMessageId: message.id, actorId: input.senderId, originNodeId: this.options.nodeId,
       class: "status", body: input.body, attachments: input.attachments, audience: { notify: [message.actorId], reason: "thread_reply" },
       visibility: messageVisibilityForConversation(conversation), policy: "durable", createdAt: this.now(),
-      metadata: { ...clientReplyMetadata(input.metadata), source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
+      metadata: { ...clientReplyMetadata(input.metadata), ...replyPointsMetadata(taskMessageId(input.senderId, input.requestId), input.points),
+        source: "scout-conversation-reply", clientMessageId: taskMessageId(input.senderId, input.requestId) } }, input.image);
   }
   private postMessage(message: MessageRecord, image?: ScoutTaskReply["image"]): Promise<unknown> {
     if (!image) return this.options.postMessage(message);

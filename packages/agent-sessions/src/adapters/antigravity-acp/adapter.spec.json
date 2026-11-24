@@ -1,0 +1,139 @@
+{
+  "$schema": "../spec/adapter-spec.v2.schema.json",
+  "specVersion": "2.0.0",
+  "adapterId": "antigravity-acp",
+  "displayName": "Google Antigravity",
+  "implementation": {
+    "package": "@openscout/agent-sessions",
+    "entrypoint": "src/adapters/antigravity-acp/adapter.ts",
+    "factoryExport": "createAdapter",
+    "className": "AcpAdapter"
+  },
+  "upstream": {
+    "kind": "official_protocol",
+    "name": "Google Antigravity CLI ACP",
+    "transport": "jsonrpc-stdio-jsonl",
+    "sources": [
+      {
+        "kind": "url",
+        "ref": "https://antigravity.google/docs/ide/extensions/acp"
+      },
+      {
+        "kind": "file",
+        "ref": "src/adapters/antigravity-acp/adapter.ts"
+      },
+      {
+        "kind": "file",
+        "ref": "src/adapters/acp/adapter.ts"
+      }
+    ]
+  },
+  "sessionModel": {
+    "lifecycle": "long_lived_process",
+    "conversationScope": "session",
+    "resumeSupport": "optional",
+    "resumeOptionKey": "sessionId",
+    "turnSteering": "new_turn_only",
+    "concurrentTurns": "single",
+    "persistence": [
+      "process_state",
+      "upstream_session_id"
+    ]
+  },
+  "capabilities": {
+    "promptInputs": {
+      "text": true,
+      "images": "native",
+      "files": "reference_text"
+    },
+    "outputBlocks": [
+      "text",
+      "reasoning",
+      "action",
+      "error"
+    ],
+    "actionKinds": [
+      "tool_call"
+    ],
+    "streaming": {
+      "text": true,
+      "reasoning": true,
+      "actionOutput": true,
+      "actionStatus": true
+    },
+    "interactive": {
+      "questions": "none",
+      "approvals": "native",
+      "serverRequests": "native"
+    },
+    "control": {
+      "interrupt": true,
+      "shutdown": true
+    }
+  },
+  "nativeProtocol": {
+    "outboundRequests": [
+      "initialize",
+      "session/new",
+      "session/load",
+      "session/resume",
+      "session/prompt",
+      "session/close",
+      "session/set_config_option"
+    ],
+    "outboundNotifications": [
+      "session/cancel"
+    ],
+    "inboundNotifications": [
+      "session/update"
+    ],
+    "inboundServerRequests": [
+      "session/request_permission",
+      "fs/read_text_file",
+      "fs/write_text_file"
+    ],
+    "messageFormats": [
+      "jsonrpc_request",
+      "jsonrpc_notification",
+      "jsonrpc_response",
+      "jsonrpc_error",
+      "jsonl_transport"
+    ],
+    "serverRequestStrategy": "resolve_and_reject"
+  },
+  "normalizedSurface": {
+    "adapterMethods": [
+      "start",
+      "send",
+      "interrupt",
+      "shutdown"
+    ],
+    "optionalAdapterMethods": [
+      "decide"
+    ],
+    "emitsPairingEvents": [
+      "session:update",
+      "turn:start",
+      "block:start",
+      "block:delta",
+      "block:action:output",
+      "block:action:status",
+      "block:action:approval",
+      "block:end",
+      "turn:error",
+      "turn:end"
+    ]
+  },
+  "conformance": {
+    "status": "grandfathered",
+    "normalizerId": "acp",
+    "fixtureSets": [
+      "acp"
+    ]
+  },
+  "limitations": [
+    "Uses credentials cached by the native Antigravity CLI. Interactive Google sign-in belongs to the operator.",
+    "The provider must confirm an explicitly requested model before Scout sends a prompt. Run agy models for account-specific IDs.",
+    "The shared ACP normalizer handles events. An authenticated Antigravity transcript fixture is pending."
+  ]
+}

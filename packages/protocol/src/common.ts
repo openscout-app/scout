@@ -93,6 +93,7 @@ export type DeliveryTransport =
   | "kimi_acp"
   | "cursor_acp"
   | "opencode_acp"
+  | "antigravity_acp"
   | "devin_acp"
   | "tmux"
   | "ghostty"
