@@ -9,6 +9,7 @@ import { redactSecrets, redactSecretsDeep } from "@openscout/agent-sessions/secr
 import { findClaudePendingToolCall } from "@openscout/agent-sessions";
 import { readClaudeSessionRecords, type ClaudeSessionRecord } from "../claude-session-records.js";
 
+import { AntigravitySource, antigravityIdFromLogPath } from "./antigravity-source.js";
 import { ClaudeSource } from "./claude-source.js";
 import { withProcessListPass } from "./discover.js";
 import {
@@ -135,7 +136,7 @@ const INTERNAL_PERSISTED_OBSERVED_SEED_LIMIT = readPositiveIntEnv(
   "OPENSCOUT_TAIL_PERSISTED_OBSERVED_SEED_LIMIT",
   4_096,
 );
-const NATIVE_TAIL_SOURCES = new Set<TranscriptSource["name"]>(["grok", "kimi", "opencode", "cursor"]);
+const NATIVE_TAIL_SOURCES = new Set<TranscriptSource["name"]>(["grok", "kimi", "opencode", "cursor", "antigravity"]);
 const TRANSCRIPT_REPLAY_MEMO_MAX_ENTRIES = readPositiveIntEnv("OPENSCOUT_TAIL_REPLAY_MEMO_MAX_ENTRIES", 256);
 const TRANSCRIPT_REPLAY_ACTIVE_GRACE_MS = readPositiveIntEnv("OPENSCOUT_TAIL_REPLAY_MEMO_ACTIVE_GRACE_MS", 2_000);
 
@@ -214,7 +215,7 @@ type Watcher = {
   pumpInFlight: Promise<void> | null;
 };
 
-const sources: TranscriptSource[] = [GrokSource, KimiSource, ClaudeSource, CodexSource, CursorSource, OpenCodeSource, PiSource, DevinSource, ManagedAgentsSource];
+const sources: TranscriptSource[] = [AntigravitySource, GrokSource, KimiSource, ClaudeSource, CodexSource, CursorSource, OpenCodeSource, PiSource, DevinSource, ManagedAgentsSource];
 
 const watchers = new Map<string, Watcher>(); // key = `${source}:${transcriptPath}` (one watcher per file, regardless of how many processes share it)
 const aggregateBuffer = new TailReplayBuffer(AGGREGATE_BUFFER_LIMIT);
@@ -292,12 +293,12 @@ function processForTranscript(
   processes: DiscoveredProcess[],
 ): DiscoveredProcess {
   const cwd = transcript.cwd?.trim();
-  if (cwd) {
-    const matches = processes.filter((proc) => proc.source === transcript.source && proc.cwd === cwd);
-    if (matches.length > 0) {
-      return pickPrimaryProcess(matches);
-    }
-  }
+  const matches = processes.filter((proc) => proc.source === transcript.source && (
+    proc.nativeSessionId !== undefined
+      ? proc.nativeSessionId !== null && proc.nativeSessionId === transcript.sessionId
+      : cwd && proc.cwd === cwd
+  ));
+  if (matches.length > 0) return pickPrimaryProcess(matches);
 
   return {
     pid: virtualPidForPath(transcript.transcriptPath),
@@ -1885,6 +1886,8 @@ export async function readRecentTranscriptEvents(
 function normalizeTailSessionRef(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
+  const antigravityId = antigravityIdFromLogPath(trimmed);
+  if (antigravityId) return antigravityId;
   const leaf = basename(trimmed);
   return leaf.endsWith(".jsonl") ? leaf.slice(0, -".jsonl".length) : leaf;
 }

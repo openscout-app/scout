@@ -48,6 +48,8 @@ export type TailEvent = {
 };
 
 export type DiscoveredProcess = {
+  /** When supplied, only a proven native session can be associated with this process. */
+  nativeSessionId?: string | null;
   pid: number;
   ppid: number;
   command: string;
