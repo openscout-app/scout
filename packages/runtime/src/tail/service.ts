@@ -1727,6 +1727,13 @@ async function memoizedTranscriptReplay(
   return [...await promise];
 }
 
+// Replayed events carry the process and workspace discovered for this read.
+// A client can resume or release a session without writing to its transcript.
+function replayContextKey(transcript: DiscoveredTranscript, process: DiscoveredProcess): string {
+  return JSON.stringify([sessionRegistryKey(transcript), process.pid, process.ppid, process.harness,
+    process.cwd, transcript.cwd, transcript.project, transcript.harness]);
+}
+
 async function appendWatcherTranscriptEvents(
   events: TailEvent[],
   seenEvents: Set<string>,
@@ -1744,7 +1751,7 @@ async function appendWatcherTranscriptEvents(
       : RECENT_TRANSCRIPT_READ_BYTES;
     const parsed = await memoizedTranscriptReplay(
       transcriptPath,
-      `recent:file:${source.name}:${sessionRegistryKey(transcript)}:${readBytes}:${[...(options?.kinds ?? [])].sort().join(",")}`,
+      `recent:file:${source.name}:${replayContextKey(transcript, process)}:${readBytes}:${[...(options?.kinds ?? [])].sort().join(",")}`,
       async () => {
         const text = await readTranscriptText(transcriptPath, readBytes);
         if (!text) return [];
@@ -1769,7 +1776,7 @@ async function appendWatcherTranscriptEvents(
   const kindKey = [...(options?.kinds ?? [])].sort().join(",");
   const parsed = await memoizedTranscriptReplay(
     transcriptPath,
-    `recent:lines:${source.name}:${sessionRegistryKey(transcript)}:${lineLimit}:${RECENT_TRANSCRIPT_READ_BYTES}:${kindKey}:${options?.kindQuota ?? ""}`,
+    `recent:lines:${source.name}:${replayContextKey(transcript, process)}:${lineLimit}:${RECENT_TRANSCRIPT_READ_BYTES}:${kindKey}:${options?.kindQuota ?? ""}`,
     () => parseRecentTranscriptLineEvents({
       source,
       transcriptPath,
@@ -1791,7 +1798,8 @@ async function appendWatcherTranscriptEvents(
   );
   for (const event of parsed) {
     if (options?.kinds?.size && !options.kinds.has(event.kind)) continue;
-    const eventKey = [
+    // Antigravity numbers native steps independently of the reader offset.
+    const eventKey = source.name === AntigravitySource.name ? event.id : [
       event.source,
       event.sessionId,
       event.kind,
@@ -1954,8 +1962,8 @@ async function parseTranscriptSessionEvents(
     ? RECENT_TRANSCRIPT_KIND_SCAN_READ_BYTES
     : SESSION_TRANSCRIPT_READ_BYTES;
   const replayVariant = source.parseFile
-    ? `session:file:${source.name}:${sessionRegistryKey(transcript)}:${maxReadBytes}:${kindKey}`
-    : `session:lines:${source.name}:${sessionRegistryKey(transcript)}:${lineBudget}:${maxReadBytes}:${kindKey}:${options?.kindQuota ?? ""}`;
+    ? `session:file:${source.name}:${replayContextKey(transcript, process)}:${maxReadBytes}:${kindKey}`
+    : `session:lines:${source.name}:${replayContextKey(transcript, process)}:${lineBudget}:${maxReadBytes}:${kindKey}:${options?.kindQuota ?? ""}`;
 
   const parsed = await memoizedTranscriptReplay(transcript.transcriptPath, replayVariant, async () => {
     if (source.parseFile) {

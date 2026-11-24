@@ -34,6 +34,7 @@ test("Antigravity discovery and history preserve native identity across conversa
       { type: "PLANNER_RESPONSE", thinking: "private", content: "Answer" },
       { type: "PLANNER_RESPONSE", thinking: "private" },
       { type: "GENERIC", content: "private" },
+      { type: "USER_INPUT", source: "USER_EXPLICIT", content: "Question" },
     ].map((step, step_index) => JSON.stringify({ ...step, step_index, created_at: "2025-01-01T00:00:00Z" })).join("\n");
     for (const id of [first, second]) writeFileSync(join(logPath(id), "transcript.jsonl"), steps + "\n");
 
@@ -47,9 +48,12 @@ test("Antigravity discovery and history preserve native identity across conversa
     const a = await readTailEventsForSession(first, { discovery });
     const b = await readTailEventsForSession(second, { discovery });
     expect(a?.events.map(e => [e.kind, e.summary, e.pid])).toEqual([
-      ["user", "Question", 7], ["tool", "list_files", 7], ["assistant", "Answer", 7],
+      ["user", "Question", 7], ["tool", "list_files", 7], ["assistant", "Answer", 7], ["user", "Question", 7],
     ]);
     expect(b?.events[0].pid).toBeLessThan(0);
+    const resumed = { ...discovery, processes: [{ ...processes[0]!, pid: 9, nativeSessionId: second }] };
+    expect((await readTailEventsForSession(second, { discovery: resumed }))?.events[0]?.pid).toBe(9);
+    expect((await readTailEventsForSession(first, { discovery: resumed }))?.events[0]?.pid).toBeLessThan(0);
     expect(JSON.stringify(a?.events)).not.toContain("private");
     expect(await readTailEventsForSession("transcript", { discovery })).toBeNull();
     expect((await readTailEventsForSession(join(logPath(second), "transcript.jsonl"), { discovery }))?.transcript.sessionId).toBe(second);
@@ -57,6 +61,16 @@ test("Antigravity discovery and history preserve native identity across conversa
     // Exercise the same recent query that scout tail uses, with another harness
     // occupying the newest slot and a file-backed conversation outside discovery.
     const caller = brokerRouter.createCaller({});
+    const removeSubscriber = __testing.addPublicSubscriberWithoutLoop(() => {});
+    try {
+      await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
+      const history = await caller.tail.recent({ sources: ["antigravity"], transcripts: true, limit: 20 });
+      const repeats = history.events.filter(e => e.sessionId === first && e.summary === "Question");
+      expect(repeats.map(e => e.id).sort()).toEqual([`antigravity:${first}:0`, `antigravity:${first}:5`]);
+    } finally {
+      removeSubscriber();
+      __testing.clearWatchers();
+    }
     await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
     const reply = a!.events.at(-1)!;
     __testing.pushEvent(reply);
