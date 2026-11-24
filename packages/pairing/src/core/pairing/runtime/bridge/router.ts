@@ -1,5 +1,5 @@
 import { mobileReadWorker } from "../../../../db/mobile-read.ts";
-import { resolveLegacyWebEntry } from "@openscout/runtime/web-full-client";
+import { resolveLegacyWebEntry } from "@openscout/runtime/client";
 // tRPC v11 router for the Bridge server.
 // Reserved transport path: web.admission is answered by the account relay
 // before router dispatch, for waiting and admitted peers. Do not shadow it
@@ -38,17 +38,18 @@ import {
 import {
   readSessionFileScan,
   readSessionSearch,
-} from "@openscout/runtime/system-probes";
+} from "@openscout/runtime/setup";
 import {
   loadLocalConfig,
   OPENSCOUT_PORTS,
   resolveBrokerPort,
   resolveHost,
   resolveWebPort,
-} from "@openscout/runtime/local-config";
+  resolveOperatorName,
+} from "@openscout/runtime/config";
 
 import { getTailFanout } from "./tail-fanout.ts";
-import type { TailEvent } from "@openscout/runtime/tail";
+import type { TailEvent } from "@openscout/runtime/harnesses";
 
 import { log } from "./log.ts";
 import { bridgeWebRequest } from "./web-request.ts";
@@ -87,7 +88,6 @@ import {
   decideMobilePermission,
   queryPermissionInboxItems,
 } from "../../../attention/runtime-permissions.ts";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
 import {
   provisionMobileTerminalAccess,
   readMobileTerminalStatus,
@@ -105,7 +105,7 @@ import {
   startCodexDeckTurn,
   steerCodexDeckTurn,
   stopLocalAgent,
-} from "@openscout/runtime/local-agents";
+} from "@openscout/runtime/harnesses";
 import {
   issueWebHandoff,
   pathForWebHandoffScope,

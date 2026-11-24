@@ -107,7 +107,7 @@ service.
 
 The runner takes its target from
 `INHERITED_DESCRIPTOR_LAYOUTS.extensionApi2.context`, exported through
-`@openscout/runtime/inherited-descriptors`. It never allocates a literal target.
+`@openscout/runtime/daemon`. It never allocates a literal target.
 The credential target stays unmapped, as do the role parent/context/fence
 capabilities. Stdio 0–2, stdin bytes, cwd, remaining argv, signals and exit status
 retain their foreground meanings. Context does not consume stdin, argv or an

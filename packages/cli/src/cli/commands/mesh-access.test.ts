@@ -4,10 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createScoutCommandContext } from "../context.ts";
 import { parseMeshAccessFlags, runMeshAccessCommand } from "./mesh-access.ts";
-import { validateAccessPolicy, validateAccessDelegation, validateAccessGrant, validateAccessRevocation, ACCESS_ARTIFACT_MAX_BYTES, accessKeyId } from "@openscout/runtime/mesh/access";
-import { verifyScopedPeerRequest, PeerNonceCache, PEER_AUTH_HEADERS } from "@openscout/runtime/mesh/peer-auth";
+import {
+  validateAccessPolicy,
+  validateAccessDelegation,
+  validateAccessGrant,
+  validateAccessRevocation,
+  ACCESS_ARTIFACT_MAX_BYTES,
+  accessKeyId,
+  verifyScopedPeerRequest,
+  PeerNonceCache,
+  PEER_AUTH_HEADERS,
+  LOCAL_ADMIN_HEADER,
+  verifyLocalAdminRequest,
+} from "@openscout/runtime/mesh";
 
-import { LOCAL_ADMIN_HEADER, verifyLocalAdminRequest } from "@openscout/runtime/mesh/local-auth";
 
 import type { PinnedHttpsClient } from "@openscout/runtime/mesh/pinned-https-client";
 

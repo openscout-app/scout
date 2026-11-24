@@ -8,8 +8,7 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { loadLocalConfig, resolvePairingPort } from "@openscout/runtime/local-config";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
+import { loadLocalConfig, resolvePairingPort, resolveOpenScoutPairingHome } from "@openscout/runtime/config";
 
 // ---------------------------------------------------------------------------
 // Schema

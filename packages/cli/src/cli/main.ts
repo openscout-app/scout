@@ -12,7 +12,7 @@ import {
   assertOpenScoutInstanceIsolation,
   selectCliOpenScoutInstance,
   selectStatuslineOpenScoutInstance,
-} from "@openscout/runtime/instance";
+} from "@openscout/runtime/config";
 
 async function runCoreReadiness(command: string, context: ScoutCommandContext, args: string[]): Promise<void> {
   if (command === "__doctor-check") {

@@ -11,7 +11,7 @@ import {
 import {
   SCOUTBOT_ROLE_CONFIG,
   scoutbotCodexLaunchArgs,
-} from "@openscout/runtime/scoutbot-role";
+} from "@openscout/runtime/harnesses";
 
 describe("scoutbot runner routing", () => {
   test("preserves contextual mentions and removes only a leading assistant routing address", () => {

@@ -17,7 +17,7 @@ import {
   type SshExec,
   type SshEnrollResult,
   type TrustedPeerGrant,
-} from "@openscout/runtime/mesh/client-wire";
+} from "@openscout/runtime/mesh";
 
 /**
  * Mesh trust cone CLI service (docs/proposals/mesh-trust-cone.md §7): thin

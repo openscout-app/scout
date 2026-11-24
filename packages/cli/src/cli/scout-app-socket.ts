@@ -5,7 +5,7 @@
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutHomeForEnv } from "@openscout/runtime/config";
 
 export type ScoutAppReply =
   | { ok: true; [field: string]: unknown }

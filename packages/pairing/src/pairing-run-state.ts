@@ -10,7 +10,7 @@
 import { readlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { assertTestIsolatedUserData } from "@openscout/runtime/support-paths";
+import { assertTestIsolatedUserData } from "@openscout/runtime/config";
 
 /** Symlink hops we will follow before calling a path circular. */
 const MAX_LINK_HOPS = 64;

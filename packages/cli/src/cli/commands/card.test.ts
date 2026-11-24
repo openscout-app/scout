@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import * as harnesses from "@openscout/runtime/harnesses";
 import type { ScoutOutput } from "../output.ts";
 
 const SUPPORTED_LOCAL_AGENT_HARNESSES = ["claude", "codex", "grok", "grok-acp", "kimi", "pi", "cursor", "opencode"];
@@ -50,7 +51,8 @@ describe("runCardCommand", () => {
       writeValue,
     };
 
-    mock.module("@openscout/runtime/local-agents", () => ({
+    mock.module("@openscout/runtime/harnesses", () => ({
+      ...harnesses,
       resolveLocalAgentByName,
       resolveLocalAgentIdentity: mock(async () => {
         throw new Error("not used");
@@ -124,7 +126,8 @@ describe("runCardCommand", () => {
       writeValue,
     };
 
-    mock.module("@openscout/runtime/local-agents", () => ({
+    mock.module("@openscout/runtime/harnesses", () => ({
+      ...harnesses,
       resolveLocalAgentByName,
       resolveLocalAgentIdentity: mock(async () => {
         throw new Error("not used");

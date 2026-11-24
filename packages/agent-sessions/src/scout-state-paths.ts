@@ -44,7 +44,7 @@ export function isScoutPairingPath(path: string, prefix: string, env: NodeJS.Pro
 /**
  * Instance-derived env a Scout service holds; a harness session a service
  * launches must not inherit it (mirrors OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS
- * in @openscout/runtime/instance; a runtime test keeps the two in sync).
+ * in @openscout/runtime/config; a runtime test keeps the two in sync).
  */
 export const SCOUT_USER_SPAWN_STRIPPED_ENV_KEYS: readonly string[] = [
   "OPENSCOUT_INSTANCE",
@@ -97,7 +97,7 @@ export const SCOUT_USER_SPAWN_STRIPPED_ENV_KEYS: readonly string[] = [
   "OPENSCOUT_CLIENT_INSTANCE",
 ];
 
-/** Mirrors normalizeOpenScoutInstanceName in @openscout/runtime/instance (a runtime test keeps them aligned). */
+/** Mirrors normalizeOpenScoutInstanceName in @openscout/runtime/config (a runtime test keeps them aligned). */
 export function normalizeScoutInstanceName(raw: string | undefined | null): string | null {
   const trimmed = (raw ?? "").trim().toLowerCase();
   if (!trimmed || trimmed === "default" || trimmed === "production") return "prod";

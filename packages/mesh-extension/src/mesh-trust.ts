@@ -6,7 +6,7 @@ import {
   SshEnrollError,
   verifySignedNodeCard,
   type SignedNodeCard,
-} from "@openscout/runtime/mesh/client-wire";
+} from "@openscout/runtime/mesh";
 
 import type { ScoutCommandContext } from "./cli-context.ts";
 import { ScoutCliError } from "./cli-context.ts";

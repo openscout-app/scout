@@ -1,6 +1,6 @@
 import type { AdmitAccountDevice } from "./account-admission.ts";
-import type { PairingRequestBinding, LocalApprovalPairingOpportunity } from "@openscout/runtime/pairing-local-socket";
-import { pairingTrustOwner, type PairingOpportunity } from "@openscout/runtime/pairing-security/trust-owner";
+import type { PairingRequestBinding, LocalApprovalPairingOpportunity } from "@openscout/runtime/daemon";
+import { pairingTrustOwner, type PairingOpportunity } from "@openscout/runtime/pairing-security";
 import { homedir } from "node:os";
 
 import {

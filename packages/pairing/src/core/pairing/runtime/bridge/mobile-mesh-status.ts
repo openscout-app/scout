@@ -1,4 +1,4 @@
-import { tailscaleStatusProbe } from "@openscout/runtime/system-probes";
+import { tailscaleStatusProbe } from "@openscout/runtime/setup";
 
 export async function getMobileMeshStatus() {
   const summary = tailscaleStatusProbe.read().value;

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveScoutBrokerUrl, watchScoutMessages } from "./service.ts";
-import { resolveBrokerSocketPathForBaseUrl } from "@openscout/runtime/broker-process-manager";
+import { resolveBrokerSocketPathForBaseUrl } from "@openscout/runtime/daemon";
 import { WatchFrameAccumulator, WatchReferenceCache, WATCH_FRAME_CHARACTER_LIMIT, WATCH_REFERENCE_LIMIT } from "./watch-retention.ts";
 const originalFetch = globalThis.fetch;
 let fixtureHome: string;

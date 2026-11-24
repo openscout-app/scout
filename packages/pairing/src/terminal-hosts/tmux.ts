@@ -3,7 +3,7 @@ import {
   execSystemFile,
   invalidateTmuxSessions,
   readTmuxSessionsWithClients,
-} from "@openscout/runtime/system-probes";
+} from "@openscout/runtime/setup";
 import { formatTerminalSurfaceId } from "@openscout/protocol";
 import type { TerminalSurface } from "@openscout/protocol";
 
@@ -13,8 +13,8 @@ import type {
   TerminalHostControlResult,
   TerminalHostSession,
 } from "./types.ts";
-import { wrapUserSpawnPaneCommand } from "@openscout/runtime/terminal-environment";
-import { buildMultiplexerServerEnvironment } from "@openscout/runtime/instance";
+import { wrapUserSpawnPaneCommand } from "@openscout/runtime/harnesses";
+import { buildMultiplexerServerEnvironment } from "@openscout/runtime/config";
 
 const TMUX_TIMEOUT_MS = 2_000;
 /** A `--version` shell-out can take seconds on a loaded machine; a host must

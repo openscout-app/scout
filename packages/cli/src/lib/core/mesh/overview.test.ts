@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { NodeDefinition } from "@openscout/protocol";
-import type { MeshNodeStateReport } from "@openscout/runtime/mesh-node-state";
+import type { MeshNodeStateReport } from "@openscout/runtime/mesh";
 import { loadScoutMeshOverview, renderScoutMeshOverviewLines } from "./overview.ts";
 import type { ScoutRecentDeps } from "./recent.ts";
 

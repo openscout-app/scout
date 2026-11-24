@@ -4,7 +4,7 @@
 // browse, ARP read, tailnet status — runs in the broker and nowhere else, so
 // `scout machines` on four terminals is still one pass and one answer.
 
-import { requestScoutBrokerJson } from "@openscout/runtime/broker-api";
+import { requestScoutBrokerJson } from "@openscout/runtime/client";
 import {
   scoutBrokerMachinePath,
   scoutBrokerPaths,

@@ -7,7 +7,7 @@
 // GET only for now: a paired browser watches. Credential routes never pass,
 // whatever the method, and streams are refused rather than held open.
 
-import { resolveWebAuthToken, resolveWebPort } from "@openscout/runtime/local-config";
+import { resolveWebAuthToken, resolveWebPort } from "@openscout/runtime/config";
 
 export const BRIDGE_WEB_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
 const BRIDGE_WEB_REQUEST_TIMEOUT_MS = 15_000;

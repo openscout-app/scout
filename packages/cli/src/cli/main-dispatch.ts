@@ -1,7 +1,11 @@
 import { removedScoutVerbError } from "./removed-verbs.ts";
 import { prepareScoutExtensionContext } from "./extension-context-runner.ts";
 import { selectedScoutExtensionInvocation } from "./extension-context.ts";
-import { resolveEffectiveLocalConfig } from "@openscout/runtime/local-config";
+import {
+  resolveEffectiveLocalConfig,
+  resolveBrokerControlUrl,
+  resolveOpenScoutScoutHome,
+} from "@openscout/runtime/config";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -16,7 +20,6 @@ import { renderScoutHelp } from "./help.ts";
 import { parseImplicitAskCommandOptions } from "./options.ts";
 import { findScoutCommandRegistration, unknownScoutCommandMessage } from "./registry.ts";
 import { findScoutExtension, runScoutExtension, scoutExtensionEnv } from "./extensions.ts";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
 import {
   normalizeCliBinaryMtimeMs,
   shouldEnsureBrokerUptodateForCommand,
@@ -25,7 +28,6 @@ import { brokerUpdateDebugEnabled, ensureBrokerUptodate } from "./broker-update.
 import { runNativeScoutdJson } from "./scoutd.ts";
 import { exitAfterCompletedCommand } from "./completed-command-exit.ts";
 import { SCOUT_APP_VERSION } from "../lib/shared/product.ts";
-import { resolveOpenScoutScoutHome } from "@openscout/runtime/support-paths";
 
 async function main() {
   const input = parseScoutArgv(process.argv.slice(2));

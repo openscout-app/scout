@@ -1,6 +1,17 @@
 import type { PendingPairRequestStore, PairRequest } from "./pairing-pair-requests.ts";
-import { requestLocalApprovalPairingOpportunity, requestLocalPairingOpportunity } from "@openscout/runtime/pairing-local-socket";
-import { pairingTrustOwner } from "@openscout/runtime/pairing-security/trust-owner";
+import {
+  requestLocalApprovalPairingOpportunity,
+  requestLocalPairingOpportunity,
+  isScoutPairingFileFromPreviousBoot,
+  isScoutPairingProcessRunning as isLivePairingProcess,
+  readLiveScoutPairingSupervisorPid,
+  readScoutPairingProcessPid as readSupervisedPairingProcessPid,
+  readScoutPairingSupervisorIntent,
+  resolveScoutPairingSupervisorPaths,
+  updateScoutPairingSupervisorIntent,
+  openPairingLocalChannel,
+} from "@openscout/runtime/daemon";
+import { pairingTrustOwner } from "@openscout/runtime/pairing-security";
 import { spawn } from "node:child_process";
 import {
   closeSync,
@@ -25,21 +36,15 @@ import {
 } from "@openscout/agent-sessions";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
 import {
-  isScoutPairingFileFromPreviousBoot,
-  isScoutPairingProcessRunning as isLivePairingProcess,
-  readLiveScoutPairingSupervisorPid,
-  readScoutPairingProcessPid as readSupervisedPairingProcessPid,
-  readScoutPairingSupervisorIntent,
-  resolveScoutPairingSupervisorPaths,
-  updateScoutPairingSupervisorIntent,
-} from "@openscout/runtime/pairing-supervisor";
-import { loadLocalConfig, resolvePairingPort } from "@openscout/runtime/local-config";
-import { openPairingLocalChannel } from "@openscout/runtime/pairing-local-socket";
+  loadLocalConfig,
+  resolvePairingPort,
+  resolveOpenScoutPairingHome,
+  selectInstanceAwareEntrypoint,
+} from "@openscout/runtime/config";
+// The emitted host entrypoint loads in Node; the harnesses facade loads bun:sqlite.
 import { resolveBunExecutable as resolveResolvedBunExecutable } from "@openscout/runtime/tool-resolution";
 
 import { coalesce } from "./coalesce.ts";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
-import { selectInstanceAwareEntrypoint } from "@openscout/runtime/instance";
 
 export const SCOUT_PAIRING_HOME_DIRECTORY = ".scout/pairing";
 export const SCOUT_PAIRING_CONFIG_FILE = "config.json";

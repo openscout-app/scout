@@ -11,8 +11,8 @@ import { parseSetupCommandOptions } from "../options.ts";
 import { runScoutSetup } from "../../lib/core/setup/service.ts";
 import { renderScoutSetupReport } from "../../lib/ui/terminal/setup.ts";
 import { readOpenScoutSettings } from "@openscout/runtime/setup";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
-import { ensureOperatorAttributionKey } from "@openscout/runtime/mesh/local-auth";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
+import { ensureOperatorAttributionKey } from "@openscout/runtime/mesh";
 import { scoutTuiNeedsDownload, SCOUT_TUI_INSTALL_OFFER } from "./tui.ts";
 
 type SourceRootPrompt = (suggestedRoot: string, additionalRootCount: number) => Promise<string>;

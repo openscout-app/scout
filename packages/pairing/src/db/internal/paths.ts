@@ -7,10 +7,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { localAgentLogsDirectory } from "@openscout/runtime/support-paths";
+import { localAgentLogsDirectory, resolveOpenScoutPairingHome } from "@openscout/runtime/config";
 
 import { metadataString } from "./parse.ts";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
 
 /* ── Compact home paths (~/...) ── */
 

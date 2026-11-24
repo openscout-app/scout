@@ -12,7 +12,7 @@ import {
   releaseOpenScoutInstance,
   repairOpenScoutInstanceRegistry,
   type OpenScoutInstanceLedgerEntry,
-} from "@openscout/runtime/instance";
+} from "@openscout/runtime/config";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";

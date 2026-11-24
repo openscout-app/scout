@@ -12,7 +12,7 @@ import {
   readRelayAgentOverrides,
 } from "@openscout/runtime/setup";
 import { isCodingAgentHost } from "@openscout/runtime";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
+import { resolveOperatorName } from "@openscout/runtime/config";
 
 export function resolveScoutAgentName(agentName?: string | null): string {
   const trimmed = agentName?.trim();

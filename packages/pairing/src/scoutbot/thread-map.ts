@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import { isOpaqueChannelId, mintChannelId } from "@openscout/protocol";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 
 import type {
   ScoutBrokerConversationRecord,
@@ -12,7 +12,7 @@ import type {
 import {
   SCOUTBOT_DEFAULT_THREAD_ID,
   SCOUTBOT_DEFAULT_THREAD_NAME,
-} from "@openscout/runtime/scoutbot-role";
+} from "@openscout/runtime/harnesses";
 
 export type ScoutbotThreadPins = {
   projectRoot?: string;

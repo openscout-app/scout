@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
+import { deriveOpenScoutInstanceLayout, resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 import {
   drainSharedMcpOptIn,
   readSharedMcpOptIn,
@@ -14,8 +14,7 @@ import {
   sharedMcpPort,
   sharedMcpUrl,
   writeSharedMcpOptIn,
-} from "@openscout/runtime/shared-mcp";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+} from "@openscout/runtime/extensions";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { selectedLocalMcpProfile, type LocalMcpProfile } from "../../mcp/local-tool-profile.ts";

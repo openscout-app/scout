@@ -1,5 +1,5 @@
 import { scoutSessionHostForNode } from "@openscout/protocol";
-import type { MeshNodeStateProject } from "@openscout/runtime/mesh-node-state";
+import type { MeshNodeStateProject } from "@openscout/runtime/mesh";
 import { loadMachineNodeStates, type ScoutRecentDeps } from "./recent.ts";
 
 /**

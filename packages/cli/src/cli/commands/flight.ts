@@ -1,4 +1,4 @@
-import { resolveHost, resolveWebPort } from "@openscout/runtime/local-config";
+import { resolveHost, resolveWebPort } from "@openscout/runtime/config";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";

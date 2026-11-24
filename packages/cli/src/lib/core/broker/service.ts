@@ -3,7 +3,11 @@ import { WatchFrameAccumulator, WatchReferenceCache } from "./watch-retention.ts
 import { assertLocalAttachmentBroker, postOperatorAttachment } from "../../../cli/notify-attachment-runtime.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { resolveScoutMachines } from "../mesh/machine-selector.ts";
-import type { LiveTerminalSession } from "@openscout/runtime/live-terminal-session";
+import type {
+  LiveTerminalSession,
+  inferLocalAgentBinding,
+  LocalAgentBinding,
+} from "@openscout/runtime/harnesses";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -103,22 +107,20 @@ import {
   type ScoutBrokerChildServiceSnapshots,
   type ScoutBrokerHealthPayload,
   type ScoutBrokerJsonRequestTrace,
-} from "@openscout/runtime/broker-api";
+} from "@openscout/runtime/client";
 import {
   resolveScoutBrokerControlUrl,
   resolveBrokerSocketPathForBaseUrl,
-} from "@openscout/runtime/broker-process-manager";
+} from "@openscout/runtime/daemon";
 import {
   SUPPORTED_LOCAL_AGENT_HARNESSES,
   SUPPORTED_SCOUT_HARNESSES,
-} from "@openscout/runtime/local-agent-harnesses";
-import type { inferLocalAgentBinding, LocalAgentBinding } from "@openscout/runtime/local-agents";
+} from "@openscout/runtime/harnesses";
 import {
   createRuntimeRegistrySnapshot,
   type RuntimeRegistrySnapshot,
-} from "@openscout/runtime/registry";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
+} from "@openscout/runtime/routing";
+import { resolveOpenScoutSupportPaths, resolveOperatorName } from "@openscout/runtime/config";
 
 import {
   openAiAudioSpeechUrl,
@@ -2516,7 +2518,7 @@ export async function registerScoutLocalAgentBinding(input: {
 }): Promise<ScoutLocalAgentBindingSyncResult | null> {
   const broker = input.broker ?? (await loadScoutBrokerContext());
   const nodeId = broker?.node.id ?? process.env.OPENSCOUT_NODE_ID ?? "local";
-  const { inferLocalAgentBinding } = await import("@openscout/runtime/local-agents");
+  const { inferLocalAgentBinding } = await import("@openscout/runtime/harnesses");
   const binding = await inferLocalAgentBinding(input.agentId, nodeId);
   if (!binding) {
     return null;
@@ -2605,7 +2607,7 @@ async function resolveConversationActorId(
     return normalized;
   }
 
-  const { inferLocalAgentBinding } = await import("@openscout/runtime/local-agents");
+  const { inferLocalAgentBinding } = await import("@openscout/runtime/harnesses");
   const binding = await inferLocalAgentBinding(configured.agentId, nodeId);
   if (binding) {
     await syncBrokerBinding(baseUrl, snapshot, binding);
@@ -2655,7 +2657,7 @@ async function ensureTargetRelayAgentRegistered(
     return false;
   }
 
-  const { inferLocalAgentBinding } = await import("@openscout/runtime/local-agents");
+  const { inferLocalAgentBinding } = await import("@openscout/runtime/harnesses");
   const binding = await inferLocalAgentBinding(configured.agentId, nodeId);
   if (!binding) {
     await syncBrokerAgentRegistration(

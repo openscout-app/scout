@@ -1,5 +1,10 @@
-import { submitDiagnosticReport, formatDiagnosticReceipt, reporterHarness, type DiagnosticReporter } from "@openscout/runtime/diagnostic-report";
-import { findNearestProjectRoot } from "@openscout/runtime/setup";
+import {
+  submitDiagnosticReport,
+  formatDiagnosticReceipt,
+  reporterHarness,
+  type DiagnosticReporter,
+  findNearestProjectRoot,
+} from "@openscout/runtime/setup";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { basename } from "node:path";

@@ -1,5 +1,5 @@
 import { registerUserConfigFieldAfterSet } from "@openscout/runtime";
-import { saveOpenScoutOnboardingIdentity } from "@openscout/runtime/onboarding";
+import { saveOpenScoutOnboardingIdentity } from "@openscout/runtime/setup";
 
 // Side effects shared by `scout config` and `scout settings`: setting the name
 // also records it as the onboarding identity.

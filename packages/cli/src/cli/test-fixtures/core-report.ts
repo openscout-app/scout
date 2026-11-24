@@ -1,4 +1,4 @@
-import { buildCoreServiceReport, describeCoreHarnessPresence } from "@openscout/runtime/core-report";
+import { buildCoreServiceReport, describeCoreHarnessPresence } from "@openscout/runtime/setup";
 
 export function healthyCoreReport() {
   const target = { instance: "test", brokerUrl: "http://127.0.0.1:1", expectedNodeId: "node-test" };

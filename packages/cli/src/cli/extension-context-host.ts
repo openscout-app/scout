@@ -12,7 +12,7 @@ export function scoutExtensionContextBackend(): boolean {
  * Source runs use the runtime sibling; installed CLI runs use a fixed sidecar.
  * Loading this module never opens the product gate or allocates a descriptor.
  */
-export async function loadScoutExtensionChannelHost(): Promise<typeof import("@openscout/runtime/extension-channel-host")> {
+export async function loadScoutExtensionChannelHost(): Promise<Pick<typeof import("@openscout/runtime/extensions"), "allocateExtensionChannel">> {
   const location = import.meta.url.endsWith(".ts")
     ? new URL("../../../runtime/src/extension-channel-host.ts", import.meta.url)
     : new URL("./extension-channel-host.mjs", import.meta.url);

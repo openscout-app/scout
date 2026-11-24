@@ -24,7 +24,7 @@ const legacySources = {
   setup: ["./setup.js", "onboarding", "diagnostic-report", "core-report", "system-probes"],
   harnesses: [
     "harness-catalog", "harness-topology", "harness-model-preferences", "local-agents",
-    "local-agent-harnesses", "control-plane-agents", "agent-workspace", "agent-workspace-retirement",
+    "local-agent-harnesses", "control-plane-agents", "scoutbot-role", "agent-workspace", "agent-workspace-retirement",
     "live-terminal-session", "terminal-environment", "in-place", "tail", "pi-rpc",
     "claude-stream-json", "claude-statusline", "tool-resolution", "broker-runtime-profiles",
     "runtime-list-preferences",

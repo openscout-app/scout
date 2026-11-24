@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { ConversationDefinition, MessageRecord, ScoutReplyContext } from "@openscout/protocol";
-import { BrokerAttachmentService } from "@openscout/runtime/attachments";
+import { BrokerAttachmentService } from "@openscout/runtime/storage";
 // Test fixtures only: production code must not expose an unscoped blob store.
 import { AttachmentBlobStore } from "../../../runtime/src/attachment-blob-store.ts";
 import { handleAttachmentRoute, executeHostAttachmentRead } from "../../../runtime/src/broker-attachments-http.ts";

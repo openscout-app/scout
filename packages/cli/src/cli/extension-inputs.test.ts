@@ -99,7 +99,7 @@ test("permission revalidation happens under the policy lock and changed selectio
   expect(existsSync(join(dirname(scoutExtensionGrantStore(f.env)), ".lock"))).toBe(false);
 });
 
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
+import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/config";
 import { captureScoutExtensionSelection } from "./extension-context.ts";
 import { prepareScoutExtensionContext } from "./extension-context-runner.ts";
 import { prepareScoutExtensionInputSession, encodeScoutExtensionInputResponse, EXTENSION_INPUT_REQUEST_SCHEMA } from "./extension-input-session.ts";

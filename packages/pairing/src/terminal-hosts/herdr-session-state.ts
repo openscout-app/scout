@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { parseHerdrPersistedTopology } from "@openscout/runtime/system-probes";
+import { parseHerdrPersistedTopology } from "@openscout/runtime/setup";
 
 /**
  * What a stopped herdr session still knows about itself.

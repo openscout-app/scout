@@ -6,7 +6,7 @@ import {
   flightCompletion,
   type ScoutRouteTarget,
 } from "@openscout/protocol";
-import { ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
+import { ScoutBrokerHttpError } from "@openscout/runtime/client";
 import { findNearestProjectRoot } from "@openscout/runtime/setup";
 
 import {

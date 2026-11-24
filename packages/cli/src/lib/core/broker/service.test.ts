@@ -20,9 +20,9 @@ import {
 import {
   registerActiveScoutBrokerService,
   type ActiveScoutBrokerService,
-} from "@openscout/runtime/broker-api";
-import { createRuntimeRegistrySnapshot } from "@openscout/runtime/registry";
-import { SUPPORTED_LOCAL_AGENT_HARNESSES } from "@openscout/runtime/local-agents";
+} from "@openscout/runtime/client";
+import { createRuntimeRegistrySnapshot } from "@openscout/runtime/routing";
+import { SUPPORTED_LOCAL_AGENT_HARNESSES } from "@openscout/runtime/harnesses";
 
 import {
   cancelScoutFlight,

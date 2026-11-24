@@ -12,7 +12,7 @@
  * the runs domain (queryRuns) needs the same logic.
  */
 
-import { resolveOperatorName } from "@openscout/runtime/user-config";
+import { resolveOperatorName } from "@openscout/runtime/config";
 
 import { db } from "./internal/db.ts";
 import { jsonBoolean, normalizeTimestampMs } from "./internal/parse.ts";

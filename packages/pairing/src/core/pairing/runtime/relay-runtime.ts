@@ -7,11 +7,11 @@ import {
   execSystemFile,
   tailscaleStatusProbe,
   type TailscaleStatusSummary,
-} from "@openscout/runtime/system-probes";
+} from "@openscout/runtime/setup";
 
 import { pairingLog } from "./log.ts";
 import { startRelay, type RelayOptions } from "./relay/relay.ts";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutPairingHome } from "@openscout/runtime/config";
 
 function pairingDir(): string {
   return resolveOpenScoutPairingHome();

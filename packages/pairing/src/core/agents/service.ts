@@ -5,7 +5,7 @@ import {
   type ScoutAgentStatus,
   type UpdateScoutAgentCardInput,
   type UpScoutAgentInput,
-} from "@openscout/runtime/control-plane-agents";
+} from "@openscout/runtime/harnesses";
 
 import {
   loadScoutBrokerContext,

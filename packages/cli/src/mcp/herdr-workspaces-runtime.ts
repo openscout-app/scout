@@ -1,6 +1,6 @@
 import * as z from "zod/v4";
 import type { HerdrWorkspacesRead } from "@openscout/protocol";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
+import { resolveBrokerControlUrl } from "@openscout/runtime/config";
 
 const availability = z.enum(["not_scanned", "available", "unavailable", "partial"]);
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

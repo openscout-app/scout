@@ -1,7 +1,6 @@
 import { createCredentialBinding } from "./credential-binding.ts";
-import { pairingTrustOwner } from "@openscout/runtime/pairing-security/trust-owner";
+import { pairingTrustOwner, isTrustedPeer } from "@openscout/runtime/pairing-security";
 import type { AdmitAccountDevice } from "../account-admission.ts";
-import { isTrustedPeer } from "@openscout/runtime/pairing-security/identity";
 import { watchSharedScoutMessages } from "./broker-message-fanout.ts";
 // Relay client — connects the bridge OUTBOUND to a relay server.
 //

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSystemFile } from "@openscout/runtime/system-probes";
+import { execSystemFile } from "@openscout/runtime/setup";
 import { DOCTOR_HELP, NODE_DOCTOR_HELP, SETUP_HELP, preflightLifecycle } from "../../bin/lifecycle-preflight.mjs";
 
 const roots: string[] = [];

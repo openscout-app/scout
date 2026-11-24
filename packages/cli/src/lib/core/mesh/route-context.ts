@@ -1,4 +1,4 @@
-import { readNativeAppThreads, type NativeThreadInventory } from "@openscout/runtime/in-place";
+import { readNativeAppThreads, type NativeThreadInventory } from "@openscout/runtime/harnesses";
 import { parseScoutSessionHostAddress, scoutNodeMatchesSessionHost } from "@openscout/protocol";
 import { RoutingStore, RoutingChunks, resolveRoute, type RouteKind, type RouteResult, type RouteOptions } from "@openscout/runtime/routing";
 import { loadMachineNodeStates, type ScoutMachineNodeStateOptions, type ScoutRecentDeps } from "./recent.ts";
