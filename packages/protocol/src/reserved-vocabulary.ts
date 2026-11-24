@@ -6,6 +6,7 @@ import {
 } from "./agent-identity.js";
 import {
   SCOUT_LAUNCHABLE_HARNESSES,
+  SCOUT_RUNTIME_HARNESS_ALIASES,
   SCOUT_REASONING_EFFORTS,
 } from "./runtime-execution.js";
 import { SCOUT_RESERVED_RUNTIME_PROFILE_IDS } from "./runtime-profiles.js";
@@ -53,7 +54,7 @@ const PRODUCT_IDENTITIES = new Set([
 
 const RESERVED_BY_KIND: ReadonlyArray<readonly [ScoutReservedVocabularyKind, ReadonlySet<string>]> = [
   ["profile", new Set(SCOUT_RESERVED_RUNTIME_PROFILE_IDS)],
-  ["harness", new Set(SCOUT_LAUNCHABLE_HARNESSES)],
+  ["harness", new Set([...SCOUT_LAUNCHABLE_HARNESSES, ...Object.keys(SCOUT_RUNTIME_HARNESS_ALIASES)])],
   ["effort", new Set(SCOUT_REASONING_EFFORTS)],
   ["dimension", new Set(SCOUT_RESERVED_DIMENSION_WORDS)],
   ["product", PRODUCT_IDENTITIES],

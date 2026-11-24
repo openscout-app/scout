@@ -10,6 +10,7 @@ import {
  * broker-owned; clients use this list only to recognize unambiguous syntax.
  */
 export const SCOUT_RESERVED_RUNTIME_PROFILE_IDS = [
+  "antigravity",
   "fable",
   "kimi",
   "grok",

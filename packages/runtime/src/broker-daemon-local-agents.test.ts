@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { namedChannelNaturalKey } from "@openscout/protocol";
 
+import type { RuntimeRegistrySnapshot } from "./registry.js";
 import { createBrokerDaemonTestHarness } from "./test-helpers/broker-daemon-harness.test";
 
 const broker = createBrokerDaemonTestHarness();
@@ -575,6 +576,53 @@ for await (const line of rl) {
         }),
       }),
     }));
+  }, 15_000);
+
+  test("an Antigravity profile configures the native session before delivering the ask", async () => {
+    const home = mkdtempSync(join(tmpdir(), "scout-agy-profile-"));
+    const bin = join(home, ".local", "bin");
+    const projectPath = join(home, "project");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(projectPath);
+    // Report the settings actually received by the child, not the broker's intent.
+    writeFileSync(join(bin, "agy"), `#!/usr/bin/env bun
+import { createInterface } from "node:readline";
+const send = message => console.log(JSON.stringify({ jsonrpc: "2.0", ...message }));
+const config = new Map();
+let workspace;
+for await (const line of createInterface({ input: process.stdin })) {
+  const { id, method, params } = JSON.parse(line);
+  let result = {};
+  if (method === "initialize") result = { protocolVersion: 1 };
+  if (method === "session/new") {
+    workspace = params.cwd;
+    result = { sessionId: "native-agy" };
+  }
+  if (method === "session/set_config_option") {
+    if (params.configId === "model") config.delete("thought_level");
+    config.set(params.configId, params.value);
+    result = { configOptions: Array.from(config, ([id, currentValue]) => ({ id, currentValue })) };
+  }
+  if (method === "session/prompt") send({ method: "session/update", params: { sessionId: params.sessionId,
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "text",
+      text: [workspace, config.get("model"), config.get("thought_level")].join(" ") } } } });
+  send({ id, result: method === "session/prompt" ? { stopReason: "end_turn" } : result });
+}
+`, { mode: 0o700 });
+    const { baseUrl } = await broker.startBroker({ controlHome: home, devInstance: true,
+      env: { HOME: home, OPENSCOUT_CORE_AGENTS: "", OPENSCOUT_RUNTIME_CATALOG_URL: "http://127.0.0.1:1" } });
+    const { flight } = await broker.postJson<{ flight: { id: string } }>(baseUrl, "/v1/deliver", {
+      target: { kind: "runtime_profile", profile: "antigravity", projectPath, reasoningEffort: "high" },
+      execution: { model: "gemini-4-neon" }, body: "Report the configured runtime.", intent: "consult",
+    });
+    const { flights, endpoints } = await broker.waitFor(
+      () => broker.getJson<RuntimeRegistrySnapshot>(baseUrl, "/v1/snapshot"),
+      value => ["completed", "failed"].includes(value.flights[flight.id]?.state),
+    );
+    expect(flights[flight.id]).toMatchObject({ state: "completed", output: `${projectPath} gemini-4-neon high` });
+    expect(Object.values(endpoints).find(endpoint => endpoint.transport === "antigravity_acp")?.metadata).toMatchObject({
+      externalSessionId: "native-agy", observedRuntime: { harness: "antigravity", model: "gemini-4-neon", reasoningEffort: "high" },
+    });
   }, 15_000);
 
   test("starts and invokes a Kimi ACP cardless session for project routing", async () => {
