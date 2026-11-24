@@ -217,6 +217,12 @@ to retry. The record keeps the answering `requestId`; a repeat with the same
 one returns the current view and sends nothing, for every answer kind. A
 different `requestId` on a settled ask is refused with 409.
 
+Answering is the operator's act. The route needs operator proof, as
+`/v1/permissions/decide` and `/v1/tasks/ready/decide` do: a request signed
+with the operator attribution key (`OPENSCOUT_ATTRIBUTION_KEY_FILE`, or a key
+the surface adopted). An unsigned local request gets 403
+`operator_attribution_required`. Reading asks needs no proof.
+
 `metadata.decisionAnswer` on a reply is written only by the runtime. A
 client's reply metadata never carries it: the runtime removes the key.
 
