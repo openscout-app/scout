@@ -47,6 +47,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "wait": node("--timeout="),
   "flight": node("--timeout=", { "get": node(), "wait": node(), "cancel": node() }),
   "work-retry": node("--attempt="),
+  "worktree": node("", { "list": node("--project= --base="), "gc": node("--project= --base= --dry-run") }),
   "worktrees": node("--dry-run --json --project=", { "status": node(), "retire": node() }),
   "label": node("--interval= --limit= --once --since=", { "watch": node(), "feed": node(), "brief": node() }),
   "card": node("--all --as= --clear-model --clear-permission-profile --clear-reasoning-effort --context-root= --display-name= --effort= --harness= --model= --name= --no-input --one-time --path= --permission-profile= --provider= --reasoning-effort= --restart", { "create": node(), "update": node(), "cleanup": node(), "retire": node() }),

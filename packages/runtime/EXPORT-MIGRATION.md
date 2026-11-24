@@ -27,6 +27,10 @@ legacy subpath after both repositories and their build configs stop using it.
 | `./storage` | `./schema`, `./sqlite-adapter`, `./drizzle`, `./attachments` |
 | `./extensions` | `./scout-extensions`, `./extension-channel-host`, `./shared-mcp` |
 
+- **Harnesses:** `listScoutWorktrees` and `gcScoutWorktrees` are the manual
+  worktree APIs. The retirement sweep's candidate-only `listScoutWorktrees`
+  helper is `listScoutWorktreeRetirementCandidates` on the facade. Its legacy
+  subpath retains the original name.
 - **Storage:** `briefingsTable` keeps the schema type. For an import from
   `./drizzle`, use `drizzleBriefingsTable` to retain the narrowed bridge type.
   Both names refer to the same table at runtime.
