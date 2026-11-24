@@ -30,10 +30,9 @@ const legacySources = {
     "runtime-list-preferences",
   ],
   mesh: [
-    "mesh-dial-order", "mesh-peer-client", "mesh-node-state", "mesh-peer-filter", "mesh-join",
-    "mesh/tailscale", "mesh/iroh-bridge", "mesh-bridge-config", "mesh/node-identity",
-    "mesh/access", "mesh/peer-auth", "mesh/local-auth", "mesh/pinned-https-client",
-    "mesh/client-wire", "open-scout-network", "relay-transport",
+    "mesh-dial-order", "mesh-node-state", "mesh-peer-filter", "mesh-join", "mesh/tailscale",
+    "mesh/iroh-bridge", "mesh-bridge-config", "mesh/node-identity", "mesh/access",
+    "mesh/peer-auth", "mesh/local-auth", "mesh/client-wire", "open-scout-network", "relay-transport",
   ],
   "pairing-security": [
     "pairing-security/noise", "pairing-security/identity", "pairing-security/transport",

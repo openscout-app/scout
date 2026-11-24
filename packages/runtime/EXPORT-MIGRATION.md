@@ -21,7 +21,7 @@ legacy subpath after both repositories and their build configs stop using it.
 | `./config` | `./support-paths`, `./scout-home`, `./local-config`, `./user-config`, `./user-config-fields`, `./instance`, `./path-trust` |
 | `./setup` | `./setup` (same path), `./onboarding`, `./diagnostic-report`, `./core-report`, `./system-probes` |
 | `./harnesses` | `./harness-catalog`, `./harness-topology`, `./harness-model-preferences`, `./local-agents`, `./local-agent-harnesses`, `./control-plane-agents`, `./agent-workspace`, `./agent-workspace-retirement`, `./live-terminal-session`, `./terminal-environment`, `./in-place`, `./tail`, `./pi-rpc`, `./claude-stream-json`, `./claude-statusline`, `./tool-resolution`, `./broker-runtime-profiles`, `./runtime-list-preferences` |
-| `./mesh` | `./mesh-dial-order`, `./mesh-peer-client`, `./mesh-node-state`, `./mesh-peer-filter`, `./mesh-join`, `./mesh-bridge-config`, `./mesh/tailscale`, `./mesh/iroh-bridge`, `./mesh/node-identity`, `./mesh/access`, `./mesh/peer-auth`, `./mesh/local-auth`, `./mesh/pinned-https-client`, `./mesh/client-wire`, `./open-scout-network`, `./relay-transport` |
+| `./mesh` | `./mesh-dial-order`, `./mesh-node-state`, `./mesh-peer-filter`, `./mesh-join`, `./mesh-bridge-config`, `./mesh/tailscale`, `./mesh/iroh-bridge`, `./mesh/node-identity`, `./mesh/access`, `./mesh/peer-auth`, `./mesh/local-auth`, `./mesh/client-wire`, `./open-scout-network`, `./relay-transport` |
 | `./pairing-security` | `./pairing-security/noise` (host callers only; see below), `./pairing-security/identity`, `./pairing-security/transport`, `./pairing-security/trust-owner` |
 | `./routing` | `./registry`, `./routing` (same path), `./provisional-agent-names`, `./scout-bridge-command`, `./dist-access`, `./conversations`, `./conversations/legacy-ids` |
 | `./storage` | `./schema`, `./sqlite-adapter`, `./drizzle`, `./attachments` |
@@ -34,6 +34,9 @@ legacy subpath after both repositories and their build configs stop using it.
   modules through `./broker-trpc-router`, `./tail`, and `./drizzle`,
   respectively. Keep Node value imports on their portable legacy paths until
   the facade has a portable entrypoint. Type-only imports can move.
+- **Mesh TLS:** Keep `./mesh-peer-client` and `./mesh/pinned-https-client`
+  on their current paths. Their X.509 dependency modifies Node process
+  globals on import. The `./mesh` facade does not load that dependency.
 - **Browser:** Keep `./pairing-security/noise` and its Vite alias for browser
   value imports until there is a browser-safe replacement. The host pairing
   facade also loads filesystem-backed trust code.
