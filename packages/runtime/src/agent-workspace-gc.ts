@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep 
 import { SCOUT_WORKSPACES_DIRNAME } from "./agent-workspace.js";
 import { ProbeCommandError, execSystemFile } from "./system-probes/exec.js";
 
-export type ScoutWorktreeSkipReason = "locked" | "active" | "dirty" | "unmerged" | "git_error" | "changed";
+export type ScoutWorktreeSkipReason = "locked" | "active" | "dirty" | "index_flags" | "unmerged" | "git_error" | "changed";
 
 export type ScoutWorktree = {
   path: string;
@@ -104,26 +104,28 @@ async function realpathOrNull(path: string): Promise<string | null> {
   try { return await realpath(path); } catch { return null; }
 }
 
-async function isScoutPath(workspaceDir: string, path: string): Promise<boolean> {
-  if (dirname(path) !== workspaceDir) return false;
-  // Neither the workspace directory nor a registered child may redirect
-  // through a symlink. Check both again before a destructive Git call.
+async function readScoutDirectory(workspaceDir: string, path: string) {
+  if (dirname(path) !== workspaceDir) return null;
   try {
-    return (await lstat(workspaceDir)).isDirectory()
-      && (await lstat(path)).isDirectory()
-      && await realpath(path) === path;
+    if (!(await lstat(workspaceDir)).isDirectory() || await realpath(path) !== path) return null;
+    const directory = await lstat(path, { bigint: true });
+    return directory.isDirectory() ? directory : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 async function canonicalActivePaths(paths: ReadonlySet<string> | undefined): Promise<Set<string>> {
   const result = new Set<string>();
   for (const path of paths ?? []) {
-    const absolute = resolve(path);
-    result.add(absolute);
-    const canonical = await realpathOrNull(absolute);
-    if (canonical) result.add(canonical);
+    try {
+      // Resolve symlinks before interpreting '..' in a session's path.
+      result.add(await realpath(path));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      result.add(resolve(path));
+    }
   }
   return result;
 }
@@ -137,6 +139,7 @@ async function inspect(entry: Entry, cwd: string, baseCommit: string, activePath
   const { path, branch, head, locked } = entry;
   const activeSession = [...activePaths].some(activePath => containsPath(path, activePath));
   let clean = false;
+  let indexFlags = false;
   let merged = false;
   let error: string | undefined;
   try {
@@ -152,7 +155,13 @@ async function inspect(entry: Entry, cwd: string, baseCommit: string, activePath
     // Disable optional index writes and override status config that can hide
     // untracked files or changed submodules.
     const status = await git(path, ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]);
-    clean = status.stdout === "";
+    if (status.stdout === "") {
+      // Status can miss edits on paths marked assume-unchanged (lowercase
+      // tag) or skip-worktree (S). Do not trust a clean result in either case.
+      const files = await git(path, ["ls-files", "-v", "-z"]);
+      indexFlags = files.stdout.split("\0").some(record => /^[a-zS] /.test(record));
+      clean = !indexFlags;
+    }
   } catch (cause) {
     error = gitError(cause);
   }
@@ -163,7 +172,7 @@ async function inspect(entry: Entry, cwd: string, baseCommit: string, activePath
     if (!(cause instanceof ProbeCommandError && cause.exitCode === 1)) error ??= gitError(cause);
   }
   const skipReason = locked ? "locked" : activeSession ? "active" : error ? "git_error"
-    : !clean ? "dirty" : !merged ? "unmerged" : undefined;
+    : indexFlags ? "index_flags" : !clean ? "dirty" : !merged ? "unmerged" : undefined;
   return {
     path, name: basename(path), branch, head, clean, merged, locked, activeSession,
     eligible: skipReason === undefined, ...(skipReason && { skipReason }), ...(error && { error }),
@@ -178,7 +187,7 @@ export async function listScoutWorktrees(projectRoot: string, options: ScoutWork
   const workspaceDir = join(cwd, SCOUT_WORKSPACES_DIRNAME);
   const worktrees: ScoutWorktree[] = [];
   for (const entry of await registeredWorktrees(cwd)) {
-    if (!entry.prunable && await isScoutPath(workspaceDir, entry.path)) {
+    if (!entry.prunable && await readScoutDirectory(workspaceDir, entry.path)) {
       worktrees.push(await inspect(entry, cwd, base.commit, activePaths));
     }
   }
@@ -212,22 +221,6 @@ async function deleteScoutBranch(
   }
 }
 
-async function pruneWorktreeMetadata(cwd: string, warnings: string[]): Promise<void> {
-  // Non-forced removal already deletes its own entry. Git prune is repo-wide;
-  // do not remove any other registration (including a temporarily absent disk).
-  try {
-    const args = ["worktree", "prune", "--expire=never"];
-    const preview = await git(cwd, [...args, "--dry-run", "--verbose"]);
-    if (preview.stdout.trim() || preview.stderr.trim()) {
-      warnings.push("Skipped git worktree prune: it would prune other worktree registrations.");
-      return;
-    }
-    await git(cwd, args);
-  } catch (error) {
-    warnings.push(`Git worktree prune failed: ${gitError(error)}`);
-  }
-}
-
 export async function gcScoutWorktrees(projectRoot: string, options: ScoutWorktreeGcOptions = {}): Promise<ScoutWorktreeGcReport> {
   const { projectRoot: cwd, baseRef, worktrees } = await listScoutWorktrees(projectRoot, options);
   const dryRun = options.dryRun ?? false;
@@ -240,8 +233,8 @@ export async function gcScoutWorktrees(projectRoot: string, options: ScoutWorktr
     }
     try {
       const current = (await registeredWorktrees(cwd)).find(entry => entry.path === worktree.path);
-      if (!current || current.prunable || current.head !== worktree.head || current.branch !== worktree.branch
-        || !await isScoutPath(workspaceDir, worktree.path)) {
+      const directory = await readScoutDirectory(workspaceDir, worktree.path);
+      if (!current || !directory || current.prunable || current.head !== worktree.head || current.branch !== worktree.branch) {
         report.worktrees.push({ ...worktree, eligible: false, skipReason: "changed", action: "skipped" });
         continue;
       }
@@ -252,10 +245,14 @@ export async function gcScoutWorktrees(projectRoot: string, options: ScoutWorktr
         report.worktrees.push({ ...checked, action: "skipped" });
         continue;
       }
-      if (!await isScoutPath(workspaceDir, checked.path)) {
+      // Recheck the direct, canonical directory immediately before removal.
+      // A replacement at the same path is not the directory Git inspected.
+      const rechecked = await readScoutDirectory(workspaceDir, checked.path);
+      if (!rechecked || rechecked.dev !== directory.dev || rechecked.ino !== directory.ino) {
         report.worktrees.push({ ...checked, eligible: false, skipReason: "changed", action: "skipped" });
         continue;
       }
+      // This removes the worktree's own registration without a repo-wide prune.
       await git(cwd, ["worktree", "remove", "--", checked.path]);
       const branchDeleted = await deleteScoutBranch(cwd, baseRef, checked, report.warnings);
       report.worktrees.push({ ...checked, action: "removed", branchDeleted });
@@ -263,6 +260,5 @@ export async function gcScoutWorktrees(projectRoot: string, options: ScoutWorktr
       report.worktrees.push({ ...worktree, action: "failed", error: gitError(error) });
     }
   }
-  if (report.worktrees.some(worktree => worktree.action === "removed")) await pruneWorktreeMetadata(cwd, report.warnings);
   return report;
 }

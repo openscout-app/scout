@@ -120,8 +120,10 @@ The project defaults to the current directory. Both commands accept `--json`
 and `--base <ref>`. Without `--base`, Scout checks against `origin/main`,
 then `main`, then `HEAD`. GC only considers Git worktrees directly under the
 project's `.scout-worktrees/` directory. It keeps worktrees with a lock,
-tracked changes, untracked files, or commits not in the base. Ignored files
-do not count as changes and can be deleted with a worktree.
+tracked changes, untracked files, or commits not in the base. It also keeps
+worktrees with paths marked `assume-unchanged` or `skip-worktree` because
+those flags can hide edits from Git status. Ignored files do not count as
+changes and can be deleted with a worktree.
 
 Scout uses the local runtime's endpoint inventory to keep worktrees in use.
 If the runtime is unavailable, confirm that no sessions are using the worktrees

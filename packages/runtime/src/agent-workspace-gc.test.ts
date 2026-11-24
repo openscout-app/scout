@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { existsSync, renameSync } from "node:fs";
+import { cp, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 
 import { gcScoutWorktrees, listScoutWorktrees } from "./agent-workspace-gc.js";
 import { execSystemFile } from "./system-probes/exec.js";
@@ -82,16 +82,35 @@ describe("Scout worktree GC", () => {
     }
   });
 
-  test("keeps locked worktrees and worktrees whose active session cwd is a symlinked subdirectory", async () => {
+  test("keeps worktrees with index flags even when Git status is clean", async () => {
+    const assumed = await addWorktree("assumed");
+    await git(assumed, "update-index", "--assume-unchanged", "tracked.txt");
+    await writeFile(join(assumed, "tracked.txt"), "hidden edit\n");
+    const skipped = await addWorktree("skipped");
+    await git(skipped, "update-index", "--skip-worktree", "tracked.txt");
+    expect(await git(assumed, "status", "--porcelain")).toBe("");
+    expect(await git(skipped, "status", "--porcelain")).toBe("");
+
+    const { worktrees } = await gcScoutWorktrees(root);
+    expect(worktrees).toHaveLength(2);
+    for (const worktree of worktrees) {
+      expect(worktree).toMatchObject({ clean: false, eligible: false, action: "skipped", skipReason: "index_flags" });
+    }
+    expect(await readFile(join(assumed, "tracked.txt"), "utf8")).toBe("hidden edit\n");
+    expect(existsSync(skipped)).toBe(true);
+  });
+
+  test("keeps locked worktrees and resolves a symlink before the parent segment in an active cwd", async () => {
     const locked = await addWorktree("locked");
     const active = await addWorktree("active");
     const sibling = await addWorktree("active-sibling");
     await git(root, "worktree", "lock", "--reason", "Keep this\nworktree", locked);
-    await mkdir(join(active, "nested"));
+    const src = join(active, "src");
+    await mkdir(src);
     const alias = join(fixture, "alias");
-    await symlink(active, alias, "dir");
+    await symlink(src, alias, "dir");
 
-    const { worktrees } = await gcScoutWorktrees(root, { activePaths: new Set([join(alias, "nested")]) });
+    const { worktrees } = await gcScoutWorktrees(root, { activePaths: new Set([`${alias}${sep}..`]) });
     const byName = Object.fromEntries(worktrees.map(entry => [entry.name, entry]));
     expect(byName.locked).toMatchObject({ locked: true, skipReason: "locked", action: "skipped" });
     expect(byName.active).toMatchObject({ activeSession: true, clean: true, skipReason: "active", action: "skipped" });
@@ -134,6 +153,30 @@ describe("Scout worktree GC", () => {
     expect(await readFile(join(movedChild, "tracked.txt"), "utf8")).toBe("initial\n");
   });
 
+  test("keeps a replacement directory installed during the GC recheck", async () => {
+    const path = await addWorktree("replaced");
+    const original = join(fixture, "original");
+    const replacement = join(fixture, "replacement");
+    // The replacement has the same .git pointer and files, but is a different directory.
+    await cp(path, replacement, { recursive: true });
+    const activePaths = new Set<string>();
+    const entries = activePaths[Symbol.iterator].bind(activePaths);
+    let pathReads = 0;
+    activePaths[Symbol.iterator] = () => {
+      // Swap the directory as GC refreshes active paths after reading its identity.
+      if (++pathReads === 2) {
+        renameSync(path, original);
+        renameSync(replacement, path);
+      }
+      return entries();
+    };
+    expect((await gcScoutWorktrees(root, { activePaths })).worktrees).toMatchObject([
+      { path, eligible: false, action: "skipped", skipReason: "changed" },
+    ]);
+    expect(await readFile(join(original, "tracked.txt"), "utf8")).toBe("initial\n");
+    expect(await readFile(join(path, "tracked.txt"), "utf8")).toBe("initial\n");
+  });
+
   test("keeps a registered worktree path that has been reused for a different repository", async () => {
     const path = await addWorktree("reused");
     await rename(path, join(fixture, "original"));
@@ -159,7 +202,7 @@ describe("Scout worktree GC", () => {
 
     const report = await gcScoutWorktrees(root, { dryRun: true, baseRef: "HEAD" });
     expect(report).toMatchObject({ baseRef: "HEAD", dryRun: true, worktrees: [{ path, action: "would_remove" }] });
-    expect(existsSync(path)).toBe(true);
+    expect(await readFile(join(path, "tracked.txt"), "utf8")).toBe("initial\n");
     expect(await readFile(index)).toEqual(indexBefore);
     expect((await stat(index)).mtimeMs).toBe(mtimeBefore);
     expect(await git(root, "show-ref")).toBe(refsBefore);
