@@ -12,7 +12,7 @@ export const readinessBootstrapImports = [
   "../discovery.ts", "../context.ts", "../../lib/shared/product.ts",
   "../../../bin/lifecycle-preflight.mjs",
 ].map(path => fileURLToPath(new URL(path, import.meta.url))).concat(
-  Bun.resolveSync("@openscout/runtime/instance", import.meta.dir),
+  Bun.resolveSync("@openscout/runtime/config", import.meta.dir),
 );
 
 /** Insert after the synthetic fixture's imports/mocks, BEFORE any operation.

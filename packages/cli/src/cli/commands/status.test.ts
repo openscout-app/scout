@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { createRuntimeRegistrySnapshot } from "@openscout/runtime/registry";
+import { createRuntimeRegistrySnapshot } from "@openscout/runtime/routing";
 import { buildWorkStatuses, parseStatusCommandOptions, runStatusCommand, selectWorkStatuses } from "./status.ts";
 import { shouldEnsureBrokerUptodateForCommand } from "../uptodate.ts";
 import { createScoutCommandContext } from "../context.ts";

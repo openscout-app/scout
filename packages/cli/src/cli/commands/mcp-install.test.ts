@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { drainSharedMcpOptIn, readSharedMcpOptIn, writeSharedMcpOptIn } from "@openscout/runtime/shared-mcp";
+import { drainSharedMcpOptIn, readSharedMcpOptIn, writeSharedMcpOptIn } from "@openscout/runtime/extensions";
 
 import {
   enableSharedScoutMcp,

@@ -74,7 +74,7 @@ that the indexed snippet belongs to a verified readable transcript.
 
 `herdr_workspaces` is unchanged in this port and still uses its web adapter.
 The runtime already exports Herdr session/topology probes through
-`@openscout/runtime/system-probes`, and protocol owns the digest model. It has
+`@openscout/runtime/setup`, and protocol owns the digest model. It has
 no existing broker HTTP route for the full digest or reconciled terminal
 surfaces. Machine host/count evidence is not a pane topology replacement.
 

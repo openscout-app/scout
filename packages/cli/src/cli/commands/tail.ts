@@ -1,4 +1,4 @@
-import { isTailNoiseEvent } from "@openscout/runtime/tail";
+import { isTailNoiseEvent } from "@openscout/runtime/harnesses";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";

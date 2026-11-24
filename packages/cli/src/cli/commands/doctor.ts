@@ -1,5 +1,5 @@
 import { loadScoutCoreReport, resolveScoutCoreReportTarget } from "../../lib/core/setup/readiness.ts";
-import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
+import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harnesses";
 import { DOCTOR_HELP } from "../../../bin/lifecycle-preflight.mjs";
 import { collectDoctorCheck, doctorBunReport, DOCTOR_CHECK_NAMES, runDoctorCheck, renderDoctorCheck, renderDoctorAssessment } from "../doctor-checks.ts";
 import type { ScoutCommandContext } from "../context.ts";
@@ -19,8 +19,7 @@ import {
   renderScoutDoctorStreamingLead,
   renderScoutDoctorTailAfterStream,
 } from "../../lib/ui/terminal/setup.ts";
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
+import { deriveOpenScoutInstanceLayout, resolveBrokerControlUrl } from "@openscout/runtime/config";
 
 const DOCTOR_JSON_SCHEMA = "scout.doctor.core/v1" as const;
 

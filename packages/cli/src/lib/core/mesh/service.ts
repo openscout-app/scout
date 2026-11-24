@@ -1,13 +1,15 @@
-import { visibleMeshNodes } from "@openscout/runtime/mesh-peer-filter";
+import {
+  visibleMeshNodes,
+  httpMeshUrlsForNode,
+  orderMeshDialUrls,
+  joinBrokerMesh,
+  leaveBrokerMesh,
+  type TailscalePeerCandidate,
+} from "@openscout/runtime/mesh";
 import type { NodeDefinition } from "@openscout/protocol";
 import { meshPeerFetch } from "@openscout/runtime";
-import { requestScoutBrokerJson } from "@openscout/runtime/broker-api";
-import { httpMeshUrlsForNode, orderMeshDialUrls } from "@openscout/runtime/mesh-dial-order";
-import { joinBrokerMesh, leaveBrokerMesh } from "@openscout/runtime/mesh-join";
-import {
-  type TailscalePeerCandidate,
-} from "@openscout/runtime/mesh/tailscale";
-import { execSystemFile, tailscaleStatusProbe } from "@openscout/runtime/system-probes";
+import { requestScoutBrokerJson } from "@openscout/runtime/client";
+import { execSystemFile, tailscaleStatusProbe } from "@openscout/runtime/setup";
 
 import {
   readScoutBrokerHealth,

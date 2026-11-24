@@ -16,7 +16,7 @@ import {
   type WebHandoffScope,
 } from "./web-handoff.ts";
 import { serveArtifactPresentation } from "./artifact-presentation.ts";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutPairingHome } from "@openscout/runtime/config";
 
 // Allowed roots — file requests must resolve under one of these.
 const ALLOWED_ROOTS = [homedir(), "/tmp"];

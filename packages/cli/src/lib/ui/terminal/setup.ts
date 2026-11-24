@@ -6,7 +6,7 @@ import type {
   ScoutProjectInventoryEntry,
   ScoutSetupReport,
 } from "../../core/setup/service.ts";
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
+import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/config";
 
 function renderInstanceLine(): string {
   const layout = deriveOpenScoutInstanceLayout();

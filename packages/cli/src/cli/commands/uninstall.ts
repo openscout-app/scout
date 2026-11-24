@@ -4,13 +4,16 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
+import {
+  deriveOpenScoutInstanceLayout,
+  assertTestIsolatedUserData,
+  isTestRunnerProcess,
+} from "@openscout/runtime/config";
 import {
   claudeStatuslineCommandWrapperPath,
   isOpenScoutClaudeStatuslineCommand,
   readClaudeStatuslineDelegate,
-} from "@openscout/runtime/claude-statusline";
-import { assertTestIsolatedUserData, isTestRunnerProcess } from "@openscout/runtime/support-paths";
+} from "@openscout/runtime/harnesses";
 import {
   CLAUDE_PERMISSION_HOOK_WRAPPER,
   HarnessHooks,

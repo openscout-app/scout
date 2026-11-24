@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import * as harnesses from "@openscout/runtime/harnesses";
 import type { ScoutOutput } from "../output.ts";
 
 afterEach(() => {
@@ -41,7 +42,8 @@ describe("runDownCommand", () => {
       writeValue,
     };
 
-    mock.module("@openscout/runtime/local-agents", () => ({
+    mock.module("@openscout/runtime/harnesses", () => ({
+      ...harnesses,
       resolveLocalAgentByName,
     }));
     mock.module("../../lib/core/agents/service.ts", () => ({

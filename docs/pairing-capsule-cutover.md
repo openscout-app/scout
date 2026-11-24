@@ -52,7 +52,7 @@ obligation. A dishonest acquisition cannot override a truthful older holder.
 Run trusted bootstrap code **before any listener starts**:
 
 ```ts
-import {pairingTrustOwner} from "@openscout/runtime/pairing-security/trust-owner";
+import { pairingTrustOwner } from "@openscout/runtime/pairing-security";
 
 const owner = pairingTrustOwner(configuredPairingRoot);
 // Managed hosts register their existing typed adapter here. No module loader,

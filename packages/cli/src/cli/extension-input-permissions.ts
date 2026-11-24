@@ -1,6 +1,6 @@
 import { selectedScoutExtensionInvocation } from "./extension-context.ts";
-import { normalizeScoutExtensionDestination } from "@openscout/runtime/scout-extensions";
-import { resolveScoutHome } from "@openscout/runtime/scout-home";
+import { normalizeScoutExtensionDestination } from "@openscout/runtime/extensions";
+import { resolveScoutHome } from "@openscout/runtime/config";
 import type { ScoutCommandContext } from "./context.ts";
 import { grantScoutExtensionInput, inputRefusal, listScoutExtensionInputGrants, revokeScoutExtensionInputGrant, scoutExtensionGrantStore, selectedScoutExtensionInput, type ExtensionInputSelection } from "./extension-input-grants.ts";
 

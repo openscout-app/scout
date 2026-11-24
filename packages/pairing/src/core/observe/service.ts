@@ -15,13 +15,11 @@ import {
 import {
   getLocalAgentEndpointSessionSnapshot,
   getLocalAgentSessionSnapshot,
-} from "@openscout/runtime/local-agents";
-import {
   getTailDiscovery,
   readTailEventsForSession,
   refreshTailDiscovery,
   type DiscoverySnapshot,
-} from "@openscout/runtime/tail";
+} from "@openscout/runtime/harnesses";
 import {
   epochMs,
   flightSessionTrace,

@@ -16,7 +16,7 @@ import {
   type MachinePresence,
   type MachineRecord,
 } from "@openscout/protocol";
-import { classifyScoutBridgeCommand, type ScoutBridgeKind } from "@openscout/runtime/scout-bridge-command";
+import { classifyScoutBridgeCommand, type ScoutBridgeKind } from "@openscout/runtime/routing";
 
 /* ── Version comparison ── */
 

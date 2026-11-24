@@ -1,6 +1,6 @@
 /** Credential ownership is socket-authenticated, never a request/display ID.
  * This narrow gate does not qualify the general live-transport registry. */
-import { pairingTrustOwner, type PairingAuthorityView } from "@openscout/runtime/pairing-security/trust-owner";
+import { pairingTrustOwner, type PairingAuthorityView } from "@openscout/runtime/pairing-security";
 
 interface Authority { readAuthority(): PairingAuthorityView }
 interface Identity { readonly publicKey: string; admit(): void }

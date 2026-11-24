@@ -6,9 +6,9 @@ import {
 } from "@openscout/protocol";
 import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
 import { resolveExecutableFromSearch } from "@openscout/runtime/tool-resolution";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
-import { requestScoutBrokerJson, ScoutBrokerHttpError, type ScoutBrokerHealthPayload } from "@openscout/runtime/broker-api";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { resolveBrokerControlUrl, resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
+import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
+import type { ScoutBrokerHealthPayload } from "@openscout/runtime/client";
 import { withScoutCoreCommandLock } from "./command-lock.ts";
 
 export type CoreRead<T> = { availability: "available"; value: T } | { availability: "unavailable"; status: number | null; reason: string };

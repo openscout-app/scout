@@ -17,13 +17,13 @@ import {
   resolveDistKey,
   secretServiceDistKeyStore,
   type DistKeyStore,
-} from "@openscout/runtime/dist-access";
+} from "@openscout/runtime/routing";
 import {
   readWebFullClientProfile,
   resolveInstalledWebFullClient,
   webFullClientDirectory,
   webFullClientsDirectory,
-} from "@openscout/runtime/web-full-client";
+} from "@openscout/runtime/client";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";

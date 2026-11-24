@@ -6,14 +6,14 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BrokerServiceStatus } from "@openscout/runtime/broker-process-manager";
+import type { BrokerServiceStatus } from "@openscout/runtime/daemon";
 import {
   resolveExecutableFromSearch,
   resolveJavaScriptRuntime,
   resolveNodeModulesPackageEntrypoint,
   resolveOpenScoutRepoRoot,
   resolveRepoEntrypoint,
-} from "@openscout/runtime/tool-resolution";
+} from "@openscout/runtime/harnesses";
 
 const BROKER_STATUS_CACHE_TTL_MS = 2_000;
 

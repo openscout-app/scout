@@ -1,7 +1,7 @@
-import {loadOrCreateNodeIdentity} from "@openscout/runtime/mesh/node-identity";
-import {PairingTrustOwner} from "@openscout/runtime/pairing-security/trust-owner";
+import {loadOrCreateNodeIdentity} from "@openscout/runtime/mesh";
+import {PairingTrustOwner} from "@openscout/runtime/pairing-security";
 import { createPendingPairRequestStore, pairRequestStatePath } from "../pairing-pair-requests.ts";
-import { localConfigHome } from "@openscout/runtime/local-config";
+import { localConfigHome, resolveOpenScoutPairingHome } from "@openscout/runtime/config";
 // Run with HOME pointed at a scratch directory: pairing identity paths are
 // fixed from homedir() at module load.
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -11,7 +11,6 @@ import { createScoutPairingBridgeClient } from "../pairing.ts";
 import { startBridgeServerTRPC } from "../core/pairing/runtime/bridge/server-trpc.ts";
 import { bytesToHex, generateKeyPair, loadOrCreateIdentity, SecureTransport } from "../core/pairing/runtime/security/index.ts";
 import type { Bridge } from "../core/pairing/runtime/bridge/bridge.ts";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
 
 loadOrCreateNodeIdentity();
 const identity = loadOrCreateIdentity();

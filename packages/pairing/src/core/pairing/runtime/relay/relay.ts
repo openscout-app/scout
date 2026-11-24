@@ -1,5 +1,5 @@
 // Compatibility wrapper: phone HTTP policy remains private; room transport is public.
-import { startRelay as startTransport, type RelayTransportOptions } from "@openscout/runtime/relay-transport";
+import { startRelay as startTransport, type RelayTransportOptions } from "@openscout/runtime/mesh";
 import { createPairRelayHttpHandler } from "./pair-http-proxy.ts";
 
 export interface RelayOptions {

@@ -1,5 +1,17 @@
-import { prepareScoutDelivery, deliverScoutRequest, normalizeOutgoingAttachments, type OutgoingAttachmentInput } from "@openscout/runtime/delivery-client";
-export { normalizeOutgoingAttachments, type OutgoingAttachmentInput } from "@openscout/runtime/delivery-client";
+import {
+  prepareScoutDelivery,
+  deliverScoutRequest,
+  normalizeOutgoingAttachments,
+  type OutgoingAttachmentInput,
+  requestScoutBrokerJson,
+  ScoutBrokerHttpError,
+  type ScoutBrokerBuildIdentity,
+  type ScoutBrokerChildServiceSnapshots,
+  type ScoutBrokerHealthPayload,
+  type ScoutBrokerProjectionStatus,
+  type ScoutBrokerStartupStatus,
+} from "@openscout/runtime/client";
+export { normalizeOutgoingAttachments, type OutgoingAttachmentInput } from "@openscout/runtime/client";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -60,31 +72,21 @@ import {
   type ResolvedRelayAgentConfig,
 } from "@openscout/runtime/setup";
 import {
-  requestScoutBrokerJson,
-  ScoutBrokerHttpError,
-  type ScoutBrokerBuildIdentity,
-  type ScoutBrokerChildServiceSnapshots,
-  type ScoutBrokerHealthPayload,
-  type ScoutBrokerProjectionStatus,
-  type ScoutBrokerStartupStatus,
-} from "@openscout/runtime/broker-api";
-import {
   resolveBrokerServiceConfig,
   resolveBrokerSocketPathForBaseUrl,
   resolveScoutBrokerControlUrl,
-} from "@openscout/runtime/broker-process-manager";
+} from "@openscout/runtime/daemon";
 import {
   inferLocalAgentBinding,
   SUPPORTED_LOCAL_AGENT_HARNESSES,
   SUPPORTED_SCOUT_HARNESSES,
   type LocalAgentBinding,
-} from "@openscout/runtime/local-agents";
-import type { RuntimeRegistrySnapshot } from "@openscout/runtime/registry";
-import type { DiscoverySnapshot } from "@openscout/runtime/tail";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+} from "@openscout/runtime/harnesses";
+import type { RuntimeRegistrySnapshot } from "@openscout/runtime/routing";
+import type { DiscoverySnapshot } from "@openscout/runtime/harnesses";
+import { resolveOpenScoutSupportPaths, resolveOperatorName } from "@openscout/runtime/config";
 
-import { configuredOperatorActorIds } from "@openscout/runtime/conversations/legacy-ids";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
+import { configuredOperatorActorIds } from "@openscout/runtime/routing";
 
 import {
   openAiAudioSpeechUrl,
@@ -463,7 +465,7 @@ export async function resolveScoutSenderId(agentName: string | null | undefined,
     return process.env.OPENSCOUT_AGENT.trim();
   }
   const { findNearestProjectRoot } = await import("@openscout/runtime/setup");
-  const { resolveLocalAgentByName } = await import("@openscout/runtime/local-agents");
+  const { resolveLocalAgentByName } = await import("@openscout/runtime/harnesses");
   const projectRoot = await findNearestProjectRoot(currentDirectory) ?? currentDirectory;
   const projectName = basename(projectRoot);
   const agent = await resolveLocalAgentByName(projectName, { matchProjectName: true });

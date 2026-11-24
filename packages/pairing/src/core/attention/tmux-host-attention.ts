@@ -1,6 +1,6 @@
 import type { WebAgent } from "../../shared/api/web.ts";
 import type { TmuxHostAttentionRead, TmuxHostAttentionTarget } from "@openscout/protocol";
-import { collectTmuxHostAttention as collect, detectClaudeTmuxHostAttention as detect } from "@openscout/runtime/host-attention";
+import { collectTmuxHostAttention as collect, detectClaudeTmuxHostAttention as detect } from "@openscout/runtime/daemon";
 
 /** Private presentation compatibility, also used by the pending Herdr adopter. */
 export type TmuxHostAttentionItem = {

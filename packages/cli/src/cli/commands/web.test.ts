@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { resolveInstalledWebFullClient } from "@openscout/runtime/web-full-client";
+import { resolveInstalledWebFullClient } from "@openscout/runtime/client";
 
 import { createScoutCommandContext } from "../context.ts";
 import {

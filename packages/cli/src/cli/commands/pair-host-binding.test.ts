@@ -1,8 +1,8 @@
 import {afterEach,expect,test} from "bun:test";
 import {mkdtempSync,mkdirSync,readFileSync,readdirSync,writeFileSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";import {join} from "node:path";
-import {PairingTrustOwner} from "@openscout/runtime/pairing-security/trust-owner";
-import {loadOrCreateNodeIdentity} from "@openscout/runtime/mesh/node-identity";
+import {PairingTrustOwner} from "@openscout/runtime/pairing-security";
+import {loadOrCreateNodeIdentity} from "@openscout/runtime/mesh";
 import {createScoutCommandContext} from "../context.ts";
 import {runPairHostBinding} from "./pair-host-binding.ts";
 const dirs:string[]=[],saved={...process.env};

@@ -1,14 +1,14 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/broker-api";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
+import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/client";
+import { resolveBrokerControlUrl } from "@openscout/runtime/config";
 import {
   formatApproxBytes,
   type WorktreeRetirementReport,
   type WorktreeRetirementStatus,
   type WorktreeVerdict,
-} from "@openscout/runtime/agent-workspace-retirement";
+} from "@openscout/runtime/harnesses";
 import { scoutBrokerPaths } from "@openscout/protocol";
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";

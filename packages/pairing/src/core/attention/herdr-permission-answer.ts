@@ -19,7 +19,7 @@ import {
   type ContinuationDialog,
   type ContinuationDialogOption,
 } from "@openscout/runtime";
-import { execSystemFile } from "@openscout/runtime/system-probes";
+import { execSystemFile } from "@openscout/runtime/setup";
 
 import {
   answerablePermissionDialog,

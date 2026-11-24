@@ -13,7 +13,7 @@ import {
   meshBridgeStatePath,
   waitForLaunchdJobAbsent,
 } from "@openscout/runtime";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";

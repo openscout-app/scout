@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import * as harnesses from "@openscout/runtime/harnesses";
 
 afterEach(() => {
   mock.restore();
@@ -37,7 +38,8 @@ describe("agent service wiring", () => {
     const registerScoutLocalAgentBinding = mock(async () => null);
     const retireScoutLocalAgentBinding = mock(async () => false);
 
-    mock.module("@openscout/runtime/control-plane-agents", () => ({
+    mock.module("@openscout/runtime/harnesses", () => ({
+      ...harnesses,
       createScoutAgentService,
     }));
     mock.module("../broker/service.ts", () => ({

@@ -7,7 +7,7 @@ import {
   localConfigPath,
   writeLocalConfig,
   type LocalConfig,
-} from "@openscout/runtime/local-config";
+} from "@openscout/runtime/config";
 
 type InitOptions = {
   force: boolean;

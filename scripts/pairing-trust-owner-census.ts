@@ -13,15 +13,23 @@ export function pairingTrustCensus(root: string) {
       if (entry.isDirectory()) { if (entry.name !== "fixtures") visit(path); continue; }
       if (!/\.[cm]?[jt]sx?$/.test(entry.name) || /[._](test|spec)\./.test(entry.name) || /(?:test-helpers|test-harness|test-fixtures)/.test(rel)) continue;
       const source = readFileSync(path,"utf8");
-      if (source.includes("pairing-security/trust-owner") || source.includes('"./trust-owner.js"')) ownerConsumers.push(rel);
       const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
+      const importsOwner = source.includes("pairing-security/trust-owner") || source.includes('"./trust-owner.js"')
+        || file.statements.some(statement => {
+          if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)
+            || statement.moduleSpecifier.text !== "@openscout/runtime/pairing-security") return false;
+          const bindings = statement.importClause?.namedBindings;
+          return bindings !== undefined && ts.isNamedImports(bindings)
+            && bindings.elements.some(binding => (binding.propertyName ?? binding.name).text === "pairingTrustOwner");
+        });
+      if (importsOwner) ownerConsumers.push(rel);
       const line = (node: ts.Node) => file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
       function inspect(node: ts.Node) {
         if (ts.isCallExpression(node)) {
           const call = node.expression.getText(file), target = node.arguments[0]?.getText(file) ?? "";
           if (rel !== OWNER && /(?:writeFileSync|appendFileSync|renameSync|unlinkSync|copyFileSync|openSync|writeFile|appendFile)$/.test(call)
             && /trusted.?peers|TRUSTED_PEERS|\bPEERS\b/i.test(target)) directWriters.push(`${rel}:${line(node)}`);
-          if (rel !== OWNER && source.includes("trust-owner") && /\.register$/.test(call)) adapterInstallers.push(`${rel}:${line(node)}`);
+          if (rel !== OWNER && (importsOwner || source.includes("trust-owner")) && /\.register$/.test(call)) adapterInstallers.push(`${rel}:${line(node)}`);
         }
         if (rel !== OWNER && ts.isObjectLiteralExpression(node) && node.properties.some(property => ts.isPropertyAssignment(property)
           && property.name.getText(file) === "type" && property.initializer.getText(file).replace(/["']/g,"") === "manage")) managedAdopters.push(`${rel}:${line(node)}`);

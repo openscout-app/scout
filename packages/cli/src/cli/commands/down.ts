@@ -1,4 +1,4 @@
-import { resolveLocalAgentByName } from "@openscout/runtime/local-agents";
+import { resolveLocalAgentByName } from "@openscout/runtime/harnesses";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";

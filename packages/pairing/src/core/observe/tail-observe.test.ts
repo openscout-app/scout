@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { DiscoveredTranscript, TailEvent } from "@openscout/runtime/tail";
+import type { DiscoveredTranscript, TailEvent } from "@openscout/runtime/harnesses";
 
 import { buildObserveDataFromTail } from "./tail-observe.ts";
 

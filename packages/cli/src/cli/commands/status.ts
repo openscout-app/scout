@@ -2,8 +2,7 @@ import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 import { readScoutBrokerSnapshotResult, resolveScoutSenderId, type ScoutBrokerSnapshot } from "../../lib/core/broker/service.ts";
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
-import { resolveBrokerControlUrl } from "@openscout/runtime/local-config";
+import { deriveOpenScoutInstanceLayout, resolveBrokerControlUrl } from "@openscout/runtime/config";
 
 export type StatusOptions = {
   help: boolean;

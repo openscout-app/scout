@@ -22,7 +22,11 @@ import {
   scoutRuntimeEffortCatalog,
   scoutRuntimeModelCatalog,
 } from "@openscout/protocol";
-import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
+import {
+  loadHarnessCatalogSnapshot,
+  createAgentWorkspace,
+  SCOUTBOT_AGENT_ID,
+} from "@openscout/runtime/harnesses";
 import {
   collectOccupiedDefinitionIdsFromBrokerSnapshot,
   resolveProjectProvisionalAgentName,
@@ -31,7 +35,6 @@ import {
   type ProjectInventoryEntry,
   loadResolvedRelayAgents,
 } from "@openscout/runtime/setup";
-import { createAgentWorkspace } from "@openscout/runtime/agent-workspace";
 
 import { upScoutAgent } from "../agents/service.ts";
 import type { queryFleet } from "../../db-queries.ts";
@@ -56,9 +59,8 @@ import {
   type ScoutBrokerSnapshot,
   type ScoutDirectMessageResult,
 } from "../broker/service.ts";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
+import { resolveOperatorName } from "@openscout/runtime/config";
 import { postScoutbotOperatorMessage } from "../../scoutbot/runner.ts";
-import { SCOUTBOT_AGENT_ID } from "@openscout/runtime/scoutbot-role";
 import type { AgentAttentionEntry } from "../attention/agent-attention.ts";
 import { createAgentAttentionIndexReader } from "../attention/build-agent-attention-index.ts";
 

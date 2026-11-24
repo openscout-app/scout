@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, test } from "bun:test";
 import { assessScoutSetupCompletion, loadScoutCoreReport } from "./readiness.ts";
 import { healthyCoreReport } from "../../../cli/test-fixtures/core-report.ts";
-import type { HarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
-import type { CoreReportHealthPayload } from "@openscout/runtime/core-report";
+import type { HarnessCatalogSnapshot } from "@openscout/runtime/harnesses";
+import type { CoreReportHealthPayload } from "@openscout/runtime/setup";
 
 const servers: ReturnType<typeof Bun.serve>[] = [];
 const roots: string[] = [];

@@ -27,7 +27,7 @@ import {
 } from "fs";
 import { homedir, hostname, userInfo } from "os";
 import { join } from "path";
-import { execSystemFile } from "@openscout/runtime/system-probes";
+import { execSystemFile } from "@openscout/runtime/setup";
 import {
   findSshTerminalSessionForDevice,
   provisionSshTerminalAccess,
@@ -37,8 +37,8 @@ import {
   authorizedMobileTerminalSessionName,
   provisionedMobileTerminalSessionName,
 } from "./mobile-terminal-session.ts";
-import { wrapUserSpawnPaneCommand } from "@openscout/runtime/terminal-environment";
-import { buildMultiplexerServerEnvironment } from "@openscout/runtime/instance";
+import { wrapUserSpawnPaneCommand } from "@openscout/runtime/harnesses";
+import { buildMultiplexerServerEnvironment } from "@openscout/runtime/config";
 
 function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;

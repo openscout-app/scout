@@ -5,7 +5,7 @@
 checks an app bundle, installs a local-edge CA, or requires the private Web-PTY
 relay. App diagnostics own those checks.
 
-Core readiness uses the existing `@openscout/runtime/core-report` API.
+Core readiness uses the report API in `@openscout/runtime/setup`.
 `buildCoreServiceReport` projects a selected `/health` observation.
 `assessCoreSetupCompletion` assesses that report. The CLI does not derive core
 readiness from service installation, process presence, or coding-agent login.

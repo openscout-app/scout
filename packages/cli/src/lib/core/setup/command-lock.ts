@@ -2,7 +2,7 @@ import { mkdir, open, readFile, rm } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 
 type ScoutCoreCommandName = "setup" | "doctor" | "runtimes";
 

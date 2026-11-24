@@ -10,29 +10,28 @@ import {
   resolveConfiguredScoutWebHostname,
   resolveScoutWebNamedHostname,
   resolveWebPort,
-} from "@openscout/runtime/local-config";
+  resolveOpenScoutLocalEdgeDirectory,
+  resolveOpenScoutScoutHome,
+} from "@openscout/runtime/config";
 import {
   buildOpenScoutLocalEdgeMdnsCommands,
   renderOpenScoutCaddyfile,
   resolveOpenScoutLocalEdgeConfig,
   type OpenScoutLocalEdgeConfig,
   type OpenScoutLocalEdgeScheme,
-} from "@openscout/runtime/local-edge";
-import { readTailscaleSelfWebHostsSync } from "@openscout/runtime/mesh/tailscale";
-import { resolveLegacyWebEntry, resolveInstalledWebFullClient } from "@openscout/runtime/web-full-client";
-import {
-  resolveBunExecutable as resolveResolvedBunExecutable,
-} from "@openscout/runtime/tool-resolution";
-import { resolveOpenScoutSetupContextRoot } from "@openscout/runtime/setup";
-
-import {
   ensureScoutLocalEdgeTrust,
   type ScoutLocalEdgeTrustReport,
-} from "@openscout/runtime/local-edge";
+} from "@openscout/runtime/daemon";
+import { readTailscaleSelfWebHostsSync } from "@openscout/runtime/mesh";
+import { resolveLegacyWebEntry, resolveInstalledWebFullClient } from "@openscout/runtime/client";
+import {
+  resolveBunExecutable as resolveResolvedBunExecutable,
+} from "@openscout/runtime/harnesses";
+import { resolveOpenScoutSetupContextRoot } from "@openscout/runtime/setup";
+
 import { loadScoutBrokerContext, resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
-import { resolveOpenScoutLocalEdgeDirectory, resolveOpenScoutScoutHome } from "@openscout/runtime/support-paths";
 
 type ScoutServerMode = "openscout-web";
 type ScoutServerAction = "start" | "restart" | "open" | "caddyfile" | "edge" | "trust";

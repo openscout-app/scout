@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import {
   isScoutPairingFileFromPreviousBoot,
   readScoutPairingProcessPid,
-} from "@openscout/runtime/pairing-supervisor";
+} from "@openscout/runtime/daemon";
 
 import { pairingPaths, resolvedPairingConfig } from "./config.ts";
 import { loadOrCreateIdentity, trustedPeerCount, bytesToHex } from "./security.ts";

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import * as harnesses from "@openscout/runtime/harnesses";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,16 +61,14 @@ mock.module("../broker/service.ts", () => ({
   readScoutBrokerTailDiscovery: async () => tailDiscoveryResult,
 }));
 
-mock.module("@openscout/runtime/local-agents", () => ({
+mock.module("@openscout/runtime/harnesses", () => ({
+  ...harnesses,
   getLocalAgentEndpointSessionSnapshot: async (endpoint: { id: string }) => (
     localSnapshotResultsByEndpointId.has(endpoint.id)
       ? localSnapshotResultsByEndpointId.get(endpoint.id) ?? null
       : localSnapshotResult
   ),
   getLocalAgentSessionSnapshot: async () => localAgentSnapshotResult,
-}));
-
-mock.module("@openscout/runtime/tail", () => ({
   getTailDiscovery: async () => {
     localTailDiscoveryCalls += 1;
     return tailDiscoveryResult ?? {

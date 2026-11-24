@@ -1,4 +1,4 @@
-import { PairingTrustError } from "@openscout/runtime/pairing-security/trust-owner";
+import { PairingTrustError } from "@openscout/runtime/pairing-security";
 import type { Context, Hono } from "hono";
 import {
   controlScoutWebPairingService,

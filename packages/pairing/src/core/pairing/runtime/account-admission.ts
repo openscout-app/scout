@@ -3,7 +3,7 @@
 // key binds the row; display fingerprints confer no authority. Reading approved
 // is insufficient: this waiter must win conditional approved fulfillment.
 
-import { localConfigHome } from "@openscout/runtime/local-config";
+import { localConfigHome } from "@openscout/runtime/config";
 
 import {
   createPendingPairRequestStore,

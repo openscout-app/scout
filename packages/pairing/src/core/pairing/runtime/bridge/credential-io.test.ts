@@ -17,7 +17,7 @@ function inside(path: unknown): void {
     throw new Error("Credential fixture refuses filesystem access outside isolated HOME");
   }
 }
-mock.module("os", () => ({ ...realOs, homedir: () => home || (() => { throw Error("sandbox missing"); })(),
+mock.module("os", () => ({ ...realOs, homedir: () => home || join(realOs.tmpdir(), "scout-credential-io-uninitialized"),
   hostname: () => "fixture", userInfo: () => ({ username: "fixture" }) }));
 mock.module("fs", () => ({ ...real,
   readFileSync(path: any, ...args: any[]) {
@@ -39,8 +39,8 @@ mock.module("fs", () => ({ ...real,
   unlinkSync(path: any) { inside(path); return real.unlinkSync(path); },
 }));
 mock.module("./log.ts", () => ({ log: { info() {}, warn() {}, error() {}, debug() {} } }));
-const originalProbes = await import("@openscout/runtime/system-probes");
-mock.module("@openscout/runtime/system-probes", () => ({ ...originalProbes,
+const originalSetup = await import("@openscout/runtime/setup");
+mock.module("@openscout/runtime/setup", () => ({ ...originalSetup,
   async execSystemFile(_command: string, args: string[]) {
     probes++;
     const step = args.includes("has-session") ? "exists" : args.includes("list-clients") ? "clients"

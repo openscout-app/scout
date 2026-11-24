@@ -14,7 +14,7 @@
 
 import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
 import { join } from "path";
-import { resolveOpenScoutPairingHome } from "@openscout/runtime/support-paths";
+import { resolveOpenScoutPairingHome } from "@openscout/runtime/config";
 
 const MAX_LOG_BYTES = 10 * 1024 * 1024;
 const ROTATE_CHECK_EVERY = 500;

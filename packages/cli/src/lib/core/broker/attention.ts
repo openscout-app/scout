@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { gitLogLastCommitUnix, gitRevParse, gitStatusPorcelain } from "@openscout/runtime/system-probes";
+import { gitLogLastCommitUnix, gitRevParse, gitStatusPorcelain } from "@openscout/runtime/setup";
 
 import type {
   AgentEndpoint,

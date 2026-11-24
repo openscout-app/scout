@@ -23,6 +23,9 @@ types, not a browser entry, component tree, or static client.
 The package is internal to the core workspace and bundled into the CLI.
 It adds no separate install-time dependency. The closed export map supports
 Bun source loading and a declaration-bearing dist build for core consumers.
+The root, `/runtime`, `/controller`, and `/http` need Bun. The other
+entrypoints also load from `dist` in Node. Run `test:node` to build and check
+those imports.
 
 ```sh
 bun run --cwd packages/pairing check

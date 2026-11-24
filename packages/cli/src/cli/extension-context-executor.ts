@@ -5,8 +5,8 @@
  */
 import {spawn, type ChildProcess} from "node:child_process";
 import {constants as osConstants} from "node:os";
-import {INHERITED_DESCRIPTOR_LAYOUTS, MAX_INHERITED_DESCRIPTOR_SLOT} from "@openscout/runtime/inherited-descriptors";
-import type {allocateExtensionChannel} from "@openscout/runtime/extension-channel-host";
+import {INHERITED_DESCRIPTOR_LAYOUTS, MAX_INHERITED_DESCRIPTOR_SLOT} from "@openscout/runtime/daemon";
+import type {allocateExtensionChannel} from "@openscout/runtime/extensions";
 type Channel = ReturnType<typeof allocateExtensionChannel>;
 type Status = {code:number|null; signal:NodeJS.Signals|null};
 export const EXTENSION_CONTEXT_DELIVERY_TIMEOUT_MS = 5000;

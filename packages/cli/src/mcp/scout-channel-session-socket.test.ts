@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { ClaudeChannelSocketInUseError, type ClaudeChannelHost } from "@openscout/runtime/in-place";
+import { ClaudeChannelSocketInUseError, type ClaudeChannelHost } from "@openscout/runtime/harnesses";
 
 import { startSessionSocketBinding } from "./scout-channel.ts";
 

@@ -1,8 +1,8 @@
 import type { ExtensionInputMetadata } from "./extension-input-session.ts";
 import { resolve, join, isAbsolute } from "node:path";
-import type { OpenScoutInstanceLayout } from "@openscout/runtime/instance";
-import { resolveScoutHome } from "@openscout/runtime/scout-home";
-import { SCOUT_EXTENSION_CONTEXT_SCHEMA, type ScoutExtensionContextFeature, type ScoutExtensionInvocation } from "@openscout/runtime/scout-extensions";
+import type { OpenScoutInstanceLayout } from "@openscout/runtime/config";
+import { resolveScoutHome } from "@openscout/runtime/config";
+import { SCOUT_EXTENSION_CONTEXT_SCHEMA, type ScoutExtensionContextFeature, type ScoutExtensionInvocation } from "@openscout/runtime/extensions";
 import { ScoutCommandUnavailableError } from "./command-unavailable.ts";
 
 export const EXTENSION_CONTEXT_MAX_BYTES = 64 * 1024;

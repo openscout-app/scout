@@ -10,7 +10,7 @@ import type {
   OutgoingAttachmentInput,
 } from "../core/broker/service.ts";
 import type { ActorIdentity } from "@openscout/protocol";
-import { resolveOperatorName } from "@openscout/runtime/user-config";
+import { resolveOperatorName } from "@openscout/runtime/config";
 import {
   loadScoutBrokerContext,
   resolveScoutBrokerUrl,
@@ -38,7 +38,7 @@ import {
   SCOUTBOT_RUNTIME_INSTANCE_ID,
   scoutbotCodexLaunchArgs,
   scoutbotProvenance,
-} from "@openscout/runtime/scoutbot-role";
+} from "@openscout/runtime/harnesses";
 
 export interface ScoutbotRunnerHandle {
   /** Set when bootstrap could not reach the broker; this handle answers nothing. */

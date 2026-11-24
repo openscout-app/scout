@@ -1,4 +1,4 @@
-import { submitDiagnosticReport, formatDiagnosticReceipt } from "@openscout/runtime/diagnostic-report";
+import { submitDiagnosticReport, formatDiagnosticReceipt } from "@openscout/runtime/setup";
 
 /** Only an explicit leading command may export diagnostics. Quoted commands in
  * ordinary chat must never trigger an upload. No model is involved. */

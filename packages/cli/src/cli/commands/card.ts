@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 
 import { formatScoutPermissionProfiles } from "@openscout/protocol";
-import { resolveLocalAgentByName, resolveLocalAgentIdentity, SUPPORTED_LOCAL_AGENT_HARNESSES } from "@openscout/runtime/local-agents";
+import { resolveLocalAgentByName, resolveLocalAgentIdentity, SUPPORTED_LOCAL_AGENT_HARNESSES } from "@openscout/runtime/harnesses";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";

@@ -1,5 +1,5 @@
 import { APP_READINESS_UNCHECKED, loadScoutCoreReport } from "./readiness.ts";
-import type { CoreServiceReport } from "@openscout/runtime/core-report";
+import type { CoreServiceReport } from "@openscout/runtime/setup";
 import type { ScoutCapabilityMatrixSnapshot } from "@openscout/protocol";
 import {
   loadResolvedRelayAgents,
@@ -8,18 +8,17 @@ import {
   type ProjectInventoryError,
   type SetupResult,
   type ScoutSkillInstallReport,
+  runOpenScoutOnboardingSetup,
+  type OpenScoutBrokerHandoff,
+  loadSystemProbeDoctorReport,
+  type SystemProbeDoctorReport,
 } from "@openscout/runtime/setup";
-import { runOpenScoutOnboardingSetup, type OpenScoutBrokerHandoff } from "@openscout/runtime/onboarding";
-import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harness-catalog";
-import type { BrokerServiceStatus } from "@openscout/runtime/broker-process-manager";
+import { loadHarnessCatalogSnapshot } from "@openscout/runtime/harnesses";
+import type { BrokerServiceStatus } from "@openscout/runtime/daemon";
 import {
   getRuntimeBrokerServiceStatus,
 } from "../../app/host/runtime-service-client.ts";
-import { resolveOpenScoutSupportPaths } from "@openscout/runtime/support-paths";
-import {
-  loadSystemProbeDoctorReport,
-  type SystemProbeDoctorReport,
-} from "@openscout/runtime/system-probes";
+import { resolveOpenScoutSupportPaths } from "@openscout/runtime/config";
 import { withScoutCoreCommandLock } from "./command-lock.ts";
 import { readScoutCapabilityMatrix } from "../broker/service.ts";
 

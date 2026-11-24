@@ -200,8 +200,8 @@ schemas. Tools include `ask` for tasks, `ask` with `fyi: true` for news, `reply`
 | [`@openscout/scout`](./packages/cli) | Installed CLI, bundled runtime, JSON output, and MCP server |
 
 Read each package's export map before importing a subpath. For example,
-`@openscout/runtime/broker-api` provides the runtime's HTTP client helpers;
-`@openscout/runtime/host-attention` provides host attention reads. The runtime
+`@openscout/runtime/client` provides the runtime's HTTP client helpers for Bun;
+`@openscout/runtime/daemon` provides host attention reads. The runtime
 is host-side code, not a browser library. Put it behind your own host service
 when building a browser interface. Start with the runtime guide's
 [in-memory example](./packages/runtime/README.md#quickstart-embed-the-in-memory-runtime)

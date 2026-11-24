@@ -5,9 +5,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SCOUT_MCP_CORE_TOOL_CATALOG, SCOUT_MCP_LOCAL_DEFAULT_TOOLS } from "@openscout/protocol";
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/instance";
-import { SCOUTBOT_ROLE_CONFIG } from "@openscout/runtime/scoutbot-role";
-import { buildCodexEndpointSessionOptions } from "@openscout/runtime/local-agents";
+import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/config";
+import { SCOUTBOT_ROLE_CONFIG, buildCodexEndpointSessionOptions } from "@openscout/runtime/harnesses";
 import { resolveScoutMcpCodexLaunch } from "../../../agent-sessions/src/codex-launch-config.ts";
 import portableTools from "../../../mesh-extension/src/core-tools.json";
 
@@ -244,7 +243,7 @@ test("default local registration rejects calls to opt-in tools", () => withClien
 }));
 
 test("harness allowlists and attached-session prompts use the default local tools", () => withClient({ env: {} }, async client => {
-  const { DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS, buildAttachedSessionInvocationPrompt } = await import("@openscout/runtime/local-agents");
+  const { DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS, buildAttachedSessionInvocationPrompt } = await import("@openscout/runtime/harnesses");
   const registered = new Map((await client.listTools()).tools.map(tool => [tool.name, tool]));
   const allowed = DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS.filter(name => name.startsWith("mcp__scout__"))
     .map(name => name.replace("mcp__scout__", ""));
