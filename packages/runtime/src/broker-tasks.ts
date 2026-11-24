@@ -78,13 +78,25 @@ export function followupAudience(invocation: InvocationRequest, flight: FlightRe
   const sessionId = session?.sessionId ?? invocation.execution?.targetSessionId;
   const harness = session?.harness ?? invocation.execution?.harness;
   const next = sessionId
-    ? `Send a separate ask with --to session:${harness ? harness + ":" : ""}${sessionId}, or use --continue ${invocation.id} after it finishes.`
+    ? `Queue a separate task (not context for the active turn) with --to session:${harness ? harness + ":" : ""}${sessionId}, or use --continue ${invocation.id} after it finishes.`
     : `Use --continue ${invocation.id} after it finishes.`;
   // The flight is durable evidence and no follow-up message has been committed.
   throw new ProvenRequestFailure(
     `Follow-up not sent: Scout cannot add context to the active turn for task ${invocation.id}. ${next}`,
     "task_followup_not_sent", flight.id,
   );
+}
+
+/** Keep continuation advice aligned with the actual follow-up admission policy. */
+function unfinishedTaskError(invocation: InvocationRequest, flight: FlightRecord): Error {
+  try {
+    followupAudience(invocation, flight);
+  } catch (error) {
+    if (!(error instanceof ProvenRequestFailure)) throw error;
+    // Preserve the continuation's 400, but do not recommend a --ref that will fail.
+    return new Error(`task ${invocation.id} is unfinished. ${error.message}`);
+  }
+  return new Error(`task ${invocation.id} is unfinished; use --ref ${invocation.id} to add context, or wait for it to finish before continuing`);
 }
 
 /**
@@ -253,7 +265,7 @@ export class BrokerTaskService {
       );
     }
     if (request.continue) {
-      if (!taskTerminal(flight)) throw new Error(`task ${invocation.id} is unfinished; use --ref ${invocation.id} to add context where supported, or wait for it to finish before continuing`);
+      if (!taskTerminal(flight)) throw unfinishedTaskError(invocation, flight);
       const context = `Previous task ${invocation.id} (${flight.state}):\n${flight.output ?? flight.error ?? flight.summary ?? "No result recorded."}`;
       const overrides = request.successor;
       if (overrides?.host && !overrides.projectPath?.trim()) throw new Error("successor --on requires --project <path on that host>");
