@@ -1274,8 +1274,13 @@ test("status shows each held claim's lease, when it was renewed and when the nex
   await h.service.pump("c1");
   [claim] = (await h.service.status("c1"))[0]!.claims!;
   expect(claim).toMatchObject({ leaseSeconds: 300, renewedAt: claimedAt + 25_000, renewDueAt: claimedAt + 25_000 + 100_000 });
+  // The feed still holds the first claim. A room opened after its original expiry
+  // must see the lease Board acknowledged for this same attempt.
+  h.time.advance(40_000);
+  const room = await h.service.messages({ connectionId: "c1", channel: "work" });
+  expect(room.messages.find(message => message.id === task)?.task?.claim?.until).toBe(new Date(claim!.until!).toISOString());
   const token = h.board.message(task)!.task!.claim!.token;
-  const shown = JSON.stringify([await h.service.status("c1"), await h.service.dispatcherStatus("c1")]);
+  const shown = JSON.stringify([room, await h.service.status("c1"), await h.service.dispatcherStatus("c1")]);
   expect(shown).not.toContain(token);
   expect((await h.service.dispatcherStatus("c1")).claims).toEqual((await h.service.status("c1"))[0]!.claims!);
 });
