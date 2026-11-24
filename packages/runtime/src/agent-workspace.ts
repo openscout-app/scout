@@ -5,9 +5,8 @@
 // implementation that used to be duplicated byte-for-byte inline in the desktop
 // and web mobile services.
 //
-// The only strategy today is `git worktree add` — branch `scout/<agent>` under
-// `<projectRoot>/.scout-worktrees/<agent>` — which is exactly the prior behavior
-// (this is a pure de-duplication). A copy-on-write (APFS clonefile) strategy,
+// The only strategy today is `git worktree add`: branch `scout/<agent>` under
+// `<projectRoot>/.scout-worktrees/<agent>`. A copy-on-write (APFS clonefile) strategy,
 // workspace teardown, and merge-back were prototyped but deferred; see
 // docs/eng/isolation-cow-vs-worktrees.md for the design and the review blockers
 // that gate them.
@@ -25,6 +24,15 @@ export interface CreateAgentWorkspaceResult {
   path: string;
   /** Branch the worktree tracks (`scout/<agent>` unless one was requested). */
   branch: string;
+  /** Start commit of a newly created branch. Omitted when reusing a branch or worktree. */
+  baseRef?: string;
+}
+
+export interface AgentWorkspaceBaseOptions {
+  /** Git ref or commit to use instead of the repository's default. */
+  baseRef?: string;
+  /** Refresh a remote-tracking base before use. Defaults to true. */
+  fetchBase?: boolean;
 }
 
 /**
@@ -80,6 +88,102 @@ function validateWorktreeBranch(branch: string): void {
   }
 }
 
+function validBaseRef(ref: string): boolean {
+  return !!ref && !ref.includes("\0") && !ref.startsWith("-");
+}
+
+async function gitOutput(projectRoot: string, args: readonly string[]): Promise<string | undefined> {
+  try {
+    const { stdout } = await execSystemFile("git", args, { cwd: projectRoot, timeoutMs: 2_000 });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveCommit(projectRoot: string, ref: string): Promise<string | undefined> {
+  return gitOutput(projectRoot, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
+}
+
+const REMOTE_REFS = "refs/remotes/";
+type RemoteBase = { ref: string; remote: string; source: string };
+
+async function remoteBaseForRef(projectRoot: string, ref: string): Promise<RemoteBase | undefined> {
+  // Resolve symbolic refs such as origin/HEAD and keep Git's precedence over
+  // similarly named local branches or tags.
+  const fullRef = await gitOutput(projectRoot, ["rev-parse", "--symbolic-full-name", "--verify", "--quiet", "--end-of-options", ref]);
+  if (!fullRef?.startsWith(REMOTE_REFS)) return undefined;
+
+  const path = fullRef.slice(REMOTE_REFS.length);
+  const remotes = (await gitOutput(projectRoot, ["remote"]))?.split("\n") ?? [];
+  // A remote name can itself contain a slash. Use the longest matching name.
+  const remote = remotes.sort((a, b) => b.length - a.length).find((name) => path.startsWith(`${name}/`));
+  if (!remote) return undefined;
+  return { ref: fullRef, remote, source: `refs/heads/${path.slice(remote.length + 1)}` };
+}
+
+async function refreshRemoteBase(projectRoot: string, base: RemoteBase): Promise<boolean> {
+  // A fetch updates only the selected remote-tracking ref, never a local
+  // branch. Don't follow an unusual symbolic tracking ref into refs/heads/.
+  const destination = await gitOutput(projectRoot, ["symbolic-ref", "--quiet", "--", base.ref]) ?? base.ref;
+  if (!destination.startsWith(REMOTE_REFS)) return false;
+  try {
+    await execSystemFile("git", [
+      "fetch", "--no-tags", "--no-prune", "--no-recurse-submodules",
+      "--no-write-fetch-head", "--no-auto-gc", "--refmap=", "--",
+      base.remote, `+${base.source}:${destination}`,
+    ], { cwd: projectRoot, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 2_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveWorktreeBase(
+  projectRoot: string,
+  explicitRef: string | undefined,
+  fetchBase: boolean,
+): Promise<string | undefined> {
+  const preferred = explicitRef ?? await gitOutput(projectRoot, ["config", "--get", "scout.worktreeBase"]);
+  if (preferred && validBaseRef(preferred)) {
+    if (fetchBase) {
+      const remoteBase = await remoteBaseForRef(projectRoot, preferred);
+      if (remoteBase) await refreshRemoteBase(projectRoot, remoteBase);
+    }
+    const commit = await resolveCommit(projectRoot, preferred);
+    if (commit) return commit;
+  }
+  if (explicitRef !== undefined) {
+    throw new Error(`git worktree baseRef ${JSON.stringify(explicitRef)} does not resolve to a commit. Fetch the ref or choose an existing commit.`);
+  }
+
+  const head = await resolveCommit(projectRoot, "HEAD");
+  if (!head) return undefined;
+  const branch = await gitOutput(projectRoot, ["symbolic-ref", "--quiet", "HEAD"]);
+  if (!branch?.startsWith("refs/heads/")) return head;
+
+  // Read both ends of the branch's upstream mapping rather than assuming
+  // the remote branch has the same name as the local branch.
+  const upstream = await gitOutput(projectRoot, [
+    "for-each-ref", "--format=%(upstream)%09%(upstream:remotename)%09%(upstream:remoteref)", "--", branch,
+  ]);
+  const [ref, remote, source] = upstream?.split("\t") ?? [];
+  const base = ref?.startsWith(REMOTE_REFS) && remote && remote !== "." && source
+    ? { ref, remote, source }
+    : await remoteBaseForRef(projectRoot, "refs/remotes/origin/main")
+      ?? await remoteBaseForRef(projectRoot, "refs/remotes/origin/HEAD");
+  if (!base || (fetchBase && !(await refreshRemoteBase(projectRoot, base)))) return head;
+
+  const remoteCommit = await resolveCommit(projectRoot, base.ref);
+  if (!remoteCommit || remoteCommit === head) return head;
+  try {
+    await execSystemFile("git", ["merge-base", "--is-ancestor", head, remoteCommit], { cwd: projectRoot, timeoutMs: 2_000 });
+    return remoteCommit;
+  } catch {
+    return head;
+  }
+}
+
 /**
  * Materialize an isolated git worktree for `agentName` under
  * `<projectRoot>/.scout-worktrees/<agentName>`, on branch `scout/<agentName>`
@@ -94,7 +198,12 @@ export async function createAgentWorkspace(
   projectRoot: string,
   agentName: string,
   requestedBranch?: string,
+  options: AgentWorkspaceBaseOptions = {},
 ): Promise<CreateAgentWorkspaceResult | null> {
+  const explicitRef = options.baseRef?.trim();
+  if (explicitRef !== undefined && !validBaseRef(explicitRef)) {
+    throw new Error("git worktree baseRef must be non-empty, must not contain a NUL byte, and must not start with '-'");
+  }
   if (!(await isGitRepo(projectRoot))) {
     return null;
   }
@@ -113,15 +222,19 @@ export async function createAgentWorkspace(
     return { path: workspacePath, branch };
   }
 
+  const baseRef = await resolveWorktreeBase(projectRoot, explicitRef, options.fetchBase ?? true);
   await mkdir(workspaceDir, { recursive: true });
 
   try {
-    // Create the worktree on a new branch based on current HEAD.
-    await execSystemFile("git", ["worktree", "add", "-b", branch, "--", workspacePath], { cwd: projectRoot, timeoutMs: 10_000 });
+    // Use the resolved commit so a concurrent fetch cannot change the start point.
+    await execSystemFile("git", ["worktree", "add", "-b", branch, "--", workspacePath, ...(baseRef ? [baseRef] : [])], { cwd: projectRoot, timeoutMs: 10_000 });
     claimAgentWorkspace(workspacePath);
-    return { path: workspacePath, branch };
+    return { path: workspacePath, branch, ...(baseRef ? { baseRef } : {}) };
   } catch {
     // Branch might already exist — retry attaching to it without -b.
+    if (explicitRef !== undefined && await resolveCommit(projectRoot, `refs/heads/${branch}`) !== baseRef) {
+      throw new Error(`git worktree could not create branch ${JSON.stringify(branch)} at baseRef ${JSON.stringify(explicitRef)}. Choose a new branch or check git worktree list.`);
+    }
     try {
       await execSystemFile("git", ["worktree", "add", workspacePath, "--", branch], { cwd: projectRoot, timeoutMs: 10_000 });
       claimAgentWorkspace(workspacePath);
@@ -138,6 +251,8 @@ export interface SessionWorkspace {
   cwd: string;
   /** Branch of the worktree, when the session runs in one. */
   branch?: string;
+  /** Start commit of a newly created branch. */
+  baseRef?: string;
 }
 
 /**
@@ -146,7 +261,7 @@ export interface SessionWorkspace {
  * actionable error instead of falling back to the project root: a caller that
  * asked for isolation must not get a worker in the shared checkout.
  */
-export async function resolveSessionWorkspace(input: {
+export async function resolveSessionWorkspace(input: AgentWorkspaceBaseOptions & {
   projectRoot: string;
   agentName: string;
   workspace?: "same" | "new_worktree";
@@ -155,7 +270,10 @@ export async function resolveSessionWorkspace(input: {
   if (input.workspace !== "new_worktree") {
     return { cwd: input.projectRoot };
   }
-  const created = await (input.createWorkspace ?? createAgentWorkspace)(input.projectRoot, input.agentName);
+  const created = await (input.createWorkspace ?? createAgentWorkspace)(input.projectRoot, input.agentName, undefined, {
+    baseRef: input.baseRef,
+    fetchBase: input.fetchBase,
+  });
   if (!created) {
     throw new Error(
       `workspace new_worktree: could not create a git worktree for ${input.projectRoot}`
@@ -164,5 +282,5 @@ export async function resolveSessionWorkspace(input: {
       + " Ask without workspace new_worktree to run in the project folder.",
     );
   }
-  return { cwd: created.path, branch: created.branch };
+  return { cwd: created.path, branch: created.branch, ...(created.baseRef ? { baseRef: created.baseRef } : {}) };
 }
