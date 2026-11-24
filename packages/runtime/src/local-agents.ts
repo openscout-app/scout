@@ -139,6 +139,7 @@ import {
   resolveOpenScoutSupportPaths,
 } from "./support-paths.js";
 import { sharedMcpLaunchEnvironment } from "./shared-mcp.js";
+import { SCOUTBOT_AGENT_ID, SCOUTBOT_SYSTEM_PROMPT, scoutbotCodexLaunchArgs, scoutbotMcpConfig } from "./scoutbot-role.js";
 import {
   buildInteractiveTerminalEnvironment,
   buildInteractiveTerminalShellDirectives,
@@ -2762,7 +2763,9 @@ function endpointMetadataStringArray(endpoint: AgentEndpoint, key: string): stri
 function attachedCodexEndpointLaunchArgs(endpoint: AgentEndpoint): string[] {
   return applyRequestedRuntimeOptionsToLaunchArgs(
     "codex",
-    endpointMetadataStringArray(endpoint, "launchArgs"),
+    endpoint.agentId === SCOUTBOT_AGENT_ID
+      ? scoutbotCodexLaunchArgs()
+      : endpointMetadataStringArray(endpoint, "launchArgs"),
     {
       model: endpointMetadataString(endpoint, "model"),
       reasoningEffort: endpointMetadataString(endpoint, "reasoningEffort"),
@@ -2910,20 +2913,23 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
   const agentName = endpointAgentName(endpoint);
   const runtimeDirectory = relayAgentRuntimeDirectory(agentName);
   const ownsSessionThread = endpoint.metadata?.source === "scoutbot";
+  const isScoutbot = endpoint.agentId === SCOUTBOT_AGENT_ID;
   const threadId = codexEndpointResumeThreadId(endpoint);
 
   return withScoutReplyContextEnvironment({
     agentName,
     sessionId: endpointRuntimeInstanceId(endpoint),
     cwd: endpointCwd(endpoint),
-    systemPrompt: attachedLocalSessionSystemPrompt(endpoint),
+    // Existing Scoutbot threads also use the current role, not the copy saved
+    // on their endpoint when they were created.
+    systemPrompt: isScoutbot ? SCOUTBOT_SYSTEM_PROMPT : attachedLocalSessionSystemPrompt(endpoint),
     runtimeDirectory,
     logsDirectory: relayAgentLogsDirectory(agentName),
     env: {
       CODEX_HOME: codexHomeForEndpoint(endpoint),
       // While the shared Scout MCP server is on, the launch points Scout MCP
       // at it instead of starting a stdio server for this app-server.
-      ...sharedMcpLaunchEnvironment(resolveOpenScoutSupportPaths().supportDirectory),
+      ...(!isScoutbot ? sharedMcpLaunchEnvironment(resolveOpenScoutSupportPaths().supportDirectory) : {}),
       // Seed auth only into the Scout-owned background store; when an
       // external-thread resume routes a background endpoint to the operator
       // home, copying the operator's auth onto itself is not a thing.
@@ -2933,6 +2939,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
       } : {}),
     },
     launchArgs: attachedCodexEndpointLaunchArgs(endpoint),
+    ...(isScoutbot ? { profiledScoutMcp: scoutbotMcpConfig() } : {}),
     approvalPolicy: attachedCodexApprovalPolicy(endpoint),
     sandbox: attachedCodexSandbox(endpoint),
     threadId,

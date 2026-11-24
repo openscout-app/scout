@@ -11,8 +11,7 @@ import {
 import {
   SCOUTBOT_ROLE_CONFIG,
   scoutbotCodexLaunchArgs,
-  scoutbotRuntimeToolNames,
-} from "./role.ts";
+} from "@openscout/runtime/scoutbot-role";
 
 describe("scoutbot runner routing", () => {
   test("preserves contextual mentions and removes only a leading assistant routing address", () => {
@@ -68,23 +67,16 @@ describe("scoutbot runner routing", () => {
     expect(resumed.conversationId).toBe(first.conversationId);
   });
 
-  test("constrains Codex to the effective Scout broker tool manifest", () => {
+  test("constrains Scoutbot to broker writes without shell or codebase writes", () => {
     expect(SCOUTBOT_ROLE_CONFIG.grants).toMatchObject({
       shell: false,
       codebaseWrites: false,
-      write: ["messages_send", "ask"],
+      write: ["ask"],
     });
-    expect(scoutbotRuntimeToolNames()).toEqual(expect.arrayContaining([
-      "agents_search",
-      "broker_feed",
-      "messages_send",
-      "ask",
-    ]));
     expect(scoutbotCodexLaunchArgs()).toEqual(expect.arrayContaining([
       "features.shell_tool=false",
       "features.unified_exec=false",
       "features.browser_use=false",
-      `mcp_servers.scout.enabled_tools=${JSON.stringify(scoutbotRuntimeToolNames())}`,
     ]));
   });
 

@@ -10,7 +10,7 @@ import {
   scoutbotDirectiveMetadata,
   type ScoutbotDirectiveParseResult,
 } from "./directives.ts";
-import { SCOUTBOT_AGENT_ID } from "./role.ts";
+import { SCOUTBOT_AGENT_ID } from "@openscout/runtime/scoutbot-role";
 import { queryFlightRecordById } from "../db-queries.ts";
 
 export type ScoutbotBrokerSnapshot = ScoutBrokerSnapshot & {

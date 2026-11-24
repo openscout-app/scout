@@ -55,6 +55,12 @@
       "import": "./dist/local-agents.js",
       "default": "./dist/local-agents.js"
     },
+    "./scoutbot-role": {
+      "bun": "./src/scoutbot-role.ts",
+      "types": "./dist/scoutbot-role.d.ts",
+      "import": "./dist/scoutbot-role.js",
+      "default": "./dist/scoutbot-role.js"
+    },
     "./in-place": {
       "bun": "./src/in-place/index.ts",
       "types": "./dist/in-place/index.d.ts",

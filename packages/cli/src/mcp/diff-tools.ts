@@ -228,7 +228,7 @@ export function registerDiffTools(server: McpServer, request: DiffRequest): void
     description: [
       "Read the diff of one local worktree: commits on its branch since it left the base branch, staged changes, and changes not yet staged.",
       "detail=summary lists the files and line counts; detail=patch adds the patch text, cut at maxChars with the cut stated.",
-      "To explain a change, start with summary, then read the patch of the files that carry it. For an agent's work, take the worktree path from worktrees_changes or sessions_inventory.",
+      "To explain a change, start with summary, then read the patch of the files that carry it. Use worktrees_changes to find the worktree path.",
       "Read-only and local to this host.",
     ].join(" "),
     inputSchema: z.object({
