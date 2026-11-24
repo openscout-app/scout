@@ -36,6 +36,7 @@ import type {
 } from "@openscout/protocol";
 import {
   BUILT_IN_AGENT_DEFINITION_IDS,
+  SCOUT_MCP_LOCAL_DEFAULT_TOOLS,
   assertScoutAgentNameForWrite,
   epochMs,
   isScoutReservedAgentName,
@@ -1182,23 +1183,7 @@ function normalizeLocalAgentLaunchArgs(value: unknown): string[] {
 }
 
 export const DEFAULT_CLAUDE_SCOUT_ALLOWED_TOOLS = [
-  "mcp__scout__current_reply_context",
-  "mcp__scout__whoami",
-  "mcp__scout__messages_inbox",
-  "mcp__scout__messages_channel",
-  "mcp__scout__broker_feed",
-  "mcp__scout__tail_events",
-  "mcp__scout__agents_search",
-  "mcp__scout__agents_resolve",
-  "mcp__scout__reply",
-  "mcp__scout__ask",
-  "mcp__scout__invocations_get",
-  "mcp__scout__invocations_wait",
-  "mcp__scout__work_update",
-  "mcp__scout__work_retry",
-  "mcp__scout__work_move",
-  "mcp__scout__work_review",
-  "mcp__scout__work_lifecycle",
+  ...SCOUT_MCP_LOCAL_DEFAULT_TOOLS.map(name => `mcp__scout__${name}` as const),
   "Bash(scout:*)",
 ] as const;
 

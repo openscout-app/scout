@@ -57,7 +57,10 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "recent": node("--machine= --since="),
   "hosts": node("--all"),
   "latest": node("--actor= --agent= --channel= --context-root= --conversation= --limit= --messages"),
-  "mcp": node("--context-root= --dry-run --enable-notifications --force --host= --notifications", { "install": node() }),
+  "mcp": node("--context-root= --enable-notifications --notifications --profile=", {
+    "install": node("--dry-run --force --host= --profile= --shared"),
+    "serve": node("--enable-notifications --host= --idle-timeout= --notifications --port= --profile="),
+  }),
   "chat": node("--agent= --binding= --channel= --compact --count-only --endpoint= --facing= --for= --harness= --herdr-session= --limit= --mention= --mentions --name= --once --pane= --poll --request-id= --reset-cursor --session=", { "info": node(), "join": node(), "read": node(), "say": node(), "reply": node(), "react": node(), "unreact": node(), "wait": node(), "watch": node(), "status": node(), "enroll": node(), "catch-up": node(), "ack": node(), "unenroll": node() }),
   "channel": node("--channel= --clear --context-root= --latest= --mark-read --read"),
   "broadcast": node("--as= --body-file= --context-root= --harness= --message-file= --speak"),

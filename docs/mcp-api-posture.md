@@ -3,6 +3,64 @@
 Scout uses two verbs for task communication: `ask` and `reply`. The user-facing
 noun is **task**. Internal records remain invocations, flights and work items.
 
+## Choose a local tool profile
+
+Both `scout mcp` (stdio) and `scout mcp serve` (shared HTTP) register **14
+tools by default**. Unregistered tools are absent from `tools/list` and cannot
+be called. A profile selects tools; it does not grant runtime permissions.
+Opting into a group does not add it to Claude's default tool allowlist.
+
+| Default tools | Use |
+| --- | --- |
+| `whoami`, `hosts_list`, `agents_search`, `agents_resolve` | Identify the sender and find a machine or recipient. |
+| `ask`, `reply`, `current_reply_context`, `invocations_get`, `invocations_wait` | Start, answer or follow a task. |
+| `messages_inbox`, `messages_channel`, `broker_feed`, `attachments_read` | Read recent broker context and inspect a supported attachment on an inbound message. |
+| `show` | Put a local file on the operator's project canvas. |
+
+Use `--profile full` for the previous local surface (67 tools). To add only
+the tools you need, pass one or more group names separated by commas. Every
+group adds to the default; selecting two groups gives you their union.
+
+| Group | Additional tools |
+| --- | --- |
+| `aliases` | `aliases_list`, `aliases_resolve`, `aliases_set`, `aliases_repoint`, `aliases_unset` |
+| `chat` | `chat_status`, `chat_catch_up`, `chat_ack` |
+| `git` | `worktrees_changes`, `diff_read` |
+| `integrations` | `integrations_setup`, `integrations_get`, `integrations_verify`, `integrations_manifest`, `integrations_start`, `integrations_pause`, `integrations_disconnect`, `integrations_resume`, `vercel_board_plan`, `vercel_board_dispatcher` |
+| `mailbox` | `sessions_attach`, `sessions_get`, `sessions_poll`, `sessions_ack` |
+| `operator` | `decision_read`, `feedback_send`, `post` |
+| `routing` | `where`, `check`, `route_context` (also enables the Scout routing prompt) |
+| `sessions` | `agents_start`, `card_create`, `session_attach_current`, `sessions_inventory`, `sessions_search`, `sessions_names`, `sessions_rename`, `tail_events` |
+| `terminals` | `herdr_workspaces`, `rex_start_agent`, `rex_status`, `session_send` |
+| `work` | `flight_cancel`, `labels_brief`, `labels_feed`, `work_update`, `work_retry`, `work_move`, `work_review`, `work_lifecycle`, `derived_read`, `derived_write`, `derived_pending` |
+
+```sh
+scout mcp --profile git,work
+OPENSCOUT_MCP_PROFILE=sessions scout mcp serve
+scout mcp install --host codex --profile full --force
+```
+
+The flag overrides `OPENSCOUT_MCP_PROFILE`; `--profile default` explicitly
+selects the 14 tools. Use `full` on its own. Unknown names and empty selections
+are errors. The deprecated `invocations_ask` requires **both** `full` and
+`OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK=1`; prefer `ask`.
+
+A stdio install saves an explicit selection (flag or environment) in the
+host entry. Codex stores it in the MCP server's environment so Scout-managed
+sessions keep it when they supply their own launcher. Other hosts store it in
+the launch arguments. Without a selection, Scout uses the environment passed
+by the host. Use `--force` to replace an existing entry.
+
+A shared install saves one profile for all clients. For example,
+`scout mcp install --shared --profile git` enables the default tools plus the
+two Git tools. Reinstalling without a selection keeps the shared profile. To
+change it, run `scout mcp install --force` to switch hosts back to stdio,
+let the old sessions exit and the shared server drain, then install the new
+shared profile. A session cannot enlarge the server's tool list at call time.
+
+The hosted gateway uses its own `mcp:core` catalog. Local flags and environment
+settings do not change that contract.
+
 ## First collaboration
 
 1. Call `ask({projectPath, harness, body})` for fresh work. Use `to` for a known
@@ -57,12 +115,12 @@ explicit `replyMode: "inline"` wait. The legacy value `"notify"` means
 acceptance and is unrelated to operator `notify`.
 
 Use `whoami` when identity is unclear, `agents_search` and `agents_resolve`
-for discovery, `broker_feed` for broker records, and `tail_events` for observed
-harness activity. Transcripts are not Scout messages.
-`work_update` remains for work not tied to a task.
+for discovery, `broker_feed` for broker records, and the `sessions` group's `tail_events` for observed harness activity.
+Transcripts are not Scout messages. The `work` group includes `work_update`
+for work not tied to a task.
 
 The protocol catalog in `packages/protocol/src/mcp-core-tools.ts` defines the
-default core tool set. Removed sending tools have no deprecated definitions.
+hosted core tool set. Removed sending tools have no deprecated definitions.
 Old CLI sending verbs are reserved tombstones that print replacement commands
 and never deliver. Runtime and web transport routes remain unchanged; uncertain
 old dispatches reconcile under their original operation. Upgraded callers

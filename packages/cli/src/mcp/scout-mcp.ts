@@ -1,3 +1,4 @@
+import { resolveLocalMcpProfile, type LocalMcpProfile } from "./local-tool-profile.ts";
 import { claimedSessionHarness, claimedSessionId } from "../lib/core/broker/sender.js";
 import { createHash, randomUUID } from "node:crypto";
 import { parseRosterAddress, REPLY_POINTS_CAPABILITY, REPLY_POINT_LIMITS,REPLY_POINT_STANCES, validateTaskAsk, validateTaskReply, type AgentRosterTag, type ScoutTaskReply } from "@openscout/protocol";
@@ -3426,18 +3427,16 @@ export function createScoutMcpServer(options: {
 
   // Tool exposure policy must gate registration itself, not a later
   // tools/list projection: an unregistered tool rejects tools/call too.
-  const toolFilter = options.toolFilter;
-  if (toolFilter) {
-    const registerTool = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
-    server.registerTool = ((name: string, ...rest: unknown[]) => {
-      if (!toolFilter(name)) return undefined;
-      return registerTool(name, ...rest);
-    }) as typeof server.registerTool;
-  }
+  const toolFilter = options.toolFilter ?? resolveLocalMcpProfile(env.OPENSCOUT_MCP_PROFILE).includes;
+  const registerTool = server.registerTool.bind(server) as (...args: unknown[]) => unknown;
+  server.registerTool = ((name: string, ...rest: unknown[]) => {
+    if (!toolFilter(name)) return undefined;
+    return registerTool(name, ...rest);
+  }) as typeof server.registerTool;
 
   registerRoutingTools(server, routingToolDependencies(deps.resolveBrokerUrl()));
   registerRouteContext(server, routeContextDependencies({ brokerUrl: deps.resolveBrokerUrl() }),
-    !toolFilter || (toolFilter("route_context") && toolFilter("ask")));
+    toolFilter("route_context") && toolFilter("ask"));
   registerSessionDiscoveryTools(server, sessionDiscoveryDependencies(resolveScoutWebOrigin(env), { env }));
   registerHerdrWorkspaceTools(server, herdrWorkspacesDependencies({ env }));
   registerSessionSendTool(server, sessionSendDependencies(env, deps.resolveBrokerUrl()));
@@ -6026,12 +6025,14 @@ export function createScoutMcpServer(options: {
 }
 
 export async function runScoutMcpServer(options: {
+  profile?: LocalMcpProfile;
   defaultCurrentDirectory: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<void> {
   const server = createScoutMcpServer({
     defaultCurrentDirectory: options.defaultCurrentDirectory,
     env: options.env,
+    toolFilter: options.profile?.includes,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

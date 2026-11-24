@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { SCOUT_MCP_LOCAL_DEFAULT_TOOLS } from "@openscout/protocol";
+import { resolveLocalMcpProfile } from "./local-tool-profile.ts";
 import { createSharedScoutTools } from "./shared-tools.ts";
 import { codexThreadIdFromMeta, codexTurnIdFromMeta, findCodexRollout, readCodexRolloutCwd, uuidV7Time } from "./codex-threads.ts";
 import { parseLsofPeer, parseProcArgs2, readProcessEnvironment, resolvePeerIdentity, type PeerIdentity } from "./peer-process.ts";
@@ -207,7 +209,9 @@ describe("shared tool definitions", () => {
         ["two-a", "agent-two", "/work/two", "session-two", "claude"],
         ["two-b", "agent-two", "/work/two", "session-two", "claude"],
       ]);
-      expect((await one.listTools()).tools.length).toBe((await two.listTools()).tools.length);
+      for (const client of [one, two]) {
+        expect((await client.listTools()).tools.map(t => t.name).sort()).toEqual([...SCOUT_MCP_LOCAL_DEFAULT_TOOLS].sort());
+      }
       await Promise.all([one.close(), two.close()]);
     } finally {
       runtime.stop(true);
@@ -219,15 +223,20 @@ describe.if(process.platform === "darwin")("shared server", () => {
   let handle: SharedMcpServerHandle | undefined;
   afterEach(async () => { await handle?.stop(); handle = undefined; });
 
-  test("serves several connections from one process, one Scout server each", async () => {
-    handle = startSharedScoutMcpServer({ log: () => {} });
+  test("serves the selected profile to every connection, regardless of peer environment", async () => {
+    handle = startSharedScoutMcpServer({ profile: resolveLocalMcpProfile("git"), log: () => {},
+      resolveIdentity: stubIdentity({ env: { OPENSCOUT_MCP_PROFILE: "full" } }),
+    });
     const clients = await Promise.all([0, 1, 2].map(async () => {
       const client = new Client({ name: "test", version: "0" });
       await client.connect(new StreamableHTTPClientTransport(new URL(handle!.url)));
       return client;
     }));
     const lists = await Promise.all(clients.map((c) => c.listTools()));
-    expect(lists.every((l) => l.tools.some((t) => t.name === "whoami"))).toBe(true);
+    for (const { tools } of lists) {
+      expect(tools.map(t => t.name).sort()).toEqual([...SCOUT_MCP_LOCAL_DEFAULT_TOOLS, "diff_read", "worktrees_changes"].sort());
+    }
+    expect(handle.stats().profile).toBe("git");
     expect(handle.connections()).toHaveLength(3);
     expect(new Set(handle.connections().map((c) => c.id)).size).toBe(3);
     expect(handle.connections().every((c) => c.identity.pid === process.pid)).toBe(true);
@@ -497,7 +506,7 @@ describe("MCP SDK internals", () => {
       directory = dirname(directory);
     }
     expect((await Bun.file(join(directory, "package.json")).json()).version).toBe("1.29.0");
-    const tools = createSharedScoutTools({ HOME: "/h", PATH: process.env.PATH });
+    const tools = createSharedScoutTools({ HOME: "/h", PATH: process.env.PATH, OPENSCOUT_MCP_PROFILE: "routing" });
     expect(tools.methods.sort()).toEqual(["prompts/get", "prompts/list", "tools/call", "tools/list"]);
   });
 });

@@ -80,6 +80,7 @@ export * from "./agent-notifications.js";
 export * from "./session-task.js";
 
 export * from "./mcp-core-tools.js";
+export * from "./mcp-local-tools.js";
 
 export * from "./integrations.js";
 export * from "./vercel-board.js";

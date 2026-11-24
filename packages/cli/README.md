@@ -194,6 +194,10 @@ scout mcp install --host codex
 scout mcp install --host zed
 ```
 
+Local servers register 14 coordination tools by default. Add groups with
+`--profile git,work` or restore all tools with `--profile full`. See the
+[profile table](../../docs/mcp-api-posture.md#choose-a-local-tool-profile).
+
 Zed has no command for adding MCP servers, so Scout adds `context_servers.scout`
 to Zed's user `settings.json` and keeps the rest of the file, comments included.
 Zed reloads its settings without a restart. Zed's agent can then use Scout, and
