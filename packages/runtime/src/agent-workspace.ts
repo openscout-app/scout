@@ -106,20 +106,54 @@ function resolveCommit(projectRoot: string, ref: string): Promise<string | undef
 }
 
 const REMOTE_REFS = "refs/remotes/";
-type RemoteBase = { ref: string; remote: string; source: string };
+type FetchSource = { remote: string; source: string };
+type RemoteBase = { ref: string; upstream?: FetchSource };
 
 async function remoteBaseForRef(projectRoot: string, ref: string): Promise<RemoteBase | undefined> {
   // Resolve symbolic refs such as origin/HEAD and keep Git's precedence over
   // similarly named local branches or tags.
   const fullRef = await gitOutput(projectRoot, ["rev-parse", "--symbolic-full-name", "--verify", "--quiet", "--end-of-options", ref]);
-  if (!fullRef?.startsWith(REMOTE_REFS)) return undefined;
+  return fullRef?.startsWith(REMOTE_REFS) ? { ref: fullRef } : undefined;
+}
 
-  const path = fullRef.slice(REMOTE_REFS.length);
+/** Match a literal or single-wildcard fetch refspec, returning the captured text. */
+function matchRefspec(pattern: string, ref: string): string | undefined {
+  const [prefix, suffix, extra] = pattern.split("*");
+  if (suffix === undefined) return pattern === ref ? "" : undefined;
+  if (extra !== undefined || ref.length < prefix.length + suffix.length
+      || !ref.startsWith(prefix) || !ref.endsWith(suffix)) return undefined;
+  return ref.slice(prefix.length, ref.length - suffix.length);
+}
+
+async function configuredFetchSource(
+  projectRoot: string,
+  destination: string,
+  upstream?: FetchSource,
+): Promise<FetchSource | undefined> {
   const remotes = (await gitOutput(projectRoot, ["remote"]))?.split("\n") ?? [];
-  // A remote name can itself contain a slash. Use the longest matching name.
-  const remote = remotes.sort((a, b) => b.length - a.length).find((name) => path.startsWith(`${name}/`));
-  if (!remote) return undefined;
-  return { ref: fullRef, remote, source: `refs/heads/${path.slice(remote.length + 1)}` };
+  let match: FetchSource | undefined;
+  for (const remote of remotes) {
+    if (upstream && remote !== upstream.remote) continue;
+    const config = await gitOutput(projectRoot, ["config", "--null", "--get-all", `remote.${remote}.fetch`]);
+    const refspecs = config?.split("\0") ?? [];
+    for (const spec of refspecs) {
+      if (spec.startsWith("^")) continue;
+      const [source, target, extra] = spec.replace(/^\+/, "").split(":");
+      if (!source || !target || extra !== undefined || source.includes("*") !== target.includes("*")) continue;
+      const captured = matchRefspec(target, destination);
+      if (captured === undefined) continue;
+      const ref = source.replace("*", () => captured);
+      if (ref.includes("*")) continue;
+      if (match && (match.remote !== remote || match.source !== ref)) return undefined;
+      // A targeted fetch uses an empty refmap, so check the exclusions before
+      // asking Git to update the ref. Short sources cannot be compared safely
+      // to exclusions on fully qualified refs.
+      if (refspecs.some((rule) => rule.startsWith("^")
+          && (!ref.startsWith("refs/") || matchRefspec(rule.slice(1), ref) !== undefined))) return undefined;
+      match = { remote, source: ref };
+    }
+  }
+  return upstream && match?.source !== upstream.source ? undefined : match;
 }
 
 async function refreshRemoteBase(projectRoot: string, base: RemoteBase): Promise<boolean> {
@@ -127,11 +161,13 @@ async function refreshRemoteBase(projectRoot: string, base: RemoteBase): Promise
   // branch. Don't follow an unusual symbolic tracking ref into refs/heads/.
   const destination = await gitOutput(projectRoot, ["symbolic-ref", "--quiet", "--", base.ref]) ?? base.ref;
   if (!destination.startsWith(REMOTE_REFS)) return false;
+  const mapping = await configuredFetchSource(projectRoot, destination, base.upstream);
+  if (!mapping) return false;
   try {
     await execSystemFile("git", [
       "fetch", "--no-tags", "--no-prune", "--no-recurse-submodules",
       "--no-write-fetch-head", "--no-auto-gc", "--refmap=", "--",
-      base.remote, `+${base.source}:${destination}`,
+      mapping.remote, `+${mapping.source}:${destination}`,
     ], { cwd: projectRoot, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 2_000 });
     return true;
   } catch {
@@ -169,7 +205,7 @@ async function resolveWorktreeBase(
   ]);
   const [ref, remote, source] = upstream?.split("\t") ?? [];
   const base = ref?.startsWith(REMOTE_REFS) && remote && remote !== "." && source
-    ? { ref, remote, source }
+    ? { ref, upstream: { remote, source } }
     : await remoteBaseForRef(projectRoot, "refs/remotes/origin/main")
       ?? await remoteBaseForRef(projectRoot, "refs/remotes/origin/HEAD");
   if (!base || (fetchBase && !(await refreshRemoteBase(projectRoot, base)))) return head;

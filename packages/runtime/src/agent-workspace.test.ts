@@ -39,6 +39,12 @@ function cloneRepo(remote: string): string {
   return root;
 }
 
+function addMappedRemote(root: string, remote: string, refspec: string): void {
+  git(root, "remote", "add", "upstream", remote);
+  git(root, "config", "--replace-all", "remote.upstream.fetch", refspec);
+  git(root, "fetch", "-q", "upstream");
+}
+
 function makeTempDir(): string {
   const root = mkdtempSync(join(tmpdir(), "scout-ws-"));
   tempRoots.push(root);
@@ -220,6 +226,45 @@ describe("resolveSessionWorkspace", () => {
     expect(git(explicitWorkspace.cwd, "rev-parse", "HEAD")).toBe(tagged);
   });
 
+  test.each([
+    ["explicit", "refs/heads/main:refs/remotes/upstream/integration", "main"],
+    ["wildcard", "+refs/heads/publish-*-tip:refs/remotes/upstream/*", "publish-integration-tip"],
+  ])("refreshes the configured %s fetch source, not a same-named remote branch", async (_kind, refspec, sourceBranch) => {
+    const remote = makeGitRepo(sourceBranch);
+    const root = makeGitRepo();
+    addMappedRemote(root, remote, refspec);
+    git(root, "config", "scout.worktreeBase", "upstream/integration");
+    const tip = commit(remote, "new mapped tip");
+    git(remote, "switch", "-q", "-c", "integration");
+    commit(remote, "decoy tip");
+
+    const workspace = await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" });
+
+    expect(git(workspace.cwd, "rev-parse", "HEAD")).toBe(tip);
+    expect(git(root, "rev-parse", "refs/remotes/upstream/integration")).toBe(tip);
+  });
+
+  test.each(["absent", "excluded", "ambiguous"])("keeps the cached configured base when its fetch mapping is %s", async (kind) => {
+    const remote = makeGitRepo();
+    const root = makeGitRepo();
+    const destination = "refs/remotes/upstream/integration";
+    addMappedRemote(root, remote, `+refs/heads/main:${destination}`);
+    git(root, "config", "scout.worktreeBase", destination);
+    const cached = git(root, "rev-parse", destination);
+    commit(remote, "new mapped tip");
+    git(remote, "switch", "-q", "-c", "integration");
+    commit(remote, "decoy tip");
+
+    if (kind === "absent") git(root, "config", "--unset-all", "remote.upstream.fetch");
+    if (kind === "excluded") git(root, "config", "--add", "remote.upstream.fetch", "^refs/heads/ma*");
+    if (kind === "ambiguous") git(root, "config", "--add", "remote.upstream.fetch", `+refs/heads/integration:${destination}`);
+
+    const workspace = await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" });
+
+    expect(git(workspace.cwd, "rev-parse", "HEAD")).toBe(cached);
+    expect(git(root, "rev-parse", destination)).toBe(cached);
+  });
+
   test("refreshes origin/main before branching without moving local main", async () => {
     const remote = makeGitRepo();
     const root = cloneRepo(remote);
@@ -252,17 +297,31 @@ describe("resolveSessionWorkspace", () => {
     expect(git(workspace.cwd, "rev-parse", "HEAD")).toBe(remoteTip);
   });
 
-  test("prefers the current branch's configured upstream to origin/main", async () => {
+  test("prefers the current branch's upstream on a non-origin remote to origin/main", async () => {
     const remote = makeGitRepo();
     git(remote, "branch", "release");
     const root = cloneRepo(remote);
-    git(root, "branch", "--set-upstream-to=origin/release");
+    addMappedRemote(root, remote, "+refs/heads/release:refs/remotes/upstream/current");
+    git(root, "branch", "--set-upstream-to=upstream/current");
     commit(remote, "new main tip");
     git(remote, "switch", "-q", "release");
     const releaseTip = commit(remote, "new release tip");
 
     const workspace = await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" });
     expect(git(workspace.cwd, "rev-parse", "HEAD")).toBe(releaseTip);
+  });
+
+  test("keeps detached HEAD even when origin/main is ahead", async () => {
+    const remote = makeGitRepo();
+    const root = cloneRepo(remote);
+    const local = git(root, "rev-parse", "HEAD");
+    git(root, "switch", "-q", "--detach");
+    const remoteTip = commit(remote, "new remote tip");
+    git(root, "fetch", "-q", "origin");
+    expect(git(root, "rev-parse", "origin/main")).toBe(remoteTip);
+
+    const workspace = await resolveSessionWorkspace({ projectRoot: root, agentName: "quill", workspace: "new_worktree" });
+    expect(git(workspace.cwd, "rev-parse", "HEAD")).toBe(local);
   });
 
   test.each(["ahead", "diverged"])("keeps HEAD when the local branch is %s relative to origin/main", async (relation) => {
