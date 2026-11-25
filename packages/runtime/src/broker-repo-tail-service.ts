@@ -1,4 +1,4 @@
-import { tailEventMatches, type TailRecentFilter } from "./tail/recent-filter.js";
+import { compareRecentEvents, tailEventMatches, tailLineKey, type TailRecentFilter } from "./tail/recent-filter.js";
 import { performance } from "node:perf_hooks";
 
 import type {
@@ -162,10 +162,6 @@ function assistantReplySessionKey(event: TailEvent): string {
  * the live watcher (its own running line counter) and the replay (index within
  * the read window), so the same line arrives from both under two ids.
  */
-function tailLineKey(event: TailEvent): string {
-  return [event.source, event.sessionId, event.ts, event.kind, event.summary].join("\u0000");
-}
-
 /** Collapse streaming fragments/history to the latest reply per harness session. */
 function latestAssistantReplies(events: Iterable<TailEvent>): TailEvent[] {
   const latestBySession = new Map<string, TailEvent>();
@@ -369,7 +365,7 @@ export class BrokerRepoTailService<TBrokerSnapshot> {
       const scoped = filterTailEventsForDisplay(session?.events ?? [])
         .filter((event) => event.sessionId === sessionId && (since === undefined || event.ts >= since) && tailEventMatches(event, filters));
       const events = (assistantRepliesOnly ? latestAssistantReplies(scoped) : scoped)
-        .sort((left, right) => left.ts - right.ts || left.id.localeCompare(right.id))
+        .sort(compareRecentEvents)
         .slice(-limit);
       return {
         payload: { generatedAt: this.now(), limit, cursor: events.at(-1)?.id ?? null, events },
@@ -426,10 +422,7 @@ export class BrokerRepoTailService<TBrokerSnapshot> {
       : [...eventsById.values()];
     const events = candidates
       .filter((event) => (since === undefined || event.ts >= since) && tailEventMatches(event, filters))
-      .sort((left, right) => {
-        if (left.ts === right.ts) return left.id.localeCompare(right.id);
-        return left.ts - right.ts;
-      })
+      .sort(compareRecentEvents)
       .slice(-limit);
     timings.push({ name: "tail-merge", dur: performance.now() - mergeStart });
 

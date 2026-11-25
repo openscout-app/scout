@@ -104,7 +104,7 @@ test("live Tail and history pair parallel Antigravity calls across a watcher res
   const path = join(logs, "transcript.jsonl");
   mkdirSync(logs, { recursive: true });
   const line = (index: number, step: object) => JSON.stringify({
-    step_index: index, created_at: new Date(1700000000000 + index).toISOString(), source: "MODEL", ...step,
+    step_index: index + 9, created_at: "2025-01-01T12:00:00Z", source: "MODEL", ...step,
   }) + "\n";
   const planner = {
     type: "PLANNER_RESPONSE", content: "Checking the changes", thinking: "private",
@@ -137,7 +137,7 @@ test("live Tail and history pair parallel Antigravity calls across a watcher res
     expect(history.map(e => e.kind)).toEqual(["assistant", "tool", "tool", "tool-result", "tool-result",
       "assistant", "tool", "tool", "tool-result", "tool-result"]);
     expect(new Set(history.map(e => e.id)).size).toBe(history.length);
-    expect(message?.id).toBe(`antigravity:${sessionId}:0`);
+    expect(message?.id).toBe(`antigravity:${sessionId}:9`);
     expect(command).toMatchObject({ summary: "run_command · git diff --stat", raw: { input: { CommandLine: "git diff --stat" } } });
     expect(file?.summary).toBe("read_file · src/main.ts:2-5");
     expect(finished).toMatchObject({ summary: "run_command → exit 0 · 2 files changed",
@@ -149,6 +149,11 @@ test("live Tail and history pair parallel Antigravity calls across a watcher res
     expect(history[9]?.raw).not.toHaveProperty("tool_use_id");
     expect(live.map(e => [e.id, e.summary])).toEqual(history.slice(3).map(e => [e.id, e.summary]));
     expect(JSON.stringify(history)).not.toContain("private");
+    __testing.pushEvent(message!);
+    __testing.pushEvent(command!);
+    __testing.pushEvent(file!);
+    const recent = await brokerRouter.createCaller({}).tail.recent({ sources: ["antigravity"], limit: 20 });
+    expect(recent.events.map(e => e.id)).toEqual(history.map(e => e.id));
   } finally {
     unsubscribe();
     __testing.clearWatchers();

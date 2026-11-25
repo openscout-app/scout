@@ -28,7 +28,7 @@ import { KimiSource } from "./kimi-source.js";
 import { OpenCodeSource } from "./opencode-source.js";
 import { ManagedAgentsSource } from "./managed-agents-source.js";
 import { PiSource } from "./pi-source.js";
-import { normalizedFilterSet } from "./recent-filter.js";
+import { compareTailTimes, normalizedFilterSet, tailLineKey } from "./recent-filter.js";
 import { sessionRegistryKey } from "./registry.js";
 import { parsedEventsToArray } from "./types.js";
 import type {
@@ -1893,7 +1893,7 @@ export async function readRecentTranscriptEvents(
       (!kinds || kinds.has(event.kind))
       && (options?.since === undefined || event.ts >= options.since)
     ))
-    .sort((left, right) => right.ts - left.ts)
+    .sort((left, right) => compareTailTimes(right, left))
     .slice(0, limit);
 }
 
@@ -1983,7 +1983,7 @@ async function parseTranscriptSessionEvents(
 
   return parsed
     .filter((event) => !options?.kinds?.size || options.kinds.has(event.kind))
-    .sort((left, right) => left.ts - right.ts)
+    .sort(compareTailTimes)
     .slice(-limit);
 }
 
@@ -2118,16 +2118,14 @@ export function mergeSessionHistory(
   buffered: readonly TailEvent[],
   limit: number,
 ): TailEvent[] {
-  const lineKey = (event: TailEvent) =>
-    [event.source, event.sessionId, event.ts, event.kind, event.summary].join("\u0000");
   const bufferedCounts = new Map<string, number>();
   for (const event of buffered) {
-    const key = lineKey(event);
+    const key = tailLineKey(event);
     bufferedCounts.set(key, (bufferedCounts.get(key) ?? 0) + 1);
   }
   const earlier: TailEvent[] = [];
   for (const event of replayed) {
-    const key = lineKey(event);
+    const key = tailLineKey(event);
     const count = bufferedCounts.get(key) ?? 0;
     if (count > 0) {
       bufferedCounts.set(key, count - 1);
@@ -2136,6 +2134,6 @@ export function mergeSessionHistory(
     earlier.push(event);
   }
   return [...earlier, ...buffered]
-    .sort((left, right) => left.ts - right.ts)
+    .sort(compareTailTimes)
     .slice(-limit);
 }

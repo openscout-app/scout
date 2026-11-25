@@ -1,4 +1,4 @@
-import { tailEventMatches } from "./tail/recent-filter.js";
+import { compareRecentEvents, tailEventMatches } from "./tail/recent-filter.js";
 // Broker tRPC router — typed surface for cross-process consumers (bridge, web).
 //
 // Today: tail.events plus topology snapshots/events. Future: agent-activity,
@@ -249,10 +249,7 @@ const tailRouter = t.router({
 
       const events = [...eventsById.values()]
         .filter((event) => tailEventMatches(event, input))
-        .sort((left, right) => {
-          if (left.ts === right.ts) return left.id.localeCompare(right.id);
-          return left.ts - right.ts;
-        })
+        .sort(compareRecentEvents)
         .slice(-limit);
 
       return {

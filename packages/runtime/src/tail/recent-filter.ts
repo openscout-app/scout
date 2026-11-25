@@ -1,6 +1,24 @@
 import type { TailEvent } from "./types.js";
 export type TailRecentFilter = { sources?: string[]; kinds?: string[]; sessionId?: string; project?: string; cwd?: string; query?: string };
 
+// Antigravity assigns native step numbers and can timestamp a whole parallel
+// batch in the same millisecond. Cursors retain their original unpadded IDs.
+const nativeStepOrder = new Intl.Collator("en", { numeric: true });
+export function compareTailTimes(left: TailEvent, right: TailEvent): number {
+  const delta = left.ts - right.ts;
+  if (delta || left.source !== "antigravity" || right.source !== "antigravity" || left.sessionId !== right.sessionId) return delta;
+  return nativeStepOrder.compare(left.id, right.id);
+}
+
+export function compareRecentEvents(left: TailEvent, right: TailEvent): number {
+  return compareTailTimes(left, right) || left.id.localeCompare(right.id);
+}
+
+export function tailLineKey(event: TailEvent): string {
+  if (event.source === "antigravity") return event.id;
+  return [event.source, event.sessionId, event.ts, event.kind, event.summary].join("\u0000");
+}
+
 export function normalizedFilterSet(values: string[] | undefined): Set<string> | null {
   const normalized = values
     ?.map((value) => value.trim().toLowerCase())
