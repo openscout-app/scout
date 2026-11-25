@@ -1,9 +1,11 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { chmodSync, existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { indexRecentSessionKnowledge, scanRecentSessionKnowledge, SQLiteKnowledgeStore } from "./index.ts";
 
@@ -12,6 +14,7 @@ const originalEnv = {
   controlHome: process.env.OPENSCOUT_CONTROL_HOME,
   support: process.env.OPENSCOUT_SUPPORT_DIRECTORY,
   kimiRoot: process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT,
+  antigravityRoot: process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT,
   codexRoot: process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT,
   claudeRoot: process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT,
   rg: process.env.OPENSCOUT_RG_PATH,
@@ -24,6 +27,7 @@ afterEach(() => {
   restoreEnv("OPENSCOUT_CONTROL_HOME", originalEnv.controlHome);
   restoreEnv("OPENSCOUT_SUPPORT_DIRECTORY", originalEnv.support);
   restoreEnv("OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT", originalEnv.kimiRoot);
+  restoreEnv("OPENSCOUT_TAIL_ANTIGRAVITY_ROOT", originalEnv.antigravityRoot);
   restoreEnv("OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT", originalEnv.codexRoot);
   restoreEnv("OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT", originalEnv.claudeRoot);
 });
@@ -107,6 +111,7 @@ describe("session knowledge indexer (kimi)", () => {
     process.env.OPENSCOUT_SUPPORT_DIRECTORY = join(root, "support");
     process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT = join(root, "kimi-sessions");
     // Keep other harnesses empty so discovery is kimi-only even without filter.
+    process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = join(root, "empty-antigravity");
     process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT = join(root, "empty-codex");
     process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT = join(root, "empty-claude");
     mkdirSync(process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT, { recursive: true });
@@ -188,6 +193,7 @@ describe("basic session scan (no index)", () => {
         process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT = join(root, "claude");
         process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT = join(root, "empty-codex");
         process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT = join(root, "empty-kimi");
+        process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = join(root, "empty-antigravity");
         writeClaudeFixture(process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT);
 
         const result = await scanRecentSessionKnowledge({ q: "index CHILD" });
@@ -396,4 +402,74 @@ test("re-extracts stale versions, strips turn/tool boilerplate and preserves eve
   expect(second.failed).toBe(0); expect(second.sessions[0]?.skipped).not.toBe(true);
   const reader = new SQLiteKnowledgeStore(undefined, undefined, { readonly: true });
   try { expect(reader.getCollection(first.sessions[0]!.collectionId)?.extractorVersion).toBe("session-qmd-v4"); } finally { reader.close(); }
+});
+
+describe("session knowledge indexer (antigravity)", () => {
+  test("indexes compact Antigravity transcript.jsonl, skips transcript_full.jsonl, and enriches workspace + title", async () => {
+    const root = tempRoot("openscout-agy-knowledge-");
+    process.env.OPENSCOUT_CONTROL_HOME = join(root, "control-plane");
+    process.env.OPENSCOUT_SUPPORT_DIRECTORY = join(root, "support");
+    const agyRoot = join(root, "antigravity-cli");
+    process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = agyRoot;
+    process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT = join(root, "empty-codex");
+    process.env.OPENSCOUT_TAIL_CLAUDE_PROJECTS_ROOT = join(root, "empty-claude");
+    process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT = join(root, "empty-kimi");
+
+    const sessionId = "3a102f26-6237-46c4-ae20-6152148eecaa";
+    const workspaceDir = join(root, "openscout");
+    mkdirSync(workspaceDir, { recursive: true });
+    const logsDir = join(agyRoot, "brain", sessionId, ".system_generated", "logs");
+    mkdirSync(logsDir, { recursive: true });
+
+    const db = new Database(join(agyRoot, "conversation_summaries.db"));
+    try {
+      db.exec("CREATE TABLE conversation_summaries (conversation_id, title, workspace_uris, status, last_modified_time)");
+      db.query("INSERT INTO conversation_summaries VALUES (?,?,?,?,?)").run(
+        sessionId,
+        "Navigation spine review",
+        JSON.stringify([pathToFileURL(workspaceDir).href]),
+        "CASCADE_RUN_STATUS_IDLE",
+        new Date().toISOString(),
+      );
+    } finally {
+      db.close();
+    }
+
+    const compactSteps = [
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", created_at: new Date(Date.now() - 20_000).toISOString(), content: "<USER_REQUEST>Wire Antigravity sessions into Scout search</USER_REQUEST>" },
+      { step_index: 1, type: "PLANNER_RESPONSE", created_at: new Date(Date.now() - 15_000).toISOString(), tool_calls: [{ id: "tc_1", name: "edit_file", args: { Path: `${workspaceDir}/session-indexer.ts` } }] },
+      { step_index: 2, type: "PLANNER_RESPONSE", created_at: new Date(Date.now() - 10_000).toISOString(), content: "Antigravity transcripts now index cleanly by UUID." },
+    ];
+    writeFileSync(join(logsDir, "transcript.jsonl"), `${compactSteps.map((s) => JSON.stringify(s)).join("\n")}\n`, "utf8");
+    writeFileSync(
+      join(logsDir, "transcript_full.jsonl"),
+      `${JSON.stringify({ step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", created_at: new Date().toISOString(), content: "fullonlyuniquetoken" })}\n`,
+      "utf8",
+    );
+
+    const scanned = await scanRecentSessionKnowledge({ q: "UUID", harness: "antigravity" });
+    expect(scanned.totalFiles).toBe(1);
+    expect(scanned.hits).toHaveLength(1);
+    expect(scanned.hits[0]?.facets.sessionId).toBe(sessionId);
+    expect(scanned.hits[0]?.facets.project).toBe("openscout");
+
+    const indexed = await indexRecentSessionKnowledge({ hours: 12, harness: "antigravity", force: true });
+    expect(indexed.discovered).toBe(1);
+    expect(indexed.failed).toBe(0);
+    expect(indexed.sessions[0]?.harness).toBe("antigravity");
+    expect(indexed.sessions[0]?.project).toBe("openscout");
+    expect(indexed.sessions[0]?.collectionId).toContain(`sessions/antigravity/${sessionId}`);
+
+    const store = new SQLiteKnowledgeStore();
+    try {
+      const collection = store.getCollection(indexed.sessions[0]!.collectionId);
+      expect(collection?.title).toContain("Navigation spine review");
+      expect(collection?.facets.sessionId).toBe(sessionId);
+      const hits = store.searchLexical({ q: "Antigravity transcripts UUID", facets: { harness: "antigravity" }, limit: 10 });
+      expect(hits.length).toBeGreaterThan(0);
+      expect(store.searchLexical({ q: "fullonlyuniquetoken" })).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
 });

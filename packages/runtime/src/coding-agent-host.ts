@@ -1,7 +1,7 @@
 import type { RuntimeEnv } from "./portable-types.js";
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 
-export type CodingAgentHarness = "scout" | "cursor" | "claude" | "codex" | "devin" | "kimi" | "pi";
+export type CodingAgentHarness = "scout" | "cursor" | "claude" | "codex" | "devin" | "kimi" | "pi" | "antigravity";
 
 export type CodingAgentHostMatch = {
   harness: CodingAgentHarness;
@@ -77,6 +77,21 @@ const HARNESS_SIGNALS: HarnessSignal[] = [
     harness: "pi",
     signal: "HERDR_AGENT_NAME",
     matches: (env) => isHerdrManagedAgent(env, "pi"),
+  },
+  {
+    harness: "antigravity",
+    signal: "HERDR_AGENT_NAME",
+    matches: (env) => isHerdrManagedAgent(env, "antigravity") || isHerdrManagedAgent(env, "agy"),
+  },
+  {
+    harness: "antigravity",
+    signal: "ANTIGRAVITY_AGENT",
+    matches: (env) => isTruthyFlag(env.ANTIGRAVITY_AGENT),
+  },
+  {
+    harness: "antigravity",
+    signal: "ANTIGRAVITY_CONVERSATION_ID",
+    matches: (env) => hasNonEmpty(env.ANTIGRAVITY_CONVERSATION_ID),
   },
   {
     harness: "cursor",

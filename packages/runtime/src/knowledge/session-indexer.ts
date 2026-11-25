@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { claudeProjectForPath, claudeProjectRoots } from "../claude-projects.js";
 import { stripHarnessBoilerplate, stripHarnessValue } from "./boilerplate.js";
 import { knowledgeIndexEnabled, KNOWLEDGE_INDEX_OFF } from "./settings.js";
@@ -17,6 +18,7 @@ import { spawn } from "node:child_process";
 import { open, opendir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   deterministicKnowledgeChunkId,
@@ -73,7 +75,7 @@ export interface IndexRecentSessionKnowledgeResult {
   sessions: IndexedSessionKnowledgeSummary[];
 }
 
-type Harness = "codex" | "claude" | "kimi";
+type Harness = "codex" | "claude" | "kimi" | "antigravity";
 
 type SessionFile = {
   harness: Harness;
@@ -129,7 +131,7 @@ const EVENT_WINDOW_RECORDS = 350;
 const EVENT_CHUNK_RECORDS = 50;
 const DEFAULT_DAYS = 3;
 const DEFAULT_LIMIT = 220;
-const KNOWN_HARNESSES: readonly Harness[] = ["codex", "claude", "kimi"];
+const KNOWN_HARNESSES: readonly Harness[] = ["codex", "claude", "kimi", "antigravity"];
 
 function clampPositiveInt(value: number | undefined, fallback: number, max: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
@@ -173,11 +175,16 @@ function normalizeHarnessFilter(value: string | string[] | undefined): Set<Harne
 function sessionRoots(harnessFilter: Set<Harness> | null): Array<{ harness: Harness; root: string }> {
   const home = homedir();
   const kimiHome = process.env.KIMI_CODE_HOME?.trim() || join(home, ".kimi-code");
+  const antigravityConfigured = process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT?.trim();
+  const antigravityRoots = antigravityConfigured
+    ? [join(antigravityConfigured, "brain")]
+    : [join(home, ".gemini", "antigravity-cli", "brain"), join(home, ".gemini", "antigravity", "brain")];
   const roots: Array<{ harness: Harness; root: string }> = [
     { harness: "codex", root: process.env.OPENSCOUT_TAIL_CODEX_SESSIONS_ROOT ?? join(home, ".codex", "sessions") },
     { harness: "codex", root: join(home, ".openai-codex", "sessions") },
     ...claudeProjectRoots(home).map(({ root }) => ({ harness: "claude" as const, root })),
     { harness: "kimi", root: process.env.OPENSCOUT_TAIL_KIMI_SESSIONS_ROOT ?? join(kimiHome, "sessions") },
+    ...antigravityRoots.map((root) => ({ harness: "antigravity" as const, root })),
   ];
   return roots.filter((entry, index, entries) =>
     existsSync(entry.root)
@@ -189,6 +196,8 @@ function sessionRoots(harnessFilter: Set<Harness> | null): Array<{ harness: Harn
 function isHarnessTranscriptFile(harness: Harness, entry: string): boolean {
   // Kimi stores many JSONL-adjacent artifacts; only wire.jsonl is the transcript spine.
   if (harness === "kimi") return entry === "wire.jsonl";
+  // Antigravity stores both transcript.jsonl (compact) and transcript_full.jsonl; index the compact spine once.
+  if (harness === "antigravity") return entry === "transcript.jsonl";
   return entry.endsWith(".jsonl");
 }
 
@@ -262,6 +271,10 @@ async function parseJsonl(file: SessionFile): Promise<ParseResult> {
     const state = readKimiSessionState(file.path);
     cwd = state.cwd;
     sessionId = state.sessionId;
+  } else if (file.harness === "antigravity") {
+    const state = readAntigravitySessionState(file.path);
+    cwd = state.cwd;
+    sessionId = state.sessionId;
   }
 
   const handleLine = (rawLine: string) => {
@@ -329,6 +342,7 @@ function normalizeRecord(
 ): NormalizedRecord {
   if (harness === "codex") return normalizeCodex(obj, i, sourceOffset);
   if (harness === "claude") return normalizeClaude(obj, i, sourceOffset);
+  if (harness === "antigravity") return normalizeAntigravity(obj, i, sourceOffset);
   return normalizeKimi(obj, i, sourceOffset);
 }
 
@@ -585,6 +599,111 @@ function readKimiSessionState(wirePath: string): { cwd: string | null; sessionId
   return { cwd, sessionId, title };
 }
 
+const ANTIGRAVITY_SESSION_ID_RE = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/iu;
+
+function normalizeAntigravity(
+  obj: Record<string, unknown>,
+  i: number,
+  sourceOffset: number,
+): NormalizedRecord {
+  const type = String(obj.type ?? "");
+  const createdAt = typeof obj.created_at === "string" && Number.isFinite(Date.parse(obj.created_at))
+    ? new Date(Date.parse(obj.created_at)).toISOString()
+    : undefined;
+  const base = { i, ts: createdAt, sourceType: type, sourceOffset };
+  const content = typeof obj.content === "string" ? obj.content.trim() : "";
+
+  if (type === "USER_INPUT") {
+    if (obj.source !== "USER_EXPLICIT") {
+      return { ...base, kind: "system_record", tag: "user_implicit" };
+    }
+    const request = /<USER_REQUEST>([\s\S]*?)(?:<\/USER_REQUEST>|<ADDITIONAL_METADATA>|$)/u.exec(content);
+    const text = (request?.[1] ?? content.split("<ADDITIONAL_METADATA>", 1)[0]).trim();
+    return { ...base, kind: "user_turn", tag: "user", text };
+  }
+
+  if (type === "PLANNER_RESPONSE") {
+    const tools = Array.isArray(obj.tool_calls)
+      ? obj.tool_calls.map(recordValue).filter((call): call is Record<string, unknown> => call !== null)
+      : [];
+    if (!content && tools.length > 0) {
+      const first = tools[0]!;
+      const name = String(first.name ?? "tool");
+      return {
+        ...base,
+        kind: "command_or_tool",
+        tag: name,
+        tool: { name, input: first.arguments ?? first.args ?? first.input ?? {} },
+      };
+    }
+    return { ...base, kind: "assistant_turn", tag: "assistant", text: content };
+  }
+
+  if (type === "TOOL_RESPONSE" || type === "GENERIC") {
+    return {
+      ...base,
+      kind: "observation",
+      tag: "result",
+      result: { output: obj.output ?? obj.result ?? content },
+    };
+  }
+
+  return { ...base, kind: "system_record", tag: type || "record" };
+}
+
+function readAntigravitySessionState(transcriptPath: string): { cwd: string | null; sessionId: string | null; title: string | null } {
+  // .../<dataRoot>/brain/<uuid>/.system_generated/logs/transcript.jsonl
+  const logsDir = dirname(transcriptPath);
+  const generatedDir = dirname(logsDir);
+  const sessionDir = dirname(generatedDir);
+  const brainDir = dirname(sessionDir);
+  const sessionId = basename(sessionDir);
+  if (
+    basename(transcriptPath) !== "transcript.jsonl"
+    || basename(logsDir) !== "logs"
+    || basename(generatedDir) !== ".system_generated"
+    || basename(brainDir) !== "brain"
+    || !ANTIGRAVITY_SESSION_ID_RE.test(sessionId)
+  ) {
+    return { cwd: null, sessionId: null, title: null };
+  }
+  const dataRoot = dirname(brainDir);
+  const dbPath = join(dataRoot, "conversation_summaries.db");
+  if (!existsSync(dbPath)) return { cwd: null, sessionId, title: null };
+
+  let cwd: string | null = null;
+  let title: string | null = null;
+  for (const filename of [dbPath, `${pathToFileURL(dbPath).href}?immutable=1`]) {
+    if (filename !== dbPath && existsSync(`${dbPath}-wal`)) break;
+    let db: Database | undefined;
+    try {
+      db = new Database(filename, { readonly: true, create: false });
+      const meta = db
+        .query("SELECT title, workspace_uris FROM conversation_summaries WHERE conversation_id = ?")
+        .get(sessionId) as { title?: string | null; workspace_uris?: string | null } | null;
+      if (meta) {
+        title = meta.title?.trim() || null;
+        if (meta.workspace_uris) {
+          try {
+            const uris: unknown = JSON.parse(meta.workspace_uris);
+            if (Array.isArray(uris)) {
+              for (const uri of uris) {
+                if (typeof uri === "string" && uri.startsWith("file://")) {
+                  cwd = fileURLToPath(uri);
+                  break;
+                }
+              }
+            }
+          } catch { /* ignore malformed workspace_uris */ }
+        }
+      }
+      break;
+    } catch { /* ignore locked or unreadable db */ }
+    finally { db?.close(); }
+  }
+  return { cwd, sessionId, title };
+}
+
 function inferCwd(record: NormalizedRecord): string | null {
   const meta = record.meta;
   const cwd = stringValue(meta?.cwd) ?? stringValue(meta?.workDir);
@@ -594,6 +713,9 @@ function inferCwd(record: NormalizedRecord): string | null {
 function inferSessionId(record: NormalizedRecord, file: SessionFile): string | null {
   if (file.harness === "kimi") {
     return readKimiSessionState(file.path).sessionId;
+  }
+  if (file.harness === "antigravity") {
+    return readAntigravitySessionState(file.path).sessionId;
   }
   return record.refs?.sessionId
     ?? stringValue(record.meta?.id)
@@ -702,6 +824,12 @@ function titleFor(file: SessionFile, parse: ParseResult, project: string): strin
   // prefer it over reconstructing from the first user turn.
   if (file.harness === "kimi") {
     const stateTitle = readKimiSessionState(file.path).title;
+    if (stateTitle) {
+      return `${capitalize(file.harness)} ${project} ${date} - ${trimOneLine(stripHarnessBoilerplate(stateTitle), 82)}`;
+    }
+  }
+  if (file.harness === "antigravity") {
+    const stateTitle = readAntigravitySessionState(file.path).title;
     if (stateTitle) {
       return `${capitalize(file.harness)} ${project} ${date} - ${trimOneLine(stripHarnessBoilerplate(stateTitle), 82)}`;
     }
@@ -1562,6 +1690,11 @@ async function transcriptHead(file: SessionFile): Promise<{ cwd: string | null; 
   let sessionId: string | null = file.harness === "kimi"
     ? (kimiAgent === "main" ? kimiSession : `${kimiSession}:${kimiAgent}`)
     : null;
+  if (file.harness === "antigravity") {
+    const state = readAntigravitySessionState(file.path);
+    cwd = state.cwd;
+    sessionId = state.sessionId;
+  }
   let head = "";
   try {
     const handle = await open(file.path, "r");

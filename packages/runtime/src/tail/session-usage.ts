@@ -221,10 +221,28 @@ function applyPiLine(state: ScanState, line: string): void {
   state.sawTokens = true;
 }
 
+function applyAntigravityLine(state: ScanState, line: string): void {
+  if (!line.includes("\"PLANNER_RESPONSE\"")) return;
+  const entry = parseJson(line);
+  if (!entry || entry.type !== "PLANNER_RESPONSE") return;
+  const model = typeof entry.model === "string" ? entry.model.trim() : "";
+  if (model) state.model = model;
+  const input = num(entry.input_tokens);
+  const output = num(entry.output_tokens);
+  const cacheRead = num(entry.cache_read_tokens);
+  if (input > 0 || output > 0 || cacheRead > 0) {
+    state.totals.input += input;
+    state.totals.output += output;
+    state.totals.cacheRead += cacheRead;
+    state.sawTokens = true;
+  }
+}
+
 function applyUsageLine(state: ScanState, line: string): void {
   if (state.source === "claude") applyClaudeLine(state, line);
   else if (state.source === "codex") applyCodexLine(state, line);
   else if (state.source === "pi") applyPiLine(state, line);
+  else if (state.source === "antigravity") applyAntigravityLine(state, line);
 }
 
 function clipText(text: string): string {

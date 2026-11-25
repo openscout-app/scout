@@ -1,40 +1,89 @@
 import { requestScoutBrokerJson, ScoutBrokerHttpError } from "@openscout/runtime/client";
 import { resolveBrokerControlUrl } from "@openscout/runtime/config";
-import type { HarnessHookStatus, HarnessHooksResult, HarnessHooksSkipReason } from "../../../../runtime/src/harness-hooks.js";
+import type { HarnessHookStatus, HarnessHookTarget, HarnessHooksResult, HarnessHooksSkipReason } from "../../../../runtime/src/harness-hooks.js";
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 
-type HooksOptions = { command: "status" | "apply" | "remove"; json: boolean; help: boolean };
+type HooksOptions = {
+  command: "status" | "apply" | "remove";
+  harness?: HarnessHookTarget;
+  json: boolean;
+  help: boolean;
+};
+
+function normalizeHookHarness(value: string): HarnessHookTarget | null {
+  const lower = value.trim().toLowerCase();
+  if (lower === "claude" || lower === "claude-code") return "claude";
+  if (lower === "antigravity" || lower === "agy") return "antigravity";
+  return null;
+}
 
 export function renderHooksCommandHelp(): string {
   return [
     "Usage:",
-    "  scout hooks [status] [--json]",
-    "  scout hooks apply [--json]",
-    "  scout hooks remove [--json]",
+    "  scout hooks [status] [claude|antigravity] [--json]",
+    "  scout hooks apply [claude|antigravity] [--json]",
+    "  scout hooks remove [claude|antigravity] [--json]",
     "",
     "Scout's hooks in harness settings. The runtime writes them and takes them out.",
     "Claude Code: a PermissionRequest hook, so permission dialogs in any Claude session",
     "can be answered from Scout.",
+    "Antigravity: non-blocking PreToolUse/PostToolUse/Stop hooks, so questions and",
+    "approval gates in native Antigravity sessions show up in Scout.",
     "",
     "apply   Add Scout's entries. Running it again changes nothing.",
-    "remove  Take out Scout's entries and the script they run. Other hooks stay as they are.",
+    "remove  Take out Scout's entries, scripts, and hook state. Nothing of Scout's stays behind.",
   ].join("\n");
 }
 
 export function parseHooksCommandOptions(args: string[]): HooksOptions {
   const result: HooksOptions = { command: "status", json: false, help: false };
   const positional: string[] = [];
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
     if (arg === "--help" || arg === "-h" || arg === "help") return { ...result, help: true };
     if (arg === "--json") { result.json = true; continue; }
+    if (arg === "--harness") {
+      const next = args[i + 1];
+      if (!next) throw new ScoutCliError("--harness requires claude or antigravity");
+      const target = normalizeHookHarness(next);
+      if (!target) throw new ScoutCliError(`Unknown hooks harness: ${next}`);
+      result.harness = target;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--harness=")) {
+      const raw = arg.slice("--harness=".length);
+      const target = normalizeHookHarness(raw);
+      if (!target) throw new ScoutCliError(`Unknown hooks harness: ${raw}`);
+      result.harness = target;
+      continue;
+    }
     if (arg.startsWith("-")) throw new ScoutCliError(`Unknown hooks option: ${arg}`);
     positional.push(arg);
   }
-  if (positional.length > 1) throw new ScoutCliError("scout hooks takes one command: status, apply or remove");
+  if (positional.length > 2) {
+    throw new ScoutCliError("scout hooks takes at most a command (status, apply, remove) and a harness (claude, antigravity)");
+  }
+  if (positional.length === 1) {
+    const only = positional[0]!;
+    const asHarness = normalizeHookHarness(only);
+    if (asHarness) {
+      result.command = "status";
+      result.harness = result.harness ?? asHarness;
+      return result;
+    }
+  }
   const command = positional[0] ?? "status";
-  if (command !== "status" && command !== "apply" && command !== "remove") throw new ScoutCliError(`Unknown hooks command: ${command}`);
+  if (command !== "status" && command !== "apply" && command !== "remove") {
+    throw new ScoutCliError(`Unknown hooks command: ${command}`);
+  }
   result.command = command;
+  if (positional[1]) {
+    const target = normalizeHookHarness(positional[1]);
+    if (!target) throw new ScoutCliError(`Unknown hooks harness: ${positional[1]}`);
+    result.harness = target;
+  }
   return result;
 }
 
@@ -47,9 +96,10 @@ const SKIP_REASONS: Record<HarnessHooksSkipReason, string> = {
 
 function describeHook(hook: HarnessHookStatus): string {
   const label = hook.state === "applied" ? "applied" : hook.state === "absent" ? "not applied" : "needs apply";
-  const lines = [`Claude Code ${hook.event}: ${label}`, `  settings: ${hook.settingsPath}`];
+  const product = hook.harness === "antigravity" ? "Antigravity" : "Claude Code";
+  const lines = [`${product} ${hook.event}: ${label}`, `  settings: ${hook.settingsPath}`];
   if (hook.state !== "absent") lines.push(`  script:   ${hook.wrapperPath}`);
-  if (hook.detail) lines.push(`  ${hook.detail} Run \`scout hooks apply\` to fix it, or \`scout hooks remove\`.`);
+  if (hook.detail) lines.push(`  ${hook.detail} Run \`scout hooks apply ${hook.harness}\` to fix it, or \`scout hooks remove ${hook.harness}\`.`);
   return lines.join("\n");
 }
 
@@ -67,12 +117,14 @@ export async function runHooksCommand(context: ScoutCommandContext, args: string
   const options = parseHooksCommandOptions(args);
   if (options.help) { context.output.writeText(renderHooksCommandHelp()); return; }
   const baseUrl = context.env.OPENSCOUT_BROKER_URL?.trim() || resolveBrokerControlUrl();
-  const path = options.command === "status" ? "/v1/hooks" : `/v1/hooks/${options.command}`;
+  const path = options.command === "status"
+    ? (options.harness ? `/v1/hooks?harness=${encodeURIComponent(options.harness)}` : "/v1/hooks")
+    : `/v1/hooks/${options.command}`;
   let result: { hooks: HarnessHookStatus[] } | HarnessHooksResult;
   try {
     result = await requestScoutBrokerJson<typeof result>(baseUrl, path, {
       method: options.command === "status" ? "GET" : "POST",
-      ...(options.command === "status" ? {} : { body: {} }),
+      ...(options.command === "status" ? {} : { body: options.harness ? { harness: options.harness } : {} }),
       socketPath: context.env.OPENSCOUT_BROKER_SOCKET_PATH?.trim() || undefined,
       signal: AbortSignal.timeout(15_000),
     });

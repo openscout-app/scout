@@ -3516,15 +3516,19 @@ export function createScoutMcpServer(options: {
     operation, body,
   ));
 
-  const aliasToolCaller = async (senderId: string | undefined, currentDirectory: string) => ({
-    actorId: await resolveMcpSenderId(deps, senderId, currentDirectory, env),
-    currentDirectory,
-    metadata: {
-      ...((env.OPENSCOUT_SESSION_ID?.trim() || env.CODEX_THREAD_ID?.trim() || env.CLAUDE_CODE_SESSION_ID?.trim())
-        ? { sessionId: env.OPENSCOUT_SESSION_ID?.trim() || env.CODEX_THREAD_ID?.trim() || env.CLAUDE_CODE_SESSION_ID?.trim() }
-        : {}),
-    },
-  });
+  const aliasToolCaller = async (senderId: string | undefined, currentDirectory: string) => {
+    const callerSessionId = env.OPENSCOUT_SESSION_ID?.trim()
+      || env.CODEX_THREAD_ID?.trim()
+      || env.CLAUDE_CODE_SESSION_ID?.trim()
+      || env.ANTIGRAVITY_CONVERSATION_ID?.trim();
+    return {
+      actorId: await resolveMcpSenderId(deps, senderId, currentDirectory, env),
+      currentDirectory,
+      metadata: {
+        ...(callerSessionId ? { sessionId: callerSessionId } : {}),
+      },
+    };
+  };
 
   server.registerTool("show", {
     title: "Show Your Work",
@@ -3536,7 +3540,7 @@ export function createScoutMcpServer(options: {
     const caller = await aliasToolCaller(undefined, currentDirectory);
     const result = await aliasBrokerRequest("/v1/shows", { method: "POST", body: JSON.stringify({
       ...input, caller: { ...caller, metadata: { ...caller.metadata,
-        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : undefined,
+        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : env.ANTIGRAVITY_CONVERSATION_ID ? "antigravity" : undefined,
       } },
     }) });
     return { content: createTextContent(result) };
@@ -3562,7 +3566,7 @@ export function createScoutMcpServer(options: {
     const caller = await aliasToolCaller(undefined, currentDirectory);
     const result = await aliasBrokerRequest("/v1/posts", { method: "POST", body: JSON.stringify({
       ...input, caller: { ...caller, metadata: { ...caller.metadata,
-        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : undefined,
+        harness: env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : env.ANTIGRAVITY_CONVERSATION_ID ? "antigravity" : undefined,
       } },
     }) });
     return { content: createTextContent(result) };

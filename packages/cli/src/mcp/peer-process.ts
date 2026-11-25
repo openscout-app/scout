@@ -154,7 +154,7 @@ export type PeerIdentity = {
   pid: number;
   /** The harness process the identity came from (the peer or an ancestor). */
   harnessPid: number;
-  harness: "claude" | "codex" | "unknown";
+  harness: "claude" | "codex" | "antigravity" | "unknown";
   processName: string;
   sessionId: string | null;
   cwd: string | null;
@@ -169,7 +169,7 @@ export type PeerIdentity = {
  * case the connection comes from a helper the harness started.
  */
 /** Session ids a process inherited from whoever launched it. They name the launcher, not the process. */
-const INHERITED_SESSION_KEYS = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "OPENSCOUT_SESSION_ID"];
+const INHERITED_SESSION_KEYS = ["CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "OPENSCOUT_SESSION_ID"];
 
 function withoutInheritedSession(env: Record<string, string>): Record<string, string> {
   const copy = { ...env };
@@ -235,7 +235,7 @@ export async function resolvePeerIdentity(pid: number): Promise<PeerIdentity> {
   // Not a harness: a helper or script. Its own session id (set for it by
   // the harness, as for a stdio child) wins; otherwise the nearest Claude
   // ancestor.
-  const ownSessionId = ownEnv.OPENSCOUT_SESSION_ID || ownEnv.CODEX_THREAD_ID || ownEnv.CLAUDE_CODE_SESSION_ID || null;
+  const ownSessionId = ownEnv.OPENSCOUT_SESSION_ID || ownEnv.CODEX_THREAD_ID || ownEnv.CLAUDE_CODE_SESSION_ID || ownEnv.ANTIGRAVITY_CONVERSATION_ID || null;
   if (!ownSessionId) {
     let current = await parentPid(pid);
     for (let depth = 0; current && depth < 4; depth += 1) {
@@ -247,7 +247,7 @@ export async function resolvePeerIdentity(pid: number): Promise<PeerIdentity> {
   return {
     pid,
     harnessPid: pid,
-    harness: ownEnv.CODEX_THREAD_ID ? "codex" : ownEnv.CLAUDE_CODE_SESSION_ID ? "claude" : "unknown",
+    harness: ownEnv.CODEX_THREAD_ID ? "codex" : ownEnv.CLAUDE_CODE_SESSION_ID ? "claude" : ownEnv.ANTIGRAVITY_CONVERSATION_ID ? "antigravity" : "unknown",
     processName: name,
     sessionId: ownSessionId,
     cwd: (await readProcessCwd(pid)) ?? ownEnv.PWD ?? null,

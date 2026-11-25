@@ -29,7 +29,7 @@ export function sessionSendDependencies(env: NodeJS.ProcessEnv, brokerUrl?: stri
   return {
     deliver: (input) => deliverDirectSessionInput(env, input, brokerUrl),
     returnAddress: () => currentSessionReturnAddress(env),
-    ownSessionId: () => env.CLAUDE_CODE_SESSION_ID?.trim() || env.CODEX_THREAD_ID?.trim() || null,
+    ownSessionId: () => env.CLAUDE_CODE_SESSION_ID?.trim() || env.CODEX_THREAD_ID?.trim() || env.ANTIGRAVITY_CONVERSATION_ID?.trim() || null,
   };
 }
 

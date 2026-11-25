@@ -122,7 +122,8 @@ export function resolveSessionTerminalSurface(
     const normalized = value.trim().toLowerCase().replace(/_/gu, "-");
     const alias = normalized === "claude-code" || normalized === "claude-stream-json" ? "claude"
       : normalized === "codex-app-server" || normalized === "codex-exec" ? "codex"
-      : normalized === "pi-rpc" ? "pi" : normalized;
+      : normalized === "pi-rpc" ? "pi"
+      : normalized === "agy" || normalized === "google-antigravity" ? "antigravity" : normalized;
     return (AGENT_HARNESSES as readonly string[]).includes(alias) ? alias : null;
   };
   const qualifiedHarnesses = new Set<string>();

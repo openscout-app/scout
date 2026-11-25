@@ -11,7 +11,7 @@ export class ShowError extends Error {
 // Check both lexical and resolved paths: a harmless symlink must not launder a secret.
 export function assertShowPath(path: string): void {
   const parts = resolve(path).toLowerCase().split(/[\\/]/);
-  if (parts.some(p => /^(\.env[^/]*|\.git|\.ssh|\.gnupg|\.aws|\.azure|\.kube|\.config|\.codex|\.claude|\.kimi-code|\.openscout|\.scout|keys?|keychains?|\.credentials|\.secrets|\.docker|credentials?|secrets?|sessions|transcripts|\.local|\.opencode|\.pi|\.grok|node_modules)$/.test(p))
+  if (parts.some(p => /^(\.env[^/]*|\.git|\.ssh|\.gnupg|\.aws|\.azure|\.kube|\.config|\.codex|\.claude|\.gemini|\.kimi-code|\.openscout|\.scout|keys?|keychains?|\.credentials|\.secrets|\.docker|credentials?|secrets?|sessions|transcripts|\.local|\.opencode|\.pi|\.grok|node_modules)$/.test(p))
     || /(?:^|[._-])(?:credentials?|secrets?|tokens?)(?:[._-]|$)/i.test(basename(path))
     || /\.(?:pem|key|p12|pfx|keystore)$/i.test(path)
     || /^(?:id_rsa|id_ed25519|id_dsa|id_ecdsa|authorized_keys|known_hosts|\.npmrc|\.netrc|\.pypirc)$/i.test(basename(path))) {

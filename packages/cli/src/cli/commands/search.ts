@@ -27,7 +27,7 @@ Options:
   --source sessions     Only sessions is implemented for the first product slice
   --days N              Lookback window in days (default 3 for index)
   --hours N             Lookback window in hours (overrides --days)
-  --harness <id>        Filter by harness (codex, claude, kimi). Repeatable.
+  --harness <id>        Filter by harness (codex, claude, kimi, antigravity). Repeatable.
   --project <name>      Query facet filter on project basename
   --limit N             Index discovery cap or query hit limit
   --on <host>           Run the query on another host in this mesh, over that

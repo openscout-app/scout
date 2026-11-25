@@ -104,3 +104,25 @@ export * from "./t3/broker-service.js";
 export { runtimeSessionHandleForEndpoint } from "./runtime-session-handle.js";
 export type { NativePermissionDisplay, NativePermissionQuestion } from "./native-permission.js";
 export { conversationIdForSession, conversationIdForAgent } from "./session-conversation.js";
+export {
+  describeAntigravityToolCall,
+  findAntigravityPendingToolCall,
+  findAntigravityPendingToolContext,
+  formatAntigravityWaitingFor,
+  parseAntigravityQuestions,
+  readAntigravityPendingToolContext,
+  unwrapAntigravityToolArgs,
+  type AntigravityPendingQuestion,
+  type AntigravityPendingToolCall,
+} from "@openscout/agent-sessions";
+export {
+  ANTIGRAVITY_WAITING_TTL_MS,
+  isValidAntigravitySessionId,
+  parseAntigravitySessionRecord,
+  readAntigravitySessionRecords,
+  removeAntigravitySessionRecord,
+  resolveAntigravitySessionRecordsDirectory,
+  writeAntigravitySessionRecord,
+  type AntigravitySessionRecord,
+  type AntigravitySessionRecordToolCall,
+} from "./antigravity-session-records.js";

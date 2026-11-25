@@ -852,8 +852,21 @@ export function createBrokerHttpRouter(
     const hooks = deps.harnessHooks;
     if (!hooks) { json(response, 404, { error: "harness_hooks_unsupported" }); return; }
     try {
-      if (method === "GET") json(response, 200, { hooks: await hooks.status() });
-      else json(response, 200, url.pathname.endsWith("/apply") ? await hooks.apply() : await hooks.remove());
+      const parseHarness = (raw: unknown): "claude" | "antigravity" | undefined => {
+        if (raw === undefined || raw === null || raw === "") return undefined;
+        if (raw === "claude" || raw === "antigravity") return raw;
+        throw new HarnessHooksError(`Unknown hook harness: ${String(raw)}`, "settings-unreadable");
+      };
+      if (method === "GET") {
+        const harness = parseHarness(url.searchParams.get("harness"));
+        json(response, 200, { hooks: harness ? await hooks.status(harness) : await hooks.status() });
+      } else {
+        const body = await readRequestBody<{ harness?: unknown }>(request, { maxBytes: 1024 });
+        const harness = parseHarness(body?.harness);
+        json(response, 200, url.pathname.endsWith("/apply")
+          ? (harness ? await hooks.apply(harness) : await hooks.apply())
+          : (harness ? await hooks.remove(harness) : await hooks.remove()));
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       json(response, error instanceof HarnessHooksError ? 409 : 500, {

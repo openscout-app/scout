@@ -86,6 +86,25 @@ describe("detectCodingAgentHost", () => {
       harness: "claude",
       signal: "HERDR_AGENT_NAME",
     });
+    expect(detectCodingAgentHost({ ...base, HERDR_AGENT: "antigravity" })).toEqual({
+      harness: "antigravity",
+      signal: "HERDR_AGENT_NAME",
+    });
+    expect(detectCodingAgentHost({ ...base, HERDR_AGENT: "agy" })).toEqual({
+      harness: "antigravity",
+      signal: "HERDR_AGENT_NAME",
+    });
+  });
+
+  test("detects Antigravity CLI and conversation host markers", () => {
+    expect(detectCodingAgentHost({ ANTIGRAVITY_AGENT: "1" } as NodeJS.ProcessEnv)).toEqual({
+      harness: "antigravity",
+      signal: "ANTIGRAVITY_AGENT",
+    });
+    expect(detectCodingAgentHost({ ANTIGRAVITY_CONVERSATION_ID: "3a102f26-6237-46c4-ae20-6152148eecaa" } as NodeJS.ProcessEnv)).toEqual({
+      harness: "antigravity",
+      signal: "ANTIGRAVITY_CONVERSATION_ID",
+    });
   });
 
   test("rejects incomplete or unknown Herdr managed-agent markers", () => {

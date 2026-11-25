@@ -1,17 +1,29 @@
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+
 import { scoutBrokerPaths } from "@openscout/protocol";
+import {
+  describeAntigravityToolCall,
+  formatAntigravityWaitingFor,
+  isValidAntigravitySessionId,
+  removeAntigravitySessionRecord,
+  unwrapAntigravityToolArgs,
+  writeAntigravitySessionRecord,
+} from "@openscout/runtime";
 
 import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
 import type { ScoutCommandContext } from "../context.ts";
 
 /**
- * `scout permission-hook claude`: Claude Code's `PermissionRequest` hook.
+ * `scout permission-hook <claude|antigravity>`:
  *
- * Claude Code runs it while its permission dialog is on screen. It opens a
- * request on this machine's runtime, so the operator can answer it on the
- * board, and waits. A decision is printed for Claude Code to apply. Anything
- * else prints nothing and leaves the dialog to the session: the runtime is
- * down, Scout launched the session itself, the dialog was answered in the
- * session, or the request ended.
+ * - `claude`: Claude Code's `PermissionRequest` hook. Opens a native permission
+ *   request on this machine's runtime and waits so the operator can answer it
+ *   from Scout or in the terminal.
+ * - `antigravity`: Antigravity's `PreToolUse` / `PostToolUse` / `Stop` hook.
+ *   Records when a conversation pauses on a question, unsandboxed command,
+ *   plan review, or out-of-workspace file access, and immediately writes `{}`
+ *   so Antigravity's own UI is never delayed or double-prompted.
  */
 
 const MAX_INPUT_BYTES = 256 * 1024;
@@ -31,21 +43,41 @@ type HookInput = {
   permission_suggestions?: unknown;
 };
 
+type AntigravityHookInput = {
+  hookEventName?: unknown;
+  conversationId?: unknown;
+  cwd?: unknown;
+  workspacePaths?: unknown;
+  transcriptPath?: unknown;
+  artifactDirectoryPath?: unknown;
+  toolCall?: unknown;
+};
+
 type Opened = { requestId?: string; skipped?: string };
 type Outcome = { state?: "open" | "decided" | "ended"; decision?: "allow" | "deny"; updatedPermissions?: unknown; reason?: string };
 
 export type PermissionHookDeps = {
   post?: <T>(path: string, body: unknown, timeoutMs: number) => Promise<T>;
   write?: (text: string) => void;
+  recordsDirectory?: string;
+  now?: () => number;
 };
 
-export async function runPermissionHookCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
-  if (args[0] !== "claude" || process.stdin.isTTY) {
-    process.stderr.write("usage: scout permission-hook claude < hook.json (run by Claude Code as a PermissionRequest hook)\n");
+export async function runPermissionHookCommand(_context: ScoutCommandContext, args: string[]): Promise<void> {
+  const target = args[0];
+  if ((target !== "claude" && target !== "antigravity") || process.stdin.isTTY) {
+    process.stderr.write("usage: scout permission-hook <claude|antigravity> < hook.json\n");
     return;
   }
   const raw = await readBoundedStdin(MAX_INPUT_BYTES);
-  if (raw === null) return;
+  if (raw === null) {
+    if (target === "antigravity") process.stdout.write("{}\n");
+    return;
+  }
+  if (target === "antigravity") {
+    await handleAntigravityPermissionHook(raw);
+    return;
+  }
   await handleClaudePermissionHook(raw);
 }
 
@@ -95,6 +127,105 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
     }
     if (outcome?.state !== "open") return;
   }
+}
+
+function isWithinAllowedRoots(targetPath: string, roots: string[]): boolean {
+  const expanded = targetPath.startsWith("~/") ? `${homedir()}${targetPath.slice(1)}` : targetPath;
+  const resolved = resolve(expanded);
+  for (const root of roots) {
+    const cleanRoot = resolve(root);
+    if (resolved === cleanRoot || resolved.startsWith(`${cleanRoot}/`)) return true;
+  }
+  return false;
+}
+
+function shouldRecordAntigravityWaiting(
+  toolName: string,
+  args: Record<string, unknown>,
+  allowedRoots: string[],
+): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  if (normalized === "ask_question" || normalized === "notify_user" || normalized === "plan_input") {
+    return true;
+  }
+  if (normalized === "run_command" || normalized === "shell_exec") {
+    return args.BypassSandbox === true || args.BypassSandbox === "true";
+  }
+  if (normalized === "write_file" || normalized === "edit_file" || normalized === "read_file" || normalized === "view_file") {
+    const metadata = unwrapAntigravityToolArgs(args.ArtifactMetadata);
+    if (metadata.RequestFeedback === true || metadata.RequestFeedback === "true") return true;
+    const rawPath = typeof args.Path === "string" ? args.Path.trim() : "";
+    if (rawPath && allowedRoots.length > 0 && !isWithinAllowedRoots(rawPath, allowedRoots)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function handleAntigravityPermissionHook(raw: string, deps: PermissionHookDeps = {}): Promise<void> {
+  const write = deps.write ?? ((text: string) => { process.stdout.write(text); });
+  const now = (deps.now ?? Date.now)();
+  const directory = deps.recordsDirectory;
+  try {
+    const input = JSON.parse(raw) as AntigravityHookInput;
+    const sessionId = typeof input?.conversationId === "string" ? input.conversationId.trim() : "";
+    const event = typeof input?.hookEventName === "string" ? input.hookEventName.trim() : "";
+    if (!isValidAntigravitySessionId(sessionId)) {
+      write("{}\n");
+      return;
+    }
+    if (event === "PostToolUse" || event === "Stop") {
+      await removeAntigravitySessionRecord(sessionId, { directory });
+      write("{}\n");
+      return;
+    }
+    if (event === "PreToolUse") {
+      const toolObj = input.toolCall && typeof input.toolCall === "object" && !Array.isArray(input.toolCall)
+        ? input.toolCall as { id?: unknown; name?: unknown; args?: unknown }
+        : null;
+      const toolName = typeof toolObj?.name === "string" ? toolObj.name.trim() : "";
+      const args = unwrapAntigravityToolArgs(toolObj?.args);
+      const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : null;
+      const workspaces = Array.isArray(input.workspacePaths)
+        ? input.workspacePaths.filter((p): p is string => typeof p === "string" && Boolean(p.trim()))
+        : [];
+      const artifactDir = typeof input.artifactDirectoryPath === "string" && input.artifactDirectoryPath.trim()
+        ? [input.artifactDirectoryPath.trim()]
+        : [];
+      const allowedRoots = [...workspaces, ...(cwd ? [cwd] : []), ...artifactDir, "/tmp", "/private/tmp"];
+
+      if (toolName && shouldRecordAntigravityWaiting(toolName, args, allowedRoots)) {
+        const described = describeAntigravityToolCall(toolName, args);
+        const waitingFor = formatAntigravityWaitingFor({
+          toolUseId: typeof toolObj?.id === "string" ? toolObj.id : "hook",
+          tool: toolName,
+          ...described,
+          at: now,
+          alsoPending: 0,
+        });
+        await writeAntigravitySessionRecord({
+          sessionId,
+          cwd,
+          transcriptPath: typeof input.transcriptPath === "string" && input.transcriptPath.trim()
+            ? input.transcriptPath.trim()
+            : null,
+          status: "waiting",
+          waitingFor,
+          statusUpdatedAt: now,
+          toolCall: {
+            id: typeof toolObj?.id === "string" && toolObj.id.trim() ? toolObj.id.trim() : null,
+            name: toolName,
+            args,
+          },
+        }, { directory });
+      } else {
+        await removeAntigravitySessionRecord(sessionId, { directory });
+      }
+    }
+  } catch {
+    // Never block Antigravity when hook input or disk state fails.
+  }
+  write("{}\n");
 }
 
 async function postJson<T>(path: string, body: unknown, timeoutMs: number): Promise<T> {

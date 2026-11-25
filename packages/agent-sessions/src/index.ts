@@ -90,6 +90,19 @@ export {
 export type {
   ClaudePendingToolCall,
 } from "./adapters/claude-code/pending-tool-call.js";
+export {
+  describeAntigravityToolCall,
+  findAntigravityPendingToolCall,
+  findAntigravityPendingToolContext,
+  formatAntigravityWaitingFor,
+  parseAntigravityQuestions,
+  readAntigravityPendingToolContext,
+  unwrapAntigravityToolArgs,
+} from "./adapters/antigravity/pending-tool-call.js";
+export type {
+  AntigravityPendingQuestion,
+  AntigravityPendingToolCall,
+} from "./adapters/antigravity/pending-tool-call.js";
 export { createAdapter as createCodexAdapter } from "./adapters/codex/index.js";
 export { createAdapter as createCursorAcpAdapter } from "./adapters/cursor-acp/index.js";
 export { createAdapter as createAntigravityAcpAdapter } from "./adapters/antigravity-acp/adapter.js";
