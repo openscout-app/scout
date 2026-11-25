@@ -1505,12 +1505,8 @@ function stripLaunchReasoningEffortForHarness(harness: AgentHarness, launchArgs:
   return next;
 }
 
-/**
- * Grok takes model and reasoning effort over ACP, not as launch flags — and it
- * resets effort to the model default on any `session/set_model` that omits it,
- * so both travel together as adapter options.
- */
-function grokAcpAdapterOptions(
+/** Grok and Antigravity configure model and effort on the ACP session, not the command line. */
+function acpModelOptions(
   model: string | undefined,
   reasoningEffort: string | undefined,
 ): Record<string, unknown> | undefined {
@@ -6552,20 +6548,22 @@ export async function invokeLocalAgentEndpoint(
     };
   }
 
-  if (!existing && endpoint.transport === "grok_acp") {
+  if (!existing && (endpoint.transport === "grok_acp" || endpoint.transport === "antigravity_acp")) {
+    const antigravity = endpoint.transport === "antigravity_acp";
+    const invoke = antigravity ? invokeAntigravityAcpAgent : invokeGrokAcpAgent;
     const cwd = endpoint.cwd ?? endpoint.projectRoot ?? process.cwd();
     const sessionId = endpointRuntimeInstanceId(endpoint);
     const model = endpointMetadataString(endpoint, "model");
     const reasoningEffort = endpointMetadataString(endpoint, "reasoningEffort");
-    const adapterOptions = grokAcpAdapterOptions(model, reasoningEffort);
-    const result = await invokeGrokAcpAgent({
+    const adapterOptions = acpModelOptions(model, reasoningEffort);
+    const result = await invoke({
       sessionId,
       poolKey: endpoint.id,
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
       ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
-      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Grok ACP"),
+      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? (antigravity ? "Google Antigravity" : "Grok ACP")),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
       ...(adapterOptions ? { adapterOptions } : {}),
@@ -6624,20 +6622,18 @@ export async function invokeLocalAgentEndpoint(
     };
   }
 
-  if (!existing && (endpoint.transport === "devin_acp" || endpoint.transport === "antigravity_acp")) {
-    const isAntigravity = endpoint.transport === "antigravity_acp";
-    const invoke = isAntigravity ? invokeAntigravityAcpAgent : invokeDevinAcpAgent;
+  if (!existing && endpoint.transport === "devin_acp") {
     const cwd = endpoint.cwd ?? endpoint.projectRoot ?? process.cwd();
     const sessionId = endpointRuntimeInstanceId(endpoint);
     const model = endpointMetadataString(endpoint, "model");
-    const result = await invoke({
+    const result = await invokeDevinAcpAgent({
       sessionId,
       poolKey: endpoint.id,
       resumeSessionId: endpointMetadataString(endpoint, "externalSessionId"),
       cwd,
       prompt,
       ...(acpNativeSession ? { onNativeSession: acpNativeSession } : {}),
-      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? (isAntigravity ? "Google Antigravity" : "Devin ACP")),
+      name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Devin ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
       ...(model ? { adapterOptions: { model } } : {}),
@@ -6811,21 +6807,21 @@ export async function invokeLocalAgentEndpoint(
     };
     const endpointModel = endpointMetadataString(endpoint, "model");
     const modelOptions = endpointModel ? { adapterOptions: { model: endpointModel } } : {};
-    const grokAdapterOptions = grokAcpAdapterOptions(
+    const modelAndEffortOptions = acpModelOptions(
       endpointModel,
       endpointMetadataString(endpoint, "reasoningEffort"),
     );
     const result = onlineRecord.transport === "grok_acp"
       ? await invokeGrokAcpAgent({
         ...commonOptions,
-        ...(grokAdapterOptions ? { adapterOptions: grokAdapterOptions } : {}),
+        ...(modelAndEffortOptions ? { adapterOptions: modelAndEffortOptions } : {}),
       })
       : onlineRecord.transport === "kimi_acp"
         ? await invokeKimiAcpAgent(commonOptions)
         : onlineRecord.transport === "opencode_acp"
           ? await invokeOpencodeAcpAgent({ ...commonOptions, ...modelOptions })
           : onlineRecord.transport === "antigravity_acp"
-            ? await invokeAntigravityAcpAgent({ ...commonOptions, ...modelOptions })
+            ? await invokeAntigravityAcpAgent({ ...commonOptions, adapterOptions: modelAndEffortOptions })
             : onlineRecord.transport === "devin_acp"
               ? await invokeDevinAcpAgent({ ...commonOptions, ...modelOptions })
               : await invokeCursorAcpAgent(commonOptions);

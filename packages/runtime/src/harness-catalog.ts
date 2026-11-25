@@ -476,7 +476,7 @@ const BUILT_IN_HARNESS_CATALOG: HarnessCatalogEntry[] = [
   {
     name: "antigravity",
     harness: "antigravity",
-    aliases: ["agy"],
+    aliases: ["agy", "antigravity-acp"],
     label: "Google Antigravity",
     description: "Google's Antigravity CLI over the Agent Client Protocol",
     homepage: "https://antigravity.google/docs/ide/extensions/acp",

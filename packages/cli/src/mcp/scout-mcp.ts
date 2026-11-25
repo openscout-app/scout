@@ -30,12 +30,15 @@ import {
   BUILT_IN_AGENT_DEFINITION_IDS,
   diagnoseAgentIdentity,
   flightCompletion,
+  FLIGHT_WAITING_ON_KINDS,
   type ScoutCompletionReply,
   formatMinimalAgentIdentity,
   parseScoutRuntimeSpec,
   parseAgentIdentity,
   parseScoutComposerRouteTarget,
+  normalizeScoutLaunchableHarness,
   SCOUT_LAUNCHABLE_HARNESSES,
+  SCOUT_RUNTIME_HARNESS_ALIASES,
   SCOUT_REASONING_EFFORTS,
   SCOUT_RESERVED_RUNTIME_PROFILE_IDS,
   validateScoutAgentNameForWrite,
@@ -663,6 +666,11 @@ type ScoutMcpDependencies = {
 
 const flightSchema = z.object({
   id: z.string(),
+  sessionId: z.string().optional(),
+  waitingOn: z.object({
+    kind: z.enum(FLIGHT_WAITING_ON_KINDS), summary: z.string(), since: z.number(),
+    requestRef: z.string().optional(), replyMessageId: z.string().optional(),
+  }).optional(),
   invocationId: z.string(),
   requesterId: z.string(),
   targetAgentId: z.string(),
@@ -1378,6 +1386,7 @@ const askReceiptSchema = z.object({
   workPageUnavailable: z.literal(true).optional(),
   notificationStatus: z.enum(["not_requested", "requested_unconfirmed"]).optional(),
   workerInterrupted: z.boolean().optional(),
+  executionResolution: z.object({ schemaVersion: z.literal("openscout.execution-resolution.v1") }).catchall(z.unknown()).optional(),
   completion: completionStateSchema.extend({ invocationId: z.string(), flightId: z.string() }).optional(),
   parentCompletion: z.object({ flightId: z.string(), revision: z.number().int().min(0) }).optional(),
   links: followLinksSchema.optional(),
@@ -1386,6 +1395,8 @@ const askReceiptSchema = z.object({
   state: z.enum(["queued", "completed", "failed", "ambiguous"]),
   ids: z.object({
     targetAgentId: z.string().optional(),
+    sessionId: z.string().optional(),
+    sessionAlias: z.string().optional(),
     invocationId: z.string().optional(),
     flightId: z.string().optional(),
     conversationId: z.string().optional(),
@@ -4650,12 +4661,12 @@ export function createScoutMcpServer(options: {
         runtime: z
           .string()
           .optional()
-          .describe("Shell-safe RuntimeSpec: harness[/model[/effort]], such as codex/gpt-5.6-sol/xhigh."),
+          .describe("Shell-safe RuntimeSpec: harness[/model[/effort]], such as codex/gpt-5.6-sol/xhigh or antigravity/gemini-4-neon/high."),
         profile: z
           .enum(SCOUT_RESERVED_RUNTIME_PROFILE_IDS)
           .optional()
           .describe("Runtime preset base. Explicit harness/model/reasoningEffort fields may override compatible dimensions."),
-        harness: z.enum(LOCAL_AGENT_HARNESS_VALUES).optional(),
+        harness: z.enum([...LOCAL_AGENT_HARNESS_VALUES, ...Object.keys(SCOUT_RUNTIME_HARNESS_ALIASES)]).optional(),
         model: z.string().min(1).optional(),
         reasoningEffort: z.enum(SCOUT_REASONING_EFFORTS).optional(),
         placement: z
@@ -4712,7 +4723,7 @@ export function createScoutMcpServer(options: {
       timeoutSeconds,
       runtime,
       profile,
-      harness,
+      harness: inputHarness,
       model,
       reasoningEffort,
       placement,
@@ -4745,6 +4756,7 @@ export function createScoutMcpServer(options: {
       if (to && targetSessionId) throw new Error("use exactly one of to or targetSessionId");
       const targetSession = targetSessionId?.trim();
       const targetTo = targetSession ? `session:${targetSession}` : to?.trim();
+      const harness = normalizeScoutLaunchableHarness(inputHarness) ?? undefined;
       const parsedRuntime = runtime ? parseScoutRuntimeSpec(runtime) : null;
       const runtimeConflict = parsedRuntime?.ok
         ? ([

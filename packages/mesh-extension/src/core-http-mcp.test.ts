@@ -141,6 +141,24 @@ test('untyped task-closed errors keep their raw details redacted', async () => {
   await expect(client.request('/v1/messages/reply', {})).rejects.toThrow('runtime request refused (409)');
 });
 
+test('HTTP asks route Antigravity aliases to the requested project or profile without dropping effort', async () => {
+  const f = fixture();
+  await f.adapter.call('ask', { body: 'work', runtime: 'agy' });
+  expect(f.calls.at(-1)?.body).toMatchObject({
+    target: { kind: 'project_path', projectPath: '/project' }, execution: { harness: 'antigravity', session: 'new' },
+  });
+  const selection = { body: 'work', profile: 'antigravity', projectPath: '/chosen', runtime: 'antigravity/gemini-4-neon/high' };
+  await f.adapter.call('ask', { ...selection, harness: 'antigravity-acp' });
+  expect(f.calls.at(-1)?.body).toMatchObject({
+    target: { kind: 'runtime_profile', profile: 'antigravity', projectPath: '/chosen' },
+    execution: { harness: 'antigravity', model: 'gemini-4-neon', reasoningEffort: 'high', session: 'new' },
+  });
+  await expect(f.adapter.call('ask', { ...selection, harness: 'codex' })).rejects.toThrow('conflicting runtime field harness');
+  const unbound = new CoreHttpAdapter({ client: f.client, principal });
+  await expect(unbound.call('ask', { body: 'work', runtime: 'agy', currentDirectory: '/untrusted' })).rejects.toThrow('explicit projectPath');
+  expect(f.calls.filter(call => call.url.pathname === '/v1/deliver')).toHaveLength(2);
+});
+
 test('HTTP ask preserves the caller traceparent without asserting origin authority', async () => {
   const f = fixture();
   const traceparent = '00-11111111111111111111111111111111-2222222222222222-01';

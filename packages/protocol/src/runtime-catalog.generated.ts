@@ -2,7 +2,7 @@
 
 export const SCOUT_RUNTIME_CATALOG_DATA = {
   "schemaVersion": "openscout.runtime-catalog.v1",
-  "revision": "2026-11-23.1",
+  "revision": "2026-11-24.1",
   "harnesses": [
     {
       "id": "claude",
@@ -561,7 +561,14 @@ export const SCOUT_RUNTIME_CATALOG_DATA = {
       "label": "Google Antigravity",
       "enabled": true,
       "allowCustomModels": true,
-      "reasoningEfforts": null,
+      "reasoningEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultReasoningEffort": null,
       "models": []
     },
     {

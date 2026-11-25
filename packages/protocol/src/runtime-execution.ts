@@ -1,6 +1,7 @@
 import { SCOUT_RUNTIME_CATALOG_DATA } from "./runtime-catalog.generated.js";
 import {
   SCOUT_LAUNCHABLE_HARNESSES,
+  SCOUT_RUNTIME_HARNESS_ALIASES,
   SCOUT_REASONING_EFFORT_LABELS,
   SCOUT_REASONING_EFFORTS,
   type ScoutLaunchableHarness,
@@ -100,7 +101,9 @@ export function scoutRuntimeDefaultReasoningEffort(
     ? entry?.models.find((candidate) => candidate.enabled && candidate.id === model)
     : undefined;
   const efforts = scoutRuntimeReasoningEfforts(harness, model, catalog);
-  const preferred = selected?.defaultReasoningEffort ?? entry?.defaultReasoningEffort ?? null;
+  const preferred = selected?.defaultReasoningEffort !== undefined ? selected.defaultReasoningEffort : entry?.defaultReasoningEffort;
+  // An explicit null delegates the default to the provider, not the first supported level.
+  if (preferred === null) return null;
   return preferred && efforts?.includes(preferred) ? preferred : efforts?.[0] ?? null;
 }
 
@@ -425,9 +428,8 @@ export function parseScoutRuntimeSpec(input: string): ScoutRuntimeSpecParseResul
       error: "runtime must be <harness>[/<model>[/<effort>]]",
     };
   }
-  const rawHarness = parts[0]!.trim().toLowerCase();
-  const harness = (rawHarness === "oc" ? "opencode" : rawHarness) as ScoutLaunchableHarness;
-  if (!isScoutLaunchableHarness(harness)) {
+  const harness = normalizeScoutLaunchableHarness(parts[0]);
+  if (!harness) {
     return {
       ok: false,
       error: `unsupported runtime harness "${parts[0]}"; expected one of: ${SCOUT_LAUNCHABLE_HARNESSES.join(", ")}`,
@@ -480,7 +482,7 @@ export function normalizeScoutLaunchableHarness(
 ): ScoutLaunchableHarness | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "oc") return "opencode";
+  if (Object.hasOwn(SCOUT_RUNTIME_HARNESS_ALIASES, normalized)) return SCOUT_RUNTIME_HARNESS_ALIASES[normalized]!;
   return isScoutLaunchableHarness(normalized) ? normalized : null;
 }
 
@@ -563,7 +565,7 @@ export function validateScoutRuntimeTuple(
   ownedCatalog: ScoutOwnedRuntimeCatalog = SCOUT_RUNTIME_CATALOG,
 ): ScoutRuntimeTupleIssue[] {
   const rawHarness = input.harness?.trim().toLowerCase();
-  const harness = rawHarness === "oc" ? "opencode" : rawHarness;
+  const harness = normalizeScoutLaunchableHarness(rawHarness) ?? rawHarness;
   const requestedModel = input.model?.trim();
   const normalizedModel = harness && requestedModel
     ? normalizeScoutRuntimeModel(harness, requestedModel, ownedCatalog) : null;

@@ -525,6 +525,12 @@ describe("parseAskCommandOptions", () => {
     }));
   });
 
+  test("canonicalizes the Antigravity transport spelling before merging runtime dimensions", () => {
+    expect(parseAskCommandOptions(
+      ["--runtime", "antigravity-acp/gemini-4-neon/xhigh", "--harness", "agy", "review"], "/repo",
+    )).toMatchObject({ harness: "antigravity", model: "gemini-4-neon", reasoningEffort: "xhigh" });
+  });
+
   test("uses profiles as presets and fails conflicting RuntimeSpec flags closed", () => {
     expect(parseAskCommandOptions(
       ["--profile", "fable", "--model", "claude-opus-5", "--effort", "max", "review"],

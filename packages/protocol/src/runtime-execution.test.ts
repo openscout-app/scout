@@ -228,8 +228,19 @@ describe("runtime execution contracts", () => {
 
   test("Antigravity accepts account-provided model IDs and keeps the native default when omitted", () => {
     expect(isModelSelectableHarness("antigravity")).toBe(true);
-    expect(validateScoutRuntimeTuple({ harness: "antigravity", model: "gemini-fixture" })).toEqual([]);
+    expect(parseScoutRuntimeSpec("antigravity")).toEqual({ ok: true, value: { harness: "antigravity" } });
+    for (const [model, effort] of [
+      ["gemini-4-neon", "high"], ["gemini-4-neon", "xhigh"], ["gemini-4-carbon", "high"],
+      ["gemini-4-hydrogen", "medium"], ["custom-model", "low"], ["custom-model", "max"],
+    ]) {
+      const tuple = { harness: "antigravity", model, reasoningEffort: effort };
+      expect(parseScoutRuntimeSpec(`antigravity/${model}/${effort}`)).toEqual({ ok: true, value: tuple });
+      expect(validateScoutRuntimeTuple(tuple)).toEqual([]);
+    }
+    expect(validateScoutRuntimeTuple({ harness: "antigravity", reasoningEffort: "ultra" })[0]?.code)
+      .toBe("reasoning_effort_harness_mismatch");
     expect(scoutRuntimeDefaultModel("antigravity")).toBeNull();
+    expect(scoutRuntimeDefaultReasoningEffort("antigravity")).toBeNull();
   });
 
   test("devin with a catalog model passes model selectability", () => {

@@ -132,12 +132,17 @@ account can use. To give Antigravity access to Scout tools, run
 `scout mcp install --host antigravity`. To send work in the other direction:
 
 ```sh
-scout ask --project . --harness antigravity --model <model-id> "Review this change"
+scout ask --project . --runtime antigravity/gemini-4-neon/high "Review this change"
 ```
 
-Replace `<model-id>` with an ID from `agy models`, or omit the model flag to
-keep the native default. Scout checks the model returned by the ACP session
-before sending a prompt. [Google's ACP guide](https://antigravity.google/docs/ide/extensions/acp)
+MCP `ask` takes the same literal in `runtime`. Bare `antigravity` keeps the
+native defaults. Use `--profile antigravity` for a fresh session, or pass
+`--harness antigravity --model <family> --effort <level>` for separate
+dimensions. `agy` and `antigravity-acp` both select the `antigravity`
+harness. Scout passes the project directory as ACP `cwd`, then sets and
+checks `model` and `thought_level` before sending the prompt. Available
+levels depend on the model and account; a rejected level fails the ask
+instead of running with a different effort. [Google's ACP guide](https://antigravity.google/docs/ide/extensions/acp)
 
 Kimi Code is a first-class cardless harness target: `--harness kimi` resolves
 through the catalog to the `kimi_acp` transport, which launches `kimi acp` and

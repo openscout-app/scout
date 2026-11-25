@@ -821,8 +821,12 @@ describe("createScoutMcpServer", () => {
         return {
           ok: true,
           state: "queued",
+          executionResolution: {
+            schemaVersion: "openscout.execution-resolution.v1", harness: { drift: "unknown" },
+            model: { drift: "unknown" }, reasoningEffort: { drift: "unknown" },
+          },
           ids: {
-            targetAgentId: "talkie.main",
+            targetAgentId: "talkie.main", sessionId: "session-1", sessionAlias: "project-worker",
             invocationId: "inv-1",
             flightId: "flt-1",
           },
@@ -830,15 +834,22 @@ describe("createScoutMcpServer", () => {
       },
     });
 
+    // Discovery enables the SDK's strict output-schema validation for the receipt.
+    await client.listTools();
     const result = await client.callTool({
       name: "ask",
       arguments: {
         projectPath: "talkie",
+        harness: "antigravity-acp",
+        runtime: "antigravity/gemini-4-neon/high",
         body: "How did you handle auth?",
       },
     });
 
     expect(receivedAsk).toMatchObject({
+      harness: "antigravity",
+      model: "gemini-4-neon",
+      reasoningEffort: "high",
       senderId: "operator.main",
       projectPath: "/tmp/openscout-test/talkie",
       body: "How did you handle auth?",
@@ -2088,6 +2099,7 @@ describe("createScoutMcpServer", () => {
       askQuestion: async () => ({ usedBroker: true }),
       askAgentById: async () => ({ usedBroker: true }),
       getFlight: async () => ({
+        sessionId: "session-1",
         id: "flight-1",
         invocationId: "inv-1",
         requesterId: "operator",
@@ -2111,6 +2123,7 @@ describe("createScoutMcpServer", () => {
       OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
     });
 
+    await client.listTools();
     const result = await client.callTool({
       name: "invocations_wait",
       arguments: {

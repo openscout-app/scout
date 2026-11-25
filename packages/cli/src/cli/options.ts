@@ -10,7 +10,7 @@ import {
   normalizeAgentSelectorSegment,
   normalizeReservedRuntimeProfileId,
   normalizeRuntimeProfileReasoningEffort,
-  isScoutLaunchableHarness,
+  normalizeScoutLaunchableHarness,
   parseScoutRuntimeSpec,
   parseScoutComposerRoute,
   parseScoutComposerRouteTarget,
@@ -312,7 +312,7 @@ function parseNaturalLanguageAskTarget(
   const leadingToken = trimmed.match(/^(\S+)(?:\s+|$)([\s\S]*)$/u);
   const runtimeToken = leadingToken?.[1] ?? "";
   const runtimeCandidate = runtimeToken.includes("/")
-    || (isScoutLaunchableHarness(runtimeToken) && !normalizeReservedRuntimeProfileId(runtimeToken))
+    || (normalizeScoutLaunchableHarness(runtimeToken) && !normalizeReservedRuntimeProfileId(runtimeToken))
     ? parseScoutRuntimeSpec(runtimeToken)
     : null;
   if (runtimeCandidate?.ok) {
@@ -427,8 +427,7 @@ function rejectUnsupportedRuntimeProfileEffort(
   profile: string,
   reasoningEffort: string | undefined,
 ): void {
-  // Grok takes effort over ACP on `session/set_model`; the others expose no
-  // equivalent through their transports.
+  // These profiles expose no effort selector through their ACP transports.
   if (reasoningEffort && (profile === "kimi" || profile === "oc" || profile === "opencode")) {
     throw new ScoutCliError(
       `reasoning_effort_harness_mismatch: ${profile} runtime profile does not support reasoning effort through its ACP transport`,
@@ -1057,7 +1056,7 @@ export function parseAskCommandOptions(
     }
     if (current === "--harness" || current.startsWith("--harness=")) {
       const value = parseAskFlagValue(parsed.args, index, "--harness");
-      harness = value.value;
+      harness = normalizeScoutLaunchableHarness(value.value) ?? value.value;
       explicitHarnessFlag = true;
       index = value.nextIndex;
       continue;

@@ -157,6 +157,7 @@ type PendingCursorPlan = {
 };
 
 type AcpSessionResult = {
+  configOptions?: unknown;
   sessionId?: string;
   models?: { currentModelId?: string };
 };
@@ -867,6 +868,10 @@ export class AcpAdapter extends BaseAdapter {
         await this.selectRequestedModel(requestedSessionId);
         return;
       }
+      if (this.type === "antigravity-acp") {
+        const reason = recoveryFailures.map(failure => failure.message).join("; ") || "agy did not advertise resume or load";
+        throw new Error(`Cannot reopen Antigravity session ${requestedSessionId}: ${reason}. Start a new ask for fresh context.`);
+      }
       this.updateProviderMeta({
         sessionRecovery: {
           requestedSessionId,
@@ -885,25 +890,47 @@ export class AcpAdapter extends BaseAdapter {
     await this.selectRequestedModel(created.sessionId);
   }
 
+  private captureAntigravityConfig(options: unknown) {
+    if (!Array.isArray(options)) return;
+    const value = (id: string) => stringValue(options.find(option => isRecord(option) && option.id === id)?.currentValue);
+    const family = value("model");
+    const level = value("thought_level");
+    // agy models also lists variant IDs; ACP reports family and level separately.
+    const variant = family && level ? `${family}-${level}` : null;
+    this.session.model = (variant && variant === this.acpOptions.model ? variant : family) ?? undefined;
+    this.session.reasoningEffort = level ?? undefined;
+    this.updateProviderMeta({ configObservedAt: Date.now() });
+    return { model: this.session.model, reasoningEffort: this.session.reasoningEffort };
+  }
+
+  private async selectAntigravityRuntime(sessionId: string): Promise<void> {
+    const { model, reasoningEffort, startupTimeoutMs } = this.acpOptions;
+    if (!model && !reasoningEffort) return;
+
+    // agy acp has no --model or --effort flags. Set the family first: changing
+    // it can reset thought_level and changes which levels the session offers.
+    const select = async (configId: "model" | "thought_level", value: string) => {
+      const response = await this.request<AcpSessionResult>("session/set_config_option", { sessionId, configId, value }, startupTimeoutMs);
+      const observed = this.captureAntigravityConfig(response?.configOptions);
+      if (model && observed?.model !== model) {
+        throw new Error(`Antigravity did not confirm model "${model}". Run agy models to list available IDs.`);
+      }
+      if (configId === "thought_level" && observed?.reasoningEffort !== value) {
+        throw new Error(`Antigravity did not confirm effort "${value}". Run agy models to list available levels.`);
+      }
+    };
+    if (model) await select("model", model);
+    if (reasoningEffort) await select("thought_level", reasoningEffort);
+    this.updateProviderMeta({
+      ...(model ? { requestedModel: model } : {}),
+      ...(reasoningEffort ? { requestedReasoningEffort: reasoningEffort } : {}),
+    });
+  }
+
   private async selectRequestedModel(sessionId: string): Promise<void> {
     const { model, reasoningEffort } = this.acpOptions;
     if (this.acpOptions.adapterType === "antigravity-acp") {
-      if (!model) return;
-      const response = await this.request<{
-        configOptions?: Array<{ id: string; currentValue?: string }>;
-      }>("session/set_config_option", {
-        sessionId, configId: "model", value: model,
-      }, this.acpOptions.startupTimeoutMs);
-      const options = response?.configOptions;
-      const selected = options?.find(option => option.id === "model")?.currentValue;
-      const level = options?.find(option => option.id === "thought_level")?.currentValue;
-      // The CLI lists Gemini variants with one ID, but ACP reports the family and thinking level separately.
-      const matchesVariant = selected && level && `${selected}-${level}` === model;
-      if (selected !== model && !matchesVariant) {
-        throw new Error(`Antigravity did not confirm model "${model}". Run agy models to list available IDs.`);
-      }
-      this.updateProviderMeta({ requestedModel: model });
-      return;
+      return this.selectAntigravityRuntime(sessionId);
     }
     // `model` is also used by adapters such as OpenCode to configure the
     // child process. Do not assume that means the ACP agent implements the
@@ -1124,6 +1151,9 @@ export class AcpAdapter extends BaseAdapter {
         if (typeof update.status === "string") {
           this.setStatus(mapSessionStatus(update.status));
         }
+        return;
+      case "config_option_update":
+        if (this.type === "antigravity-acp") this.captureAntigravityConfig(update.configOptions);
         return;
       case "usage_update":
         this.updateProviderMeta({ usage: update });
@@ -1599,6 +1629,7 @@ export class AcpAdapter extends BaseAdapter {
    * on `session/set_model`, so switching effort alone still needs a model id.
    */
   private captureModelState(result: AcpSessionResult | undefined): void {
+    if (this.type === "antigravity-acp") this.captureAntigravityConfig(result?.configOptions);
     const current = result?.models?.currentModelId;
     if (typeof current === "string" && current.trim()) {
       this.currentAcpModelId = current.trim();
