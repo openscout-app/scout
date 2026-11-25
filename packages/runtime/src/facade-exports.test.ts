@@ -19,7 +19,7 @@ const facadeSources = {
   ],
   config: [
     "support-paths", "scout-home", "local-config", "user-config", "user-config-fields",
-    "instance", "path-trust",
+    "crew", "instance", "path-trust",
   ],
   setup: ["./setup.js", "onboarding", "diagnostic-report", "core-report", "system-probes"],
   harnesses: [
