@@ -41,7 +41,7 @@ export interface BoardRegistryView {
 export interface BrokerBoardServiceOptions {
   work: {
     lifecycles(): WorkLifecycleSummary[];
-    board(query: { lifecycleId?: string; closedSince?: number; limit?: number }): WorkBoard;
+    board(query: BoardReadQuery & { lifecycleId?: string }): WorkBoard;
   };
   defaultLifecycleId: string;
   registry(): Readonly<BoardRegistryView>;
@@ -69,7 +69,7 @@ export class BrokerBoardService {
     const lifecycleId = id === DEFAULT_BOARD_ID && !this.options.work.lifecycles().some((s) => s.lifecycle.id === id)
       ? this.options.defaultLifecycleId
       : id;
-    const placed = this.options.work.board({ lifecycleId, closedSince: query.closedSince, limit: query.limit });
+    const placed = this.options.work.board({ ...query, lifecycleId });
     return joinBoard(placed, this.options.registry(), this.options.latestEvents);
   };
 }
@@ -136,6 +136,7 @@ export function joinBoard(
     columns: lifecycle.stations.map((s) => ({ id: s.id, name: s.name, state: s.state, purpose: s.purpose ?? null })),
     transitions: lifecycle.transitions.map((t) => ({ from: t.from, to: t.to, name: t.name ?? null })),
     cards,
+    ...(placed.page && { page: placed.page }),
   };
 }
 

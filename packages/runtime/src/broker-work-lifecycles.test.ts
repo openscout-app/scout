@@ -88,10 +88,16 @@ describe("work lifecycle service", () => {
   });
 
   test("done is pending review; confirm settles it, a stale review is refused", async () => {
-    const { service, item } = await setup([workItem({ state: "working" })]);
+    const { service, item, events } = await setup([workItem({ state: "working" })]);
     const done = await service.move({ workId: "work-1", to: "done", actorId: "agent-1" });
     expect(done.decision.review).toBe("pending");
     expect(workPlacementOf(item())?.reviewPending).toBe(true);
+    const review = { workId: "work-1", moveId: done.move!.id, verdict: "confirm" as const, actorId: "reviewer" };
+    await expect(service.review({ ...review, revision: 0 })).rejects.toMatchObject({ status: 409 });
+    expect(events).toHaveLength(1);
+    // A stale attempt written by an older runtime can coexist with a still-current move.
+    events.push({ id: "legacy", recordId: "work-1", recordKind: "work_item", kind: "progressed", actorId: "reviewer",
+      at: 1011, metadata: { workReview: { moveId: done.move!.id, status: "stale", revision: 0 } } });
     const reviewed = await service.review({ workId: "work-1", moveId: done.move!.id, verdict: "confirm", revision: done.move!.revision!, actorId: "reviewer" });
     expect(reviewed.status).toBe("confirmed");
     expect(workPlacementOf(item())?.reviewPending).toBeUndefined();
@@ -113,6 +119,9 @@ describe("work lifecycle service", () => {
     const { service } = await setup([workItem({ state: "working" })]);
     const done = await service.move({ workId: "work-1", to: "done", actorId: "agent-1" });
     await service.move({ workId: "work-1", to: "doing", actorId: "agent-1" });
+    const before = service.moves({ workId: "work-1" });
+    await expect(service.review({ workId: "work-1", moveId: done.move!.id, verdict: "confirm", revision: 0 })).rejects.toMatchObject({ status: 409 });
+    expect(service.moves({ workId: "work-1" })).toEqual(before);
     const stale = await service.review({ workId: "work-1", moveId: done.move!.id, verdict: "confirm", revision: done.move!.revision! });
     expect(stale.status).toBe("stale");
   });

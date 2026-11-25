@@ -2314,6 +2314,9 @@ export function createBrokerHttpRouter(
       const closedSince = Number(url.searchParams.get("closedSince"));
       json(response, 200, deps.boards.read(decodeURIComponent(boardMatch[1]!), {
         closedSince: Number.isFinite(closedSince) && closedSince > 0 ? closedSince : undefined,
+        ...(url.searchParams.has("perColumn") && { perColumn: Number(url.searchParams.get("perColumn")) }),
+        ...(url.searchParams.has("column") && { column: url.searchParams.get("column")! }),
+        ...(url.searchParams.has("cursor") && { cursor: url.searchParams.get("cursor")! }),
         limit: parseLimit(url),
       }));
     } catch (error) {

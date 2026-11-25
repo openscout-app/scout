@@ -1,7 +1,7 @@
 import type { VercelBoardConnectionConfig, VercelBoardPlanTask } from "@openscout/protocol";
 import { VercelBoardHttpError, VercelBoardUnknownOutcomeError, type VercelBoardTransport } from "./client.js";
 import { vercelBoardScopedId } from "./projection.js";
-import type { VercelBoardOutboxRow, VercelBoardStore } from "./store.js";
+import type { PlanFollow, VercelBoardOutboxRow, VercelBoardStore } from "./store.js";
 import type { VercelBoardWireMessage } from "./wire.js";
 
 export type VercelBoardPostRequest = { channel?: string; re?: string; text: string; labels?: Record<string, string>; noSync?: boolean; profile?: string };
@@ -34,9 +34,11 @@ export class VercelBoardOutbox {
   }
 
   /** Queue a plan (one task batch) and send it. */
-  async plan(input: { scoutId: string; lane: string; request: VercelBoardPlanBatchRequest }): Promise<VercelBoardWireMessage[]> {
+  async plan(input: { scoutId: string; lane: string; request: VercelBoardPlanBatchRequest; follow: PlanFollow }): Promise<VercelBoardWireMessage[]> {
     const clientId = vercelBoardClientId(this.deps.connection.id, input.scoutId);
-    this.deps.store.enqueue({ connectionId: this.deps.connection.id, clientId, lane: input.lane, kind: "plan", request: input.request });
+    const row = this.deps.store.enqueue({ connectionId: this.deps.connection.id, clientId, lane: input.lane,
+      kind: "plan", request: { ...input.request, follow: input.follow } });
+    this.deps.store.adoptLegacyPlan(row, input.follow);
     return this.waitFor<VercelBoardWireMessage[]>(input.lane, clientId);
   }
 
@@ -81,17 +83,21 @@ export class VercelBoardOutbox {
     if (row.attempts > 0 || row.state === "unknown") {
       const landed = row.kind === "post" ? await transport.postById(row.clientId) : await transport.batch(row.clientId);
       if (landed) {
-        store.markOutbox(connection.id, row.clientId, { state: "done", response: landed });
+        store.finishOutbox(row, landed);
         return true;
       }
     }
     store.markOutbox(connection.id, row.clientId, { state: row.state, attempt: true });
     try {
-      const { profile, ...postRequest } = row.request as VercelBoardPostRequest;
-      const response = row.kind === "post"
-        ? await (profile ? transport.as(profile) : transport).post({ ...postRequest, id: row.clientId })
-        : await transport.createBatch({ ...(row.request as VercelBoardPlanBatchRequest), id: row.clientId });
-      store.markOutbox(connection.id, row.clientId, { state: "done", response });
+      let response;
+      if (row.kind === "post") {
+        const { profile, ...post } = row.request as VercelBoardPostRequest;
+        response = await (profile ? transport.as(profile) : transport).post({ ...post, id: row.clientId });
+      } else {
+        const { channel, tasks, noSync } = row.request as VercelBoardPlanBatchRequest;
+        response = await transport.createBatch({ channel, tasks, noSync, id: row.clientId });
+      }
+      store.finishOutbox(row, response);
       return true;
     } catch (error) {
       if (error instanceof VercelBoardUnknownOutcomeError) {
@@ -101,7 +107,7 @@ export class VercelBoardOutbox {
       if (error instanceof VercelBoardHttpError) {
         if (error.code === "duplicate_id") {
           const landed = row.kind === "post" ? await transport.postById(row.clientId) : await transport.batch(row.clientId);
-          if (landed) { store.markOutbox(connection.id, row.clientId, { state: "done", response: landed }); return true; }
+          if (landed) { store.finishOutbox(row, landed); return true; }
         }
         if (error.status === 429) {
           store.markOutbox(connection.id, row.clientId, { state: row.state, error: "rate_limited" });

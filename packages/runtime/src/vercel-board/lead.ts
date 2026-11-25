@@ -45,11 +45,6 @@ export class VercelBoardLead {
     this.now = deps.now ?? Date.now;
   }
 
-  /** Follow a plan from now on. Planning the same plan again keeps its cursor and takes a new lead only when one is named. */
-  follow(planId: string, channel: string, lead: string | null): void {
-    this.deps.store.followPlan({ connectionId: this.deps.connectionId, planId, channel, lead, cursor: this.deps.mirror.lastEventSeq(this.deps.connectionId) });
-  }
-
   pass(): Promise<void> {
     if (this.running) { this.again = true; return this.running; }
     this.running = (async () => {

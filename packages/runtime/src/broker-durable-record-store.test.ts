@@ -83,6 +83,27 @@ function createTestRecordStore(options: {
   };
 }
 
+test("a projected work move and its record survive or retry as one journal batch", async () => {
+  let fail = true;
+  const { runtime, records, appended } = createTestRecordStore({ beforeAppend: async () => {
+    if (fail) throw new Error("journal unavailable");
+  } });
+  const item = { kind: "work_item", id: "projected", title: "Implement", createdById: "operator", ownerId: "operator", nextMoveOwnerId: "operator", requestedById: "operator",
+    state: "working", acceptanceState: "none", createdAt: 1, updatedAt: 1 } as const;
+  await runtime.upsertCollaboration(item);
+  const write = () => records.recordCollaboration(item, { project: () => ({
+    record: { ...item, state: "done", acceptanceState: "pending", updatedAt: 2, completedAt: 2 },
+    event: { id: "completion:event", recordId: item.id, recordKind: "work_item", kind: "done", at: 2, actorId: "operator" },
+  }) });
+  await expect(write()).rejects.toThrow("journal unavailable");
+  expect(runtime.collaborationRecord(item.id)).toEqual(item);
+  expect(appended).toHaveLength(0);
+  fail = false;
+  await write();
+  expect(appended.map(batch => batch.map(entry => entry.kind))).toEqual([["collaboration.record", "collaboration.event.record"]]);
+  expect(runtime.collaborationRecord(item.id)).toMatchObject({ state: "done", acceptanceState: "pending" });
+});
+
 function testNode(): NodeDefinition {
   return {
     id: "node-1",
