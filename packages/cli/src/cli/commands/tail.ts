@@ -1,4 +1,4 @@
-import { isTailNoiseEvent } from "@openscout/runtime/harnesses";
+import { isPlainTailEvent } from "@openscout/runtime/harnesses";
 
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
@@ -237,6 +237,7 @@ export async function runTailCommand(
     cwd: options.cwd,
     query: options.query,
     transcripts,
+    plain: context.output.mode === "plain" && !options.raw && !options.verbose,
   });
   let initial = options.since && !options.once
     ? { generatedAt: Date.now(), limit: options.limit, cursor: options.since, events: [] }
@@ -322,15 +323,7 @@ export function renderTailEvent(event: TailEvent, options: RenderTailEventOption
 }
 
 function includeTailEvent(event: TailEvent, options: RenderTailEventOptions): boolean {
-  if (options.verbose || options.raw) return true;
-  if (isTailNoiseEvent(event)) return false;
-  const summary = event.summary.trim().toLowerCase();
-  if (summary.startsWith("permission requested") || summary.startsWith("permission allow")) {
-    return false;
-  }
-  // Antigravity records the command or file on the call and its output on a separate step.
-  if (event.kind === "tool" && event.source !== "antigravity") return false;
-  return true;
+  return Boolean(options.verbose || options.raw) || isPlainTailEvent(event);
 }
 
 function tailEventMatches(event: TailEvent, options: ScoutTailCommandOptions): boolean {

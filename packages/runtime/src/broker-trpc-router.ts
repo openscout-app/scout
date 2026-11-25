@@ -24,6 +24,7 @@ import {
   subscribeControlEvents,
 } from "./broker-control-events.js";
 import {
+  isPlainTailEvent,
   getTailDiscovery,
   refreshTailDiscovery,
   readRecentLiveEvents,
@@ -91,6 +92,7 @@ const tailRecentInput = z
     cwd: z.string().optional(),
     query: z.string().optional(),
     transcripts: z.boolean().optional(),
+    plain: z.boolean().optional(),
   })
   .optional();
 
@@ -226,17 +228,20 @@ const tailRouter = t.router({
     .input(tailRecentInput)
     .query(async ({ input }) => {
       const limit = input?.limit ?? TAIL_BACKLOG_LIMIT;
-      const bufferedEvents = await readRecentLiveEvents(limit, { sources: input?.sources, sessionId: input?.sessionId });
+      const accepts = input?.plain
+        ? (event: TailEvent) => isPlainTailEvent(event) && tailEventMatches(event, input)
+        : undefined;
+      const bufferedEvents = await readRecentLiveEvents(limit, { sources: input?.sources, sessionId: input?.sessionId, accepts });
       const eventsById = new Map<string, TailEvent>();
 
       if (input?.transcripts && input.sessionId) {
-        const history = await readTailEventsForSession(input.sessionId, { limit, includeAllSources: true, sources: input.sources });
+        const history = await readTailEventsForSession(input.sessionId, { limit, includeAllSources: true, sources: input.sources, accepts });
         for (const event of history?.events ?? []) eventsById.set(event.id, event);
       } else if (input?.transcripts) {
         const cached = await getTailDiscovery();
         const discovery = cached.readStatus?.initialized ? cached : await refreshTailDiscovery("shallow");
         const transcriptEvents = await readRecentTranscriptEvents(limit, {
-          discovery, sources: input.sources,
+          discovery, sources: input.sources, accepts,
           perTranscriptLineLimit: Math.min(200, Math.max(50, limit)),
         });
         for (const event of transcriptEvents) {

@@ -73,6 +73,11 @@ test("Antigravity discovery and history preserve native identity across conversa
     }
     await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
     const reply = a!.events.at(-1)!;
+    __testing.pushEvent({ ...reply, id: "hidden", ts: reply.ts + 1, source: "codex", kind: "tool" });
+    expect((await caller.tail.recent({ plain: true, limit: 1 })).events).toEqual([]);
+    const visible = await caller.tail.recent({ plain: true, limit: 1, transcripts: true });
+    expect(visible.events).toHaveLength(1);
+    expect(visible.events[0]?.source).toBe("antigravity");
     __testing.pushEvent(reply);
     __testing.pushEvent({ ...reply, id: "newer", source: "codex", ts: reply.ts + 1 });
     const filter = { limit: 1, sources: ["antigravity"] };

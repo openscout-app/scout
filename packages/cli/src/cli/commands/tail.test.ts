@@ -148,10 +148,11 @@ describe("tail plain rendering", () => {
     const lines: string[] = [];
     const context = createScoutCommandContext({ cwd: ".", env: {}, stdout: line => lines.push(line) });
     const reads: boolean[] = [];
-    await runTailCommand(context, ["--once"], async (options) => {
+    await runTailCommand(context, ["--once", "--limit", "1"], async (options) => {
+      expect(options).toMatchObject({ plain: true, limit: 1 });
       reads.push(options?.transcripts === true);
       const events = options?.transcripts
-        ? [toolStart, event({ source: "antigravity", kind: "tool-result", summary: "run_command → exit 0" })]
+        ? [event({ source: "antigravity", kind: "tool-result", summary: "run_command → exit 0" })]
         : [toolStart];
       return { generatedAt: 1, limit: 80, cursor: null, events };
     });
