@@ -24,7 +24,10 @@ import {
   subscribeControlEvents,
 } from "./broker-control-events.js";
 import {
+  getTailDiscovery,
+  refreshTailDiscovery,
   readRecentLiveEvents,
+  readTailEventsForSession,
   readRecentTranscriptEvents,
   type TailEvent,
 } from "./tail/index.js";
@@ -223,11 +226,17 @@ const tailRouter = t.router({
     .input(tailRecentInput)
     .query(async ({ input }) => {
       const limit = input?.limit ?? TAIL_BACKLOG_LIMIT;
-      const bufferedEvents = await readRecentLiveEvents(limit);
+      const bufferedEvents = await readRecentLiveEvents(limit, { sources: input?.sources, sessionId: input?.sessionId });
       const eventsById = new Map<string, TailEvent>();
 
-      if (input?.transcripts) {
+      if (input?.transcripts && input.sessionId) {
+        const history = await readTailEventsForSession(input.sessionId, { limit, includeAllSources: true, sources: input.sources });
+        for (const event of history?.events ?? []) eventsById.set(event.id, event);
+      } else if (input?.transcripts) {
+        const cached = await getTailDiscovery();
+        const discovery = cached.readStatus?.initialized ? cached : await refreshTailDiscovery("shallow");
         const transcriptEvents = await readRecentTranscriptEvents(limit, {
+          discovery, sources: input.sources,
           perTranscriptLineLimit: Math.min(200, Math.max(50, limit)),
         });
         for (const event of transcriptEvents) {
