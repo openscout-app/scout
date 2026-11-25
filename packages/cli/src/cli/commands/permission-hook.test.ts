@@ -1,6 +1,10 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { readAntigravitySessionRecords } from "@openscout/runtime";
 
-import { handleClaudePermissionHook } from "./permission-hook.ts";
+import { handleAntigravityPermissionHook, handleClaudePermissionHook } from "./permission-hook.ts";
 
 const hook = JSON.stringify({
   hook_event_name: "PermissionRequest", session_id: "0f10496b", cwd: "/tmp/project", permission_mode: "default",
@@ -78,4 +82,50 @@ test("passes transcript_path to the runtime without interpreting it", async () =
   const r = runtime([{ skipped: "no_live_session" }]);
   await handleClaudePermissionHook(JSON.stringify({ ...JSON.parse(hook), transcript_path: "/example/.claude/projects/project/0f10496b.jsonl" }), r.deps);
   expect(r.posts[0]?.body).toMatchObject({ transcriptPath: "/example/.claude/projects/project/0f10496b.jsonl" });
+});
+
+describe("scout permission-hook antigravity", () => {
+  test("records unsandboxed commands and ask_question on PreToolUse, clears on PostToolUse/Stop, and always emits {}", async () => {
+    const recordsDirectory = mkdtempSync(join(tmpdir(), "scout-agy-hook-"));
+    const sessionId = "3a102f26-6237-46c4-ae20-6152148eecaa";
+    const out: string[] = [];
+    const now = 1_800_000_000_000;
+    try {
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "t1", name: "run_command", args: { CommandLine: "bun test", BypassSandbox: false } },
+      }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
+      expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
+      expect(out).toEqual(["{}\n"]);
+
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "t2", name: "run_command", args: { CommandLine: "gh pr create", BypassSandbox: true, toolSummary: "Create PR" } },
+      }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
+      const waiting = await readAntigravitySessionRecords({ directory: recordsDirectory, now });
+      expect(waiting).toHaveLength(1);
+      expect(waiting[0]).toMatchObject({
+        sessionId,
+        status: "waiting",
+        waitingFor: "Unsandboxed command: gh pr create",
+      });
+
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PostToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        toolCall: { id: "t2", name: "run_command", args: {} },
+      }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
+      expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
+      expect(out).toEqual(["{}\n", "{}\n", "{}\n"]);
+    } finally {
+      rmSync(recordsDirectory, { recursive: true, force: true });
+    }
+  });
 });

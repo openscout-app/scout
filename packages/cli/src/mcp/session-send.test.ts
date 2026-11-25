@@ -16,7 +16,12 @@ async function useClient(deps: SessionSendDependencies, run: (client: Client) =>
 test("return address uses only one process-owned harness identity", () => {
   expect(currentSessionReturnAddress({})).toBeNull();
   expect(currentSessionReturnAddress({ CODEX_THREAD_ID: "native-sender", CLAUDE_CODE_SESSION_ID: "other-sender" })).toBeNull();
+  expect(currentSessionReturnAddress({ CODEX_THREAD_ID: "native-sender", ANTIGRAVITY_CONVERSATION_ID: "3a102f26-6237-46c4-ae20-6152148eecaa" })).toBeNull();
   expect(currentSessionReturnAddress({ CODEX_THREAD_ID: "native-sender" })).toEqual({ harness: "codex", sessionId: "native-sender" });
+  expect(currentSessionReturnAddress({ ANTIGRAVITY_CONVERSATION_ID: "3a102f26-6237-46c4-ae20-6152148eecaa" })).toEqual({
+    harness: "antigravity",
+    sessionId: "3a102f26-6237-46c4-ae20-6152148eecaa",
+  });
 });
 test("direct request opts into an exact return address, while ordinary send is unchanged", async () => {
   const bodies: string[] = [];

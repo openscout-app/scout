@@ -12,7 +12,7 @@ export const SESSION_SEARCH_MAX_QUERY = 300;
 export const SESSION_SEARCH_MAX_LIMIT = 20;
 export const SESSION_SEARCH_MAX_HOURS = 720;
 export const SESSION_SEARCH_MAX_SNIPPET = 1200;
-const SESSION_SEARCH_HARNESSES = ["codex", "claude", "kimi"] as const;
+const SESSION_SEARCH_HARNESSES = ["codex", "claude", "kimi", "antigravity"] as const;
 
 export type SessionKnowledgeSearchInput = {
   query: string;

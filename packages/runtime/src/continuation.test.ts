@@ -78,6 +78,29 @@ describe("parseContinuationDialog", () => {
       live: true,
     });
   });
+
+  test("parses an Antigravity TUI sandbox-bypass approval prompt", () => {
+    const agyPrompt = [
+      "Run command",
+      "  gh pr create --repo arach/scout --base main",
+      "Confirm the command is safe to run outside of the sandbox with full network and disk access.",
+      "Proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, and always allow access to 'gh pr create'",
+      "  3. No",
+      "  Esc to cancel",
+    ].join("\n");
+    const dialog = parseContinuationDialog(agyPrompt);
+    expect(dialog).toMatchObject({
+      kind: "permission",
+      live: true,
+    });
+    expect(dialog.options.map((option) => [option.index, option.kind, option.selected])).toEqual([
+      [1, "allow", true],
+      [2, "allow_always", false],
+      [3, "deny", false],
+    ]);
+  });
 });
 
 describe("classifyContinuationRisk", () => {

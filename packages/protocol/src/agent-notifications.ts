@@ -259,7 +259,7 @@ export function agentNotificationCategory(n: AgentNotification): string {
   }
 }
 
-const HARNESS_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", grok: "Grok", kimi: "Kimi", opencode: "OpenCode", pi: "Pi" };
+const HARNESS_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", grok: "Grok", kimi: "Kimi", opencode: "OpenCode", antigravity: "Antigravity", agy: "Antigravity", cursor: "Cursor", pi: "Pi" };
 
 /**
  * A session the operator started outside Scout has no agent card, only the

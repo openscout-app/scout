@@ -6,7 +6,15 @@ import { StringDecoder } from "node:string_decoder";
 
 import { redactSecrets, redactSecretsDeep } from "@openscout/agent-sessions/secret-redaction";
 
-import { findClaudePendingToolCall } from "@openscout/agent-sessions";
+import {
+  findAntigravityPendingToolCall,
+  findClaudePendingToolCall,
+  formatAntigravityWaitingFor,
+} from "@openscout/agent-sessions";
+import {
+  readAntigravitySessionRecords,
+  type AntigravitySessionRecord,
+} from "../antigravity-session-records.js";
 import { readClaudeSessionRecords, type ClaudeSessionRecord } from "../claude-session-records.js";
 
 import { AntigravitySource, antigravityIdFromLogPath } from "./antigravity-source.js";
@@ -999,34 +1007,120 @@ export function joinClaudeRegistryStatus(
   });
 }
 
+const ANTIGRAVITY_PENDING_SCAN_WINDOW_MS = 2 * 60 * 60_000;
+const antigravityHookTools = new Map<string, AntigravitySessionRecord["toolCall"]>();
+
+export function joinAntigravitySessionStatus(
+  transcripts: DiscoveredTranscript[],
+  records: AntigravitySessionRecord[],
+): DiscoveredTranscript[] {
+  const newest = new Map<string, AntigravitySessionRecord>();
+  for (const record of records) {
+    const prior = newest.get(record.sessionId);
+    if (!prior || record.statusUpdatedAt > prior.statusUpdatedAt) {
+      newest.set(record.sessionId, record);
+    }
+  }
+  antigravityHookTools.clear();
+  return transcripts.map((transcript) => {
+    if (transcript.source !== "antigravity") return transcript;
+    const record = transcript.sessionId ? newest.get(transcript.sessionId) : null;
+    if (!record) return transcript;
+    if (record.status === "waiting") {
+      antigravityHookTools.set(transcript.transcriptPath, record.toolCall);
+      return {
+        ...transcript,
+        cwd: transcript.cwd ?? record.cwd,
+        project: transcript.project || (record.cwd ? basename(record.cwd) : ""),
+        status: "waiting" as const,
+        statusUpdatedAt: record.statusUpdatedAt,
+        waitingFor: record.waitingFor ?? "Waiting for input",
+        attention: {
+          kind: "ask" as const,
+          source: "registry" as const,
+          reason: record.waitingFor ?? "Waiting for input",
+          since: record.statusUpdatedAt,
+        },
+      };
+    }
+    if (record.statusUpdatedAt > (transcript.statusUpdatedAt ?? 0)) {
+      return {
+        ...transcript,
+        status: record.status,
+        statusUpdatedAt: record.statusUpdatedAt,
+      };
+    }
+    return transcript;
+  });
+}
+
 /** A waiting session's transcript tail is re-read only when the file changed. */
 const PENDING_CALL_READ_BYTES = 256 * 1024;
-const pendingCallReads = new Map<string, { size: number; mtimeMs: number; pending: TailPendingToolCall | null }>();
+const pendingCallReads = new Map<string, { size: number; mtimeMs: number; hookKey: string; pending: TailPendingToolCall | null }>();
 
 /**
- * A Claude session waiting on its own prompt: the call it asks about, read
- * from the transcript (a tool_use with no tool_result). Only waiting
- * sessions are read, each once per transcript change.
+ * A native session waiting on its own prompt: the call or question it asks
+ * about, read from the transcript once per transcript change.
  */
 export async function withPendingToolCalls(
   transcripts: DiscoveredTranscript[],
   readTail: (path: string, maxBytes: number) => Promise<string> = readTranscriptText,
   statFile: (path: string) => Promise<{ size: number; mtimeMs: number } | null> = (path) => stat(path).catch(() => null),
 ): Promise<DiscoveredTranscript[]> {
-  const waiting = new Set<string>();
+  const tracked = new Set<string>();
+  const nowMs = Date.now();
   const out = await Promise.all(transcripts.map(async (transcript) => {
-    if (transcript.source !== "claude" || !transcript.attention || transcript.attention.source !== "registry") return transcript;
-    waiting.add(transcript.transcriptPath);
+    const isWaitingClaude = transcript.source === "claude" && Boolean(transcript.attention) && transcript.attention?.source === "registry";
+    const isWaitingAntigravityHook = transcript.source === "antigravity" && Boolean(transcript.attention) && transcript.attention?.source === "registry";
+    const isRecentAntigravity = transcript.source === "antigravity" && nowMs - transcript.mtimeMs <= ANTIGRAVITY_PENDING_SCAN_WINDOW_MS;
+    if (!isWaitingClaude && !isWaitingAntigravityHook && !isRecentAntigravity) return transcript;
+
+    tracked.add(transcript.transcriptPath);
     const now = await statFile(transcript.transcriptPath);
     if (!now) return transcript;
+    const hookTool = transcript.source === "antigravity" ? antigravityHookTools.get(transcript.transcriptPath) ?? null : null;
+    const sessionBusy = transcript.source === "antigravity" && transcript.status === "busy";
+    const hookKey = `${hookTool ? `${hookTool.id ?? ""}:${hookTool.name}` : ""}:${sessionBusy ? "busy" : "idle"}`;
     let read = pendingCallReads.get(transcript.transcriptPath);
-    if (!read || read.size !== now.size || read.mtimeMs !== now.mtimeMs) {
-      read = { size: now.size, mtimeMs: now.mtimeMs, pending: findClaudePendingToolCall(await readTail(transcript.transcriptPath, PENDING_CALL_READ_BYTES)) };
+    const needsPassiveRecheck = sessionBusy
+      && read?.pending === null
+      && nowMs - now.mtimeMs >= 1_500
+      && nowMs - now.mtimeMs <= 15_000;
+    if (!read || read.size !== now.size || read.mtimeMs !== now.mtimeMs || read.hookKey !== hookKey || needsPassiveRecheck) {
+      const tailText = await readTail(transcript.transcriptPath, PENDING_CALL_READ_BYTES);
+      const pending = transcript.source === "claude"
+        ? findClaudePendingToolCall(tailText)
+        : findAntigravityPendingToolCall(tailText, {
+            hookTool,
+            workspaceRoot: transcript.cwd,
+            sessionBusy,
+            now: nowMs,
+          });
+      read = { size: now.size, mtimeMs: now.mtimeMs, hookKey, pending };
       pendingCallReads.set(transcript.transcriptPath, read);
     }
-    return read.pending ? { ...transcript, attention: { ...transcript.attention, pending: read.pending } } : transcript;
+    if (!read.pending) return transcript;
+    if (transcript.source === "antigravity" && !transcript.attention) {
+      const reason = formatAntigravityWaitingFor(read.pending);
+      return {
+        ...transcript,
+        status: "waiting" as const,
+        statusUpdatedAt: read.pending.at ?? transcript.statusUpdatedAt ?? transcript.mtimeMs,
+        waitingFor: reason,
+        attention: {
+          kind: "ask" as const,
+          source: "registry" as const,
+          reason,
+          since: read.pending.at ?? transcript.mtimeMs,
+          pending: read.pending,
+        },
+      };
+    }
+    return transcript.attention
+      ? { ...transcript, attention: { ...transcript.attention, pending: read.pending } }
+      : transcript;
   }));
-  for (const path of pendingCallReads.keys()) if (!waiting.has(path)) pendingCallReads.delete(path);
+  for (const path of pendingCallReads.keys()) if (!tracked.has(path)) pendingCallReads.delete(path);
   return out;
 }
 
@@ -1195,10 +1289,15 @@ async function refreshDiscoveryPass(
     );
   }
 
-  const allTranscripts = await withPendingToolCalls(joinClaudeRegistryStatus(
-    [...knownTranscripts.values()].sort((a, b) => b.mtimeMs - a.mtimeMs),
-    await readClaudeSessionRecords().catch(() => []),
-  ));
+  const allTranscripts = await withPendingToolCalls(
+    joinAntigravitySessionStatus(
+      joinClaudeRegistryStatus(
+        [...knownTranscripts.values()].sort((a, b) => b.mtimeMs - a.mtimeMs),
+        await readClaudeSessionRecords().catch(() => []),
+      ),
+      await readAntigravitySessionRecords().catch(() => []),
+    ),
+  );
 
   let scoutManaged = 0;
   let hudsonManaged = 0;

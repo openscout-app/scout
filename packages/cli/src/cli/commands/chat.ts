@@ -86,7 +86,7 @@ export function renderChatInviteInfo(info: ChatInviteInfo, commandName = "scout 
 }
 
 export function currentChatSession(env: NodeJS.ProcessEnv): string | undefined {
-  return env.GROK_SESSION_ID || env.CODEX_THREAD_ID || env.OPENSCOUT_CODEX_THREAD_ID || env.CLAUDE_CODE_SESSION_ID || env.CLAUDE_SESSION_ID || env.CLAUDE_CODE_REMOTE_SESSION_ID || env.OPENSCOUT_SESSION_ID;
+  return env.GROK_SESSION_ID || env.CODEX_THREAD_ID || env.OPENSCOUT_CODEX_THREAD_ID || env.CLAUDE_CODE_SESSION_ID || env.CLAUDE_SESSION_ID || env.CLAUDE_CODE_REMOTE_SESSION_ID || env.ANTIGRAVITY_CONVERSATION_ID || env.OPENSCOUT_SESSION_ID;
 }
 
 export function chatPath(room: Membership, resource: string): string {

@@ -41,10 +41,10 @@ export type ContinuationDialog = {
 
 const ANSI_CSI = /\x1B\[[0-?]*[ -/]*[@-~]/gu;
 const ANSI_OSC = /\x1B\][^\x07]*(?:\x07|\x1B\\)/gu;
-const FOOTER = /\bEsc to cancel\b/i;
-const PROCEED = /\bDo you want to proceed\?/i;
+const FOOTER = /\b(?:Esc to cancel|to cancel)\b/i;
+const PROCEED = /\b(?:Do you want to proceed\?|Proceed\?(?:\s*\([^)]*\))?)/i;
 const PERMISSION_RULE = /\bPermission rule\s+(.+?)\s+requires confirmation/i;
-const REQUIRES_APPROVAL = /\bThis command requires approval\b/i;
+const REQUIRES_APPROVAL = /\b(?:This command requires approval|Confirm the command is safe to run outside of the sandbox|flagged as potentially unsafe)\b/i;
 const HOLD = /\bauto mode held this action\b/i;
 const PLAN_PROMPT = /\bYes, and use auto mode\b|\bNo, keep planning\b/i;
 const POST_PROMPT_ACTIVITY = /(?:^|\n)\s*(?:⏺|●)\s+(?:Bash|Edit|Glob|Grep|Read|Search|Task|Update|WebFetch|WebSearch|Write)\b/imu;

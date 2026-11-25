@@ -230,6 +230,7 @@ const SESSION_ENV_KEYS = [
   "OPENSCOUT_CODEX_THREAD_ID",
   "CLAUDE_CODE_SESSION_ID",
   "CLAUDE_SESSION_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
 ] as const;
 
 async function runSessionAddressAction(context: ScoutCommandContext, args: string[]): Promise<void> {
@@ -1488,7 +1489,8 @@ export function deliverDirectSessionInput(
   return deliverInPlace(input, {
     ...probes,
     ownSessionIds: [env.OPENSCOUT_SESSION_ID, env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_SESSION_ID,
-      env.CLAUDE_CODE_REMOTE_SESSION_ID, env.CODEX_THREAD_ID, env.OPENSCOUT_CODEX_THREAD_ID]
+      env.CLAUDE_CODE_REMOTE_SESSION_ID, env.CODEX_THREAD_ID, env.OPENSCOUT_CODEX_THREAD_ID,
+      env.ANTIGRAVITY_CONVERSATION_ID]
       .flatMap(id => id?.trim() ? [id.trim()] : []),
     ownTmuxPane: ownPane ? { target: ownPane, socketPath: env.TMUX?.split(",")[0]?.trim() || null } : null,
     managedTmuxContext: async () => {
@@ -1535,7 +1537,7 @@ async function runSessionSendAction(context: ScoutCommandContext, args: string[]
   let body = (promptFile ? await readCliInputFile(promptFile, "prompt") : positionals.join(" ")).trim();
   if (!body) throw new ScoutCliError("session send needs text to send (inline, or --prompt-file <path>)");
 
-  const own = process.env.CLAUDE_CODE_SESSION_ID?.trim() || process.env.CODEX_THREAD_ID?.trim();
+  const own = process.env.CLAUDE_CODE_SESSION_ID?.trim() || process.env.CODEX_THREAD_ID?.trim() || process.env.ANTIGRAVITY_CONVERSATION_ID?.trim();
   if (sessionId === own) throw new ScoutCliError("that is the session you are running in; nothing was sent");
 
   if (requestReply) {

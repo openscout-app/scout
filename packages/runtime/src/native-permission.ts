@@ -379,6 +379,9 @@ function questionsOf(input: unknown): NativePermissionQuestion[] {
     const options = (Array.isArray((entry as Record<string, unknown>).options) ? (entry as Record<string, unknown>).options as unknown[] : [])
       .slice(0, MAX_OPTIONS)
       .map((option) => {
+        if (typeof option === "string" && option.trim()) {
+          return { label: clip(option, 80) };
+        }
         const label = field(option, "label");
         const description = field(option, "description");
         return label ? { label: clip(label, 80), ...(description ? { description: clip(description, 240) } : {}) } : null;
@@ -426,22 +429,30 @@ export function nativePermissionDisplay(ask: Pick<NativePermissionAsk, "toolName
     return value ? { target: clip(value, 600) } : {};
   };
   switch (ask.toolName) {
-    case "Bash": {
-      const description = field(input, "description");
-      return { action: "Run a command", command: clip(field(input, "command") ?? "(no command)", MAX_TEXT), ...(description ? { note: clip(description, 400) } : {}) };
+    case "Bash":
+    case "run_command": {
+      const description = field(input, "description") ?? field(input, "toolSummary");
+      const cmd = field(input, "command") ?? field(input, "CommandLine");
+      return { action: "Run a command", command: clip(cmd ?? "(no command)", MAX_TEXT), ...(description ? { note: clip(description, 400) } : {}) };
     }
     case "Edit":
     case "MultiEdit":
-      return { action: "Edit a file", ...target("file_path") };
+    case "edit_file":
+      return { action: "Edit a file", ...(field(input, "file_path") ? target("file_path") : target("Path")) };
     case "Write":
-      return { action: "Write a file", ...target("file_path") };
+    case "write_file":
+      return { action: "Write a file", ...(field(input, "file_path") ? target("file_path") : target("Path")) };
     case "NotebookEdit":
       return { action: "Edit a notebook", ...target("notebook_path") };
     case "WebFetch":
-      return { action: "Fetch a page", ...target("url") };
+    case "read_url_content":
+    case "open_browser_url":
+      return { action: "Fetch a page", ...(field(input, "url") ? target("url") : target("Url")) };
     case "WebSearch":
+    case "search_web":
       return { action: "Search the web", ...target("query") };
-    case "AskUserQuestion": {
+    case "AskUserQuestion":
+    case "ask_question": {
       const questions = questionsOf(input);
       if (questions.length) return { action: questions.length > 1 ? "Ask you some questions" : "Ask you a question", questions };
       break;

@@ -176,7 +176,8 @@ export async function resolveScoutMatchParticipantId(
     || env.OPENSCOUT_CODEX_THREAD_ID?.trim()
     || env.CLAUDE_CODE_SESSION_ID?.trim()
     || env.CLAUDE_SESSION_ID?.trim()
-    || env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim();
+    || env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim()
+    || env.ANTIGRAVITY_CONVERSATION_ID?.trim();
   if (!sessionId) {
     throw new Error(
       "scout match requires a live session identity; run it inside a Claude or Codex session, or pass --session <id>",
@@ -193,15 +194,17 @@ export async function resolveScoutMatchParticipantId(
 }
 
 /** Only a native identity actually supplied by the harness determines this claim. */
-export function claimedSessionHarness(sessionId: string | undefined, env: NodeJS.ProcessEnv): "codex" | "claude" | undefined {
+export function claimedSessionHarness(sessionId: string | undefined, env: NodeJS.ProcessEnv): "codex" | "claude" | "antigravity" | undefined {
   if (!sessionId) return undefined;
   if ([env.CODEX_THREAD_ID, env.OPENSCOUT_CODEX_THREAD_ID].some(id => id?.trim() === sessionId)) return "codex";
   if ([env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_SESSION_ID, env.CLAUDE_CODE_REMOTE_SESSION_ID].some(id => id?.trim() === sessionId)) return "claude";
+  if (env.ANTIGRAVITY_CONVERSATION_ID?.trim() === sessionId) return "antigravity";
   return undefined;
 }
 
 export function claimedSessionId(env: NodeJS.ProcessEnv): string | undefined {
   return env.CODEX_THREAD_ID?.trim() || env.OPENSCOUT_CODEX_THREAD_ID?.trim()
     || env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim()
-    || env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim() || env.OPENSCOUT_SESSION_ID?.trim() || undefined;
+    || env.CLAUDE_CODE_REMOTE_SESSION_ID?.trim() || env.ANTIGRAVITY_CONVERSATION_ID?.trim()
+    || env.OPENSCOUT_SESSION_ID?.trim() || undefined;
 }

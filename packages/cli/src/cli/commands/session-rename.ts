@@ -36,6 +36,7 @@ const SELF_SESSION_ENV: Array<[key: string, harness: string]> = [
   ["OPENSCOUT_CODEX_THREAD_ID", "codex"],
   ["CLAUDE_CODE_SESSION_ID", "claude"],
   ["CLAUDE_SESSION_ID", "claude"],
+  ["ANTIGRAVITY_CONVERSATION_ID", "antigravity"],
 ];
 
 export type SessionRenameArgs = {
@@ -75,7 +76,7 @@ export function parseSessionRenameArgs(args: string[], env: NodeJS.ProcessEnv): 
   if (self) {
     const found = SELF_SESSION_ENV.find(([key]) => env[key]?.trim());
     if (!found) {
-      throw new ScoutCliError("--self needs a harness session in the environment (CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID); name the session instead");
+      throw new ScoutCliError("--self needs a harness session in the environment (CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, or ANTIGRAVITY_CONVERSATION_ID); name the session instead");
     }
     nativeSessionId = env[found[0]]!.trim();
     harness ??= found[1];

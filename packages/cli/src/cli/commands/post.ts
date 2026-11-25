@@ -31,7 +31,7 @@ export function parsePostArgs(args: string[]): { text?: string; textFile?: strin
 }
 
 export function callerHarness(env: NodeJS.ProcessEnv): string | undefined {
-  return env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : undefined;
+  return env.CODEX_THREAD_ID ? "codex" : env.CLAUDE_CODE_SESSION_ID ? "claude" : env.ANTIGRAVITY_CONVERSATION_ID ? "antigravity" : undefined;
 }
 
 export async function runPostCommand(context: ScoutCommandContext, args: string[]): Promise<void> {
@@ -39,7 +39,7 @@ export async function runPostCommand(context: ScoutCommandContext, args: string[
   const parsed = parsePostArgs(args);
   const text = parsed.text ?? await readFile(resolve(context.cwd, parsed.textFile!), "utf8");
   const agentId = await resolveScoutSenderId(null, context.cwd, context.env);
-  const sessionId = context.env.OPENSCOUT_SESSION_ID || context.env.CODEX_THREAD_ID || context.env.CLAUDE_CODE_SESSION_ID;
+  const sessionId = context.env.OPENSCOUT_SESSION_ID || context.env.CODEX_THREAD_ID || context.env.CLAUDE_CODE_SESSION_ID || context.env.ANTIGRAVITY_CONVERSATION_ID;
   const response = await fetch(new URL("/v1/posts", resolveScoutBrokerUrl()), {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({

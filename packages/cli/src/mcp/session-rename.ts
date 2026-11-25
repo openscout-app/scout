@@ -19,6 +19,8 @@ function selfSession(env: NodeJS.ProcessEnv): { harness: string; nativeSessionId
   if (codex) return { harness: "codex", nativeSessionId: codex };
   const claude = env.CLAUDE_CODE_SESSION_ID?.trim() || env.CLAUDE_SESSION_ID?.trim();
   if (claude) return { harness: "claude", nativeSessionId: claude };
+  const antigravity = env.ANTIGRAVITY_CONVERSATION_ID?.trim();
+  if (antigravity) return { harness: "antigravity", nativeSessionId: antigravity };
   return null;
 }
 
@@ -45,7 +47,7 @@ export function registerSessionRenameTools(server: McpServer, request: BrokerReq
       };
       if (input.self) {
         const self = selfSession(env);
-        if (!self) throw new Error("self=true needs CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID in the MCP server's environment; pass a selector instead");
+        if (!self) throw new Error("self=true needs CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, or ANTIGRAVITY_CONVERSATION_ID in the MCP server's environment; pass a selector instead");
         target = self;
       }
       if (!target.selector && !target.nativeSessionId) {

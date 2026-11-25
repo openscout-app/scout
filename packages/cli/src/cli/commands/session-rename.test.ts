@@ -38,6 +38,8 @@ describe("scout session rename", () => {
       .toEqual({ nativeSessionId: "claude-1", harness: "claude", name: "Rename sessions" });
     expect(parseSessionRenameArgs(["--self", "--clear"], { CODEX_THREAD_ID: "thread-1" }).request)
       .toEqual({ nativeSessionId: "thread-1", harness: "codex", name: null });
+    expect(parseSessionRenameArgs(["--self", "Guides", "pass"], { ANTIGRAVITY_CONVERSATION_ID: "agy-conv-1" }).request)
+      .toEqual({ nativeSessionId: "agy-conv-1", harness: "antigravity", name: "Guides pass" });
     expect(() => parseSessionRenameArgs(["--self", "x"], {})).toThrow(/CLAUDE_CODE_SESSION_ID/);
   });
 

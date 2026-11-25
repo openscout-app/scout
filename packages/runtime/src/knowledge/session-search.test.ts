@@ -13,7 +13,7 @@ const hit = { id: "h", collectionId: "c", documentId: "d", chunkId: "k", title: 
 
 describe("session knowledge search", () => {
   test("wire params round-trip and refuse out-of-bound values", () => {
-    const input = { query: "build steps", harness: ["codex", "claude"], project: "scout", hours: 24, limit: 5, narrowToWarmed: true };
+    const input = { query: "build steps", harness: ["codex", "claude", "kimi", "antigravity"], project: "scout", hours: 24, limit: 5, narrowToWarmed: true };
     expect(parseSessionKnowledgeSearchParams(sessionKnowledgeSearchParams(input))).toEqual(input);
     expect(parseSessionKnowledgeSearchParams(new URLSearchParams("q=x"))).toEqual({ query: "x" });
     for (const bad of ["", "q=", `q=${"a".repeat(301)}`, "q=x&limit=21", "q=x&hours=0", "q=x&hours=1.5", "q=x&harness=gpt"]) {

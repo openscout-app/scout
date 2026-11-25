@@ -75,7 +75,8 @@ function parseTarget(value: string | undefined): ScoutRouteTarget | undefined {
 function caller(context: ScoutCommandContext): ScoutCallerContext {
   const sessionId = context.env.OPENSCOUT_SESSION_ID?.trim()
     || context.env.CODEX_THREAD_ID?.trim()
-    || context.env.CLAUDE_CODE_SESSION_ID?.trim();
+    || context.env.CLAUDE_CODE_SESSION_ID?.trim()
+    || context.env.ANTIGRAVITY_CONVERSATION_ID?.trim();
   return {
     actorId: context.env.OPENSCOUT_AGENT_ID?.trim() || "operator",
     currentDirectory: context.cwd,
