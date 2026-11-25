@@ -50,25 +50,30 @@ test.each([
   expect(calls).toEqual(["computer.windowState", "computer.elementAction", "computer.windowState", "activity", "computer.pressKey"]);
 });
 
-test("a real long reply cannot match its truncated snapshot", async () => {
-  const text = "x".repeat(241);
+test.each(["x", "😀", "e\u0301"])("a long %s reply matches its summarized value before and after focus", async character => {
+  const text = character.repeat(237) + " a long tail";
   const calls: string[] = [];
-  await expect(submitLatticesComposer(text, async () => {}, async method => {
+  await submitLatticesComposer(text, async () => { calls.push("activity"); }, async method => {
     calls.push(method);
-    return snapshot([{ ...field, value: latticesValue(text) }]);
-  })).rejects.toThrow();
-  expect(calls).toEqual(["computer.windowState"]);
+    if (method === "computer.windowState") return snapshot([{ ...field, value: latticesValue(text) }]);
+    return { ok: true };
+  });
+  expect(calls).toEqual(["computer.windowState", "computer.elementAction", "computer.windowState", "activity", "computer.pressKey"]);
 });
 
-test("even a literal 240-character reply ending in ... needs full-value evidence", async () => {
-  const text = "x".repeat(237) + "...";
-  expect(latticesValue(text)).toBe(text);
+test.each([false, true])("two composers sharing the reply prefix refuse Return (ambiguity after focus: %s)", async afterFocus => {
+  const prefix = "x".repeat(237);
+  const text = prefix + " expected reply";
+  const other = prefix + " unrelated draft";
   const calls: string[] = [];
-  await expect(submitLatticesComposer(text, async () => {}, async method => {
+  await expect(submitLatticesComposer(text, async () => { calls.push("activity"); }, async method => {
     calls.push(method);
-    return snapshot([{ ...field, value: text }]);
-  })).rejects.toThrow("truncated");
-  expect(calls).toEqual(["computer.windowState"]);
+    if (method !== "computer.windowState") return { ok: true };
+    const elements = [{ ...field, value: latticesValue(text) }];
+    if (!afterFocus || calls.includes("computer.elementAction")) elements.push({ ...field, id: "other", value: latticesValue(other) });
+    return snapshot(elements);
+  })).rejects.toThrow("exactly one");
+  expect(calls).toEqual(afterFocus ? ["computer.windowState", "computer.elementAction", "computer.windowState"] : ["computer.windowState"]);
 });
 
 test("a composer that grows into a truncated value after focus is never submitted", async () => {
@@ -79,6 +84,6 @@ test("a composer that grows into a truncated value after focus is never submitte
     if (method === "computer.windowState") return snapshot([{ ...field, value: focused ? latticesValue("reply".repeat(100)) : "reply" }]);
     if (method === "computer.elementAction") focused = true;
     return { ok: true };
-  })).rejects.toThrow("exact reply");
+  })).rejects.toThrow("matching the reply");
   expect(calls).toEqual(["computer.windowState", "computer.elementAction", "computer.windowState"]);
 });
