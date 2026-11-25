@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AntigravitySource } from "./antigravity-source.js";
 import { brokerRouter } from "../broker-trpc-router.js";
 import { __testing, readTailEventsForSession } from "./service.js";
-import type { DiscoveredProcess, DiscoverySnapshot } from "./types.js";
+import type { DiscoveredProcess, DiscoveredTranscript, DiscoverySnapshot, TailEvent } from "./types.js";
 
 test("Antigravity discovery and history preserve native identity across conversations in one workspace", async () => {
   const root = mkdtempSync(join(tmpdir(), "scout-agy-"));
@@ -93,6 +93,66 @@ test("Antigravity discovery and history preserve native identity across conversa
     __testing.resetTailEventBuffers();
     if (previous === undefined) delete process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT;
     else process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("live Tail and history pair parallel Antigravity calls across a watcher restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scout-agy-tools-"));
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const logs = join(root, "brain", sessionId, ".system_generated", "logs");
+  const path = join(logs, "transcript.jsonl");
+  mkdirSync(logs, { recursive: true });
+  const line = (index: number, step: object) => JSON.stringify({
+    step_index: index, created_at: new Date(1700000000000 + index).toISOString(), source: "MODEL", ...step,
+  }) + "\n";
+  const planner = {
+    type: "PLANNER_RESPONSE", content: "Checking the changes", thinking: "private",
+    tool_calls: [
+      { name: "run_command", args: { CommandLine: "git diff --stat", extra: "private" } },
+      { name: "read_file", args: { Path: "src/main.ts", StartLine: 2, EndLine: 5 } },
+    ],
+  };
+  const result = (output: string, status = "DONE") => ({
+    type: "GENERIC", status, content: "Created At: 2025-01-01T12:00:00Z\nCompleted At: 2025-01-01T12:00:01Z\n" + output,
+  });
+  const output = "Command exited with code 0.\n\nCommand output:\n2 files changed";
+  const process: DiscoveredProcess = { pid: 7, ppid: 1, command: "agy", etime: "01:00", cwd: root,
+    parentChain: [], source: "antigravity", harness: "unattributed", nativeSessionId: sessionId };
+  const transcript: DiscoveredTranscript = { source: "antigravity", cwd: root, project: "demo", harness: "unattributed",
+    sessionId, transcriptPath: path, mtimeMs: Date.now(), size: 0 };
+  const discovery: DiscoverySnapshot = { processes: [process], transcripts: [transcript], generatedAt: Date.now(),
+    totals: { total: 1, scoutManaged: 0, hudsonManaged: 0, unattributed: 1, transcripts: 1 } };
+  const live: TailEvent[] = [];
+  const unsubscribe = __testing.addPublicSubscriberWithoutLoop(event => live.push(event));
+  try {
+    writeFileSync(path, line(0, planner));
+    const watcher = await __testing.installWatcher({ source: AntigravitySource, process, transcript });
+    appendFileSync(path, line(1, result(output)) + line(2, { ...result("Read failed", "ERROR"), error: "Missing file" })
+      + line(3, planner) + line(5, result("Reading", "RUNNING"))
+      + line(6, result("Unattributed output")) + line(7, { type: "GENERIC", content: "private" }));
+    await __testing.pumpWatcher(watcher);
+    const history = (await readTailEventsForSession(sessionId, { discovery }))!.events;
+    const [message, command, file, finished, failed] = history;
+    expect(history.map(e => e.kind)).toEqual(["assistant", "tool", "tool", "tool-result", "tool-result",
+      "assistant", "tool", "tool", "tool-result", "tool-result"]);
+    expect(new Set(history.map(e => e.id)).size).toBe(history.length);
+    expect(message?.id).toBe(`antigravity:${sessionId}:0`);
+    expect(command).toMatchObject({ summary: "run_command · git diff --stat", raw: { input: { CommandLine: "git diff --stat" } } });
+    expect(file?.summary).toBe("read_file · src/main.ts:2-5");
+    expect(finished).toMatchObject({ summary: "run_command → exit 0 · 2 files changed",
+      raw: { tool_use_id: command?.id, tool_name: "run_command", status: "DONE", output } });
+    expect(failed).toMatchObject({ summary: "read_file → error · Missing file",
+      raw: { tool_use_id: file?.id, error: "Missing file" } });
+    expect(history[8]).toMatchObject({ summary: "read_file → running · Reading", raw: { tool_use_id: history[7]?.id } });
+    expect(history[9]?.summary).toBe("tool → Unattributed output");
+    expect(history[9]?.raw).not.toHaveProperty("tool_use_id");
+    expect(live.map(e => [e.id, e.summary])).toEqual(history.slice(3).map(e => [e.id, e.summary]));
+    expect(JSON.stringify(history)).not.toContain("private");
+  } finally {
+    unsubscribe();
+    __testing.clearWatchers();
+    __testing.resetTailEventBuffers();
     rmSync(root, { recursive: true, force: true });
   }
 });

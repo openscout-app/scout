@@ -1,11 +1,14 @@
+import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
+import { oneLine, summarizeToolResult } from "./tool-format.js";
 import { execSystemFile } from "../system-probes/exec.js";
 import { buildParentChain, classifyAttribution, commandBasename, listProcesses, processResourceFields, readCwd } from "./discover.js";
-import type { DiscoveredProcess, DiscoveredTranscript, TailContext, TailDiscoveryScope, TailEvent, TranscriptSource } from "./types.js";
+import type { DiscoveredProcess, DiscoveredTranscript, TailContext, TailDiscoveryScope, TailEvent, ParsedTailEvents, AnyTranscriptSource } from "./types.js";
 
 const SOURCE = "antigravity";
 const nativeId = /^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/iu;
@@ -128,7 +131,32 @@ async function processes(): Promise<DiscoveredProcess[]> {
   }));
 }
 
-function parseLine(line: string, ctx: TailContext): TailEvent | null {
+type ToolCall = { id: string; name: string; summary: string };
+
+// Keep only fields that describe the action. Edit bodies, MCP payloads and
+// private planner fields are not part of a displayed tool call.
+const actionKeys = [
+  "CommandLine", "Path", "StartLine", "EndLine", "ByteOffset", "ToolName", "ServerName",
+  "query", "domain", "Action", "TaskId", "Recipient", "Role", "ImageName", "CronExpression", "toolSummary",
+] as const;
+
+function describeCall(name: string, args: Record<string, unknown>) {
+  const input: Record<string, string | number> = {};
+  for (const key of actionKeys) {
+    const value = args[key];
+    if (typeof value === "string") input[key] = redactSecrets(value);
+    else if (typeof value === "number" && Number.isFinite(value)) input[key] = value;
+  }
+  let subject = input.CommandLine ?? input.Path ?? input.query ?? input.Action ?? input.Recipient
+    ?? input.Role ?? input.ImageName ?? input.CronExpression ?? input.toolSummary;
+  if (input.ToolName) subject = [input.ServerName, input.ToolName].filter(Boolean).join(".");
+  if (input.Path && input.StartLine != null) {
+    subject = `${input.Path}:${input.StartLine}${input.EndLine != null ? `-${input.EndLine}` : ""}`;
+  }
+  return { input, summary: subject ? oneLine(`${name} · ${subject}`) : name };
+}
+
+function parseLine(line: string, ctx: TailContext): ParsedTailEvents {
   let step;
   try { step = JSON.parse(line); } catch { return null; }
   if (!step || !Number.isSafeInteger(step.step_index) || step.step_index < 0) return null;
@@ -136,36 +164,69 @@ function parseLine(line: string, ctx: TailContext): TailEvent | null {
   const sessionId = ctx.transcript.sessionId;
   if (!sessionId || !Number.isFinite(ts)) return null;
   const content = typeof step.content === "string" ? step.content.trim() : "";
-  let kind: TailEvent["kind"];
-  let text: string;
+  const id = `${SOURCE}:${sessionId}:${step.step_index}`;
+  const event = (kind: TailEvent["kind"], summary: string, raw: unknown, eventId = id): TailEvent => ({
+    id: eventId, ts, sessionId, source: SOURCE, kind, summary: stripVTControlCharacters(redactSecrets(summary)).slice(0, 500), raw,
+    pid: ctx.process.pid, parentPid: ctx.process.ppid || null,
+    cwd: ctx.transcript.cwd ?? "", project: ctx.transcript.project, harness: ctx.process.harness,
+  });
+
+  // The N tool calls in a planner step own the next N native step indexes.
+  // Key by index so a missing line cannot shift a result onto another call.
+  const state = ctx.state;
+  if (state && step.type !== "GENERIC") delete state.pendingAntigravityCalls;
   switch (step.type) {
     case "USER_INPUT": {
       if (step.source !== "USER_EXPLICIT") return null;
       const request = /<USER_REQUEST>([\s\S]*?)(?:<\/USER_REQUEST>|<ADDITIONAL_METADATA>|$)/u.exec(content);
-      text = (request?.[1] ?? content.split("<ADDITIONAL_METADATA>", 1)[0]).trim();
-      kind = "user";
-      break;
+      const text = (request?.[1] ?? content.split("<ADDITIONAL_METADATA>", 1)[0]).trim();
+      return text ? event("user", text, { content: text }) : null;
     }
     case "PLANNER_RESPONSE": {
-      const tools = Array.isArray(step.tool_calls) ? step.tool_calls.flatMap((call: { name?: string } | null) =>
-        typeof call?.name === "string" ? [call.name] : []) : [];
-      kind = content ? "assistant" : "tool";
-      text = content || tools.join(", ");
-      break;
+      const events = content ? [event("assistant", content, { content })] : [];
+      if (!Array.isArray(step.tool_calls)) return events;
+      const pending = new Map<number, ToolCall>();
+      for (const [i, call] of step.tool_calls.entries()) {
+        if (typeof call?.name !== "string" || !call.name.trim()) continue;
+        const name = redactSecrets(call.name.trim());
+        const { summary, input } = describeCall(name, call.args ?? {});
+        // Preserve the existing cursor on the first visible event of a step.
+        const callId = events.length ? `${id}:call:${String(i).padStart(6, "0")}` : id;
+        pending.set(step.step_index + i + 1, { id: callId, name, summary });
+        events.push(event("tool", summary, { tool_name: name, tool_use_id: callId, input }, callId));
+      }
+      if (state) state.pendingAntigravityCalls = pending;
+      return events;
     }
-    case "ERROR_MESSAGE":
-      kind = "system";
-      text = typeof step.error === "string" ? step.error : "Antigravity reported an error";
-      break;
+    case "GENERIC": {
+      // Tool results are MODEL steps with a native timestamp envelope. A
+      // bounded replay can start here, before the planner line is available.
+      if (step.source !== "MODEL" || !/^Created At: \d{4}-\d{2}-\d{2}T/u.test(content)) return null;
+      const pending = state?.pendingAntigravityCalls as Map<number, ToolCall> | undefined;
+      const call = pending?.get(step.step_index);
+      pending?.delete(step.step_index);
+      const body = content.replace(/^(?:(?:Created|Completed) At: [^\n]*(?:\n|$))+/u, "").trim();
+      const output = redactSecrets(body);
+      const error = typeof step.error === "string" ? redactSecrets(step.error) : "";
+      const status = typeof step.status === "string" ? step.status : "";
+      // Put the exit code and stdout together so both fit in the ordinary rail.
+      const concise = output.replace(/^Command exited with code (-?\d+)\.\s*(?:Command output:\s*)?/u, "exit $1 · ").trim();
+      const detail = summarizeToolResult(error || concise || status.toLowerCase());
+      const preview = status === "RUNNING" ? `running · ${detail}` : status === "ERROR" ? `error · ${detail}` : detail;
+      const name = call?.name ?? "tool";
+      return event("tool-result", `${name} → ${preview}`, {
+        status, output, ...(error && { error }), ...(call && { tool_name: name, tool_use_id: call.id, call: call.summary }),
+      });
+    }
+    case "ERROR_MESSAGE": {
+      const text = typeof step.error === "string" ? step.error : "Antigravity reported an error";
+      return event("system", text, { content: text });
+    }
     default: return null;
   }
-  if (!text) return null;
-  return { id: `${SOURCE}:${sessionId}:${step.step_index}`, ts, sessionId, source: SOURCE, kind,
-    summary: text.slice(0, 500), raw: { content: text }, pid: ctx.process.pid, parentPid: ctx.process.ppid || null,
-    cwd: ctx.transcript.cwd ?? "", project: ctx.transcript.project, harness: ctx.process.harness };
 }
 
-export const AntigravitySource: TranscriptSource = {
+export const AntigravitySource: AnyTranscriptSource = {
   name: SOURCE, discoverProcesses: processes, discoverTranscripts: discover, parseLine,
   findTranscript(id) {
     const row = transcript(id);

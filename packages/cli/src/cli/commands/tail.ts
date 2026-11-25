@@ -29,7 +29,7 @@ export type ScoutTailCommandOptions = {
   query?: string;
   since?: string;
   once: boolean;
-  transcripts: boolean;
+  transcripts?: boolean;
   raw: boolean;
   verbose: boolean;
 };
@@ -72,7 +72,8 @@ export function renderTailCommandHelp(): string {
     "  --limit <count>                   Initial backlog count (default 80)",
     "  --since <event-id>                Resume live streaming after a TailEvent id cursor",
     "  --once                            Print the backlog and exit",
-    "  --transcripts                     Include recent file-backed transcript events in the initial backlog",
+    "  --transcripts                     Always include recent transcript history (automatic on an empty backlog)",
+    "  --no-transcripts                  Read only the live backlog",
     "  --verbose, --debug                Show the full firehose including lifecycle noise",
     "  --raw                             Unfiltered plain output plus bounded raw payload JSON",
     "  --json                            Emit JSON (streaming mode uses NDJSON); complete events",
@@ -96,7 +97,7 @@ export function parseTailCommandOptions(args: string[]): ScoutTailCommandOptions
   let query: string | undefined;
   let since: string | undefined;
   let once = false;
-  let transcripts = false;
+  let transcripts: boolean | undefined;
   let raw = false;
   let verbose = false;
 
@@ -226,18 +227,22 @@ export async function runTailCommand(
   }
 
   const options = parseTailCommandOptions(args);
-  const initial = options.since && !options.once
+  const readBacklog = (transcripts: boolean) => readScoutTailEvents({
+    limit: options.limit,
+    sources: options.sources,
+    kinds: options.kinds,
+    sessionId: options.sessionId,
+    project: options.project,
+    cwd: options.cwd,
+    query: options.query,
+    transcripts,
+  });
+  let initial = options.since && !options.once
     ? { generatedAt: Date.now(), limit: options.limit, cursor: options.since, events: [] }
-    : await readScoutTailEvents({
-      limit: options.limit,
-      sources: options.sources,
-      kinds: options.kinds,
-      sessionId: options.sessionId,
-      project: options.project,
-      cwd: options.cwd,
-      query: options.query,
-      transcripts: options.transcripts,
-    });
+    : await readBacklog(options.transcripts === true);
+  if (!options.since && options.transcripts === undefined && initial.events.length === 0) {
+    initial = await readBacklog(true);
+  }
 
   const renderOptions: RenderTailEventOptions = {
     raw: options.raw,
@@ -268,6 +273,8 @@ export async function runTailCommand(
     emitEvent(event);
   }
 
+  // A file-backed cursor may be outside the live replay window.
+  const initialIds = new Set(initial.events.map(event => event.id));
   const controller = new AbortController();
   const shutdown = () => controller.abort();
   process.on("SIGINT", shutdown);
@@ -278,7 +285,9 @@ export async function runTailCommand(
       since: options.since ?? initial.cursor ?? undefined,
       sources: options.sources,
       signal: controller.signal,
-      onEvent: emitEvent,
+      onEvent: (event) => {
+        if (!initialIds.delete(event.id)) emitEvent(event);
+      },
     });
   } finally {
     process.off("SIGINT", shutdown);
@@ -316,8 +325,8 @@ function includeTailEvent(event: TailEvent, options: RenderTailEventOptions): bo
   if (summary.startsWith("permission requested") || summary.startsWith("permission allow")) {
     return false;
   }
-  // The rail shows work landing, not the wind-up.
-  if (event.kind === "tool") return false;
+  // Antigravity records the command or file on the call and its output on a separate step.
+  if (event.kind === "tool" && event.source !== "antigravity") return false;
   return true;
 }
 
@@ -407,7 +416,8 @@ function compactTailSummary(summary: string, maxLength: number): string {
 }
 
 function sceneRest(event: TailEvent, maxLength: number): string {
-  if (event.kind === "assistant" || event.kind === "user") {
+  if (event.kind === "assistant" || event.kind === "user"
+      || (event.source === "antigravity" && (event.kind === "tool" || event.kind === "tool-result"))) {
     return compact(flatten(event.summary), maxLength);
   }
   const { verb, noun } = sceneWork(event.summary);

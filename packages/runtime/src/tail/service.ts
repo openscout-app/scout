@@ -30,6 +30,7 @@ import { ManagedAgentsSource } from "./managed-agents-source.js";
 import { PiSource } from "./pi-source.js";
 import { normalizedFilterSet } from "./recent-filter.js";
 import { sessionRegistryKey } from "./registry.js";
+import { parsedEventsToArray } from "./types.js";
 import type {
   DiscoveredProcess,
   DiscoveredTranscript,
@@ -41,7 +42,7 @@ import type {
   TailEventKind,
   TailContext,
   TailPendingToolCall,
-  TranscriptSource,
+  AnyTranscriptSource as TranscriptSource,
 } from "./types.js";
 
 function readPositiveIntEnv(name: string, fallback: number): number {
@@ -364,11 +365,6 @@ function redactTailEvent(event: TailEvent): TailEvent {
     ...(event.prompt ? { prompt: redactSecretsDeep(event.prompt) } : {}),
     ...(event.raw ? { raw: redactSecretsDeep(event.raw) } : {}),
   };
-}
-
-function parsedEventsToArray(events: TailEvent | TailEvent[] | null): TailEvent[] {
-  if (!events) return [];
-  return Array.isArray(events) ? events : [events];
 }
 
 const GROK_QUIET_PHASES = new Set([
@@ -759,7 +755,7 @@ async function runWatcherPump(watcher: Watcher, observedAt: number): Promise<voi
       watcher.carry = lines.pop() ?? "";
       for (const line of lines) {
         if (!line) continue;
-        const event = watcher.source.parseLine(line, {
+        const parsed = watcher.source.parseLine(line, {
           process: watcher.process,
           transcript: watcher.transcript,
           transcriptPath: watcher.transcriptPath,
@@ -767,7 +763,7 @@ async function runWatcherPump(watcher: Watcher, observedAt: number): Promise<voi
           state: watcher.state,
         });
         watcher.lineCounter++;
-        if (event) {
+        for (const event of parsedEventsToArray(parsed)) {
           rememberWatcherEvent(watcher, event, "all");
         }
       }
@@ -887,7 +883,8 @@ async function seedTail(
       return;
     }
 
-    if (!watcher.source.parseFile && (options.reconcileInternal || watcher.source.name === "codex")) {
+    const primeCalls = watcher.source.name === "codex" || watcher.source.name === "antigravity";
+    if (!watcher.source.parseFile && (options.reconcileInternal || primeCalls)) {
       const lines = await readRecentTranscriptLines(
         watcher.transcriptPath,
         options.reconcileInternal
@@ -905,8 +902,8 @@ async function seedTail(
           lineOffset: index,
           state: watcher.state,
         });
-        if (options.reconcileInternal && parsed) {
-          rememberWatcherEvent(watcher, parsed, "internal");
+        if (options.reconcileInternal) {
+          for (const event of parsedEventsToArray(parsed)) rememberWatcherEvent(watcher, event, "internal");
         }
       });
       watcher.lineCounter = lines.length;
@@ -1627,13 +1624,13 @@ async function parseRecentTranscriptLineEvents(input: {
     const parsed: TailEvent[] = [];
     let index = 0;
     for (const line of lines) {
-      const event = input.source.parseLine(line, {
+      const lineEvents = input.source.parseLine(line, {
         ...input.context,
         lineOffset: index,
         state: parseState,
       });
       index++;
-      if (event) parsed.push(compactEvent(event));
+      for (const event of parsedEventsToArray(lineEvents)) parsed.push(compactEvent(event));
     }
 
     const matchingCount = kindQuota
