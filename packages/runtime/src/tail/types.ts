@@ -183,7 +183,17 @@ export type TailContext = {
   state?: Record<string, unknown>;
 };
 
-export interface TranscriptSource {
+/** A native transcript line can carry text and several parallel tool calls. */
+export type ParsedTailEvents = TailEvent | TailEvent[] | null;
+
+export function parsedEventsToArray(events: ParsedTailEvents): TailEvent[] {
+  if (!events) return [];
+  return Array.isArray(events) ? events : [events];
+}
+
+export type AnyTranscriptSource = TranscriptSource<ParsedTailEvents>;
+
+export interface TranscriptSource<LineEvents extends ParsedTailEvents = TailEvent | null> {
   readonly name: string;
   /** Empty legacy adapters can hide IO failures; only an explicit report proves empty. */
   discoveryAvailability?: () => "available" | "unavailable" | "unknown";
@@ -192,7 +202,7 @@ export interface TranscriptSource {
     processes: DiscoveredProcess[],
     scope?: TailDiscoveryScope,
   ): Promise<DiscoveredTranscript[]> | DiscoveredTranscript[];
-  parseLine(line: string, ctx: TailContext): TailEvent | null;
+  parseLine(line: string, ctx: TailContext): LineEvents;
   parseFile?(text: string, ctx: TailContext): TailEvent | TailEvent[] | null;
   /** Locate one exact session outside the discovery activity window. */
   findTranscript?(sessionRef: string): DiscoveredTranscript | null;

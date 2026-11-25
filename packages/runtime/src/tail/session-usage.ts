@@ -2,7 +2,7 @@ import { open } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { redactSecrets } from "@openscout/agent-sessions/secret-redaction";
 
-import type { DiscoveredTranscript, TailContext, TailEvent, TranscriptSource } from "./types.js";
+import { parsedEventsToArray, type AnyTranscriptSource as TranscriptSource, type DiscoveredTranscript, type TailContext, type TailEvent } from "./types.js";
 
 /**
  * Lifetime token totals read from a session's own transcript. Every field
@@ -265,14 +265,13 @@ function newestTurn(source: TranscriptSource, transcript: DiscoveredTranscript, 
   const stop = Math.max(0, lines.length - TURN_TAIL_MAX_EVENTS);
   for (let index = lines.length - 1; index >= stop; index -= 1) {
     if (!lines[index]) continue;
-    let event: TailEvent | null = null;
     try {
-      event = source.parseLine(lines[index]!, syntheticContext(transcript, index));
-    } catch {
-      event = null;
-    }
-    const turn = event ? turnFromEvent(event) : null;
-    if (turn) return turn;
+      const events = parsedEventsToArray(source.parseLine(lines[index]!, syntheticContext(transcript, index)));
+      for (let i = events.length - 1; i >= 0; i--) {
+        const turn = turnFromEvent(events[i]!);
+        if (turn) return turn;
+      }
+    } catch { /* An unreadable line does not hide the preceding turn. */ }
   }
   return null;
 }

@@ -62,7 +62,7 @@ describe("tail command", () => {
       sessionId: "sess-1",
       query: "permission",
       once: true,
-      transcripts: false,
+      transcripts: undefined,
       raw: true,
       verbose: false,
     });
@@ -71,6 +71,9 @@ describe("tail command", () => {
   test("parses verbose and debug firehose flags", () => {
     expect(parseTailCommandOptions(["--verbose"]).verbose).toBe(true);
     expect(parseTailCommandOptions(["--debug"]).verbose).toBe(true);
+    expect(parseTailCommandOptions([]).transcripts).toBeUndefined();
+    expect(parseTailCommandOptions(["--transcripts"]).transcripts).toBe(true);
+    expect(parseTailCommandOptions(["--no-transcripts"]).transcripts).toBe(false);
   });
 
   test("rejects unknown kinds", () => {
@@ -130,6 +133,31 @@ describe("tail plain rendering", () => {
     expect(rendered).toContain("main.js");
     expect(renderTailEvents([toolStart, tool], { columns: 83 })).not.toContain("▸");
     expect(renderTailEvents([toolStart], { columns: 83 })).toBe("");
+  });
+
+  test("plain Antigravity output shows what ran and what came back", () => {
+    const call = event({ source: "antigravity", kind: "tool", summary: "run_command · git diff --stat" });
+    const result = event({ source: "antigravity", kind: "tool-result", summary: "run_command → exit 0 · 2 files changed" });
+    const lines = renderTailEvents([call, result]).split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("run_command · git diff --stat");
+    expect(lines[1]).toContain("run_command → exit 0 · 2 files changed");
+  });
+
+  test("looks up transcripts when every live row is hidden in plain output", async () => {
+    const lines: string[] = [];
+    const context = createScoutCommandContext({ cwd: ".", env: {}, stdout: line => lines.push(line) });
+    const reads: boolean[] = [];
+    await runTailCommand(context, ["--once", "--limit", "1"], async (options) => {
+      expect(options).toMatchObject({ plain: true, limit: 1 });
+      reads.push(options?.transcripts === true);
+      const events = options?.transcripts
+        ? [event({ source: "antigravity", kind: "tool-result", summary: "run_command → exit 0" })]
+        : [toolStart];
+      return { generatedAt: 1, limit: 80, cursor: null, events };
+    });
+    expect(reads).toEqual([false, true]);
+    expect(lines.join("\n")).toContain("run_command → exit 0");
   });
 
   test("a known noisy grok phase does not appear by default", () => {
