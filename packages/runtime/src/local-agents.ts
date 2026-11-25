@@ -205,6 +205,7 @@ type LocalAgentRecord = {
   transport: RelayRuntimeTransport;
   capabilities?: AgentCapability[];
   launchArgs?: string[];
+  crewRole?: string;
   permissionProfile?: ScoutPermissionProfile;
   card?: RelayAgentCardLifecycle;
 };
@@ -1819,6 +1820,7 @@ function normalizeLocalAgentRecord(agentId: string, record: LocalAgentRecord): L
     transport: activeProfile?.transport ?? normalizeLocalAgentTransport(record.transport, harness),
     capabilities: normalizeLocalAgentCapabilities(record.capabilities),
     launchArgs: activeProfile?.launchArgs ?? normalizeLaunchArgsForHarness(harness, record.launchArgs),
+    ...(record.crewRole?.trim() ? { crewRole: record.crewRole.trim() } : {}),
     permissionProfile: activeProfile?.permissionProfile ?? record.permissionProfile,
     registrationSource: record.registrationSource,
     card: normalizeLocalAgentCardLifecycle(record.card),
@@ -2903,6 +2905,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
   runtimeDirectory: string;
   logsDirectory: string;
   launchArgs: string[];
+  crewRole?: string;
   threadId?: string;
   requireExistingThread?: boolean;
 } {
@@ -2911,6 +2914,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
   const ownsSessionThread = endpoint.metadata?.source === "scoutbot";
   const isScoutbot = endpoint.agentId === SCOUTBOT_AGENT_ID;
   const threadId = codexEndpointResumeThreadId(endpoint);
+  const crewRole = endpointMetadataString(endpoint, "crewRole");
 
   return withScoutReplyContextEnvironment({
     agentName,
@@ -2935,6 +2939,7 @@ export function buildCodexEndpointSessionOptions(endpoint: AgentEndpoint): Codex
       } : {}),
     },
     launchArgs: attachedCodexEndpointLaunchArgs(endpoint),
+    ...(crewRole ? { crewRole } : {}),
     ...(isScoutbot ? { profiledScoutMcp: scoutbotMcpConfig() } : {}),
     approvalPolicy: attachedCodexApprovalPolicy(endpoint),
     sandbox: attachedCodexSandbox(endpoint),
@@ -3030,8 +3035,10 @@ export function buildClaudeEndpointSessionOptions(endpoint: AgentEndpoint): {
   runtimeDirectory: string;
   logsDirectory: string;
   launchArgs: string[];
+  crewRole?: string;
 } {
   const agentName = endpointAgentName(endpoint);
+  const crewRole = endpointMetadataString(endpoint, "crewRole");
   return {
     agentName,
     sessionId: endpointRuntimeInstanceId(endpoint),
@@ -3040,6 +3047,7 @@ export function buildClaudeEndpointSessionOptions(endpoint: AgentEndpoint): {
     runtimeDirectory: relayAgentRuntimeDirectory(agentName),
     logsDirectory: relayAgentLogsDirectory(agentName),
     launchArgs: attachedClaudeEndpointLaunchArgs(endpoint),
+    ...(crewRole ? { crewRole } : {}),
   };
 }
 
@@ -4914,6 +4922,7 @@ async function ensureLocalAgentOnlineOnce(agentName: string, record: LocalAgentR
       ...buildManagedAgentShellExports({
         agentName,
         currentDirectory: projectPath,
+        ...(normalizedRecord.crewRole ? { crewRole: normalizedRecord.crewRole } : {}),
       }),
       ...buildRelayAgentWatchdogDirectives({
         sessionName: normalizedRecord.tmuxSession,
@@ -6494,6 +6503,11 @@ export async function invokeLocalAgentEndpoint(
   // invocation.timeoutMs is a caller wait budget. Local harness execution keeps
   // tracking until the agent produces a terminal result or broker-visible reply.
 
+  const crewRole = endpointMetadataString(endpoint, "crewRole")
+    ?? (typeof invocation.metadata?.crewRole === "string" && invocation.metadata.crewRole.trim()
+      ? invocation.metadata.crewRole.trim()
+      : undefined);
+
   if (!existing && endpoint.transport === "codex_app_server") {
     await ensureLocalSessionEndpointOnline(endpoint);
     const invoke = isSessionBackedEndpoint(endpoint)
@@ -6501,6 +6515,7 @@ export async function invokeLocalAgentEndpoint(
       : invokeCodexAppServerAgentForBroker;
     const result = await invoke({
       ...buildCodexEndpointSessionOptions(endpoint),
+      ...(crewRole ? { crewRole } : {}),
       prompt,
       replyContext,
       onSubmission: hooks.onCodexSubmission,
@@ -6520,6 +6535,7 @@ export async function invokeLocalAgentEndpoint(
     await ensureLocalSessionEndpointOnline(endpoint);
     const result = await invokeClaudeStreamJsonAgent({
       ...buildClaudeEndpointSessionOptions(endpoint),
+      ...(crewRole ? { crewRole } : {}),
       prompt,
     });
 
@@ -6566,6 +6582,7 @@ export async function invokeLocalAgentEndpoint(
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? (antigravity ? "Google Antigravity" : "Grok ACP")),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
+      ...(crewRole ? { crewRole } : {}),
       ...(adapterOptions ? { adapterOptions } : {}),
     });
 
@@ -6589,6 +6606,7 @@ export async function invokeLocalAgentEndpoint(
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Kimi Code ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
+      ...(crewRole ? { crewRole } : {}),
     });
 
     return {
@@ -6612,6 +6630,7 @@ export async function invokeLocalAgentEndpoint(
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "OpenCode ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
+      ...(crewRole ? { crewRole } : {}),
       ...(model ? { adapterOptions: { model } } : {}),
     });
 
@@ -6636,6 +6655,7 @@ export async function invokeLocalAgentEndpoint(
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Devin ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
+      ...(crewRole ? { crewRole } : {}),
       ...(model ? { adapterOptions: { model } } : {}),
     });
 
@@ -6659,6 +6679,7 @@ export async function invokeLocalAgentEndpoint(
       name: String(endpoint.metadata?.agentName ?? endpoint.metadata?.definitionId ?? "Cursor ACP"),
       timeoutMs: invocation.timeoutMs,
       hardCeilingMs: invocation.execution?.turnBudgetMs,
+      ...(crewRole ? { crewRole } : {}),
     });
 
     return {
@@ -6708,6 +6729,7 @@ export async function invokeLocalAgentEndpoint(
         ),
         capabilities: [...DEFAULT_LOCAL_AGENT_CAPABILITIES],
         launchArgs: flatSessionEndpointLaunchArgs(endpoint),
+        ...(crewRole ? { crewRole } : {}),
       }
       : null
   );

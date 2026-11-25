@@ -365,7 +365,7 @@ export async function resolveCrewRoleForAskOptions(
     || options.harness
     || options.runtimeProfile
   ) {
-    return options;
+    return { ...options, role: undefined };
   }
 
   const currentDirectory = options.currentDirectory ?? defaultScoutContextDirectory(context);

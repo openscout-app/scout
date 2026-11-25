@@ -253,6 +253,7 @@ export type ProfiledScoutMcp = {
 const PROFILED_SCOUT_MCP_ENV_VARS = [
   "OPENSCOUT_CLIENT_INSTANCE",
   "OPENSCOUT_REPLY_CONTEXT_FILE", "OPENSCOUT_AGENT", "OPENSCOUT_SESSION_ID",
+  "OPENSCOUT_CREW_ROLE",
   "OPENSCOUT_HOME", "OPENSCOUT_SUPPORT_DIRECTORY", "OPENSCOUT_CONTROL_HOME",
   "OPENSCOUT_SCOUT_HOME", "OPENSCOUT_RELAY_HUB",
   "OPENSCOUT_BROKER_URL", "OPENSCOUT_BROKER_INTERNAL_URL", "OPENSCOUT_BROKER_HOST",
@@ -339,6 +340,9 @@ export async function resolveScoutMcpCodexLaunch(options: {
       `mcp_servers.scout.args=${JSON.stringify(resolved.args)}`,
       "-c",
       `mcp_servers.scout.cwd=${JSON.stringify(resolved.cwd)}`,
+      ...(env.OPENSCOUT_CREW_ROLE?.trim()
+        ? ["-c", `mcp_servers.scout.env_vars=${JSON.stringify(PROFILED_SCOUT_MCP_ENV_VARS)}`]
+        : []),
     ],
     usesUrl: false,
     unknownReason: null,

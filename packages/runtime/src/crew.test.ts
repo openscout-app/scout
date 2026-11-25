@@ -292,4 +292,23 @@ describe("crew reachability gating, ask resolution, and whoami summary", () => {
       profile: expect.objectContaining({ id: "lane", label: "Lane owner" }),
     });
   });
+
+  test("project-scoped writes preserve existing partial role overrides in .openscout/crew.json", () => {
+    const root = makeTempDir("scout-crew-project-partial-");
+    const globalPath = join(root, "global-crew.json");
+    const projectRoot = join(root, "repo");
+    mkdirSync(join(projectRoot, ".openscout"), { recursive: true });
+    setCrewRole("worker", { runtime: "codex", pool: 2 }, { globalPath });
+    writeFileSync(
+      join(projectRoot, ".openscout", "crew.json"),
+      JSON.stringify({ version: 1, roles: { worker: { pool: 8 } } }, null, 2),
+      "utf8",
+    );
+
+    setCrewRole("advisor", { runtime: "claude" }, { scope: "project", projectRoot, globalPath });
+
+    const state = loadCrewState({ globalPath, projectRoot });
+    expect(state.roles.worker).toMatchObject({ runtime: "codex", pool: 8, source: "project" });
+    expect(state.roles.advisor).toMatchObject({ runtime: "claude", source: "project" });
+  });
 });

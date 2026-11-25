@@ -157,6 +157,10 @@ test('HTTP asks route Antigravity aliases to the requested project or profile wi
   const unbound = new CoreHttpAdapter({ client: f.client, principal });
   await expect(unbound.call('ask', { body: 'work', runtime: 'agy', currentDirectory: '/untrusted' })).rejects.toThrow('explicit projectPath');
   expect(f.calls.filter(call => call.url.pathname === '/v1/deliver')).toHaveLength(2);
+  await expect(f.adapter.call('ask', { body: 'work', role: 'worker' })).rejects.toThrow('crew.json role bindings are host-local');
+  await expect(f.adapter.call('ask', { body: 'work', role: 'worker', projectPath: '/chosen' })).rejects.toThrow('crew.json role bindings are host-local');
+  await f.adapter.call('ask', { body: 'work', role: 'worker', runtime: 'agy' });
+  expect(f.calls.filter(call => call.url.pathname === '/v1/deliver')).toHaveLength(3);
 });
 
 test('HTTP ask preserves the caller traceparent without asserting origin authority', async () => {

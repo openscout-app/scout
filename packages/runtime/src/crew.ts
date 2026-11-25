@@ -18,6 +18,7 @@ import {
   type CrewPreset,
   type CrewRoleBinding,
   type CrewRoleCheckResult,
+  type CrewRolePartialOverride,
   type CrewRoleRungCheck,
   type CrewSlotProfile,
   type CrewWhoAmISummary,
@@ -290,8 +291,15 @@ function assertNotSymlinkTarget(path: string, label: string): void {
   }
 }
 
-function formatCrewConfigJson(config: CrewConfig): string {
-  const payload: CrewConfig = {
+export type CrewWriteConfig = {
+  version: typeof CREW_CONFIG_VERSION;
+  activePreset?: string;
+  roles: Record<string, CrewRolePartialOverride>;
+  presets?: Record<string, CrewPreset>;
+};
+
+function formatCrewConfigJson(config: CrewConfig | CrewWriteConfig): string {
+  const payload: CrewWriteConfig = {
     version: CREW_CONFIG_VERSION,
     ...(config.activePreset ? { activePreset: config.activePreset } : {}),
     roles: config.roles,
@@ -314,7 +322,7 @@ export function saveGlobalCrewConfig(
   return path;
 }
 
-export function saveProjectCrewConfig(projectRoot: string, config: CrewConfig): string {
+export function saveProjectCrewConfig(projectRoot: string, config: CrewConfig | CrewWriteConfig): string {
   const root = resolve(projectRoot);
   const projectDir = join(root, ".openscout");
   const projectPath = join(projectDir, "crew.json");
@@ -331,7 +339,7 @@ function readTargetCrewConfigForWrite(options: {
   currentDirectory?: string;
   env?: RuntimeEnv;
   globalPath?: string;
-}): { path: string; projectRoot?: string; config: CrewConfig } {
+}): { path: string; projectRoot?: string; config: CrewWriteConfig } {
   if (options.scope === "project") {
     const root = options.projectRoot
       ? resolve(options.projectRoot)
@@ -343,10 +351,24 @@ function readTargetCrewConfigForWrite(options: {
     assertNotSymlinkTarget(projectDir, ".openscout directory");
     assertNotSymlinkTarget(path, "project crew config");
     const raw = readRawJsonFileSafe(path, "project", { checkParentDir: projectDir });
-    const config = raw.exists
-      ? sanitizeCrewConfig(raw.data, { source: "project", path }).config
-      : createEmptyCrewConfig();
-    return { path, projectRoot: root, config };
+    if (raw.exists) {
+      const { layer } = sanitizeCrewLayer(raw.data, {
+        source: "project",
+        path,
+        allowPartialRoles: true,
+      });
+      return {
+        path,
+        projectRoot: root,
+        config: {
+          version: CREW_CONFIG_VERSION,
+          ...(layer.activePreset ? { activePreset: layer.activePreset } : {}),
+          roles: layer.roles,
+          presets: layer.presets,
+        },
+      };
+    }
+    return { path, projectRoot: root, config: createEmptyCrewConfig() };
   }
 
   const path = options.globalPath ?? resolveGlobalCrewConfigPath(options.env);
@@ -432,7 +454,7 @@ export function setCrewRole(
 
   const path = scope === "project"
     ? saveProjectCrewConfig(target.projectRoot!, target.config)
-    : saveGlobalCrewConfig(target.config, { env: options.env, globalPath: options.globalPath });
+    : saveGlobalCrewConfig(target.config as CrewConfig, { env: options.env, globalPath: options.globalPath });
 
   return { role, binding, path, scope };
 }
@@ -459,7 +481,7 @@ export function unsetCrewRole(
     if (scope === "project") {
       saveProjectCrewConfig(target.projectRoot!, target.config);
     } else {
-      saveGlobalCrewConfig(target.config, { env: options.env, globalPath: options.globalPath });
+      saveGlobalCrewConfig(target.config as CrewConfig, { env: options.env, globalPath: options.globalPath });
     }
   }
   return { role, removed, path: target.path, scope };
@@ -490,7 +512,11 @@ export function saveCrewPreset(
   });
   const target = readTargetCrewConfigForWrite({ ...options, scope });
   const rolesSnapshot: Record<string, CrewRoleBinding> = {};
-  const sourceRoles = scope === "global" ? target.config.roles : effectiveState.roles;
+  const sourceRoles = scope === "global"
+    ? Object.fromEntries(
+        Object.entries(target.config.roles).filter(([, b]) => Boolean(b.runtime)),
+      ) as Record<string, CrewRoleBinding>
+    : effectiveState.roles;
   for (const [role, binding] of Object.entries(sourceRoles)) {
     Object.defineProperty(rolesSnapshot, role, {
       value: {
@@ -521,7 +547,7 @@ export function saveCrewPreset(
 
   const path = scope === "project"
     ? saveProjectCrewConfig(target.projectRoot!, target.config)
-    : saveGlobalCrewConfig(target.config, { env: options.env, globalPath: options.globalPath });
+    : saveGlobalCrewConfig(target.config as CrewConfig, { env: options.env, globalPath: options.globalPath });
 
   return { name, preset, path, scope };
 }
@@ -579,7 +605,7 @@ export function useCrewPreset(
 
   const path = scope === "project"
     ? saveProjectCrewConfig(target.projectRoot!, target.config)
-    : saveGlobalCrewConfig(target.config, { env: options.env, globalPath: options.globalPath });
+    : saveGlobalCrewConfig(target.config as CrewConfig, { env: options.env, globalPath: options.globalPath });
 
   return { name, preset, path, scope };
 }

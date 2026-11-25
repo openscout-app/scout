@@ -152,6 +152,16 @@ describe("buildScoutMcpCodexLaunchArgs", () => {
       env: { PATH: "", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_MCP_SHARED_URL: SHARED_URL },
     })).toHaveLength(6);
   });
+
+  test("forwards OPENSCOUT_CREW_ROLE into stdio Scout MCP env_vars when active", async () => {
+    const args = await buildScoutMcpCodexLaunchArgs({
+      currentDirectory: import.meta.dir,
+      env: { PATH: "", OPENSCOUT_CLI_BIN: process.execPath, OPENSCOUT_CREW_ROLE: "worker" },
+    });
+    expect(args).toHaveLength(8);
+    expect(args[7]).toContain("mcp_servers.scout.env_vars=");
+    expect(args[7]).toContain("OPENSCOUT_CREW_ROLE");
+  });
 });
 
 describe("codexHomeScoutMcpEntry without a Codex it can run", () => {

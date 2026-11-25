@@ -29,6 +29,7 @@ type SessionRequestOptions = {
   runtimeDirectory: string;
   logsDirectory: string;
   launchArgs?: string[];
+  crewRole?: string;
 };
 
 type InvocationOptions = SessionRequestOptions & {
@@ -1074,6 +1075,7 @@ class ClaudeStreamJsonSession {
         env: buildManagedAgentEnvironment({
           agentName: this.options.agentName,
           currentDirectory: this.options.cwd,
+          ...(this.options.crewRole ? { crewRole: this.options.crewRole } : {}),
           baseEnv: process.env,
         }),
       });

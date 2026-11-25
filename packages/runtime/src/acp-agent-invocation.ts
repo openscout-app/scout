@@ -25,6 +25,7 @@ export interface AcpAgentInvocationOptions {
   name?: string;
   timeoutMs?: number;
   hardCeilingMs?: number;
+  crewRole?: string;
   adapterOptions?: Record<string, unknown>;
   /**
    * Called with the provider-native ACP session id as soon as the session
@@ -127,11 +128,12 @@ function sessionFingerprint(options: AcpAgentInvocationOptions): string {
   const requestedEffort = typeof options.adapterOptions?.reasoningEffort === "string"
     ? options.adapterOptions.reasoningEffort.trim()
     : "";
+  const requestedRole = options.crewRole?.trim() ?? "";
   // Adapter model selection happens when the ACP process/session is created.
   // Reusing the same pool entry after the requested model changes would keep
   // prompting the old model while reporting the new request as resolved. The
   // same holds for reasoning effort, which rides on that one set_model call.
-  return [options.adapterType, options.sessionId, options.cwd, requestedModel, requestedEffort].join("\u0000");
+  return [options.adapterType, options.sessionId, options.cwd, requestedModel, requestedEffort, requestedRole].join("\u0000");
 }
 
 async function createPoolEntry(options: AcpAgentInvocationOptions): Promise<AcpPoolEntry> {
@@ -147,6 +149,7 @@ async function createPoolEntry(options: AcpAgentInvocationOptions): Promise<AcpP
     env: buildManagedAgentEnvironment({
       agentName: options.sessionId,
       currentDirectory: options.cwd,
+      ...(options.crewRole ? { crewRole: options.crewRole } : {}),
       baseEnv: process.env,
     }),
     warmth: "lazy",

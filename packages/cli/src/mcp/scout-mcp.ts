@@ -4937,7 +4937,7 @@ export function createScoutMcpServer(options: {
             ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
             ...(placement ? { placement } : {}),
             ...(effectiveRuntime ? { runtimeLiteral: effectiveRuntime } : {}),
-            ...(role?.trim() ? { crewRole: role.trim() } : {}),
+            ...(crewResolution?.ok ? { crewRole: crewResolution.role } : {}),
             ...((effectiveRuntime || harness || model || reasoningEffort) ? {
               executionSource: {
                 ...(resolvedHarness

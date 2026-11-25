@@ -2986,7 +2986,7 @@ describe("MCP crew role resolution and whoami summary", () => {
       crewRole: "worker",
     });
 
-    // 2. Explicit runtime takes precedence over role (including antigravity/<model>)
+    // 2. Explicit runtime takes precedence over role (including antigravity/<model>) and clears ignored crewRole
     const withExplicitRuntime = await client.callTool({
       name: "ask",
       arguments: { role: "unconfigured", runtime: "antigravity/gemini-fixture", body: "Check layout" },
@@ -2996,10 +2996,10 @@ describe("MCP crew role resolution and whoami summary", () => {
       harness: "antigravity",
       model: "gemini-fixture",
       runtimeLiteral: "antigravity/gemini-fixture",
-      crewRole: "unconfigured",
     });
+    expect(receivedCommands[1]?.crewRole).toBeUndefined();
 
-    // 3. Explicit to takes precedence over role
+    // 3. Explicit to takes precedence over role and clears ignored crewRole
     const withExplicitTo = await client.callTool({
       name: "ask",
       arguments: { role: "unconfigured", to: "reviewer", body: "Review PR" },
@@ -3007,8 +3007,8 @@ describe("MCP crew role resolution and whoami summary", () => {
     expect((withExplicitTo.structuredContent as { ok: boolean }).ok).toBe(true);
     expect(receivedCommands[2]).toMatchObject({
       to: "reviewer",
-      crewRole: "unconfigured",
     });
+    expect(receivedCommands[2]?.crewRole).toBeUndefined();
 
     // 4. Unconfigured role without explicit override returns actionable error
     const unconfigured = await client.callTool({
