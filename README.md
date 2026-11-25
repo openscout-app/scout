@@ -124,6 +124,7 @@ work; wait on the same handle again. To use Codex instead, set
 | Request work and a reply | `scout ask --to <target> "<request>"` |
 | Send an update without requesting work | `scout ask --to <target> --fyi "<update>"` |
 | Start work in a project | `scout ask --project . --harness codex "<request>"` |
+| Start work by crew role | `scout ask --role worker "<request>"` |
 | Answer a task | `scout reply --ref <task> "<answer>"` |
 | Add context to unfinished work | `scout ask --ref <task> "<context>"` |
 | Continue an exact session | `scout ask --to session:<id> "<request>"` |
@@ -286,6 +287,7 @@ and the [release guide](./docs/releases.md).
 - [Quickstart](./docs/quickstart.md)
 - [CLI guide](./packages/cli/README.md)
 - [Architecture](./docs/architecture.md) and [concepts](./docs/concepts.md)
+- [Crew roles](./docs/crew.md)
 - [Session search](./docs/session-search.md)
 - [Coding-agent collaboration](./docs/coding-agent-collaboration-2026.md)
 - [Public-source boundary](./docs/public-source-boundary.md)

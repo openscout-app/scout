@@ -179,6 +179,9 @@ export class CoreHttpAdapter {
       const isAsk = !a.fyi, operator = a.operator === true;
       if (a.callback) throw new Error('callback paths are host-local; send the ask through a local Scout client');
       if (a.decision) throw new Error('decision cards read local pictures; send the ask through a local Scout client');
+      if (a.role && !a.to && !a.targetSessionId && !a.targetAgentId && !a.targetLabel && !a.runtime && !a.harness && !a.profile && !operator && !a.ref && !a.continue && !a.channel) {
+        throw new Error('crew.json role bindings are host-local; pass an explicit runtime or target, or send the ask through a local Scout client');
+      }
       if (!a.projectPath && !a.on && !operator && !a.ref && !a.continue && !a.channel && !a.to && !a.targetSessionId && !a.targetAgentId && !a.targetLabel
         && (a.runtime || a.harness || a.model || a.reasoningEffort || a.profile)) {
         // A portable client can default only to a project configured on the bridge.

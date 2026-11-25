@@ -13,6 +13,8 @@ import { iterateMessageRecordsAsync } from "./broker-message-records.js";
 import {
   SCOUT_DISPATCHER_AGENT_ID,
   createScoutExecutionResolution,
+  isValidCrewKey,
+  normalizeCrewKey,
   normalizeScoutRuntimeModel,
   validateScoutRuntimeTuple,
   type AgentDefinition,
@@ -176,6 +178,7 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
     projectAgent?: ScoutDeliverRequest["projectAgent"];
     /** `new_worktree` gives the new session a fresh git worktree as its cwd. */
     workspace?: "new_worktree";
+    crewRole?: string;
     requesterId: string;
     createdAt: number;
   }) => Promise<Extract<InvocationResolution, { kind: "resolved_session" }>>;
@@ -1091,6 +1094,7 @@ export class BrokerDeliveryAcceptanceService {
           execution,
           projectAgent: payload.projectAgent,
           ...(askWorkspaceFromPayload(payload) === "new_worktree" ? { workspace: "new_worktree" as const } : {}),
+          ...(crewRoleFromPayload(payload) ? { crewRole: crewRoleFromPayload(payload) } : {}),
           requesterId,
           createdAt,
         })
@@ -1587,6 +1591,17 @@ export function askWorkspaceFromPayload(
 ): "same" | "new_worktree" | undefined {
   for (const value of [payload.invocationMetadata?.askWorkspace, payload.messageMetadata?.askWorkspace]) {
     if (value === "same" || value === "new_worktree") return value;
+  }
+  return undefined;
+}
+
+export function crewRoleFromPayload(
+  payload: Pick<ScoutDeliverRequest, "invocationMetadata" | "messageMetadata">,
+): string | undefined {
+  for (const value of [payload.invocationMetadata?.crewRole, payload.messageMetadata?.crewRole]) {
+    if (typeof value === "string" && isValidCrewKey(value)) {
+      return normalizeCrewKey(value);
+    }
   }
   return undefined;
 }

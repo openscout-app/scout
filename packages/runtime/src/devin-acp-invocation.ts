@@ -14,6 +14,7 @@ export interface DevinAcpInvocationOptions {
   name?: string;
   timeoutMs?: number;
   hardCeilingMs?: number;
+  crewRole?: string;
   adapterOptions?: Record<string, unknown>;
 }
 

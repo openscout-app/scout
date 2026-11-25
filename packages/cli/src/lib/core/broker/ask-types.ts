@@ -30,6 +30,7 @@ type ScoutAskCommandBase = {
   reasoningEffort?: string;
   placement?: SessionPlacement;
   runtimeLiteral?: string;
+  crewRole?: string;
   executionSource?: Partial<Record<"harness" | "model" | "reasoningEffort", "flag" | "literal">>;
   workspace?: ScoutAskWorkspace;
   session?: ScoutAskSession;

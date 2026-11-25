@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { setCrewRole, type CrewReachabilityChecker } from "@openscout/runtime/crew";
 
 import { createScoutCommandContext } from "../context.ts";
 import { renderWhoAmICommandHelp, runWhoAmICommand } from "./whoami.ts";
@@ -58,6 +60,42 @@ describe("whoami report", () => {
       expect(output).toContain("Default Sender: worker.");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("surfaces only available crew roles and active seat posture", async () => {
+    const root = mkdtempSync(join(tmpdir(), "openscout-whoami-crew-"));
+    try {
+      const home = join(root, "openscout-home");
+      const cwd = join(root, "repo");
+      mkdirSync(cwd, { recursive: true });
+      setCrewRole("lane", { runtime: "antigravity/gemini-fixture" }, { env: { OPENSCOUT_HOME: home } });
+      setCrewRole("worker", { runtime: "codex", pool: 4 }, { env: { OPENSCOUT_HOME: home } });
+      setCrewRole("stylist", { runtime: "kimi" }, { env: { OPENSCOUT_HOME: home } });
+
+      const checker: CrewReachabilityChecker = {
+        checkHarness: (harness) => ["antigravity", "codex"].includes(harness)
+          ? { harness, available: true, state: "ready", detail: `${harness} ready` }
+          : { harness, available: false, state: "missing", detail: `${harness} missing` },
+      };
+
+      const lines: string[] = [];
+      const context = createScoutCommandContext({
+        cwd,
+        env: { OPENSCOUT_HOME: home, OPENSCOUT_CREW_ROLE: "lane" },
+        stdout: (line) => lines.push(line),
+        stderr: () => undefined,
+        isTty: false,
+      });
+
+      await runWhoAmICommand(context, [], { crewChecker: checker });
+      const output = lines.join("\n");
+      expect(output).toContain("Active Seat: lane (antigravity/gemini-fixture)");
+      expect(output).toContain("Seat Posture:");
+      expect(output).toContain("Crew Roles: lane=antigravity/gemini-fixture · worker=codex x4");
+      expect(output).not.toContain("stylist");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

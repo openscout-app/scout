@@ -4,12 +4,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { buildFlightLinks } from "./flight.ts";
 import type { ScoutCommandContext } from "../context.ts";
 import { defaultScoutContextDirectory } from "../context.ts";
+import { ScoutCliError } from "../errors.ts";
 import {
   parseAskCommandOptions,
   type ScoutAskCommandOptions,
 } from "../options.ts";
 import { readTaskCallbackFile, resolvePromptBody } from "../input-file.ts";
-import { scoutAskHandler } from "../../lib/core/broker/ask.ts";
+import { scoutAskHandler, type ScoutAskHandler } from "../../lib/core/broker/ask.ts";
+import { resolveCliCrewRoleForAsk } from "../../lib/core/crew/service.ts";
 import type {
   ScoutAskReceipt,
 } from "../../lib/core/broker/ask-types.ts";
@@ -65,6 +67,7 @@ export function renderAskCommandHelp(): string {
     "  --continue-for <task> continuation obligation on an active parent, NOT --continue",
     "  --placement <background|foreground|attached>  new-session placement",
     "  --runtime <harness[/model[/effort]]> or --profile <name>  runtime selection",
+    "  --role <role>         crew role slot from crew.json (walks fallback; explicit --runtime or --to wins)",
     "Unknown flags are errors. Routing modes cannot be combined. Message text never cancels work.",
     "An automatic final turn still answers the task; do not also call reply.",
     "", "Examples:",
@@ -346,10 +349,70 @@ export async function runAskCommand(
   await runAskWithOptions(context, options);
 }
 
+export async function resolveCrewRoleForAskOptions(
+  options: ScoutAskCommandOptions,
+  context: ScoutCommandContext,
+  resolveRole: typeof resolveCliCrewRoleForAsk = resolveCliCrewRoleForAsk,
+): Promise<ScoutAskCommandOptions> {
+  if (!options.role) {
+    return options;
+  }
+  // Explicit runtime/harness/profile or explicit target (--to / existing handle) always takes precedence.
+  if (
+    options.targetLabel
+    || options.existingTargetHandle
+    || options.runtimeLiteral
+    || options.harness
+    || options.runtimeProfile
+  ) {
+    return { ...options, role: undefined };
+  }
+
+  const currentDirectory = options.currentDirectory ?? defaultScoutContextDirectory(context);
+  const resolved = await resolveRole(options.role, {
+    currentDirectory,
+    env: context.env,
+  });
+  if (!resolved.ok) {
+    throw new ScoutCliError(resolved.error);
+  }
+
+  return {
+    ...options,
+    harness: resolved.selectedSpec.harness,
+    model: options.model ?? resolved.selectedSpec.model,
+    reasoningEffort: options.reasoningEffort ?? resolved.selectedSpec.reasoningEffort,
+    runtimeLiteral: resolved.selectedRuntime,
+    ...(resolved.selectedHost && !options.onHost ? { onHost: resolved.selectedHost } : {}),
+    projectPath: options.projectPath ?? currentDirectory,
+    session: options.session ?? "new",
+    executionSource: {
+      ...(options.executionSource ?? {}),
+      harness: options.executionSource?.harness ?? "literal",
+      ...(options.model ?? resolved.selectedSpec.model
+        ? { model: options.executionSource?.model ?? "literal" }
+        : {}),
+      ...(options.reasoningEffort ?? resolved.selectedSpec.reasoningEffort
+        ? { reasoningEffort: options.executionSource?.reasoningEffort ?? "literal" }
+        : {}),
+    },
+  };
+}
+
 export async function runAskWithOptions(
   context: ScoutCommandContext,
-  options: ScoutAskCommandOptions,
+  rawOptions: ScoutAskCommandOptions,
+  deps: {
+    askHandler?: ScoutAskHandler;
+    resolveCrewRole?: typeof resolveCliCrewRoleForAsk;
+  } = {},
 ): Promise<void> {
+  const options = await resolveCrewRoleForAskOptions(
+    rawOptions,
+    context,
+    deps.resolveCrewRole ?? resolveCliCrewRoleForAsk,
+  );
+  const askHandler = deps.askHandler ?? scoutAskHandler;
   if ((options.targets?.length ?? 0) > 1) {
     const requestId = options.requestId ?? `ask-${randomUUID()}`;
     const results: Array<{ target: string; accepted: boolean; receipt?: unknown; error?: string }> = [];
@@ -360,7 +423,7 @@ export async function runAskWithOptions(
           writeValue: (value: unknown) => { receipt = value; }, writeText: () => {} } }, {
           ...options, targets: undefined, targetLabel: target,
           requestId: `ask-${createHash("sha256").update(JSON.stringify([requestId, target])).digest("hex")}`,
-        });
+        }, deps);
         results.push({ target, accepted: true, receipt });
       } catch (error) { results.push({ target, accepted: false, error: error instanceof Error ? error.message : String(error) }); }
     }
@@ -398,7 +461,7 @@ export async function runAskWithOptions(
   const requestId = options.requestId ?? `ask-${randomUUID()}`;
   context.stderr(`request ${requestId} (reuse with --request-id after an uncertain receipt)`);
   const callerSessionId = claimedSessionId(context.env);
-  const receipt = await scoutAskHandler({
+  const receipt = await askHandler({
     requestId,
     task: { ...(options.task ?? { version: 1 }), ...(callback ? { callback } : {}), ...(decision ? { decision: decision.decision } : {}) },
     ...(decision?.images.length ? { decisionImages: decision.images } : {}),
@@ -415,6 +478,7 @@ export async function runAskWithOptions(
     reasoningEffort: options.reasoningEffort,
     placement: options.placement,
     runtimeLiteral: options.runtimeLiteral,
+    ...(options.role ? { crewRole: options.role } : {}),
     executionSource: options.executionSource,
     session: options.session,
     labels: options.labels,

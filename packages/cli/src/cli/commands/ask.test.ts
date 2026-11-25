@@ -1,6 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { formatScoutAskReceiptError, formatScoutAskRoutingError, renderAskCommandHelp, renderScoutAskReceipt } from "./ask.ts";
+import { setCrewRole, type CrewReachabilityChecker } from "@openscout/runtime/crew";
+
+import { createScoutCommandContext } from "../context.ts";
+import { parseAskCommandOptions } from "../options.ts";
+import { resolveCliCrewRoleForAsk } from "../../lib/core/crew/service.ts";
+import {
+  formatScoutAskReceiptError,
+  formatScoutAskRoutingError,
+  renderAskCommandHelp,
+  renderScoutAskReceipt,
+  resolveCrewRoleForAskOptions,
+} from "./ask.ts";
 
 describe("formatScoutAskReceiptError", () => {
   const sessionId = "0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000";
@@ -325,5 +339,99 @@ describe("ask receipt follow-up clarity", () => {
     } });
     expect(text).toContain("harness claude (dispatched)");
     expect(text).not.toContain("codex (observed)");
+  });
+});
+
+describe("resolveCrewRoleForAskOptions", () => {
+  const checkerFor = (available: string[]): CrewReachabilityChecker => {
+    const set = new Set(available);
+    return {
+      checkHarness: (harness) => set.has(harness)
+        ? { harness, available: true, state: "ready", detail: `${harness} ready` }
+        : { harness, available: false, state: "missing", detail: `${harness} missing` },
+    };
+  };
+
+  test("resolves configured role and walks fallback when primary harness is unavailable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-ask-role-"));
+    try {
+      const home = join(root, "openscout-home");
+      setCrewRole("worker", {
+        runtime: "codex/gpt-fixture",
+        fallback: ["antigravity/gemini-fixture"],
+      }, { env: { OPENSCOUT_HOME: home } });
+
+      const context = createScoutCommandContext({
+        cwd: root,
+        env: { OPENSCOUT_HOME: home },
+        stdout: () => undefined,
+        stderr: () => undefined,
+      });
+      const parsed = parseAskCommandOptions(["--role", "worker", "run tests"], root);
+      const resolved = await resolveCrewRoleForAskOptions(
+        parsed,
+        context,
+        (role, opts) => resolveCliCrewRoleForAsk(role, { ...opts, checker: checkerFor(["antigravity"]) }),
+      );
+
+      expect(resolved.harness).toBe("antigravity");
+      expect(resolved.model).toBe("gemini-fixture");
+      expect(resolved.runtimeLiteral).toBe("antigravity/gemini-fixture");
+      expect(resolved.role).toBe("worker");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("explicit --runtime and --to always take precedence over --role", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-ask-role-override-"));
+    try {
+      const context = createScoutCommandContext({
+        cwd: root,
+        env: { OPENSCOUT_HOME: join(root, "empty-home") },
+        stdout: () => undefined,
+        stderr: () => undefined,
+      });
+
+      const withRuntime = parseAskCommandOptions(
+        ["--role", "unconfigured", "--runtime", "claude/sonnet", "review"],
+        root,
+      );
+      const resolvedRuntime = await resolveCrewRoleForAskOptions(withRuntime, context);
+      expect(resolvedRuntime.harness).toBe("claude");
+      expect(resolvedRuntime.model).toBe("sonnet");
+
+      const withTo = parseAskCommandOptions(
+        ["--role", "unconfigured", "--to", "reviewer", "review"],
+        root,
+      );
+      const resolvedTo = await resolveCrewRoleForAskOptions(withTo, context);
+      expect(resolvedTo.targetLabel).toBe("reviewer");
+      expect(resolvedTo.harness).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("fails with an actionable error naming scout crew set when role is unconfigured", async () => {
+    const root = mkdtempSync(join(tmpdir(), "scout-ask-role-missing-"));
+    try {
+      const context = createScoutCommandContext({
+        cwd: root,
+        env: { OPENSCOUT_HOME: join(root, "empty-home") },
+        stdout: () => undefined,
+        stderr: () => undefined,
+      });
+      const parsed = parseAskCommandOptions(["--role", "systems", "check races"], root);
+      await expect(
+        resolveCrewRoleForAskOptions(
+          parsed,
+          context,
+          (role, opts) => resolveCliCrewRoleForAsk(role, { ...opts, checker: checkerFor(["claude"]) }),
+        ),
+      ).rejects.toThrow("scout crew set systems <runtime>");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

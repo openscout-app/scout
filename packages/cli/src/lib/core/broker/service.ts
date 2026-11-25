@@ -4315,6 +4315,7 @@ export async function askScoutAgentById(input: {
   executionReasoningEffort?: string;
   executionPlacement?: import("@openscout/protocol").SessionPlacement;
   executionSource?: ScoutDeliverRequest["executionSource"];
+  crewRole?: string;
   executionSession?: "new" | "existing" | "any";
   workspace?: ScoutAskWorkspace;
   senderContext?: ScoutAskSenderContext;
@@ -4486,6 +4487,7 @@ export async function deliverScoutAsk(input: {
   executionReasoningEffort?: string;
   executionPlacement?: import("@openscout/protocol").SessionPlacement;
   executionSource?: ScoutDeliverRequest["executionSource"];
+  crewRole?: string;
   executionSession?: "new" | "existing" | "any";
   workspace?: ScoutAskWorkspace;
   senderContext?: ScoutAskSenderContext;
@@ -4567,6 +4569,7 @@ export async function deliverScoutAsk(input: {
     ...(replyToSessionId ? { replyToSessionId } : {}),
     ...(input.replyToSessionHarness ? { replyToSessionHarness: input.replyToSessionHarness } : {}),
     ...(input.replyMode ? { replyMode: input.replyMode } : {}),
+    ...(input.crewRole ? { crewRole: input.crewRole } : {}),
   };
   const delivery = await brokerPostDeliver(brokerBaseUrl, {
     ...(input.requestId ? { requestId: input.requestId } : {}),

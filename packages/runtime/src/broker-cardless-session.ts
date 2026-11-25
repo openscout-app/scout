@@ -114,6 +114,7 @@ export interface CardlessSessionInput {
   reasoningEffort?: string;
   placement?: SessionPlacement;
   launchArgs?: string[];
+  crewRole?: string;
   /** Provenance only: the preset/card a cardless session was stamped with, if any. */
   viaCard?: string;
   /**
@@ -287,6 +288,7 @@ export function buildCardlessSessionEndpoint(input: CardlessSessionInput): Agent
       ...(input.model?.trim() ? { model: input.model.trim() } : {}),
       ...(input.reasoningEffort?.trim() ? { reasoningEffort: input.reasoningEffort.trim() } : {}),
       ...(launchArgs && launchArgs.length > 0 ? { launchArgs } : {}),
+      ...(input.crewRole?.trim() ? { crewRole: input.crewRole.trim() } : {}),
       ...(input.viaCard ? { viaCard: input.viaCard } : {}),
       startedAt: String(startedAt),
     },

@@ -3,6 +3,7 @@ import { buildUserSpawnEnvironment } from "./instance.js";
 type ManagedAgentEnvironmentOptions = {
   agentName: string;
   currentDirectory: string;
+  crewRole?: string;
 };
 
 function managedAgentEnvironmentEntries(
@@ -10,10 +11,12 @@ function managedAgentEnvironmentEntries(
 ): Array<[key: string, value: string]> {
   const agentName = options.agentName.trim();
   const currentDirectory = options.currentDirectory.trim();
+  const crewRole = options.crewRole?.trim() ?? "";
   const entries: Array<[key: string, value: string]> = [
     ["OPENSCOUT_AGENT", agentName],
     ["OPENSCOUT_SETUP_CWD", currentDirectory],
     ["OPENSCOUT_MANAGED_AGENT", "1"],
+    ...(crewRole ? [["OPENSCOUT_CREW_ROLE", crewRole] as [string, string]] : []),
   ];
 
   return entries.filter(([, value]) => value.length > 0);
