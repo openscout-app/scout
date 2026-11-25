@@ -13,14 +13,17 @@ secret-cutoff, and receipt boundary.
 Use Scout's `browser_*` MCP tools or `scout browser ...` CLI first whenever
 the task is on a web page:
 
-1. **`scout-companion`** (preferred when connected): Scout's Chrome Companion
-   MV3 extension over the local bridge (`ws://127.0.0.1:4321/chrome-companion`)
-   for live DOM/page introspection and targeted actions.
+1. **`scout-companion`** (preferred when connected): Scout's MV3 Browser
+   Companion extension (Chrome and Safari) over the local bridge
+   (`ws://127.0.0.1:4321/browser-companion`) for live DOM/page introspection
+   and targeted actions.
 2. **`scout-native`**: Scout-owned non-headless Chrome identities under
    `~/Library/Application Support/Scout/ChromeProfiles/<name>` (with
    compatibility for existing `Action/ChromeProfiles/<name>` identities), full
    CDP control, and domain-allowlisted cookie seeding.
-3. **`browser-use`** (first external adapter): Wraps the `browser-use` CLI
+3. **`scout-safari`**: Direct macOS Safari tab control and DOM inspection
+   (AppleScript / `do JavaScript` or paired Safari Web Extension).
+4. **`browser-use`** (first external adapter): Wraps the `browser-use` CLI
    behind Scout's lease, origin allow-list, and receipt contract.
 
 ```text

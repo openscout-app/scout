@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/browser-use/scout-safari.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "Async osascript execution for Scout Safari browser adapter on macOS",
+  "owner": "runtime"
+}

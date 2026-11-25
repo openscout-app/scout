@@ -10,16 +10,18 @@
 export const BROWSER_ADAPTER_IDS = [
   "scout-companion",
   "scout-native",
+  "scout-safari",
   "browser-use",
   "browserbase",
 ] as const;
 
 export type BrowserAdapterId = (typeof BROWSER_ADAPTER_IDS)[number];
 
-/** Default preference order: Scout's own companion & managed Chrome first, then external engines. */
+/** Default preference order: Scout's own companion, managed Chrome, Safari, then external engines. */
 export const DEFAULT_BROWSER_ADAPTER_ORDER: readonly BrowserAdapterId[] = [
   "scout-companion",
   "scout-native",
+  "scout-safari",
   "browser-use",
   "browserbase",
 ];

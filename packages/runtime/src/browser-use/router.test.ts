@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { BrowserActionRequest, BrowserAdapterHealth, BrowserReceipt } from "@openscout/protocol";
 import { BrowserRouter, type BrowserAdapter } from "./adapter.js";
 import { createBrowserUseAdapter } from "./browser-use.js";
+import { createScoutSafariAdapter } from "./scout-safari.js";
 
 function fakeAdapter(
   id: BrowserAdapter["id"],
@@ -98,5 +99,22 @@ describe("BrowserRouter", () => {
     const res = await adapter.execute({ action: "open", driverId: "a", url: "https://example.com" });
     expect(res.ok).toBe(true);
     expect(calls).toEqual([["open", "https://example.com"]]);
+  });
+
+  test("scout-safari adapter opens URLs and snapshots active tab via injected osascript", async () => {
+    const adapter = createScoutSafariAdapter({
+      platform: "darwin",
+      safariExists: async () => true,
+      runScript: async (_script, args) => {
+        if (args?.[0]?.startsWith("https://")) return { code: 0, stdout: args[0], stderr: "" };
+        return { code: 0, stdout: JSON.stringify({ url: "https://example.com", title: "Example", interactive: [] }), stderr: "" };
+      },
+    });
+    expect((await adapter.health()).available).toBe(true);
+    const opened = await adapter.execute({ action: "open", driverId: "a", url: "https://example.com" });
+    expect(opened.ok).toBe(true);
+    const snap = await adapter.execute({ action: "snapshot", driverId: "a" });
+    expect(snap.ok).toBe(true);
+    expect(snap.title).toBe("Example");
   });
 });
