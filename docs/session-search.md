@@ -67,6 +67,9 @@ scout search index --source sessions --harness claude --days 7 --force
 scout search query "xcodebuild" --harness kimi --hours 12
 scout search query "pairing flap" --project openscout --days 3
 scout search query "iOS build" --harness kimi --json
+
+# Continue a page: the token comes from the previous run's `next` field
+scout search query "pairing flap" --limit 30 --after <page token>
 ```
 
 ### Flags
@@ -77,7 +80,8 @@ scout search query "iOS build" --harness kimi --json
 | `--days N` / `--hours N` | lookback | coverage + optional mtime filter | Hours overrides days; max 30d |
 | `--harness <id>` | filter roots | facet + coverage | `codex`, `claude`, `kimi` (repeatable) |
 | `--project <name>` | — | facet | Project basename facet |
-| `--limit N` | discovery cap | hit cap | |
+| `--limit N` | discovery cap | page size (max 500) | |
+| `--after <page>` | — | continue a query from the previous page token | Query and filters must match the original search |
 | `--force` | re-index | — | Ignore content-hash skip |
 
 ### Coverage honesty

@@ -21,6 +21,7 @@ import type {
   KnowledgeIndexJobState,
   KnowledgeIndexRequest,
   KnowledgeSearchHit,
+  KnowledgeSearchPage,
   KnowledgeSearchQuery,
   KnowledgeSourceRef,
   KnowledgeStatus,
@@ -237,6 +238,10 @@ function nowMs(): number {
 // Active index jobs heartbeat via updated_at on every progress write; a job
 // untouched for this long means its indexer process is gone.
 const STALE_INDEX_JOB_MS = 10 * 60 * 1000;
+
+// A page is a starting point, not a ceiling: one query returns at most this
+// many ranked chunks, and a caller continues from `offset`.
+const SEARCH_PAGE_MAX = 500;
 
 function normalizedLimit(value: number | undefined, fallback = 20, max = 100): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
@@ -866,21 +871,36 @@ export class SQLiteKnowledgeStore {
   }
 
   searchLexical(query: KnowledgeSearchQuery): KnowledgeSearchHit[] {
-    const q = query.q.trim();
-    if (!q) return [];
-    const andQuery = normalizeFtsQueryAnd(q);
-    if (!andQuery) return [];
-    // Precision first (all tokens present), then fail open to OR recall for
-    // natural phrases where one token is rare/absent from a chunk.
-    const variants = [andQuery];
-    const orQuery = normalizeFtsQueryOr(q);
-    if (orQuery && orQuery !== andQuery) variants.push(orQuery);
+    return this.searchLexicalPage(query).hits;
+  }
 
-    for (const ftsQuery of variants) {
-      const hits = this.searchLexicalWithFtsQuery(query, q, ftsQuery);
-      if (hits.length > 0) return hits;
+  /**
+   * One page of ranked chunks, reporting which FTS variant produced it.
+   *
+   * Precision comes first (all tokens present), then OR recall for natural
+   * phrases where one token is rare/absent from a chunk. A continuation page
+   * carries that choice back in `ftsMode`: re-deciding it at a non-zero offset
+   * would silently switch ranking mid-search and repeat or skip hits.
+   */
+  searchLexicalPage(query: KnowledgeSearchQuery): KnowledgeSearchPage {
+    const q = query.q.trim();
+    if (!q) return { hits: [], ftsMode: "and" };
+    const andQuery = normalizeFtsQueryAnd(q);
+    if (!andQuery) return { hits: [], ftsMode: "and" };
+    const orQuery = normalizeFtsQueryOr(q);
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+    const pinned = query.ftsMode ?? (offset > 0 ? "and" : undefined);
+
+    if (pinned === "or") {
+      const hits = orQuery ? this.searchLexicalWithFtsQuery(query, q, orQuery) : [];
+      return { hits, ftsMode: "or" };
     }
-    return [];
+    const andHits = this.searchLexicalWithFtsQuery(query, q, andQuery);
+    if (pinned === "and" || andHits.length > 0) return { hits: andHits, ftsMode: "and" };
+    if (orQuery && orQuery !== andQuery) {
+      return { hits: this.searchLexicalWithFtsQuery(query, q, orQuery), ftsMode: "or" };
+    }
+    return { hits: [], ftsMode: "and" };
   }
 
   private searchLexicalWithFtsQuery(
@@ -958,8 +978,10 @@ export class SQLiteKnowledgeStore {
       JOIN collections col ON col.id = c.collection_id
       WHERE ${clauses.join(" AND ")}
       ORDER BY rank ASC
-      LIMIT ?${params.length + 1}`;
-    params.push(normalizedLimit(query.limit));
+      LIMIT ?${params.length + 1}
+      OFFSET ?${params.length + 2}`;
+    params.push(normalizedLimit(query.limit, 20, SEARCH_PAGE_MAX));
+    params.push(Math.max(0, Math.floor(query.offset ?? 0)));
 
     try {
       const rows = this.db.query(sql).all(...params) as ChunkRow[];
