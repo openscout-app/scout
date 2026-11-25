@@ -2037,7 +2037,7 @@ async function readExactEndpointTail(
 ): Promise<Awaited<ReturnType<typeof readTailEventsForSession>>> {
   const endpointHarness = canonicalSessionHarness(endpoint.harness);
   const expectedTailSource = endpointHarness === "grok-acp" ? "grok" : endpointHarness;
-  if (!expectedTailSource || !["grok", "kimi", "opencode", "cursor"].includes(expectedTailSource)) {
+  if (!expectedTailSource || !["grok", "kimi", "opencode", "cursor", "antigravity"].includes(expectedTailSource)) {
     return null;
   }
 
