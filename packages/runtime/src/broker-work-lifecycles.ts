@@ -52,6 +52,8 @@ import type { BrokerJournalEntry } from "./broker-journal.js";
 import { applyWorkClaim, dropClaimWhenTerminal, planWorkClaim } from "./broker-work-claims.js";
 
 export interface WorkItemPosition {
+  /** The tracker that owns this work item, or null for native Scout work. */
+  sourceAdapterId: string | null;
   workId: string;
   lifecycleId: string;
   lifecycleVersion: number;
@@ -344,11 +346,11 @@ export function planWorkReview(
     ...(request.note?.trim() ? { note: request.note.trim() } : {}), at: context.now,
   });
   const base = { id: context.eventId, recordId: record.id, recordKind: "work_item" as const, actorId: request.actorId, at: context.now };
-  if (!placement || placement.revision !== move.revision) {
-    return { status: "stale", event: { ...base, kind: "progressed", summary: "Review skipped: the item moved after this move.", metadata: { workReview: review("stale") } } };
-  }
   if (request.revision !== move.revision) {
     throw new WorkLifecycleError(409, `Review revision must match the current move revision ${move.revision}.`);
+  }
+  if (!placement || placement.revision !== move.revision) {
+    return { status: "stale", event: { ...base, kind: "progressed", summary: "Review skipped: the item moved after this move.", metadata: { workReview: review("stale") } } };
   }
   if (request.verdict === "consult") {
     return { status: "consulted", event: { ...base, kind: "progressed", summary: `Review asks for a decision.${request.note ? ` ${request.note}` : ""}`, metadata: { workReview: review("consulted") } } };
@@ -516,6 +518,7 @@ export class BrokerWorkLifecycleService {
     const station = currentWorkStation(machine, { ...record, placement });
     return {
       workId: record.id,
+      sourceAdapterId: record.externalContext?.source?.adapterId ?? null,
       lifecycleId: machine.id,
       lifecycleVersion: machine.version,
       station,

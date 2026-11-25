@@ -1384,6 +1384,18 @@ test("a lost plan response registers its lead on recovery and replay delivers th
   expect((await h.service.dispatcherStatus("c1")).leads[0]).toMatchObject({ done: true, lead: "agent-lead" });
 });
 
+test.each(["adopt first", "settle first"])("registers a legacy lead during remote read-back: %s", (order) => {
+  const { store } = harness();
+  const request = { channel: "work", tasks: [{ text: "Retry", labels: { "scout.plan": "plan-1" } }] };
+  const inFlight = store.enqueue({ connectionId: "c1", clientId: "batch-1", lane: "plan:work", kind: "plan", request });
+  const adopt = () => store.adoptLegacyPlan(inFlight, { planId: "plan-1", lead: "agent-lead", channel: "work", cursor: 20 });
+  if (order === "adopt first") adopt();
+  store.finishOutbox(inFlight, []);
+  if (order === "settle first") adopt();
+  expect(store.plans("c1")).toMatchObject([{ planId: "plan-1", lead: "agent-lead", cursor: 0 }]);
+  expect(store.outboxRow("c1", "batch-1")?.state).toBe("done");
+});
+
 test("the swarm never takes another owner's task, or synced text, that carries a plan label", async () => {
   const h = await swarmHarness();
   const theirs = h.board.createTask({ channel: "work", text: "Theirs", owner: "local:user:teammate", by: "local:user:teammate", labels: { "scout.plan": "work-plan-1" } });

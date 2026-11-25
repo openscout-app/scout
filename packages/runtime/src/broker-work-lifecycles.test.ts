@@ -119,6 +119,9 @@ describe("work lifecycle service", () => {
     const { service } = await setup([workItem({ state: "working" })]);
     const done = await service.move({ workId: "work-1", to: "done", actorId: "agent-1" });
     await service.move({ workId: "work-1", to: "doing", actorId: "agent-1" });
+    const before = service.moves({ workId: "work-1" });
+    await expect(service.review({ workId: "work-1", moveId: done.move!.id, verdict: "confirm", revision: 0 })).rejects.toMatchObject({ status: 409 });
+    expect(service.moves({ workId: "work-1" })).toEqual(before);
     const stale = await service.review({ workId: "work-1", moveId: done.move!.id, verdict: "confirm", revision: done.move!.revision! });
     expect(stale.status).toBe("stale");
   });

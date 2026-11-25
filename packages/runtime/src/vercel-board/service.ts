@@ -406,9 +406,9 @@ export class BrokerVercelBoardService {
       await live.custody.tick();
       if (options.dispatch !== false) await live.dispatcher.pass();
       await live.dispatcher.idle();
+      await live.outbox.drainAll();
       await live.lead.pass();
       await live.lead.idle();
-      await live.outbox.drainAll();
     } catch (error) {
       this.classify(live, error);
       throw error;
@@ -448,7 +448,7 @@ export class BrokerVercelBoardService {
     await this.options.recordWork(projected, {
       project: (existing, incoming) => {
         const merged = mergeBoardProjection(existing, incoming as WorkItemRecord);
-        if (existing?.kind !== "work_item" || existing.state === "done" || task.state !== "completed" || !mine || !this.options.placeWorkChange) {
+        if (existing?.kind !== "work_item" || existing.state === "done" || merged.state !== "done" || task.state !== "completed" || !mine || !this.options.placeWorkChange) {
           return { record: merged };
         }
         const moveId = vercelBoardScopedId("vercel-board-move", config.id, root.id, String(task.epoch));

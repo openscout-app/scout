@@ -255,23 +255,29 @@ export class VercelBoardStore {
 
   /** A confirmed batch and the lead's subscription become visible together. */
   finishOutbox(row: VercelBoardOutboxRow, response: unknown): void {
-    const follow = row.kind === "plan" ? (row.request as { follow?: PlanFollow }).follow : undefined;
     this.database.transaction(() => {
-      if (follow) this.followPlan({ connectionId: row.connectionId, ...follow });
+      if (row.kind === "plan") {
+        // A legacy replay may have attached the lead while the remote read-back was in flight.
+        const current = this.outboxRow(row.connectionId, row.clientId)!;
+        const { follow } = current.request as { follow?: PlanFollow };
+        if (current.state !== "done" && follow) this.followPlan({ connectionId: row.connectionId, ...follow });
+      }
       this.markOutbox(row.connectionId, row.clientId, { state: "done", response });
     })();
   }
 
   /** On explicit replay, older batches can recover the lead their original row did not store. */
   adoptLegacyPlan(row: VercelBoardOutboxRow, follow: PlanFollow): void {
-    const request = row.request as { channel: string; tasks: { labels?: Record<string, string> }[]; follow?: PlanFollow };
-    if (request.follow || request.channel !== follow.channel || request.tasks[0]?.labels?.["scout.plan"] !== follow.planId) return;
+    if ((row.request as { follow?: PlanFollow }).follow) return;
     this.database.transaction(() => {
+      const current = this.outboxRow(row.connectionId, row.clientId)!;
+      const request = current.request as { channel: string; tasks: { labels?: Record<string, string> }[]; follow?: PlanFollow };
+      if (request.follow || request.channel !== follow.channel || request.tasks[0]?.labels?.["scout.plan"] !== follow.planId) return;
       // Start at the beginning of this plan's history. An existing subscription keeps its cursor.
       const saved = { ...request, follow: { ...follow, cursor: 0 } };
       this.database.query("UPDATE vercel_board_outbox SET request = ?3 WHERE connection_id = ?1 AND client_id = ?2")
         .run(row.connectionId, row.clientId, JSON.stringify(saved));
-      if (row.state === "done") this.followPlan({ connectionId: row.connectionId, ...saved.follow });
+      if (current.state === "done") this.followPlan({ connectionId: row.connectionId, ...saved.follow });
     })();
   }
 
