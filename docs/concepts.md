@@ -138,6 +138,16 @@ disposable. Prefer starting a fresh session and re-steering it through the
 durable agent/mission context; use `session:<id>` only when the exact prior
 harness context is required.
 
+**Crew Role.** A crew role is an operator-configured economic and behavioral
+slot in `~/.openscout/crew.json` (with optional project overrides in
+`<project>/.openscout/crew.json`) that maps a timeless working posture — such as
+`architect`, `lane`, `worker`, `systems`, `stylist`, `advisor`, or a custom name
+— to a concrete `RuntimeSpec` and optional fallback rungs. Scout core ships no
+hardcoded model defaults for crew roles; `scout ask --role <role>` and MCP `ask`
+resolve configured slots against live harness and mesh reachability, while an
+explicit `runtime` or `to` target always takes precedence. See
+[`crew.md`](./crew.md).
+
 **Endpoint.** An endpoint attaches an agent identity to one reachable session,
 on a given transport and node. It is the join between the durable target and the
 concrete runtime — the record that says "this agent is currently reachable this

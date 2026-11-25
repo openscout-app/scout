@@ -7,6 +7,13 @@ export const SCOUT_LAUNCHABLE_HARNESSES = [
 
 export type ScoutLaunchableHarness = typeof SCOUT_LAUNCHABLE_HARNESSES[number];
 
+/** Input spellings only: persist and route the canonical harness id. */
+export const SCOUT_RUNTIME_HARNESS_ALIASES: Readonly<Partial<Record<string, ScoutLaunchableHarness>>> = {
+  oc: "opencode",
+  agy: "antigravity",
+  "antigravity-acp": "antigravity",
+};
+
 export const SCOUT_REASONING_EFFORTS = [
   "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ] as const;
@@ -48,6 +55,7 @@ export interface ScoutOwnedRuntimeModel {
   version?: string;
   contextWindowTokens?: number;
   reasoningEfforts?: readonly ScoutReasoningEffort[] | null;
+  /** Explicit null leaves the default level to the provider. */
   defaultReasoningEffort?: ScoutReasoningEffort | null;
   presentation?: ScoutRuntimeModelPresentation;
 }
@@ -66,6 +74,7 @@ export interface ScoutOwnedRuntimeHarness {
   allowCustomModels?: boolean;
   default?: boolean;
   reasoningEfforts: readonly ScoutReasoningEffort[] | null;
+  /** Explicit null leaves the default level to the provider. */
   defaultReasoningEffort?: ScoutReasoningEffort | null;
   presentation?: ScoutRuntimeHarnessPresentation;
   models: readonly ScoutOwnedRuntimeModel[];

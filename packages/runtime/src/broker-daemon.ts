@@ -18,7 +18,7 @@ import { permissionDialogView } from "./agent-notification-builders.js";
 import { conversationIdForSession } from "./session-conversation.js";
 import { BrokerTaskReadyService, TaskReadyError, TaskReadyNotifier, prepareTaskReady, taskReadyEntered } from "./broker-task-ready.js";
 import { BrokerTaskService } from "./broker-tasks.js";
-import { REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
+import { REPLY_POINTS_CAPABILITY, SCOUT_TASKS_CAPABILITY, VERCEL_BOARD_ADAPTER_ID, flightSessionTrace, isValidCrewKey, normalizeCrewKey, type ControlEvent, type ScoutDeliverRequest } from "@openscout/protocol";
 import { readAttachmentHostResponse } from "./attachment-host-response.js";
 import { AttachmentBlobStore } from "./attachment-blob-store.js";
 import { BrokerAttachmentService } from "./broker-attachment-service.js";
@@ -2770,6 +2770,7 @@ async function createCardlessProjectSessionForDelivery(input: {
   execution?: InvocationRequest["execution"];
   projectAgent?: { handle?: string };
   workspace?: "new_worktree";
+  crewRole?: string;
   requesterId: string;
   createdAt: number;
 }) {
@@ -2841,6 +2842,7 @@ async function createCardlessProjectSessionForDelivery(input: {
     ...(input.execution?.reasoningEffort?.trim() ? { reasoningEffort: input.execution.reasoningEffort.trim() } : {}),
     ...(input.execution?.placement ? { placement: input.execution.placement } : {}),
     ...(launchArgs.length > 0 ? { launchArgs } : {}),
+    ...(input.crewRole?.trim() ? { crewRole: input.crewRole.trim() } : {}),
   });
   const endpoint = runtime.snapshot().endpoints[registered.endpointId];
   if (!endpoint) {
@@ -3131,6 +3133,9 @@ async function createIsolatedAgentEndpointForInvocation(
   const launchArgs = launchArgsForCardlessSession(harness, invocation.execution);
   const definitionId = agent.definitionId || agent.id;
   const isolatedAgentName = `${definitionId}-isolated-${sessionId.slice(-8)}`;
+  const crewRole = typeof invocation.metadata?.crewRole === "string" && isValidCrewKey(invocation.metadata.crewRole)
+    ? normalizeCrewKey(invocation.metadata.crewRole)
+    : undefined;
   const sessionEndpoint = buildCardlessSessionEndpoint({
     sessionId,
     handle: isolatedAgentName,
@@ -3146,6 +3151,7 @@ async function createIsolatedAgentEndpointForInvocation(
       : {}),
     ...(invocation.execution?.placement ? { placement: invocation.execution.placement } : {}),
     ...(launchArgs.length > 0 ? { launchArgs } : {}),
+    ...(crewRole ? { crewRole } : {}),
     viaCard: definitionId,
   });
   return {

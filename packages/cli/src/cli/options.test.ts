@@ -525,6 +525,12 @@ describe("parseAskCommandOptions", () => {
     }));
   });
 
+  test("canonicalizes the Antigravity transport spelling before merging runtime dimensions", () => {
+    expect(parseAskCommandOptions(
+      ["--runtime", "antigravity-acp/gemini-4-neon/xhigh", "--harness", "agy", "review"], "/repo",
+    )).toMatchObject({ harness: "antigravity", model: "gemini-4-neon", reasoningEffort: "xhigh" });
+  });
+
   test("uses profiles as presets and fails conflicting RuntimeSpec flags closed", () => {
     expect(parseAskCommandOptions(
       ["--profile", "fable", "--model", "claude-opus-5", "--effort", "max", "review"],
@@ -862,4 +868,40 @@ test("positional route rewrites preserve flags and shell-quote literal payload",
 test.each(["ref:1-ti4i2u", "1-ti4i2u", "flt-example"])("normalizes continuation ref %s", ref => {
   const parsed = parseAskCommandOptions(["--continue", ref, "next"], "/tmp/workspace");
   expect(parsed.task?.continue).toBe(ref.replace(/^ref:/, ""));
+});
+
+describe("ask --role", () => {
+  test("parses --role as a launch target and infers the current project", () => {
+    const parsed = parseAskCommandOptions(["--role", "worker", "run the tests"], "/tmp/repo");
+    expect(parsed).toMatchObject({
+      role: "worker",
+      projectPath: "/tmp/repo",
+      session: "new",
+      message: "run the tests",
+    });
+  });
+
+  test("allows explicit --runtime or --to alongside --role so precedence can be applied at dispatch", () => {
+    const withRuntime = parseAskCommandOptions(
+      ["--role", "worker", "--runtime", "antigravity/gemini-fixture", "run the tests"],
+      "/tmp/repo",
+    );
+    expect(withRuntime).toMatchObject({
+      role: "worker",
+      runtimeLiteral: "antigravity/gemini-fixture",
+      harness: "antigravity",
+      model: "gemini-fixture",
+      message: "run the tests",
+    });
+
+    const withTarget = parseAskCommandOptions(
+      ["--role", "worker", "--to", "reviewer", "check this"],
+      "/tmp/repo",
+    );
+    expect(withTarget).toMatchObject({
+      role: "worker",
+      targetLabel: "reviewer",
+      message: "check this",
+    });
+  });
 });

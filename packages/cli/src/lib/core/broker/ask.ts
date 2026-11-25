@@ -560,6 +560,7 @@ const submitAsk: ScoutAskHandler = async (command) => {
     executionReasoningEffort: command.reasoningEffort,
     executionPlacement: command.placement,
     executionSource: command.executionSource,
+    crewRole: command.crewRole,
     executionSession: executionSessionForAsk(host ? command.session ?? "new" : command.session),
     workspace: command.workspace,
     senderContext,

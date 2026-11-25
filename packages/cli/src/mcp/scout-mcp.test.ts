@@ -821,8 +821,12 @@ describe("createScoutMcpServer", () => {
         return {
           ok: true,
           state: "queued",
+          executionResolution: {
+            schemaVersion: "openscout.execution-resolution.v1", harness: { drift: "unknown" },
+            model: { drift: "unknown" }, reasoningEffort: { drift: "unknown" },
+          },
           ids: {
-            targetAgentId: "talkie.main",
+            targetAgentId: "talkie.main", sessionId: "session-1", sessionAlias: "project-worker",
             invocationId: "inv-1",
             flightId: "flt-1",
           },
@@ -830,15 +834,22 @@ describe("createScoutMcpServer", () => {
       },
     });
 
+    // Discovery enables the SDK's strict output-schema validation for the receipt.
+    await client.listTools();
     const result = await client.callTool({
       name: "ask",
       arguments: {
         projectPath: "talkie",
+        harness: "antigravity-acp",
+        runtime: "antigravity/gemini-4-neon/high",
         body: "How did you handle auth?",
       },
     });
 
     expect(receivedAsk).toMatchObject({
+      harness: "antigravity",
+      model: "gemini-4-neon",
+      reasoningEffort: "high",
       senderId: "operator.main",
       projectPath: "/tmp/openscout-test/talkie",
       body: "How did you handle auth?",
@@ -2088,6 +2099,7 @@ describe("createScoutMcpServer", () => {
       askQuestion: async () => ({ usedBroker: true }),
       askAgentById: async () => ({ usedBroker: true }),
       getFlight: async () => ({
+        sessionId: "session-1",
         id: "flight-1",
         invocationId: "inv-1",
         requesterId: "operator",
@@ -2111,6 +2123,7 @@ describe("createScoutMcpServer", () => {
       OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test",
     });
 
+    await client.listTools();
     const result = await client.callTool({
       name: "invocations_wait",
       arguments: {
@@ -2920,4 +2933,134 @@ test("derived_read, derived_write and derived_pending go through their broker de
     ["write", { workId: "work-1", kind: "presentation", sourceVersion: "r3.u200", body: { primary: "shot-1" }, producerId: "agent-curator", producerKind: "agent", producerVersion: "curator@2" }],
     ["pending", 5],
   ]);
+});
+
+describe("MCP crew role resolution and whoami summary", () => {
+  test("ask resolves role, walks fallback, honors explicit runtime/to override, accepts antigravity runtime, and errors clearly when unconfigured", async () => {
+    const receivedCommands: Array<Record<string, unknown>> = [];
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "lane-owner",
+      scoutAskHandler: async (command) => {
+        receivedCommands.push(command as unknown as Record<string, unknown>);
+        return {
+          ok: true,
+          state: "queued",
+          ids: { flightId: "flt-crew-1", invocationId: "inv-crew-1" },
+        };
+      },
+      resolveCrewRole: async (role) => {
+        if (role === "worker") {
+          return {
+            ok: true,
+            role: "worker",
+            source: "global",
+            binding: { runtime: "codex", fallback: ["antigravity/gemini-fixture"] },
+            profile: null,
+            selectedRuntime: "antigravity/gemini-fixture",
+            selectedSpec: { harness: "antigravity", model: "gemini-fixture" },
+            usedFallback: true,
+            rungs: [],
+            issues: [],
+          };
+        }
+        return {
+          ok: false,
+          code: "role_unconfigured",
+          role,
+          error: `crew role "${role}" is not configured. Configure it with: scout crew set ${role} <runtime>`,
+          issues: [],
+        };
+      },
+    });
+
+    // 1. Role resolves through fallback
+    const byRole = await client.callTool({
+      name: "ask",
+      arguments: { role: "worker", body: "Run package tests" },
+    });
+    expect((byRole.structuredContent as { ok: boolean }).ok).toBe(true);
+    expect(receivedCommands[0]).toMatchObject({
+      harness: "antigravity",
+      model: "gemini-fixture",
+      runtimeLiteral: "antigravity/gemini-fixture",
+      crewRole: "worker",
+    });
+
+    // 2. Explicit runtime takes precedence over role (including antigravity/<model>) and clears ignored crewRole
+    const withExplicitRuntime = await client.callTool({
+      name: "ask",
+      arguments: { role: "unconfigured", runtime: "antigravity/gemini-fixture", body: "Check layout" },
+    });
+    expect((withExplicitRuntime.structuredContent as { ok: boolean }).ok).toBe(true);
+    expect(receivedCommands[1]).toMatchObject({
+      harness: "antigravity",
+      model: "gemini-fixture",
+      runtimeLiteral: "antigravity/gemini-fixture",
+    });
+    expect(receivedCommands[1]?.crewRole).toBeUndefined();
+
+    // 3. Explicit to takes precedence over role and clears ignored crewRole
+    const withExplicitTo = await client.callTool({
+      name: "ask",
+      arguments: { role: "unconfigured", to: "reviewer", body: "Review PR" },
+    });
+    expect((withExplicitTo.structuredContent as { ok: boolean }).ok).toBe(true);
+    expect(receivedCommands[2]).toMatchObject({
+      to: "reviewer",
+    });
+    expect(receivedCommands[2]?.crewRole).toBeUndefined();
+
+    // 4. Unconfigured role without explicit override returns actionable error
+    const unconfigured = await client.callTool({
+      name: "ask",
+      arguments: { role: "advisor", body: "Critique this design" },
+    });
+    expect(unconfigured.structuredContent).toMatchObject({
+      ok: false,
+      state: "failed",
+      error: {
+        code: "invalid_request",
+        message: expect.stringContaining("scout crew set advisor <runtime>"),
+      },
+    });
+  });
+
+  test("whoami surfaces compact crew summary with available roles and active seat posture", async () => {
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "lane-owner",
+      loadCrewSummary: async () => ({
+        activePreset: "balanced",
+        activeSeat: {
+          role: "lane",
+          runtime: "antigravity/gemini-fixture",
+          profile: {
+            id: "lane",
+            label: "Lane owner",
+            economics: "Strong judgment + high efficiency · one per active lane",
+            posture: "Owns a coherent lane end-to-end.",
+          },
+        },
+        availableRoles: [
+          { role: "lane", runtime: "antigravity/gemini-fixture" },
+          { role: "worker", runtime: "codex", pool: 4 },
+        ],
+      }),
+    });
+
+    const whoami = await client.callTool({
+      name: "whoami",
+      arguments: { currentDirectory: "/tmp/repo" },
+    });
+    expect(whoami.structuredContent).toMatchObject({
+      defaultSenderId: "lane-owner",
+      crew: {
+        activePreset: "balanced",
+        activeSeat: { role: "lane", runtime: "antigravity/gemini-fixture" },
+        availableRoles: [
+          { role: "lane", runtime: "antigravity/gemini-fixture" },
+          { role: "worker", runtime: "codex", pool: 4 },
+        ],
+      },
+    });
+  });
 });

@@ -9,6 +9,7 @@ import {
 describe("runtime profile syntax", () => {
   test("publishes only deterministic reserved natural-language names", () => {
     expect(SCOUT_RESERVED_RUNTIME_PROFILE_IDS).toEqual([
+      "antigravity",
       "fable",
       "kimi",
       "grok",

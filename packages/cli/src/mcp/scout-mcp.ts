@@ -13,6 +13,8 @@ import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
 import { registerDiffTools } from "./diff-tools.ts";
 import { loadScoutMeshOverview, renderScoutMeshOverviewLines, type ScoutMeshMachine, type ScoutMeshOverview } from "../lib/core/mesh/overview.ts";
+import { loadCliCrewWhoAmISummary, resolveCliCrewRoleForAsk } from "../lib/core/crew/service.ts";
+import type { CrewRoleAskResolution } from "@openscout/runtime/crew";
 import {
   detectCurrentLiveTerminalSession,
   type LiveTerminalDetection,
@@ -30,12 +32,15 @@ import {
   BUILT_IN_AGENT_DEFINITION_IDS,
   diagnoseAgentIdentity,
   flightCompletion,
+  FLIGHT_WAITING_ON_KINDS,
   type ScoutCompletionReply,
   formatMinimalAgentIdentity,
   parseScoutRuntimeSpec,
   parseAgentIdentity,
   parseScoutComposerRouteTarget,
+  normalizeScoutLaunchableHarness,
   SCOUT_LAUNCHABLE_HARNESSES,
+  SCOUT_RUNTIME_HARNESS_ALIASES,
   SCOUT_REASONING_EFFORTS,
   SCOUT_RESERVED_RUNTIME_PROFILE_IDS,
   validateScoutAgentNameForWrite,
@@ -47,6 +52,7 @@ import {
   type ScoutReplyContext,
   type RouteAliasBinding,
   type RouteAliasResolveResult,
+  type CrewWhoAmISummary,
 } from "@openscout/protocol";
 import {
   findNearestProjectRoot,
@@ -659,10 +665,23 @@ type ScoutMcpDependencies = {
   ) => Promise<ScoutLabelFeed | null>;
   loadMeshOverview?: (machine?: string) => Promise<ScoutMeshOverview>;
   readDecisions?: typeof readBrokerDecisions;
+  resolveCrewRole?: (
+    role: string,
+    options: { currentDirectory: string; env: NodeJS.ProcessEnv },
+  ) => Promise<CrewRoleAskResolution>;
+  loadCrewSummary?: (options: {
+    currentDirectory: string;
+    env: NodeJS.ProcessEnv;
+  }) => Promise<CrewWhoAmISummary | null>;
 };
 
 const flightSchema = z.object({
   id: z.string(),
+  sessionId: z.string().optional(),
+  waitingOn: z.object({
+    kind: z.enum(FLIGHT_WAITING_ON_KINDS), summary: z.string(), since: z.number(),
+    requestRef: z.string().optional(), replyMessageId: z.string().optional(),
+  }).optional(),
   invocationId: z.string(),
   requesterId: z.string(),
   targetAgentId: z.string(),
@@ -939,10 +958,36 @@ const localAgentStatusSchema = z.object({
   source: z.string(),
 });
 
+const crewSlotProfileSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  economics: z.string(),
+  posture: z.string(),
+});
+
+const crewWhoAmISummarySchema = z.object({
+  activePreset: z.string().optional(),
+  activeSeat: z.object({
+    role: z.string(),
+    profile: crewSlotProfileSchema.nullable(),
+    runtime: z.string().optional(),
+    note: z.string().optional(),
+  }).optional(),
+  availableRoles: z.array(z.object({
+    role: z.string(),
+    runtime: z.string(),
+    host: z.string().optional(),
+    pool: z.number().int().min(1).optional(),
+    usedFallback: z.boolean().optional(),
+    economics: z.string().optional(),
+  })),
+});
+
 const whoAmISchema = z.object({
   currentDirectory: z.string(),
   brokerUrl: z.string(),
   defaultSenderId: z.string(),
+  crew: crewWhoAmISummarySchema.optional(),
 });
 
 const brokerMessageSchema = z
@@ -1378,6 +1423,7 @@ const askReceiptSchema = z.object({
   workPageUnavailable: z.literal(true).optional(),
   notificationStatus: z.enum(["not_requested", "requested_unconfirmed"]).optional(),
   workerInterrupted: z.boolean().optional(),
+  executionResolution: z.object({ schemaVersion: z.literal("openscout.execution-resolution.v1") }).catchall(z.unknown()).optional(),
   completion: completionStateSchema.extend({ invocationId: z.string(), flightId: z.string() }).optional(),
   parentCompletion: z.object({ flightId: z.string(), revision: z.number().int().min(0) }).optional(),
   links: followLinksSchema.optional(),
@@ -1386,6 +1432,8 @@ const askReceiptSchema = z.object({
   state: z.enum(["queued", "completed", "failed", "ambiguous"]),
   ids: z.object({
     targetAgentId: z.string().optional(),
+    sessionId: z.string().optional(),
+    sessionAlias: z.string().optional(),
     invocationId: z.string().optional(),
     flightId: z.string().optional(),
     conversationId: z.string().optional(),
@@ -3725,10 +3773,19 @@ export function createScoutMcpServer(options: {
         resolvedCurrentDirectory,
         env,
       );
+      const crewSummary = await (deps.loadCrewSummary ?? ((input) => loadCliCrewWhoAmISummary({
+        currentDirectory: input.currentDirectory,
+        env: input.env,
+        loadMeshOverview: deps.loadMeshOverview,
+      })))({
+        currentDirectory: resolvedCurrentDirectory,
+        env,
+      });
       const structuredContent = {
         currentDirectory: resolvedCurrentDirectory,
         brokerUrl: deps.resolveBrokerUrl(),
         defaultSenderId,
+        ...(crewSummary ? { crew: crewSummary } : {}),
       };
       return {
         content: createTextContent(structuredContent),
@@ -4650,12 +4707,17 @@ export function createScoutMcpServer(options: {
         runtime: z
           .string()
           .optional()
-          .describe("Shell-safe RuntimeSpec: harness[/model[/effort]], such as codex/gpt-5.6-sol/xhigh."),
+          .describe("Shell-safe RuntimeSpec: harness[/model[/effort]], such as codex/gpt-5.6-sol/xhigh or antigravity/gemini-4-neon/high."),
+        role: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Crew role slot from crew.json (e.g. worker, systems, advisor); walks fallback rungs if primary harness is unavailable. Explicit runtime or to always takes precedence."),
         profile: z
           .enum(SCOUT_RESERVED_RUNTIME_PROFILE_IDS)
           .optional()
           .describe("Runtime preset base. Explicit harness/model/reasoningEffort fields may override compatible dimensions."),
-        harness: z.enum(LOCAL_AGENT_HARNESS_VALUES).optional(),
+        harness: z.enum([...LOCAL_AGENT_HARNESS_VALUES, ...Object.keys(SCOUT_RUNTIME_HARNESS_ALIASES)]).optional(),
         model: z.string().min(1).optional(),
         reasoningEffort: z.enum(SCOUT_REASONING_EFFORTS).optional(),
         placement: z
@@ -4711,8 +4773,9 @@ export function createScoutMcpServer(options: {
       replyMode,
       timeoutSeconds,
       runtime,
+      role,
       profile,
-      harness,
+      harness: inputHarness,
       model,
       reasoningEffort,
       placement,
@@ -4745,6 +4808,30 @@ export function createScoutMcpServer(options: {
       if (to && targetSessionId) throw new Error("use exactly one of to or targetSessionId");
       const targetSession = targetSessionId?.trim();
       const targetTo = targetSession ? `session:${targetSession}` : to?.trim();
+      const harness = normalizeScoutLaunchableHarness(inputHarness) ?? undefined;
+      const shouldResolveRole = Boolean(
+        role?.trim()
+        && !targetTo
+        && !runtime
+        && !harness
+        && !profile
+        && !operator
+        && !ref
+        && !predecessor
+        && !channel,
+      );
+      const crewResolution = shouldResolveRole
+        ? await (deps.resolveCrewRole ?? ((r, o) => resolveCliCrewRoleForAsk(r, {
+            currentDirectory: o.currentDirectory,
+            env: o.env,
+            loadMeshOverview: deps.loadMeshOverview,
+          })))(role!.trim(), {
+            currentDirectory: resolvedCurrentDirectory,
+            env,
+          })
+        : null;
+      const effectiveRuntime = runtime ?? (crewResolution?.ok ? crewResolution.selectedRuntime : undefined);
+      const effectiveOnHost = onHost?.trim() || (crewResolution?.ok ? crewResolution.selectedHost : undefined);
       const parsedRuntime = runtime ? parseScoutRuntimeSpec(runtime) : null;
       const runtimeConflict = parsedRuntime?.ok
         ? ([
@@ -4755,16 +4842,21 @@ export function createScoutMcpServer(options: {
             explicit && literal && explicit.toLowerCase() !== literal.toLowerCase()
           ))
         : undefined;
-      const resolvedHarness = harness ?? (parsedRuntime?.ok ? parsedRuntime.value.harness : undefined);
-      const resolvedModel = model ?? (parsedRuntime?.ok ? parsedRuntime.value.model : undefined);
+      const resolvedHarness = harness
+        ?? (parsedRuntime?.ok ? parsedRuntime.value.harness : undefined)
+        ?? (crewResolution?.ok ? crewResolution.selectedSpec.harness : undefined);
+      const resolvedModel = model
+        ?? (parsedRuntime?.ok ? parsedRuntime.value.model : undefined)
+        ?? (crewResolution?.ok ? crewResolution.selectedSpec.model : undefined);
       const resolvedReasoningEffort = reasoningEffort
-        ?? (parsedRuntime?.ok ? parsedRuntime.value.reasoningEffort : undefined);
+        ?? (parsedRuntime?.ok ? parsedRuntime.value.reasoningEffort : undefined)
+        ?? (crewResolution?.ok ? crewResolution.selectedSpec.reasoningEffort : undefined);
       // A path on another machine is that machine's to resolve.
-      const targetProjectPath = projectPath?.trim() && onHost?.trim()
+      const targetProjectPath = projectPath?.trim() && effectiveOnHost
         ? projectPath.trim()
         : projectPath?.trim()
         ? resolve(resolvedCurrentDirectory, projectPath.trim())
-        : !operator && !ref && !predecessor && !channel && !targetTo && !profile && (runtime || resolvedHarness || resolvedModel || resolvedReasoningEffort)
+        : !operator && !ref && !predecessor && !channel && !targetTo && !profile && (effectiveRuntime || resolvedHarness || resolvedModel || resolvedReasoningEffort || shouldResolveRole)
           ? resolvedCurrentDirectory
         : undefined;
       // The callback file is read on this side: the task may run on another host.
@@ -4776,10 +4868,17 @@ export function createScoutMcpServer(options: {
       const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window,
         ...(taskCallback ? { callback: taskCallback } : {}), ...(taskDecision ? { decision: taskDecision.decision } : {}) };
       validateTaskAsk(task, { to: targetTo, channel, capability: !predecessor && Boolean(targetProjectPath || profile),
-        execution: Boolean(runtime || harness || model || reasoningEffort || placement || onHost || projectPath || profile || workspace === "new_worktree" || session === "new"), relation: Boolean(relation),
+        execution: Boolean(effectiveRuntime || harness || model || reasoningEffort || placement || effectiveOnHost || projectPath || profile || shouldResolveRole || workspace === "new_worktree" || session === "new"), relation: Boolean(relation),
         decisionImages: taskDecision?.images.length ?? 0 });
       const taskImage = image ? await readTaskImage(resolve(resolvedCurrentDirectory, image)) : undefined;
-      let structuredContent: ScoutAskReceipt = parsedRuntime && !parsedRuntime.ok
+      let structuredContent: ScoutAskReceipt = crewResolution && !crewResolution.ok
+        ? {
+            ok: false,
+            state: "failed" as const,
+            ids: {},
+            error: { code: "invalid_request" as const, message: crewResolution.error },
+          }
+        : parsedRuntime && !parsedRuntime.ok
         ? {
             ok: false,
             state: "failed" as const,
@@ -4837,8 +4936,9 @@ export function createScoutMcpServer(options: {
             ...(resolvedModel ? { model: resolvedModel } : {}),
             ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
             ...(placement ? { placement } : {}),
-            ...(runtime ? { runtimeLiteral: runtime } : {}),
-            ...((runtime || harness || model || reasoningEffort) ? {
+            ...(effectiveRuntime ? { runtimeLiteral: effectiveRuntime } : {}),
+            ...(crewResolution?.ok ? { crewRole: crewResolution.role } : {}),
+            ...((effectiveRuntime || harness || model || reasoningEffort) ? {
               executionSource: {
                 ...(resolvedHarness
                   ? { harness: harness ? "flag" as const : "literal" as const }
@@ -4862,7 +4962,7 @@ export function createScoutMcpServer(options: {
             replyMode: resolvedReplyMode,
             currentDirectory: resolvedCurrentDirectory,
             source: "scout-mcp",
-            ...(onHost?.trim() ? { host: onHost.trim() } : {}),
+            ...(effectiveOnHost ? { host: effectiveOnHost } : {}),
             aliasScope: aliasProject || aliasHost ? {
               ...(aliasProject ? { projectRoot: resolve(resolvedCurrentDirectory, aliasProject) } : {}),
               ...(aliasHost ? { nodeId: aliasHost } : {}),

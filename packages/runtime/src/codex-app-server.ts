@@ -65,6 +65,7 @@ export type {
 type SessionRequestOptions = CodexAppServerSessionOptions & {
   approvalPolicy?: CodexApprovalPolicy;
   sandbox?: CodexSandboxMode;
+  crewRole?: string;
 };
 
 type InvocationOptions = CodexAppServerInvocationOptions & SessionRequestOptions;
@@ -1112,6 +1113,7 @@ function withManagedCodexEnvironment<T extends SessionRequestOptions>(options: T
     processEnv: buildManagedAgentEnvironment({
       agentName: options.agentName,
       currentDirectory: options.cwd,
+      ...(options.crewRole ? { crewRole: options.crewRole } : {}),
       baseEnv,
     }),
   };

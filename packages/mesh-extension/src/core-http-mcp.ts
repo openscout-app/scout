@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js';
-import { diagnoseAgentIdentity, parseAgentIdentity, namedChannelNaturalKey, systemChannelNaturalKey, stableChannelId, parseScoutComposerRouteTarget, parseScoutRuntimeSpec, SCOUT_MCP_CORE_TOOL_NAMES, type McpEventPrincipal } from '@openscout/protocol';
+import { diagnoseAgentIdentity, parseAgentIdentity, namedChannelNaturalKey, systemChannelNaturalKey, stableChannelId, parseScoutComposerRouteTarget, normalizeScoutLaunchableHarness, parseScoutRuntimeSpec, SCOUT_MCP_CORE_TOOL_NAMES, type McpEventPrincipal } from '@openscout/protocol';
 import definitions from './core-tools.json';
 import { RuntimeHttpClient, RuntimeHttpError } from './http-client.ts';
 
@@ -179,6 +179,16 @@ export class CoreHttpAdapter {
       const isAsk = !a.fyi, operator = a.operator === true;
       if (a.callback) throw new Error('callback paths are host-local; send the ask through a local Scout client');
       if (a.decision) throw new Error('decision cards read local pictures; send the ask through a local Scout client');
+      if (a.role && !a.to && !a.targetSessionId && !a.targetAgentId && !a.targetLabel && !a.runtime && !a.harness && !a.profile && !operator && !a.ref && !a.continue && !a.channel) {
+        throw new Error('crew.json role bindings are host-local; pass an explicit runtime or target, or send the ask through a local Scout client');
+      }
+      if (!a.projectPath && !a.on && !operator && !a.ref && !a.continue && !a.channel && !a.to && !a.targetSessionId && !a.targetAgentId && !a.targetLabel
+        && (a.runtime || a.harness || a.model || a.reasoningEffort || a.profile)) {
+        // A portable client can default only to a project configured on the bridge.
+        const project = this.options.currentDirectory;
+        if (!project || project === '/') throw new Error('runtime launch requires an explicit projectPath');
+        a.projectPath = project;
+      }
       const task = { version: 1, ...pick(a, ['operator','ref','continue','cancel','fyi','notify','defaultAction','options','permission','because','window']) } as import('@openscout/protocol').ScoutTaskAsk;
       validateTaskAsk(task, { to: a.to ?? a.targetSessionId, channel: a.channel, capability: !a.continue && Boolean(a.projectPath || a.profile),
         execution: Boolean(a.harness || a.model || a.reasoningEffort || a.on || a.runtime || a.placement || a.projectPath), relation: Boolean(a.relation) });
@@ -186,7 +196,6 @@ export class CoreHttpAdapter {
       if (!node.capabilities?.includes(SCOUT_TASKS_CAPABILITY)) throw new Error(`runtime requires ${SCOUT_TASKS_CAPABILITY}`);
       if (a.image) throw new Error('image paths are host-local; submit inline evidence through a local Scout client');
       a.requestId ??= `ask-${randomUUID()}`;
-      if (a.profile && !a.projectPath) { if (!this.options.currentDirectory || this.options.currentDirectory === '/') throw new Error('profile requires an explicit projectPath');a.projectPath = this.options.currentDirectory; }
       if (a.on && !a.continue && (!a.projectPath || a.to || a.targetSessionId || a.profile)) throw new Error('on requires projectPath and cannot combine with an exact target or profile');
       if (a.continue && (a.on || a.projectPath)) task.successor = { host: a.on, projectPath: a.projectPath };
       let target = a.ref || a.continue ? { kind: 'binding_ref', ref: a.ref ?? a.continue } : operator ? { kind: 'agent_id', agentId: 'operator' } : a.targetAgentId ? { kind: 'agent_id', agentId: a.targetAgentId }
@@ -197,9 +206,10 @@ export class CoreHttpAdapter {
       if (!target) throw new Error('one explicit target or project is required');
       if ((a.completion || a.relation) && (!a.requestId || !['agent_id','session_id'].includes(target.kind))) throw new Error('completion requires requestId and an exact target');
       let execution = pick(a,['harness','model','reasoningEffort','placement']);
+      if (a.harness) execution.harness = normalizeScoutLaunchableHarness(a.harness);
       if (a.runtime) {
-        const spec = parseScoutRuntimeSpec(a.runtime);if (!spec.ok) throw new Error('invalid runtime specification');
-        for (const [key,value] of Object.entries(spec.value)) if (execution[key] !== undefined && execution[key] !== value) throw new Error(`conflicting runtime field ${key}`);
+        const spec = parseScoutRuntimeSpec(a.runtime);if (!spec.ok) throw new Error(`invalid runtime specification: ${spec.error}`);
+        for (const [key,value] of Object.entries(spec.value)) if (execution[key] !== undefined && execution[key].toLowerCase() !== value.toLowerCase()) throw new Error(`conflicting runtime field ${key}`);
         execution = { ...spec.value, ...execution };
       }
       if (target.kind === 'session_id') a.targetSessionId = target.sessionId;

@@ -1,5 +1,5 @@
 import {
-  isScoutLaunchableHarness,
+  normalizeScoutLaunchableHarness,
   normalizeAgentSelectorSegment,
   parseScoutRuntimeSpec,
   SCOUT_REASONING_EFFORTS,
@@ -163,7 +163,7 @@ export function normalizeRuntimePresetId(raw: unknown): string {
   if ((SCOUT_RESERVED_RUNTIME_PROFILE_IDS as readonly string[]).includes(id)) {
     throw new Error(`runtime preset id "${id}" is a reserved runtime profile name`);
   }
-  if (isScoutLaunchableHarness(id)) {
+  if (normalizeScoutLaunchableHarness(id)) {
     throw new Error(`runtime preset id "${id}" collides with a launchable harness`);
   }
   if ((SCOUT_REASONING_EFFORTS as readonly string[]).includes(id)) {

@@ -113,7 +113,7 @@ function model(value: unknown, path: string, errors: string[]): ScoutOwnedRuntim
     ...(input.reasoningEfforts !== undefined ? { reasoningEfforts: efforts ?? null } : {}),
     ...(defaultEffort && reasoningEfforts.has(defaultEffort)
       ? { defaultReasoningEffort: defaultEffort as ScoutReasoningEffort }
-      : {}),
+      : input.defaultReasoningEffort === null ? { defaultReasoningEffort: null } : {}),
     ...(input.presentation !== undefined
       ? { presentation: presentation(input.presentation, `${path}.presentation`, errors, ["detail"]) }
       : {}),
@@ -179,7 +179,7 @@ function harness(value: unknown, path: string, errors: string[]): ScoutOwnedRunt
     reasoningEfforts: efforts,
     ...(defaultEffort && reasoningEfforts.has(defaultEffort)
       ? { defaultReasoningEffort: defaultEffort as ScoutReasoningEffort }
-      : {}),
+      : input.defaultReasoningEffort === null ? { defaultReasoningEffort: null } : {}),
     ...(input.presentation !== undefined
       ? { presentation: presentation(input.presentation, `${path}.presentation`, errors, ["short", "monogram"]) }
       : {}),

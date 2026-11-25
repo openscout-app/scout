@@ -143,8 +143,7 @@ export type CreateLocalAgentClientOptions = {
   adapterOptions?: Record<string, unknown>;
   warmth?: LocalAgentWarmth;
   model?: string;
-  /** Codex reasoning effort ("low" | "medium" | ...) — translated to a
-   * model_reasoning_effort config override in the app-server launch args. */
+  /** Reasoning level for transports that support it (Codex app-server and Antigravity ACP). */
   reasoningEffort?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -356,6 +355,7 @@ function buildAdapterOptions(options: {
   transport: LocalAgentTransport;
   systemPrompt?: string;
   model?: string;
+  reasoningEffort?: string;
   reuseKey?: string;
   adapterOptions?: Record<string, unknown>;
 }): Record<string, unknown> {
@@ -382,6 +382,7 @@ function buildAdapterOptions(options: {
     ...(options.transport === "opencode_acp" && options.model ? { model: options.model } : {}),
     // V2 takes `provider/model#variant` and sets it on the new native session.
     ...(options.transport === "opencode_v2" && options.model ? { model: options.model } : {}),
+    ...(options.transport === "antigravity_acp" && options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
     // Devin applies this model at launch. Antigravity confirms it on the ACP session.
     ...((options.transport === "devin_acp" || options.transport === "antigravity_acp") && options.model ? { model: options.model } : {}),
   };
@@ -652,8 +653,14 @@ function metadataFromSnapshot(snapshot: SessionState | null, turn: TurnState | u
     return undefined;
   }
 
+  const { model, reasoningEffort } = snapshot.session;
+  const observedAt = nestedRecord(snapshot.session.providerMeta, "acp")?.configObservedAt;
   return {
     adapterType: snapshot.session.adapterType,
+    ...(snapshot.session.adapterType === "antigravity-acp" && typeof observedAt === "number" ? {
+      observedRuntime: { harness: "antigravity", model, reasoningEffort },
+      observedRuntimeAt: observedAt,
+    } : {}),
     providerMeta: snapshot.session.providerMeta ?? {},
     ...(turn
       ? {
@@ -888,6 +895,7 @@ export async function createLocalAgentClient(
         transport,
         systemPrompt: options.systemPrompt,
         model,
+        reasoningEffort: options.reasoningEffort,
         reuseKey: options.reuseKey,
         adapterOptions: options.adapterOptions,
       }),

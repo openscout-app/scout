@@ -133,7 +133,7 @@
   },
   "limitations": [
     "Uses credentials cached by the native Antigravity CLI. Interactive Google sign-in belongs to the operator.",
-    "The provider must confirm an explicitly requested model before Scout sends a prompt. Run agy models for account-specific IDs.",
+    "The provider must confirm the requested model and thought level before Scout sends a prompt. Run agy models for account-specific IDs.",
     "The shared ACP normalizer handles events. An authenticated Antigravity transcript fixture is pending."
   ]
 }

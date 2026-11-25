@@ -11,6 +11,7 @@ export interface CursorAcpInvocationOptions {
   name?: string;
   timeoutMs?: number;
   hardCeilingMs?: number;
+  crewRole?: string;
 }
 
 export type CursorAcpInvocationResult = AcpAgentInvocationResult;

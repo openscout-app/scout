@@ -349,6 +349,12 @@
       "import": "./dist/user-config-fields.js",
       "default": "./dist/user-config-fields.js"
     },
+    "./crew": {
+      "bun": "./src/crew.ts",
+      "types": "./dist/crew.d.ts",
+      "import": "./dist/crew.js",
+      "default": "./dist/crew.js"
+    },
     "./harness-model-preferences": {
       "bun": "./src/harness-model-preferences.ts",
       "types": "./dist/harness-model-preferences.d.ts",

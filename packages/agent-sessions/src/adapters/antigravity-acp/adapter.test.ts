@@ -11,7 +11,9 @@ afterEach(() => {
 
 type ModelSelection = Array<{ id: string; currentValue: string }>;
 
-function fixture(model?: string, selected?: ModelSelection, nativeSessionId?: string, signedOut = false) {
+function fixture({ model, selected, nativeSessionId, signedOut, reasoningEffort }: {
+  model?: string; selected?: ModelSelection; nativeSessionId?: string; signedOut?: boolean; reasoningEffort?: string;
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "scout-antigravity-"));
   roots.push(dir);
   const log = join(dir, "methods");
@@ -22,7 +24,7 @@ import { createInterface } from "node:readline";
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, method, params } = JSON.parse(line);
   appendFileSync(process.env.METHOD_LOG, JSON.stringify({ method, params, args: process.argv.slice(2) }) + "\\n");
-  if (process.env.SIGNED_OUT && method === "session/new") {
+  if (process.env.SIGNED_OUT && ["session/new", "session/load"].includes(method)) {
     console.log(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: "Authentication required" } }));
     continue;
   }
@@ -37,7 +39,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     adapter: createAdapter({
       sessionId: "scout-session", name: "Antigravity", cwd: dir,
       env: { METHOD_LOG: log, ...(signedOut ? { SIGNED_OUT: "1" } : {}), ...(selected ? { SELECTION: JSON.stringify(selected) } : {}) },
-      options: { command, model, sessionId: nativeSessionId, startupTimeoutMs: 3000 },
+      options: { command, model, reasoningEffort, sessionId: nativeSessionId, startupTimeoutMs: 3000 },
     }),
     calls: () => readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)),
   };
@@ -53,7 +55,7 @@ test("starts the native stdio harness using its Google login and default model",
 });
 
 test("selects the exact native model after loading a saved session", async () => {
-  const { adapter, calls } = fixture("gemini-fixture", undefined, "native-session");
+  const { adapter, calls } = fixture({ model: "gemini-fixture", nativeSessionId: "native-session" });
   try {
     await adapter.start();
     expect(calls().map(call => call.method)).toEqual(["initialize", "session/load", "session/set_config_option"]);
@@ -62,7 +64,7 @@ test("selects the exact native model after loading a saved session", async () =>
 });
 
 test("rejects an unconfirmed model before sending any prompt", async () => {
-  const { adapter, calls } = fixture("gemini-fixture", [{ id: "model", currentValue: "other-model" }]);
+  const { adapter, calls } = fixture({ model: "gemini-fixture", selected: [{ id: "model", currentValue: "other-model" }] });
   try {
     await expect(adapter.start()).rejects.toThrow("did not confirm model");
     expect(calls().map(call => call.method)).toEqual(["initialize", "session/new", "session/set_config_option"]);
@@ -74,10 +76,10 @@ test.each([
   ["gemini-4-neon", "high", false],
   ["gemini-4-argon", "medium", false],
 ] as const)("checks the native model family %s and thought level %s", async (family, level, matches) => {
-  const { adapter, calls } = fixture("gemini-4-neon-medium", [
+  const { adapter, calls } = fixture({ model: "gemini-4-neon-medium", selected: [
     { id: "model", currentValue: family },
     { id: "thought_level", currentValue: level },
-  ]);
+  ] });
   try {
     if (matches) await adapter.start();
     else await expect(adapter.start()).rejects.toThrow("did not confirm model");
@@ -85,10 +87,21 @@ test.each([
   } finally { await adapter.shutdown(); }
 });
 
-test("returns the native login command when Google requires sign-in", async () => {
-  const { adapter, calls } = fixture(undefined, undefined, undefined, true);
+test.each(["high", "low"])("requires confirmation of effort alone on a resumed session (%s)", async level => {
+  const { adapter, calls } = fixture({ nativeSessionId: "native-session", reasoningEffort: "high",
+    selected: [{ id: "thought_level", currentValue: level }] });
+  try {
+    if (level === "high") await adapter.start();
+    else await expect(adapter.start()).rejects.toThrow('did not confirm effort "high"');
+    expect(calls().map(call => call.method)).toEqual(["initialize", "session/load", "session/set_config_option"]);
+    expect(calls().at(-1).params).toEqual({ sessionId: "native-session", configId: "thought_level", value: "high" });
+  } finally { await adapter.shutdown(); }
+});
+
+test.each([undefined, "native-session"])("returns the login command without substituting another session (%s)", async nativeSessionId => {
+  const { adapter, calls } = fixture({ signedOut: true, nativeSessionId });
   try {
     await expect(adapter.start()).rejects.toThrow("agy acp --login");
-    expect(calls().map(call => call.method)).toEqual(["initialize", "session/new"]);
+    expect(calls().map(call => call.method)).toEqual(["initialize", nativeSessionId ? "session/load" : "session/new"]);
   } finally { await adapter.shutdown(); }
 });

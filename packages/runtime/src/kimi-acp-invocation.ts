@@ -14,6 +14,7 @@ export interface KimiAcpInvocationOptions {
   name?: string;
   timeoutMs?: number;
   hardCeilingMs?: number;
+  crewRole?: string;
 }
 
 export type KimiAcpInvocationResult = AcpAgentInvocationResult;

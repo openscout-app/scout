@@ -21,6 +21,17 @@ describe("buildManagedAgentEnvironment", () => {
     expect(env.OPENSCOUT_AGENT).toBe("dewey.node.workspace");
     expect(env.OPENSCOUT_SETUP_CWD).toBe("/tmp/worktrees/feature-x");
     expect(env.OPENSCOUT_MANAGED_AGENT).toBe("1");
+    expect(env.OPENSCOUT_CREW_ROLE).toBeUndefined();
+  });
+
+  test("exports OPENSCOUT_CREW_ROLE when a crew role is provided", () => {
+    const env = buildManagedAgentEnvironment({
+      agentName: "dewey.node.workspace",
+      currentDirectory: "/tmp/worktrees/feature-x",
+      crewRole: "worker",
+      baseEnv: {},
+    });
+    expect(env.OPENSCOUT_CREW_ROLE).toBe("worker");
   });
 });
 

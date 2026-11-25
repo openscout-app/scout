@@ -13,6 +13,12 @@ export interface BrokerRuntimeProfile {
 }
 
 const BROKER_RUNTIME_PROFILES: Record<ScoutReservedRuntimeProfileId, BrokerRuntimeProfile> = {
+  antigravity: {
+    id: "antigravity",
+    displayName: "Antigravity",
+    supportsReasoningEffort: true,
+    execution: { harness: "antigravity", session: "new" },
+  },
   fable: {
     id: "fable",
     displayName: "Fable",
