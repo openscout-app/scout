@@ -89,6 +89,8 @@ export interface VercelBoardLeadRow {
   createdAt: number;
 }
 
+export type PlanFollow = Pick<VercelBoardLeadRow, "planId" | "channel" | "lead" | "cursor">;
+
 export class VercelBoardStore {
   /*
    * Connections known to have no active custody or no queued writes. The
@@ -249,6 +251,28 @@ export class VercelBoardStore {
     const lanes = this.database.query<{ lane: string }>("SELECT DISTINCT lane FROM vercel_board_outbox WHERE connection_id = ?1 AND state IN ('pending', 'unknown')").all(connectionId).map(row => row.lane);
     if (!lanes.length) this.quietOutbox.add(connectionId);
     return lanes;
+  }
+
+  /** A confirmed batch and the lead's subscription become visible together. */
+  finishOutbox(row: VercelBoardOutboxRow, response: unknown): void {
+    const follow = row.kind === "plan" ? (row.request as { follow?: PlanFollow }).follow : undefined;
+    this.database.transaction(() => {
+      if (follow) this.followPlan({ connectionId: row.connectionId, ...follow });
+      this.markOutbox(row.connectionId, row.clientId, { state: "done", response });
+    })();
+  }
+
+  /** On explicit replay, older batches can recover the lead their original row did not store. */
+  adoptLegacyPlan(row: VercelBoardOutboxRow, follow: PlanFollow): void {
+    const request = row.request as { channel: string; tasks: { labels?: Record<string, string> }[]; follow?: PlanFollow };
+    if (request.follow || request.channel !== follow.channel || request.tasks[0]?.labels?.["scout.plan"] !== follow.planId) return;
+    this.database.transaction(() => {
+      // Start at the beginning of this plan's history. An existing subscription keeps its cursor.
+      const saved = { ...request, follow: { ...follow, cursor: 0 } };
+      this.database.query("UPDATE vercel_board_outbox SET request = ?3 WHERE connection_id = ?1 AND client_id = ?2")
+        .run(row.connectionId, row.clientId, JSON.stringify(saved));
+      if (row.state === "done") this.followPlan({ connectionId: row.connectionId, ...saved.follow });
+    })();
   }
 
   markOutbox(connectionId: string, clientId: string, patch: { state: VercelBoardOutboxRow["state"]; response?: unknown; error?: string; attempt?: boolean }): void {

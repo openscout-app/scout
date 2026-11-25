@@ -141,6 +141,22 @@ describe("boards", () => {
     expect(boards.read("default", { closedSince: 1, limit: 1 }).cards.map((c) => c.workId)).toEqual(["done-new"]);
   });
 
+  test("pages each station by time and ID and counts every qualifying card", async () => {
+    const closed = Array.from({ length: 500 }, (_, i) => workItem({ id: `done-${String(i).padStart(3, "0")}`, state: "done", updatedAt: 900 }));
+    const { boards } = await setup([...closed, workItem({ id: "waiting", state: "waiting", waitingOn: { kind: "condition", label: "Reply" } })]);
+    const query = { perColumn: 250, closedSince: 1 };
+    const first = boards.read("default", query);
+    expect(first.cards).toHaveLength(251);
+    expect(first.cards.at(-1)?.workId).toBe("waiting");
+    expect(first.page).toMatchObject({ totalCount: 501, columnCounts: { waiting: 1, done: 500 } });
+    const cursor = first.page!.nextByColumn.done!;
+    const second = boards.read("default", { ...query, column: "done", cursor });
+    expect(second.cards.map(c => c.workId)).toEqual(closed.slice(250).map(r => r.id));
+    expect(second.page?.nextByColumn).toEqual({});
+    expect(() => boards.read("default", { ...query, column: "waiting", cursor })).toThrow("Invalid cursor");
+    expect(() => boards.read("default", { ...query, column: "done", cursor: "bad" })).toThrow("Invalid cursor");
+  });
+
   test("an unknown board is a 404", async () => {
     const { boards } = await setup([]);
     let error: unknown;

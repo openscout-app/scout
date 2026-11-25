@@ -81,8 +81,10 @@ async function createWorld(channels = ["work", "ops"]): Promise<World> {
     },
     vercelBoardWorker: { node: "/nonexistent/node" },
     credentialOptions: { env: { VERCEL_BOARD_TEST_TOKEN: board.token } },
-    recordWork: async (record, options) => { records.set(record.id, options?.reconcile ? options.reconcile(records.get(record.id), record) : record); },
-    appendWorkEvent: async () => {},
+    recordWork: async (record, options) => {
+      const projected = options?.project?.(records.get(record.id), record) ?? { record };
+      records.set(record.id, projected.record);
+    },
     work: id => records.get(id),
     workItems: () => [...records.values()].filter((record): record is WorkItemRecord => record.kind === "work_item"),
     persistActor: async () => undefined,

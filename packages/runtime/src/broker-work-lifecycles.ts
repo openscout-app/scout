@@ -14,6 +14,8 @@ import { join } from "node:path";
 
 import {
   DEFAULT_WORK_LIFECYCLE,
+  type BoardPage,
+  type BoardReadQuery,
   assertValidCollaborationEvent,
   assertValidCollaborationRecord,
   compileWorkLifecycle,
@@ -62,6 +64,7 @@ export interface WorkItemPosition {
 }
 
 export interface WorkBoard {
+  page?: BoardPage;
   lifecycle: WorkLifecycleSummary;
   items: Array<{ workId: string; station: WorkStationId; reviewPending: boolean; revision: number; next: WorkStationId[] }>;
 }
@@ -74,6 +77,21 @@ export class WorkLifecycleError extends Error {
 
 // ---------------------------------------------------------------------------
 // Registry
+
+function compareBoardId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function boardCursor(cursor: string, board: string, column?: string, closedSince?: number): { at: number; id: string } {
+  try {
+    const point: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString());
+    if (Array.isArray(point) && point.length === 5 && point[0] === board && column !== undefined && point[1] === column
+      && point[2] === (closedSince ?? null) && Number.isFinite(point[3]) && typeof point[4] === "string") {
+      return { at: point[3], id: point[4] };
+    }
+  } catch { /* fall through to the same client error for all invalid cursors */ }
+  throw new WorkLifecycleError(400, "Invalid cursor for this board column.");
+}
 
 type RegistryEntry = { doc: WorkLifecycle; machine: CompiledWorkLifecycle; builtIn: boolean };
 
@@ -326,8 +344,11 @@ export function planWorkReview(
     ...(request.note?.trim() ? { note: request.note.trim() } : {}), at: context.now,
   });
   const base = { id: context.eventId, recordId: record.id, recordKind: "work_item" as const, actorId: request.actorId, at: context.now };
-  if (!placement || placement.revision !== request.revision || move.revision !== request.revision) {
+  if (!placement || placement.revision !== move.revision) {
     return { status: "stale", event: { ...base, kind: "progressed", summary: "Review skipped: the item moved after this move.", metadata: { workReview: review("stale") } } };
+  }
+  if (request.revision !== move.revision) {
+    throw new WorkLifecycleError(409, `Review revision must match the current move revision ${move.revision}.`);
   }
   if (request.verdict === "consult") {
     return { status: "consulted", event: { ...base, kind: "progressed", summary: `Review asks for a decision.${request.note ? ` ${request.note}` : ""}`, metadata: { workReview: review("consulted") } } };
@@ -363,8 +384,10 @@ export function workMovesFromEvents(events: CollaborationEvent[]): WorkMoveRecor
   for (const event of ordered) {
     const move = event.metadata?.workMove as WorkMoveRecord | undefined;
     if (move && typeof move.id === "string") moves.set(move.id, { ...move });
-    const review = event.metadata?.workReview as { moveId?: string; status?: WorkMoveReviewStatus; note?: string; reviewerId?: string; at?: number } | undefined;
+    const review = event.metadata?.workReview as { moveId?: string; revision?: number; status?: WorkMoveReviewStatus; note?: string; reviewerId?: string; at?: number } | undefined;
     const target = review?.moveId ? moves.get(review.moveId) : undefined;
+    // Older writers marked a current move stale when a caller supplied the wrong revision.
+    if (review?.status === "stale" && review.revision !== target?.revision) continue;
     if (target && review?.status) {
       target.review = review.status;
       if (review.note) target.reviewNote = review.note;
@@ -431,22 +454,58 @@ export class BrokerWorkLifecycleService {
   readonly lifecycles = (): WorkLifecycleSummary[] => this.options.registry.list();
 
   /** Every item on one lifecycle, placed: open work plus work closed since `closedSince`. */
-  readonly board = (query: { lifecycleId?: string; closedSince?: number; limit?: number }): WorkBoard => {
+  readonly board = (query: BoardReadQuery & { lifecycleId?: string }): WorkBoard => {
     const lifecycleId = query.lifecycleId?.trim() || this.options.registry.defaultId;
     const summary = this.options.registry.list().find((entry) => entry.lifecycle.id === lifecycleId);
     if (!summary) throw new WorkLifecycleError(404, `No lifecycle ${lifecycleId}.`);
     const closedSince = query.closedSince ?? this.now() - 7 * 24 * 60 * 60 * 1000;
     const limit = Math.min(Math.max(query.limit ?? 500, 1), 2000);
-    const items = this.options.listWorkItems()
-      .filter((record) => this.options.registry.forRecord(record).id === lifecycleId)
-      .filter((record) => !isWorkItemTerminalState(record.state) || record.updatedAt >= closedSince)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, limit)
-      .map((record) => {
-        const position = this.position(record.id);
-        return { workId: record.id, station: position.station, reviewPending: position.reviewPending, revision: position.revision, next: position.next.map((n) => n.station) };
-      });
-    return { lifecycle: summary, items };
+    const paged = query.perColumn !== undefined;
+    const records = this.options.listWorkItems()
+      .filter(record => this.options.registry.forRecord(record).id === lifecycleId)
+      .filter(record => !isWorkItemTerminalState(record.state) || record.updatedAt >= closedSince)
+      .sort((a, b) => b.updatedAt - a.updatedAt || (paged ? compareBoardId(a.id, b.id) : 0));
+    const machine = this.options.registry.get(lifecycleId)!;
+    let page: BoardPage | undefined;
+    let selected: WorkItemRecord[];
+    if (paged) {
+      const size = query.perColumn!;
+      if (!Number.isSafeInteger(size) || size < 1 || size > 500) throw new WorkLifecycleError(400, "perColumn must be between 1 and 500.");
+      if (query.column !== undefined && !machine.stations.has(query.column)) throw new WorkLifecycleError(400, "Unknown board column.");
+      const after = query.cursor === undefined ? null : boardCursor(query.cursor, lifecycleId, query.column, query.closedSince);
+      const columns = new Map(summary.lifecycle.stations.map(({ id }) => [id, {
+        count: 0, shown: 0, last: undefined as WorkItemRecord | undefined, next: null as string | null,
+      }]));
+      selected = [];
+      for (const record of records) {
+        const station = currentWorkStation(machine, { ...record, placement: workPlacementOf(record) });
+        const column = columns.get(station)!;
+        column.count++;
+        if (query.column !== undefined && station !== query.column) continue;
+        if (after && (record.updatedAt > after.at || (record.updatedAt === after.at && record.id <= after.id))) continue;
+        if (column.shown < size) {
+          selected.push(record);
+          column.shown++;
+          column.last = record;
+        } else if (!column.next) {
+          const tail = column.last!;
+          column.next = Buffer.from(JSON.stringify([lifecycleId, station, query.closedSince ?? null, tail.updatedAt, tail.id])).toString("base64url");
+        }
+      }
+      page = {
+        totalCount: records.length,
+        columnCounts: Object.fromEntries(Array.from(columns, ([id, col]) => [id, col.count])),
+        nextByColumn: Object.fromEntries(Array.from(columns).flatMap(([id, col]) => col.next ? [[id, col.next]] : [])),
+      };
+    } else {
+      if (query.column !== undefined || query.cursor !== undefined) throw new WorkLifecycleError(400, "Column paging requires perColumn.");
+      selected = records.slice(0, limit);
+    }
+    const items = selected.map(record => {
+      const position = this.position(record.id);
+      return { workId: record.id, station: position.station, reviewPending: position.reviewPending, revision: position.revision, next: position.next.map(n => n.station) };
+    });
+    return { lifecycle: summary, items, ...(page && { page }) };
   };
 
   /** Where an item sits and the moves open to it, for agents deciding their next move. */

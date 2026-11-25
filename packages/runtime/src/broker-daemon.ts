@@ -2604,7 +2604,6 @@ const vercelBoardService = routeAliasDatabase ? new BrokerVercelBoardService({
   database: routeAliasDatabase,
   connectionsDirectory: join(controlHome, "vercel-board"),
   recordWork: (record, options) => recordCollaborationDurably(record, options),
-  appendWorkEvent: appendCollaborationEventDurably,
   work: id => runtime.collaborationRecord(id),
   workItems: () => Object.values(runtime.peek().collaborationRecords).filter((record): record is WorkItemRecord => record.kind === "work_item"),
   persistActor: upsertActorDurably,

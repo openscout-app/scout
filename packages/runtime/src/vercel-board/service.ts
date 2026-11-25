@@ -1,3 +1,4 @@
+import type { CollaborationProjection } from "../broker-durable-record-store.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -6,7 +7,7 @@ import {
   validateVercelBoardVercelTarget, vercelTargetOfUrl, vercelTeamBoardUrl, type VercelBoardTarget,
   type ActorIdentity, type VercelBoardClaimRequest, type VercelBoardClaimResponse, type VercelBoardConnectRequest, type VercelBoardConnectResponse,
   type VercelBoardConnectionConfig, type VercelBoardConnectionState, type VercelBoardConnectionStatus, type VercelBoardPlanRequest, type VercelBoardPlanResponse,
-  type CollaborationEvent, type CollaborationRecord, type FlightRecord, type ScoutDeliverRequest, type ScoutDeliverResponse, type WorkItemRecord,
+  type CollaborationRecord, type FlightRecord, type ScoutDeliverRequest, type ScoutDeliverResponse, type WorkItemRecord,
   type ConversationDefinition, type VercelBoardChannelMirrorStatus, type VercelBoardHandoff, type VercelBoardHandoffEvent, type VercelBoardHandoffsResponse,
   type VercelBoardMessagesResponse, type VercelBoardMirrorState, type VercelBoardMirroredMessage, type VercelBoardPromoteRequest, type VercelBoardPromoteResponse, type VercelBoardRoleRequest, type VercelBoardRoleResponse,
   type VercelBoardClaimStatus, type VercelBoardDispatchConfig, type VercelBoardDispatcherStatus, type VercelBoardDispatchRunRequest, type VercelBoardDispatchRunResponse, type VercelBoardDispatchSetRequest,
@@ -44,8 +45,7 @@ export interface BrokerVercelBoardServiceOptions {
   database: ControlPlaneSqliteTransactionalDatabase;
   /** Directory for the connection file, in the control home. */
   connectionsDirectory: string;
-  recordWork(record: CollaborationRecord, options?: { reconcile?: (existing: CollaborationRecord | undefined, incoming: CollaborationRecord) => CollaborationRecord }): Promise<unknown>;
-  appendWorkEvent(event: CollaborationEvent): Promise<unknown>;
+  recordWork(record: CollaborationRecord, options?: { project?: CollaborationProjection }): Promise<unknown>;
   work(id: string): CollaborationRecord | undefined;
   workItems(): WorkItemRecord[];
   persistActor(actor: ActorIdentity): Promise<void>;
@@ -445,30 +445,27 @@ export class BrokerVercelBoardService {
       connectionId: config.id, operatorId: this.options.operatorId, now,
       ...(mine && ["held", "settling", "settled"].includes(mine.state) ? { scoutHolder: { agentId: mine.agentId, epoch: task.epoch } } : {}),
     });
-    let move: Record<string, unknown> | undefined;
     await this.options.recordWork(projected, {
-      reconcile: (existing, incoming) => {
-        move = undefined;
+      project: (existing, incoming) => {
         const merged = mergeBoardProjection(existing, incoming as WorkItemRecord);
-        // A task a Scout agent completed: a runtime move into Done, judged by the Done station.
-        if (existing?.kind === "work_item" && existing.state !== "done" && merged.state === "done" && task.state === "completed" && mine && this.options.placeWorkChange) {
-          const placed = this.options.placeWorkChange(existing, merged, { now, moveId: vercelBoardScopedId("vercel-board-move", config.id, root.id, String(task.epoch)), actorId: mine.agentId });
-          move = placed.move;
-          if (placed.move?.review === "pending") {
-            return { ...placed.record, acceptanceState: "pending", reviewRequestedAt: now, nextMoveOwnerId: placed.record.requestedById ?? this.options.operatorId };
-          }
-          return placed.record;
+        if (existing?.kind !== "work_item" || existing.state === "done" || task.state !== "completed" || !mine || !this.options.placeWorkChange) {
+          return { record: merged };
         }
-        return merged;
+        const moveId = vercelBoardScopedId("vercel-board-move", config.id, root.id, String(task.epoch));
+        const { record, move } = this.options.placeWorkChange(existing, merged, { now, moveId, actorId: mine.agentId });
+        if (!move) return { record };
+        return {
+          record: move.review === "pending"
+            ? { ...record, acceptanceState: "pending", reviewRequestedAt: now, nextMoveOwnerId: record.requestedById ?? this.options.operatorId }
+            : record,
+          event: {
+            id: `${moveId}:event`, recordId: record.id, recordKind: "work_item", kind: "done",
+            actorId: mine.agentId, at: now, summary: task.result ?? "Completed on the board.",
+            metadata: { source: VERCEL_BOARD_ADAPTER_ID, vercelBoardConnectionId: config.id, vercelBoardTaskId: root.id, vercelBoardEpoch: task.epoch, workMove: move },
+          },
+        };
       },
     });
-    if (move) {
-      await this.options.appendWorkEvent({
-        id: `${String(move.id ?? vercelBoardScopedId("vercel-board-move", config.id, root.id))}:event`, recordId: projected.id, recordKind: "work_item", kind: "done",
-        actorId: mine!.agentId, at: now, summary: task.result ?? "Completed on the board.",
-        metadata: { source: VERCEL_BOARD_ADAPTER_ID, vercelBoardConnectionId: config.id, vercelBoardTaskId: root.id, vercelBoardEpoch: task.epoch, workMove: move },
-      } as CollaborationEvent).catch(error => this.options.warn?.("[vercel-board] move event not recorded", error));
-    }
   }
 
   /** Deleted on the board: the copy keeps a tombstone; a promoted task's work item loses its text. */
@@ -990,18 +987,18 @@ export class BrokerVercelBoardService {
         ...(task.for ? { for: this.forActor(live, task.for, index) } : {}),
       };
     });
+    const planId = request.planningTaskId.slice(0, 256);
     let roots: VercelBoardWireMessage[];
     try {
-      roots = await live.outbox.plan({ scoutId: `plan:${request.requestId}`, lane: `plan:${request.channel}`, request: { channel: request.channel, tasks, noSync: !live.config.syncChannels?.includes(request.channel) } });
+      roots = await live.outbox.plan({ scoutId: `plan:${request.requestId}`, lane: `plan:${request.channel}`,
+        request: { channel: request.channel, tasks, noSync: !live.config.syncChannels?.includes(request.channel) },
+        follow: { planId, channel: request.channel, lead: request.lead ?? null, cursor: live.mirror.lastEventSeq(live.config.id) } });
     } catch (error) {
       if (error instanceof VercelBoardUnknownOutcomeError || (error instanceof Error && error.name === "VercelBoardOutboxError")) {
         throw new VercelBoardServiceError(502, (error as { code?: string }).code ?? "outcome_unknown", error.message);
       }
       throw error;
     }
-    // The lead loop follows the plan from here. The label is the plan's name on the board.
-    const planId = request.planningTaskId.slice(0, 256);
-    live.lead.follow(planId, request.channel, request.lead ?? null);
     const swarm = live.config.dispatch?.enabled !== false && vercelBoardChannelSwarm(live.config, request.channel);
     if (swarm) this.wake(live);
     return {

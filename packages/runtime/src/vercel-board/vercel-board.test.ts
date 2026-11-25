@@ -465,8 +465,11 @@ function serviceHarness(beforeFetch?: (url: string, board: FakeVercelBoard) => v
     },
     vercelBoardWorker: { node: "/nonexistent/node" },
     credentialOptions: { env: { VERCEL_BOARD_TEST_TOKEN: board.token } },
-    recordWork: async (record, options) => { records.set(record.id, options?.reconcile ? options.reconcile(records.get(record.id), record) : record); },
-    appendWorkEvent: async event => { events.push(event); },
+    recordWork: async (record, options) => {
+      const projected = options?.project?.(records.get(record.id), record) ?? { record };
+      records.set(record.id, projected.record);
+      if (projected.event) events.push(projected.event);
+    },
     work: id => records.get(id),
     workItems: () => [...records.values()].filter((record): record is WorkItemRecord => record.kind === "work_item"),
     persistActor: async () => undefined,
@@ -1360,6 +1363,25 @@ test("the swarm runs an operator plan end to end: needs in order, the reviewer a
   expect(h.leadUpdates().at(-1)!.body).toContain("Every task in the plan has ended.");
   const status = await h.service.dispatcherStatus("c1");
   expect(status.leads).toEqual([expect.objectContaining({ planId: "work-plan-1", channel: "work", lead: "agent-lead", done: true, tasks: { open: 0, completed: 2, failed: 0, blocked: 0 } })]);
+});
+
+test("a lost plan response registers its lead on recovery and replay delivers the completion once", async () => {
+  const h = await swarmHarness();
+  const tasks = [{ text: "Build after recovery", for: "builder" }];
+  h.board.fault({ route: "POST /tasks/batch", mode: "drop_answer" });
+  await expect(h.plan(tasks)).rejects.toMatchObject({ code: "outcome_unknown" });
+  expect((await h.service.dispatcherStatus("c1")).leads).toHaveLength(0);
+  // Delay the read-back as well so the task finishes before its subscription activates.
+  h.board.fault({ route: "GET /tasks/batch/:id", mode: "fail_before", times: 2 });
+  await h.service.pump("c1");
+  h.flights.set(h.flightOf("agent-build"), done("Built before acknowledgement."));
+  for (let i = 0; i < 4; i++) await h.service.pump("c1");
+  await h.plan(tasks);
+  await h.service.pump("c1");
+  expect(h.board.count("POST", "/tasks/batch")).toBe(1);
+  expect(h.leadUpdates()).toHaveLength(1);
+  expect(h.leadUpdates()[0]!.body).toContain("Built before acknowledgement.");
+  expect((await h.service.dispatcherStatus("c1")).leads[0]).toMatchObject({ done: true, lead: "agent-lead" });
 });
 
 test("the swarm never takes another owner's task, or synced text, that carries a plan label", async () => {
