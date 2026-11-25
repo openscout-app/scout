@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { AgentEndpoint } from "@openscout/protocol";
 import { resetScoutdProbeClientForTests } from "../system-probes/scoutd-client.js";
 import { deliverInPlace, type DeliverInPlaceDeps } from "./deliver.js";
+import { inspectSessionInputRoute } from "./session-input-route.js";
 
 const session = "session-managed-socket";
 const native = "5b0f6a3e-2f0c-4c55-9a8e-6c7f1d2e3a4b";
@@ -92,6 +93,16 @@ test("a direct send finds the marked pane and stays on its tmux socket", async (
   expect(paneCalls.map(call => call.split(" ")[2])).toEqual(expect.arrayContaining(["capture-pane", "load-buffer", "paste-buffer", "send-keys"]));
   for (const call of paneCalls) expect(call).toStartWith(`-S ${socket} `);
   expect(paneCalls.filter(call => call.includes(" send-keys ")).every(call => call.includes("-t %17"))).toBe(true);
+});
+
+test("inspection uses the verified managed tmux socket without submitting input", async () => {
+  const route = await inspectSessionInputRoute({ sessionId: native, harness: "claude" }, deps());
+  expect(route).toMatchObject({ kind: "live_host", via: "tmux", provenance: "observed", location: `tmux ${session} · %17` });
+  const log = calls();
+  expect(log).toHaveLength(2);
+  expect(log[0]).toStartWith(`list-panes -s -t ${session} -F`);
+  expect(log[1]).toStartWith(`-S ${join(directory, "tmux.sock")} capture-pane`);
+  expect(existsSync(join(directory, "buffer"))).toBe(false);
 });
 
 test("the caller's own pane is refused only on the same tmux server", async () => {

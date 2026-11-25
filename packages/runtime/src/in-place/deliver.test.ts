@@ -423,7 +423,7 @@ describe("native app submission activity guard", () => {
       codexActivity: async () => { calls.push(`activity:${activity}`); return activity; },
       askScoutApp: ask,
       draftCodexApp: async () => { calls.push("draft"); },
-      latticesCall: async () => { calls.push("lattices fallback"); return { ok: true }; },
+      latticesCall: async () => { calls.push("daemon.status"); return { ok: false }; },
       typeIntoCodexApp: async () => {
         calls.push("open");
         await ask({ op: "composer.submit", text: "reply" });
@@ -431,7 +431,7 @@ describe("native app submission activity guard", () => {
     }));
     expect(result).toMatchObject({ ok: false, code: "in_place_failed", via: "scout-app" });
     if (!result.ok && "detail" in result) expect(result.detail).toContain("after focus and before Return");
-    expect(calls).toEqual(["activity:idle", "status"]);
+    expect(calls).toEqual(["activity:idle", "daemon.status", "status"]);
   });
 
   test.each(["busy", "unknown"] as const)("never opens or submits a %s thread", async activity => {
@@ -440,11 +440,59 @@ describe("native app submission activity guard", () => {
     expect(result).toMatchObject({ ok: false, code: activity === "busy" ? "busy" : "activity_unknown" });
     expect(submitted).toBe(false);
   });
-  test("falls back only when Scout.app is unavailable", async () => {
-    let submitted = false;
-    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply" }, noHosts({ codexHeldByApp: async () => true, codexActivity: async () => "idle", askScoutApp: async () => ({ ok: false, code: "unavailable", message: "offline" }), latticesCall: async () => ({ ok: true }), typeIntoCodexApp: async () => { submitted = true; } }));
-    expect(result).toMatchObject({ ok: true, via: "lattices" });
-    expect(submitted).toBe(true);
+  test.each([true, false])("uses Lattices without consulting a running Scout.app (already held: %s)", async alreadyHeld => {
+    const folder = await mkdtemp(join(tmpdir(), "scout-app-send-"));
+    try {
+      const transcript = join(folder, "rollout.jsonl");
+      await writeFile(transcript, "");
+      const calls: string[] = [];
+      let held = alreadyHeld;
+      let opening = false;
+      const input = { sessionId: SESSION, harness: "codex", body: "reply" };
+      const deps = noHosts({
+        codexHeldByApp: async () => {
+          if (opening && !held) {
+            held = true;
+            return false; // The first post-open ownership probe is too early.
+          }
+          return held;
+        },
+        codexActivity: async () => { calls.push("idle"); return "idle"; },
+        askScoutApp: async request => { calls.push(request.op); return { ok: true, accessibility: "granted" }; },
+        findCodexTranscript: async id => { expect(id).toBe(SESSION); return transcript; },
+        draftCodexApp: async (id, body) => {
+          calls.push("open");
+          expect([id, body]).toEqual([SESSION, "reply"]);
+          opening = !alreadyHeld;
+        },
+        latticesCall: async method => {
+          calls.push(method);
+          if (method === "computer.windowState") return { ok: true, snapshotId: "snapshot", target: { wid: 1 },
+            elements: [{ role: "AXTextArea", id: "composer", value: input.body, focused: true }] };
+          if (method === "computer.pressKey") await appendFile(transcript, JSON.stringify({ payload: { type: "user_message", message: input.body } }) + "\n");
+          return { ok: true };
+        },
+      });
+
+      if (!alreadyHeld) {
+        expect(await deliverInPlace(input, deps)).toEqual({ ok: false, code: "not_live" });
+        expect(calls).toEqual([]);
+      }
+      expect(await deliverInPlace({ ...input, openAppIfNeeded: !alreadyHeld }, deps)).toMatchObject({ ok: true, via: "lattices" });
+      expect(calls).toEqual(["idle", "daemon.status", "open", "idle", "computer.windowState",
+        "computer.elementAction", "computer.windowState", "idle", "computer.pressKey"]);
+    } finally { await rm(folder, { recursive: true, force: true }); }
+  });
+
+  test("open and send refuses to open beside a non-app Codex writer", async () => {
+    const never = async () => { throw new Error("must not touch the app"); };
+    const result = await deliverInPlace({ sessionId: SESSION, harness: "codex", body: "reply", openAppIfNeeded: true }, noHosts({
+      codexThreadPids: async () => [12345],
+      draftCodexApp: never,
+      latticesCall: never,
+      askScoutApp: never,
+    }));
+    expect(result).toEqual({ ok: false, code: "not_live" });
   });
 });
 

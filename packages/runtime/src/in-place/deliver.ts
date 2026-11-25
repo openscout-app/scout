@@ -1,4 +1,4 @@
-import { callLattices, submitLatticesComposer, type LatticesCall } from "./lattices-composer.js";
+import { latticesReachable, submitLatticesComposer, type LatticesCall } from "./lattices-composer.js";
 // A reply to a session that is open somewhere goes INTO that session, where it
 // runs — never to a background copy or a fork. The operator started it in a
 // place; the words belong in that place.
@@ -27,8 +27,8 @@ import { callLattices, submitLatticesComposer, type LatticesCall } from "./latti
 // A Codex thread held by the ChatGPT app's Codex (its app-server is stdio-only,
 // so no process can join it) gets the words through the app's own thread link
 // (`codex://threads/<id>?prompt=`). Scout.app's combined focus + Return has no
-// activity guard at the actuator, so that submission path is refused. When
-// Scout.app is unavailable, Lattices can focus an unambiguous text composer,
+// activity guard at the actuator, so that submission path is refused. Instead,
+// Lattices can focus an unambiguous text composer,
 // recheck activity, and press Return; the thread's transcript confirms it.
 //
 // Hosts are exact, so a session normally matches one. The order decides only
@@ -83,7 +83,7 @@ export type InPlaceDelivery =
    * without it the words may have reached the composer.
    */
   | { ok: false; code: "in_place_failed"; via: InPlaceVia; location: string; detail: string; nothingSent?: true }
-  /** Live in an app only the Scout app can reach, and the Scout app can't right now. */
+  /** No guarded desktop actuator answered; Scout.app diagnostics are retained for callers. */
   | { ok: false; code: "scout_app_unavailable" | "scout_app_accessibility"; via: InPlaceVia; location: string }
   /** No live place holds this session. */
   | { ok: false; code: "not_live" }
@@ -93,7 +93,7 @@ export type InPlaceDelivery =
 export type HerdrPaneMatch = { session: string; paneId: string; status: string | null; harness?: string; sessionKind?: string };
 
 export type DeliverInPlaceDeps = {
-  /** Opt-in for direct sends, not for reply routing or resume probes. */
+  /** Opt-in for direct sends and on-demand inspection, not legacy reply/resume probes. */
   managedTmuxContext?: () => Promise<{ nodeId: string; snapshot: Pick<RuntimeRegistrySnapshot, "endpoints" | "flights"> } | null>;
   ownSessionIds?: readonly string[];
   /**
@@ -126,13 +126,14 @@ export type DeliverInPlaceDeps = {
   tmuxComposerDraft?: (target: string) => Promise<string | null | undefined>;
   ttyForPid?: (pid: number) => Promise<string | null>;
   typeIntoTty?: (tty: string, body: string) => Promise<void>;
-  /** Whether the ChatGPT app's Codex holds this thread's writer lock. */
+  /** Whether the Codex desktop app holds this thread's writer lock. */
   codexHeldByApp?: (sessionId: string) => Promise<boolean>;
   /** Opens only the exact thread link; never submits. */
   draftCodexApp?: (sessionId: string, body: string) => Promise<void>;
+  findCodexTranscript?: (sessionId: string) => Promise<string | null>;
   codexActivity?: (sessionId: string) => Promise<"idle" | "busy" | "unknown">;
   latticesCall?: LatticesCall;
-  /** Lattices submission override for tests; never bypasses the Scout.app refusal. */
+  /** Lattices submission override for tests; only used after Lattices is found. */
   typeIntoCodexApp?: (sessionId: string, body: string) => Promise<void>;
   /** The Scout app's socket; injectable for tests. */
   askScoutApp?: (request: { op: string; [field: string]: unknown }) => Promise<ScoutAppReply>;
@@ -140,6 +141,15 @@ export type DeliverInPlaceDeps = {
   askClaudeChannel?: (request: { op: "ping"; sessionId: string } | { op: "deliver"; sessionId: string; body: string }) => Promise<ClaudeChannelReply>;
   /** Preferred host order; defaults to OPENSCOUT_IN_PLACE_ORDER, then IN_PLACE_HOSTS. */
   order?: readonly InPlaceHost[];
+};
+
+export type InPlaceReadDeps = Pick<DeliverInPlaceDeps,
+  "ownSessionIds" | "findHerdrPane" | "findClaudeRecord" | "scoutLaunchedTmuxSessions" |
+  "codexThreadPids" | "locateProcess" | "self" | "selfTty" | "readOrcaAgents" |
+  "tmuxComposerDraft" | "ttyForPid" | "codexHeldByApp" | "findCodexTranscript" | "codexActivity" |
+  "managedTmuxContext" | "ownTmuxPane" | "managedTmuxPane" | "readTmuxTail"
+> & {
+  askClaudeChannel?: (request: { op: "ping"; sessionId: string }) => Promise<ClaudeChannelReply>;
 };
 
 const HERDR_TIMEOUT_MS = 4_000;
@@ -212,7 +222,7 @@ type GatheredCandidates =
 /** Find every place that holds the session. Nothing is typed. */
 async function gatherInPlaceCandidates(
   input: { sessionId: string; harness: string | null; requireExactHarness?: boolean },
-  deps: DeliverInPlaceDeps,
+  deps: InPlaceReadDeps,
 ): Promise<GatheredCandidates> {
   const { sessionId, harness } = input;
   const candidates: Candidates = { herdr: null, orca: null, tmux: null, channel: false, terminalPid: null, claude: null, held: false };
@@ -263,7 +273,11 @@ async function gatherInPlaceCandidates(
     }
   }
   if (!harness || harness === "codex") {
-    pids.push(...await (deps.codexThreadPids ?? codexThreadHolderPids)(sessionId).catch(() => []));
+    try {
+      pids.push(...await (deps.codexThreadPids ?? codexThreadHolderPids)(sessionId));
+    } catch {
+      if (input.requireExactHarness) return { ok: false, code: "session_runtime_unobserved" };
+    }
   }
   // A channel's answer counts only beside Claude's own record of the session:
   // the record must be live, not Scout's copy, and held by the very process
@@ -272,10 +286,10 @@ async function gatherInPlaceCandidates(
   // is never taken for the operator's session.
   if (candidates.claude && isClaudeChannelSessionId(sessionId)
     && !(deps.ownSessionIds ?? []).includes(sessionId)) {
-    const ping = await claudeChannel(deps)({ op: "ping", sessionId }).catch(() => null);
+    const ping = await (deps.askClaudeChannel ?? askClaudeChannel)({ op: "ping", sessionId }).catch(() => null);
     candidates.channel = ping?.ok === true && ping.hostPid === candidates.claude.pid;
   }
-  candidates.held = pids.length > 0;
+  candidates.held = pids.length > 0 || candidates.herdr !== null;
   for (const pid of pids) {
     const location = await (deps.locateProcess ?? locateProcessHost)(pid).catch(() => null);
     if (location?.host === "herdr" && !candidates.herdr) {
@@ -334,58 +348,100 @@ export async function probeInPlace(
   if (!gathered.ok) return { live: false, code: gathered.code };
   const { candidates } = gathered;
 
-  const harnessActivity = async (): Promise<InPlaceActivity> => {
-    if (harness === "codex") return await (deps.codexActivity ?? codexActivity)(sessionId).catch(() => "unknown" as const);
-    const status = candidates.claude?.status;
-    // "shell" is a finished turn with a background shell still running: the
-    // prompt is free. A shell command inside a turn reads "busy".
-    if (status === "idle" || status === "shell") return "idle";
-    if (status === "busy") return "busy";
-    if (status === "waiting") return "blocked";
-    return "unknown";
-  };
-
+  const activity = inPlaceHarnessActivity(sessionId, harness, candidates, deps);
   const order = deps.order ?? resolveInPlaceOrder();
   for (const host of order) {
-    if (host === "herdr" && candidates.herdr) {
-      const status = candidates.herdr.status;
-      const activity: InPlaceActivity = status === "blocked" ? "blocked"
-        : status === "working" ? "busy"
-        : status === "idle" || status === "done" ? "idle"
-        : await harnessActivity();
-      return { live: true, via: "herdr", location: herdrLocation(candidates.herdr), activity };
-    }
-    if (host === "orca" && candidates.orca) {
-      const { location, agent } = await orcaPlace(candidates.orca, deps);
-      const activity: InPlaceActivity = agent?.state === "blocked" || agent?.state === "waiting" ? "blocked" : await harnessActivity();
-      return { live: true, via: "orca", location, activity };
-    }
-    if (host === "tmux" && candidates.tmux) {
-      let activity = await harnessActivity();
-      if (activity === "idle") {
-        const draft = await tmuxDraft(candidates.tmux.target, deps);
-        activity = draft === undefined ? "unknown" : draft ? "composing" : "idle";
-      }
-      return { live: true, via: "tmux", location: candidates.tmux.location, activity };
-    }
-    if (host === "channel" && candidates.channel) {
-      return { live: true, via: "claude-channel", location: channelLocation(sessionId), activity: await harnessActivity() };
-    }
+    if (host === "terminal") continue;
+    const probe = await probeInPlaceHost(host, sessionId, candidates, deps, activity);
+    if (probe) return probe;
   }
 
   if (harness === "codex") {
     const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => false);
-    if (!held) return { live: false, code: "not_live", held: candidates.held };
-    return { live: true, via: "scout-app", location: CODEX_APP_LOCATION, activity: await harnessActivity() };
+    if (held) return { live: true, via: "scout-app", location: "the ChatGPT app’s Codex", activity: await activity() };
+  } else if (order.includes("terminal")) {
+    const terminal = await probeInPlaceHost("terminal", sessionId, candidates, deps, activity);
+    if (terminal) return terminal;
   }
+  return { live: false, code: "not_live", held: candidates.held };
+}
 
-  const unreachable: InPlaceProbe = { live: false, code: "not_live", held: candidates.held };
-  if (!order.includes("terminal") || candidates.terminalPid === null) return unreachable;
-  const tty = await (deps.ttyForPid ?? ttyForPid)(candidates.terminalPid).catch(() => null);
-  if (!tty) return unreachable;
-  const ownTty = await (deps.selfTty ?? callerTty)().catch(() => null);
-  if (tty === ownTty) return unreachable;
-  return { live: true, via: "lattices", location: `terminal ${tty}`, activity: await harnessActivity() };
+function inPlaceHarnessActivity(sessionId: string, harness: string | null, candidates: Candidates, deps: InPlaceReadDeps) {
+  let reading: Promise<InPlaceActivity> | undefined;
+  return () => reading ??= (async (): Promise<InPlaceActivity> => {
+    if (harness === "codex") return await (deps.codexActivity ?? codexActivity)(sessionId).catch(() => "unknown" as const);
+    const status = candidates.claude?.status;
+    // "shell" is a finished turn with a background shell still running.
+    if (status === "idle" || status === "shell") return "idle";
+    if (status === "busy") return "busy";
+    if (status === "waiting") return "blocked";
+    return "unknown";
+  })();
+}
+
+type LiveInPlaceProbe = Extract<InPlaceProbe, { live: true }>;
+
+async function probeInPlaceHost(
+  host: InPlaceHost, sessionId: string, candidates: Candidates, deps: InPlaceReadDeps,
+  harnessActivity: () => Promise<InPlaceActivity>, checkGate = false,
+): Promise<LiveInPlaceProbe | null> {
+  if (host === "herdr" && candidates.herdr) {
+    const status = candidates.herdr.status;
+    const activity = status === "blocked" ? "blocked" : status === "working" ? "busy"
+      : status === "idle" || status === "done" ? "idle" : await harnessActivity();
+    return { live: true, via: "herdr", location: herdrLocation(candidates.herdr), activity };
+  }
+  if (host === "orca" && candidates.orca) {
+    const { location, agent } = await orcaPlace(candidates.orca, deps);
+    const activity = agent?.state === "blocked" || agent?.state === "waiting" ? "blocked" : await harnessActivity();
+    return { live: true, via: "orca", location, activity };
+  }
+  if (host === "tmux" && candidates.tmux) {
+    let activity = await harnessActivity();
+    if (checkGate && !deps.tmuxComposerDraft) {
+      const tail = await captureTmuxComposerTail(candidates.tmux.target).catch(() => null);
+      if (tail && tmuxHasAnswerGate(tail)) activity = "blocked";
+      else if (activity === "idle") activity = composerActivity(tail === null ? undefined : tmuxPaneTailComposerState(tail), activity);
+    } else if (activity === "idle") {
+      activity = composerActivity(await tmuxDraft(candidates.tmux.target, deps), activity);
+    }
+    return { live: true, via: "tmux", location: candidates.tmux.location, activity };
+  }
+  if (host === "channel" && candidates.channel) {
+    return { live: true, via: "claude-channel", location: channelLocation(sessionId), activity: await harnessActivity() };
+  }
+  if (host === "terminal" && candidates.terminalPid !== null) {
+    const tty = await (deps.ttyForPid ?? ttyForPid)(candidates.terminalPid).catch(() => null);
+    const ownTty = tty && await (deps.selfTty ?? callerTty)().catch(() => null);
+    if (tty && tty !== ownTty) return { live: true, via: "lattices", location: `terminal ${tty}`, activity: await harnessActivity() };
+  }
+  return null;
+}
+
+/** @internal Exact read-only observations for the on-demand router. */
+export async function probeSessionInputHosts(input: { sessionId: string; harness: string }, deps: InPlaceReadDeps) {
+  const { sessionId, harness } = input;
+  const gathered = await gatherInPlaceCandidates({ ...input, requireExactHarness: true }, deps);
+  if (!gathered.ok) return gathered;
+  const { candidates } = gathered;
+  const activity = inPlaceHarnessActivity(sessionId, harness, candidates, deps);
+  const hosts = await Promise.all(IN_PLACE_HOSTS.map(host => probeInPlaceHost(host, sessionId, candidates, deps, activity, true)));
+  const channel = hosts.find(host => host?.via === "claude-channel") ?? null;
+  const managed = await findManagedTmuxCandidate(input, deps);
+  if (managed && !managed.ok && managed.code === "session_ambiguous") return { ok: false as const, code: managed.code };
+  if (managed?.ok) {
+    const { pane } = managed;
+    const slot = IN_PLACE_HOSTS.indexOf("tmux");
+    const composer = await readManagedTmuxComposer(pane, deps);
+    if (!hosts[slot] || composer.blocked) hosts[slot] = {
+      live: true, via: "tmux", location: pane.location,
+      activity: composer.blocked ? "blocked" : composerActivity(composer.draft, pane.activity),
+    };
+  }
+  const host = hosts.find(host => host && host.via !== "claude-channel") ?? null;
+  const blocked = hosts.find(host => host?.activity === "blocked")
+    ?? (candidates.claude?.status === "waiting" ? { location: "Claude Code" } : null);
+  return { ok: true as const, held: candidates.held || managed !== null, host, channel, blocked };
 }
 
 const PROBE_CONFIRM_READINGS = 3;
@@ -435,7 +491,8 @@ export async function probeInPlaceConfirmed(
   return last ?? { live: false, code: "session_runtime_unobserved" };
 }
 
-const CODEX_APP_LOCATION = "the ChatGPT app’s Codex";
+/** @internal Shared by delivery and route inspection. */
+export const CODEX_APP_LOCATION = "the Codex desktop app";
 
 function herdrLocation(pane: HerdrPaneMatch): string {
   return `Herdr ${pane.session} · ${pane.paneId}`;
@@ -443,7 +500,7 @@ function herdrLocation(pane: HerdrPaneMatch): string {
 
 async function orcaPlace(
   terminal: { terminalHandle: string; paneKey: string | null },
-  deps: DeliverInPlaceDeps,
+  deps: InPlaceReadDeps,
 ): Promise<{ location: string; agent: OrcaAgent | null }> {
   const agents = terminal.paneKey
     ? await (deps.readOrcaAgents ?? readOrcaAgents)().catch(() => [])
@@ -522,14 +579,18 @@ async function isOwnTmuxPane(
   return (await canonical(own.socketPath)) === (await canonical(pane.socketPath));
 }
 
-async function deliverToManagedTmux(
-  input: { sessionId: string; harness: string | null; body: string },
-  deps: DeliverInPlaceDeps,
-  before?: BeforeKeystroke,
-): Promise<InPlaceDelivery | null> {
+type ManagedTmuxPane = {
+  target: string; socketPath: string; location: string; harness: "claude" | "codex";
+  activity: "busy" | "idle" | "blocked";
+};
+
+async function findManagedTmuxCandidate(
+  input: { sessionId: string; harness: string | null },
+  deps: InPlaceReadDeps,
+): Promise<{ ok: true; pane: ManagedTmuxPane } | { ok: false; code: "not_live" | "session_ambiguous" } | null> {
   const context = await deps.managedTmuxContext?.().catch(() => null);
   if (!context) return null;
-  const { sessionId, harness, body } = input;
+  const { sessionId, harness } = input;
   const { snapshot, nodeId } = context;
   const matches = Object.values(snapshot.endpoints).filter(endpoint => {
     if (endpoint.nodeId !== nodeId || endpoint.transport !== "tmux"
@@ -554,7 +615,7 @@ async function deliverToManagedTmux(
   if (matches.some(endpoint => deps.ownSessionIds?.some(id => endpointStronglyMatchesSession(endpoint, id)))) {
     return { ok: false, code: "not_live" };
   }
-  const panes = new Map<string, { target: string; socketPath: string; location: string; harness: "claude" | "codex"; waiting: boolean }>();
+  const panes = new Map<string, ManagedTmuxPane>();
   for (const endpoint of matches) {
     const session = typeof endpoint.metadata?.tmuxSession === "string" ? endpoint.metadata.tmuxSession : endpoint.sessionId;
     if (!session || session.startsWith("flat-")) continue;
@@ -564,19 +625,47 @@ async function deliverToManagedTmux(
     const previous = panes.get(key);
     if (previous && previous.harness !== endpoint.harness) return { ok: false, code: "session_ambiguous" };
     panes.set(key, { ...surface, location: `tmux ${session} · ${surface.target}`,
-      harness: endpoint.harness as "claude" | "codex", waiting: endpoint.state === "waiting" || Boolean(previous?.waiting) });
+      harness: endpoint.harness as "claude" | "codex",
+      activity: endpoint.state === "waiting" || previous?.activity === "blocked" ? "blocked"
+        : endpoint.state === "idle" && previous?.activity !== "busy" ? "idle" : "busy" });
   }
   if (panes.size > 1) return { ok: false, code: "session_ambiguous" };
   const pane = [...panes.values()][0];
   if (!pane) return null;
   if (await isOwnTmuxPane(pane, deps.ownTmuxPane)) return { ok: false, code: "not_live" };
-  const place = { via: "tmux" as const, location: pane.location };
-  if (pane.waiting) return { ok: false, code: "session_blocked", ...place };
+  return { ok: true, pane };
+}
+
+function composerActivity(draft: string | null | undefined, activity: InPlaceActivity): InPlaceActivity {
+  return draft === undefined ? "unknown" : draft ? "composing" : activity;
+}
+
+function tmuxHasAnswerGate(tail: string): boolean {
+  return Boolean(parseContinuationDialog(tail).live || tmuxPaneTailBlockingHarnessDialog(tail));
+}
+
+async function readManagedTmuxComposer(pane: ManagedTmuxPane, deps: InPlaceReadDeps): Promise<
+  { blocked: true } | { blocked: false; draft: string | null | undefined }
+> {
+  if (pane.activity === "blocked") return { blocked: true };
   const tail = await (deps.readTmuxTail ?? captureTmuxComposerTail)(pane.target, pane.socketPath).catch(() => null);
-  if (tail && (parseContinuationDialog(tail).live || tmuxPaneTailBlockingHarnessDialog(tail))) {
-    return { ok: false, code: "session_blocked", ...place };
-  }
-  const draft = tail === null ? undefined : tmuxPaneTailComposerState(tail);
+  if (tail && tmuxHasAnswerGate(tail)) return { blocked: true };
+  return { blocked: false, draft: tail === null ? undefined : tmuxPaneTailComposerState(tail) };
+}
+
+async function deliverToManagedTmux(
+  input: { sessionId: string; harness: string | null; body: string },
+  deps: DeliverInPlaceDeps,
+  before?: BeforeKeystroke,
+): Promise<InPlaceDelivery | null> {
+  const found = await findManagedTmuxCandidate(input, deps);
+  if (!found?.ok) return found;
+  const { pane } = found;
+  const { body } = input;
+  const place = { via: "tmux" as const, location: pane.location };
+  const composer = await readManagedTmuxComposer(pane, deps);
+  if (composer.blocked) return { ok: false, code: "session_blocked", ...place };
+  const { draft } = composer;
   if (draft === undefined) return { ok: false, code: "in_place_failed", ...place, nothingSent: true,
     detail: "Cannot observe the tmux composer; unsent text could be overwritten. Nothing was typed." };
   if (draft) return { ok: false, code: "busy", ...place, detail: "The composer holds unsent text. Nothing was typed." };
@@ -594,6 +683,8 @@ export async function deliverInPlace(
     body: string;
     requireExactHarness?: boolean;
     mode?: "submit" | "draft";
+    /** An explicit Codex submit may open a stopped thread in the desktop app. */
+    openAppIfNeeded?: boolean;
     beforeKeystroke?: BeforeKeystroke;
   },
   deps: DeliverInPlaceDeps = {},
@@ -616,7 +707,10 @@ export async function deliverInPlace(
     }
   }
 
-  const gathered = await gatherInPlaceCandidates({ sessionId, harness, requireExactHarness: input.requireExactHarness }, deps);
+  const openCodex = input.openAppIfNeeded === true && harness === "codex";
+  const gathered = await gatherInPlaceCandidates({
+    sessionId, harness, requireExactHarness: input.requireExactHarness || openCodex,
+  }, deps);
   if (!gathered.ok) return { ok: false, code: gathered.code };
   const { candidates } = gathered;
 
@@ -643,33 +737,25 @@ export async function deliverInPlace(
   const managed = await deliverToManagedTmux({ sessionId, harness, body }, deps, before);
   if (managed) return managed;
 
-  // A Codex thread open in the ChatGPT app: nothing above can reach it.
+  // Prefer the guarded Lattices actuator whether or not Scout.app is running.
   if (harness === "codex") {
-    const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => false);
-    if (!held) return { ok: false, code: "not_live" };
-    const location = "the ChatGPT app’s Codex";
-    let via: InPlaceVia = "scout-app";
+    const held = await (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId).catch(() => null);
+    if (held === null && (input.requireExactHarness || openCodex)) return { ok: false, code: "session_runtime_unobserved" };
+    if (!held && (!openCodex || candidates.held)) return { ok: false, code: "not_live" };
+    const location = CODEX_APP_LOCATION;
     const activity = await (deps.codexActivity ?? codexActivity)(sessionId).catch(() => "unknown" as const);
-    if (activity !== "idle") return { ok: false, code: activity === "busy" ? "busy" : "activity_unknown", via, location, detail: "Nothing submitted. Use mode=draft (--draft) to fill the composer, or queue with ask and wait for app release." };
-    // Check the app can finish before the link puts words in the composer,
-    // so a refusal never leaves a half-sent reply sitting there.
+    if (activity !== "idle") return { ok: false, code: activity === "busy" ? "busy" : "activity_unknown", via: "lattices", location, detail: "Nothing submitted. Open the thread to reply manually, or queue with ask." };
+    if (await latticesReachable(deps.latticesCall)) return typeAt({ via: "lattices", location }, before, () =>
+      (deps.typeIntoCodexApp ?? ((id, words) => typeIntoCodexAppWithLattices(id, words, deps, !held)))(sessionId, body));
+
+    // Scout.app status is diagnostic only. Its composer.submit combines focus
+    // and Return without an activity recheck, so never use it to fall back.
+    const via = "scout-app" as const;
     const ask = deps.askScoutApp ?? ((request) => askScoutApp(request, { timeoutMs: 3_000 }));
-    const status = await ask({ op: "status" });
-    if (!status.ok) {
-      // A call to an already-running daemon is a probe, never an app launch.
-      try { await (deps.latticesCall ?? callLattices)("daemon.status", {}); via = "lattices"; }
-      catch { return { ok: false, code: "scout_app_unavailable", via, location }; }
-    }
-    if (status.ok && status.accessibility !== "granted") return { ok: false, code: "scout_app_accessibility", via, location };
-    if (status.ok) {
-      // composer.submit combines focus + Return without a thread-bound idle
-      // check between them. A preflight here cannot guard a turn started by
-      // focus. Refuse before opening the URL; do not send ignored safety flags
-      // to an old actuator or bypass this refusal through another backend.
-      return { ok: false, code: "in_place_failed", via, location, nothingSent: true, detail: "Scout.app cannot recheck thread activity after focus and before Return; nothing opened or submitted. Use mode=draft (--draft) and send manually." };
-    }
-    return typeAt({ via, location }, before, () =>
-      (deps.typeIntoCodexApp ?? ((id, words) => typeIntoCodexAppWithLattices(id, words, deps.latticesCall, deps.codexActivity)))(sessionId, body));
+    const status = await ask({ op: "status" }).catch(() => null);
+    if (!status?.ok) return { ok: false, code: "scout_app_unavailable", via, location };
+    if (status.accessibility !== "granted") return { ok: false, code: "scout_app_accessibility", via, location };
+    return { ok: false, code: "in_place_failed", via, location, nothingSent: true, detail: "Lattices is unavailable, and Scout.app cannot recheck thread activity after focus and before Return. Nothing opened or submitted. Send manually." };
   }
 
   // A plain terminal tab: only Claude Code records the process to type into.
@@ -803,7 +889,7 @@ async function promptTmuxPane(target: string, body: string): Promise<void> {
 const TMUX_COMPOSER_TAIL_LINES = 40;
 
 /** A failed capture cannot establish an empty composer. */
-async function tmuxDraft(target: string, deps: DeliverInPlaceDeps): Promise<string | null | undefined> {
+async function tmuxDraft(target: string, deps: InPlaceReadDeps): Promise<string | null | undefined> {
   return await (deps.tmuxComposerDraft ?? readTmuxComposerDraft)(target).catch(() => undefined);
 }
 
@@ -856,8 +942,9 @@ async function typeIntoTtyWithLattices(tty: string, body: string): Promise<void>
   ], { timeoutMs: 15_000, maxStdoutBytes: 256 * 1024 });
 }
 
-const CHATGPT_APP = "ChatGPT.app/";
+const CODEX_DESKTOP_PROCESS = /(?:^|\/)(?:Codex|ChatGPT)\.app\//u;
 const CODEX_APP_OPEN_SETTLE_MS = 1_200;
+const CODEX_APP_OPEN_TIMEOUT_MS = 8_000;
 
 function codexHome(): string {
   return process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
@@ -870,12 +957,19 @@ function codexHome(): string {
 async function codexThreadLockHolders(sessionId: string): Promise<Array<{ pid: number; command: string }>> {
   if (!/^[0-9a-f-]{16,}$/iu.test(sessionId)) return [];
   const lock = join(codexHome(), "thread-writer-locks", `${sessionId}.lock`);
+  try { await stat(lock); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
   let pids: string[] = [];
   try {
     const { stdout } = await execSystemFile("lsof", ["-t", lock], { timeoutMs: 3_000, maxStdoutBytes: 4 * 1024 });
     pids = stdout.split(/\s+/u).filter(Boolean);
-  } catch {
-    return []; // lsof exits 1 when nothing holds the file
+  } catch (error) {
+    const failure = error as { exitCode?: number; stderr?: string };
+    if (failure.exitCode === 1 && !failure.stderr?.trim()) return [];
+    throw error;
   }
   const holders: Array<{ pid: number; command: string }> = [];
   for (const pid of pids) {
@@ -889,13 +983,13 @@ async function codexThreadLockHolders(sessionId: string): Promise<Array<{ pid: n
 /** Codex processes with the thread open in a terminal, not in the ChatGPT app. */
 export async function codexThreadHolderPids(sessionId: string): Promise<number[]> {
   return (await codexThreadLockHolders(sessionId))
-    .filter((holder) => !holder.command.includes(CHATGPT_APP) && Number.isInteger(holder.pid))
+    .filter((holder) => !CODEX_DESKTOP_PROCESS.test(holder.command) && Number.isInteger(holder.pid))
     .map((holder) => holder.pid);
 }
 
-/** When the process holding the lock lives inside ChatGPT.app, the thread is open in the app. */
+/** ChatGPT.app and Codex.app are both desktop holders; the export keeps its old name. */
 export async function codexThreadHeldByChatGPTApp(sessionId: string): Promise<boolean> {
-  return (await codexThreadLockHolders(sessionId)).some((holder) => holder.command.includes(CHATGPT_APP));
+  return (await codexThreadLockHolders(sessionId)).some((holder) => CODEX_DESKTOP_PROCESS.test(holder.command));
 }
 
 /** The URL handler fills the composer; no Accessibility grant or Return key. */
@@ -907,32 +1001,46 @@ async function draftCodexApp(sessionId: string, body: string): Promise<void> {
 async function typeIntoCodexAppWithLattices(
   sessionId: string,
   body: string,
-  latticesCall: LatticesCall = callLattices,
-  activity: (sessionId: string) => Promise<"idle" | "busy" | "unknown"> = codexActivity,
+  deps: DeliverInPlaceDeps,
+  opening: boolean,
 ): Promise<void> {
   // The bridge holds no Accessibility grant. The link and the transcript need
   // none; focus and Return use the already-running Lattices daemon's grant.
-  const transcript = await findCodexTranscript(sessionId);
-  const offset = transcript ? (await stat(transcript).catch(() => null))?.size ?? 0 : 0;
-
+  const transcript = await (deps.findCodexTranscript ?? findCodexTranscript)(sessionId);
   if (!transcript) throw new Error("Cannot verify the target transcript; use draft mode instead.");
+  const offset = (await stat(transcript)).size;
 
   // 1. The app's own thread link picks the thread by id and fills its
   //    composer. `-u` keeps `open` a plain URL open; a lone argument is
   //    rerouted to scoutd's file-reveal verb, which refuses URLs.
-  await draftCodexApp(sessionId, body);
+  if (opening && (await (deps.codexThreadPids ?? codexThreadHolderPids)(sessionId)).length > 0) {
+    throw new Error("The thread acquired another writer; nothing opened. Reply from that session instead.");
+  }
+  await (deps.draftCodexApp ?? draftCodexApp)(sessionId, body);
+  const deadline = Date.now() + CODEX_APP_OPEN_TIMEOUT_MS;
   await new Promise((resolve) => setTimeout(resolve, CODEX_APP_OPEN_SETTLE_MS));
 
+  const heldByApp = () => (deps.codexHeldByApp ?? codexThreadHeldByChatGPTApp)(sessionId);
+  const threadNotOpen = () => new Error("Codex did not open the target thread; nothing submitted. Check the app before retrying.");
+  // Launching a cold app can take longer than switching an already open thread.
+  while (!await heldByApp()) {
+    if (!opening || Date.now() >= deadline) throw threadNotOpen();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
   // 2. Lattices anchors on content, verifies it again after focus, and checks
-  //    activity before Return. Scout.app's unguarded operation is never used.
-  const beforeSubmit = async () => {
-    if (await activity(sessionId) !== "idle") throw new Error("Thread is busy or activity is unknown; nothing submitted. Use draft mode or queue with ask.");
+  //    ownership and activity before Return. Scout.app's unguarded operation is never used.
+  const requireIdle = async () => {
+    if (await (deps.codexActivity ?? codexActivity)(sessionId) !== "idle") throw new Error("Thread is busy or activity is unknown; nothing submitted. Use draft mode or queue with ask.");
   };
-  await beforeSubmit();
-  await submitLatticesComposer(body, beforeSubmit, latticesCall);
+  const beforeSubmit = async () => {
+    if (!await heldByApp()) throw threadNotOpen();
+    await requireIdle();
+  };
+  await requireIdle();
+  await submitLatticesComposer(body, beforeSubmit, deps.latticesCall);
 
   // 3. Delivered means the thread recorded it, not that a key was pressed.
-  if (!transcript) throw new Error("couldn't find this thread's transcript to confirm the reply");
   if (!(await waitForCodexUserMessage(transcript, offset, body))) {
     throw new Error("Return was pressed, but the thread didn't record the reply; inspect the transcript before retrying to avoid duplicates, or use draft mode");
   }
@@ -995,7 +1103,8 @@ export async function codexActivityFromRollout(path: string): Promise<CodexActiv
   return reading.state === "idle" && reading.tail.unfinished() ? "unknown" : reading.state;
 }
 
-async function codexActivity(sessionId: string): Promise<CodexActivity> {
+/** @internal Shared by delivery and route inspection. */
+export async function codexActivity(sessionId: string): Promise<CodexActivity> {
   const path = await findCodexTranscript(sessionId);
   return path ? codexActivityFromRollout(path) : "unknown";
 }
@@ -1019,7 +1128,7 @@ async function waitForCodexUserMessage(transcript: string, offset: number, body:
   while (Date.now() < deadline) {
     const text = await readFile(transcript, "utf8").catch(() => "");
     for (const line of Buffer.from(text, "utf8").subarray(offset).toString("utf8").split("\n")) {
-      if (!line.includes('"user"')) continue;
+      if (!line.includes('"user"') && !line.includes('"user_message"')) continue;
       try {
         const payload = (JSON.parse(line) as { payload?: { role?: string; type?: string; message?: string; content?: Array<{ text?: string }> } }).payload;
         const said = payload?.type === "user_message"
