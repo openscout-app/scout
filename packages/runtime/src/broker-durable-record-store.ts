@@ -46,7 +46,12 @@ export type DurableCommitOptions = {
   enqueueProjection?: boolean;
 };
 
+export type CollaborationProjection = (existing: CollaborationRecord | undefined, incoming: CollaborationRecord) =>
+  { record: CollaborationRecord; event?: CollaborationEvent };
+
 export type CollaborationWriteOptions = DurableCommitOptions & {
+  /** Project a record and its associated event together under the durable writer. */
+  project?: CollaborationProjection;
   /** Rewrite or refuse the record against the stored one, under the writer. */
   reconcile?: (existing: CollaborationRecord | undefined, incoming: CollaborationRecord) => CollaborationRecord;
 };
@@ -609,13 +614,22 @@ export class BrokerDurableRecordStore {
     options: CollaborationWriteOptions = {},
   ): Promise<BrokerJournalEntry[]> => {
     assertValidCollaborationRecord(record);
-    const { reconcile, ...commitOptions } = options;
+    const { reconcile, project, ...commitOptions } = options;
     return this.options.durableStore.runWrite(async () => {
-      const next = reconcile ? reconcile(this.options.runtime.collaborationRecord(record.id), record) : record;
+      const existing = this.options.runtime.collaborationRecord(record.id);
+      const reconciled = reconcile ? reconcile(existing, record) : record;
+      const { record: next, event } = project ? project(existing, reconciled) : { record: reconciled };
+      const entries: BrokerJournalEntry[] = [{ kind: "collaboration.record", record: next }];
+      if (event) {
+        assertValidCollaborationRecord(next);
+        assertValidCollaborationEvent(event, next);
+        entries.push({ kind: "collaboration.event.record", event });
+      }
       return this.options.durableStore.commitEntries(
-        { kind: "collaboration.record", record: next },
+        entries,
         async () => {
           await this.options.runtime.upsertCollaboration(next);
+          if (event) await this.options.runtime.appendCollaborationEvent(event);
         },
         commitOptions,
       );

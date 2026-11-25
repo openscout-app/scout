@@ -111,6 +111,13 @@ export interface BoardCard {
   activeFlight: BoardCardFlight | null;
 }
 
+/** Whole-board counts and a continuation for each column with more cards. */
+export interface BoardPage {
+  totalCount: number;
+  columnCounts: Record<string, number>;
+  nextByColumn: Record<string, string>;
+}
+
 /** `GET /v1/boards/:id`. */
 export interface BoardRead {
   board: BoardHeader;
@@ -118,6 +125,7 @@ export interface BoardRead {
   transitions: BoardTransition[];
   /** In the runtime's board order: most recently updated first. */
   cards: BoardCard[];
+  page?: BoardPage;
 }
 
 export interface BoardReadQuery {
@@ -125,4 +133,8 @@ export interface BoardReadQuery {
   closedSince?: number;
   /** At most this many cards. Defaults to 100, at most 500, as on `/v1/work/board`. */
   limit?: number;
+  /** Opt into independently paged columns, each ordered by update time and work ID. */
+  perColumn?: number;
+  column?: string;
+  cursor?: string;
 }

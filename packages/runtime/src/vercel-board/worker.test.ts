@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import type { CollaborationEvent, CollaborationRecord, FlightRecord, ScoutDeliverRequest, ScoutDeliverResponse, WorkItemRecord } from "@openscout/protocol";
+import type { CollaborationRecord, FlightRecord, ScoutDeliverRequest, ScoutDeliverResponse, WorkItemRecord } from "@openscout/protocol";
 import { validateVercelBoardConnectionConfig, vercelTeamBoardUrl } from "@openscout/protocol";
 import { accessSync, chmodSync, constants, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,8 +196,10 @@ function serviceHarness(vercelBoardWorker: ConstructorParameters<typeof BrokerVe
   const service = new BrokerVercelBoardService({
     nodeId: "node-a", operatorId: "operator", database: db, connectionsDirectory: join(dir, "board"), autoStart: false, vercelBoardWorker,
     credentialOptions: { env: { VERCEL_BOARD_TEST_TOKEN: "test-token-0123" } },
-    recordWork: async (record, options) => { records.set(record.id, options?.reconcile ? options.reconcile(records.get(record.id), record) : record); },
-    appendWorkEvent: async (_event: CollaborationEvent) => undefined,
+    recordWork: async (record, options) => {
+      const projected = options?.project?.(records.get(record.id), record) ?? { record };
+      records.set(record.id, projected.record);
+    },
     work: id => records.get(id),
     workItems: () => [...records.values()].filter((record): record is WorkItemRecord => record.kind === "work_item"),
     persistActor: async () => undefined,
