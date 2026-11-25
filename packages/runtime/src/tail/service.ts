@@ -28,8 +28,9 @@ import { KimiSource } from "./kimi-source.js";
 import { OpenCodeSource } from "./opencode-source.js";
 import { ManagedAgentsSource } from "./managed-agents-source.js";
 import { PiSource } from "./pi-source.js";
-import { normalizedFilterSet } from "./recent-filter.js";
+import { compareTailTimes, normalizedFilterSet, tailLineKey } from "./recent-filter.js";
 import { sessionRegistryKey } from "./registry.js";
+import { parsedEventsToArray } from "./types.js";
 import type {
   DiscoveredProcess,
   DiscoveredTranscript,
@@ -41,7 +42,7 @@ import type {
   TailEventKind,
   TailContext,
   TailPendingToolCall,
-  TranscriptSource,
+  AnyTranscriptSource as TranscriptSource,
 } from "./types.js";
 
 function readPositiveIntEnv(name: string, fallback: number): number {
@@ -364,11 +365,6 @@ function redactTailEvent(event: TailEvent): TailEvent {
     ...(event.prompt ? { prompt: redactSecretsDeep(event.prompt) } : {}),
     ...(event.raw ? { raw: redactSecretsDeep(event.raw) } : {}),
   };
-}
-
-function parsedEventsToArray(events: TailEvent | TailEvent[] | null): TailEvent[] {
-  if (!events) return [];
-  return Array.isArray(events) ? events : [events];
 }
 
 const GROK_QUIET_PHASES = new Set([
@@ -759,7 +755,7 @@ async function runWatcherPump(watcher: Watcher, observedAt: number): Promise<voi
       watcher.carry = lines.pop() ?? "";
       for (const line of lines) {
         if (!line) continue;
-        const event = watcher.source.parseLine(line, {
+        const parsed = watcher.source.parseLine(line, {
           process: watcher.process,
           transcript: watcher.transcript,
           transcriptPath: watcher.transcriptPath,
@@ -767,7 +763,7 @@ async function runWatcherPump(watcher: Watcher, observedAt: number): Promise<voi
           state: watcher.state,
         });
         watcher.lineCounter++;
-        if (event) {
+        for (const event of parsedEventsToArray(parsed)) {
           rememberWatcherEvent(watcher, event, "all");
         }
       }
@@ -887,7 +883,8 @@ async function seedTail(
       return;
     }
 
-    if (!watcher.source.parseFile && (options.reconcileInternal || watcher.source.name === "codex")) {
+    const primeCalls = watcher.source.name === "codex" || watcher.source.name === "antigravity";
+    if (!watcher.source.parseFile && (options.reconcileInternal || primeCalls)) {
       const lines = await readRecentTranscriptLines(
         watcher.transcriptPath,
         options.reconcileInternal
@@ -905,8 +902,8 @@ async function seedTail(
           lineOffset: index,
           state: watcher.state,
         });
-        if (options.reconcileInternal && parsed) {
-          rememberWatcherEvent(watcher, parsed, "internal");
+        if (options.reconcileInternal) {
+          for (const event of parsedEventsToArray(parsed)) rememberWatcherEvent(watcher, event, "internal");
         }
       });
       watcher.lineCounter = lines.length;
@@ -1551,7 +1548,7 @@ export const __testing = {
 
 export async function readRecentLiveEvents(
   limit = 500,
-  options?: { kinds?: TailEventKind[]; sources?: string[]; sessionId?: string },
+  options?: { kinds?: TailEventKind[]; sources?: string[]; sessionId?: string; accepts?: (event: TailEvent) => boolean },
 ): Promise<TailEvent[]> {
   // This is a snapshot read, not an ingestion trigger. The subscriber-owned
   // watcher loop keeps the event rings current through the bounded demand
@@ -1561,13 +1558,14 @@ export async function readRecentLiveEvents(
   const kinds = options?.kinds?.length ? new Set(options.kinds) : null;
   const sourceFilter = normalizedFilterSet(options?.sources);
   const sessionId = options?.sessionId?.trim();
-  if (!kinds && !sourceFilter && !sessionId) return snapshotRecentEvents(limit);
+  if (!kinds && !sourceFilter && !sessionId && !options?.accepts) return snapshotRecentEvents(limit);
   const source = kinds?.size === 1 && kinds.has("assistant")
     ? assistantBuffer
     : aggregateBuffer.recent(AGGREGATE_BUFFER_LIMIT);
   return source.filter((event) => (!kinds || kinds.has(event.kind))
     && (!sourceFilter || sourceFilter.has(event.source))
-    && (!sessionId || event.sessionId === sessionId)).slice(-limit);
+    && (!sessionId || event.sessionId === sessionId)
+    && (!options?.accepts || options.accepts(event))).slice(-limit);
 }
 
 async function readRecentTranscriptLines(
@@ -1627,13 +1625,13 @@ async function parseRecentTranscriptLineEvents(input: {
     const parsed: TailEvent[] = [];
     let index = 0;
     for (const line of lines) {
-      const event = input.source.parseLine(line, {
+      const lineEvents = input.source.parseLine(line, {
         ...input.context,
         lineOffset: index,
         state: parseState,
       });
       index++;
-      if (event) parsed.push(compactEvent(event));
+      for (const event of parsedEventsToArray(lineEvents)) parsed.push(compactEvent(event));
     }
 
     const matchingCount = kindQuota
@@ -1817,6 +1815,7 @@ export async function readRecentTranscriptEvents(
     perTranscriptLineLimit?: number;
     kinds?: TailEventKind[];
     perTranscriptKindLimit?: number;
+    accepts?: (event: TailEvent) => boolean;
     since?: number;
   },
 ): Promise<TailEvent[]> {
@@ -1882,6 +1881,7 @@ export async function readRecentTranscriptEvents(
           kinds,
           kindQuota,
           initialReadBytes: RECENT_TRANSCRIPT_READ_BYTES,
+          accepts: options.accepts,
         },
       );
       for (const event of parsed) {
@@ -1895,8 +1895,9 @@ export async function readRecentTranscriptEvents(
     .filter((event) => (
       (!kinds || kinds.has(event.kind))
       && (options?.since === undefined || event.ts >= options.since)
+      && (!options?.accepts || options.accepts(event))
     ))
-    .sort((left, right) => right.ts - left.ts)
+    .sort((left, right) => compareTailTimes(right, left))
     .slice(0, limit);
 }
 
@@ -1924,14 +1925,15 @@ function snapshotSessionEvents(
   sessionId: string,
   source: string,
   limit: number,
+  accepts?: (event: TailEvent) => boolean,
 ): TailEvent[] {
   const bucket = perSessionBuffer.get(sessionId);
   if (bucket?.length) {
-    const sourceEvents = bucket.filter((event) => event.source === source);
+    const sourceEvents = bucket.filter((event) => event.source === source && (!accepts || accepts(event)));
     if (sourceEvents.length > 0) return sourceEvents.slice(-limit);
   }
   return aggregateBuffer.recent(AGGREGATE_BUFFER_LIMIT)
-    .filter((event) => event.sessionId === sessionId && event.source === source)
+    .filter((event) => event.sessionId === sessionId && event.source === source && (!accepts || accepts(event)))
     .slice(-limit);
 }
 
@@ -1943,6 +1945,7 @@ async function parseTranscriptSessionEvents(
     kinds?: Set<TailEventKind> | null;
     kindQuota?: number;
     initialReadBytes?: number;
+    accepts?: (event: TailEvent) => boolean;
   },
 ): Promise<TailEvent[]> {
   const source = sources.find((candidate) => candidate.name === transcript.source);
@@ -1985,8 +1988,8 @@ async function parseTranscriptSessionEvents(
   }, source.parseFile ? { size: transcript.size, mtimeMs: transcript.mtimeMs } : undefined);
 
   return parsed
-    .filter((event) => !options?.kinds?.size || options.kinds.has(event.kind))
-    .sort((left, right) => left.ts - right.ts)
+    .filter((event) => (!options?.kinds?.size || options.kinds.has(event.kind)) && (!options?.accepts || options.accepts(event)))
+    .sort(compareTailTimes)
     .slice(-limit);
 }
 
@@ -1999,6 +2002,7 @@ export async function readTailEventsForSession(
     sources?: string[];
     /** Exact Tail history also supports Claude/Codex; Observe keeps its own adapters. */
     includeAllSources?: boolean;
+    accepts?: (event: TailEvent) => boolean;
   },
 ): Promise<{ transcript: DiscoveredTranscript; events: TailEvent[] } | null> {
   const normalizedRef = normalizeTailSessionRef(sessionRef);
@@ -2017,7 +2021,7 @@ export async function readTailEventsForSession(
 
   const limit = options?.limit ?? 2_000;
   const sessionId = transcript.sessionId?.trim() || normalizedRef;
-  const buffered = snapshotSessionEvents(sessionId, transcript.source, limit);
+  const buffered = snapshotSessionEvents(sessionId, transcript.source, limit, options?.accepts);
   // A line watcher seeds at the end of its file, so its buffer holds only what
   // it saw after attaching: a task discovered mid-run would lose its opening.
   // Whole-file sources seed from the start and their buffer is the history.
@@ -2025,7 +2029,7 @@ export async function readTailEventsForSession(
   if (buffered.length >= limit || (buffered.length > 0 && wholeFile)) {
     return { transcript, events: buffered };
   }
-  const replayed = await parseTranscriptSessionEvents(transcript, discovery.processes, limit);
+  const replayed = await parseTranscriptSessionEvents(transcript, discovery.processes, limit, { accepts: options?.accepts });
   return { transcript, events: mergeSessionHistory(replayed, buffered, limit) };
 }
 
@@ -2121,16 +2125,14 @@ export function mergeSessionHistory(
   buffered: readonly TailEvent[],
   limit: number,
 ): TailEvent[] {
-  const lineKey = (event: TailEvent) =>
-    [event.source, event.sessionId, event.ts, event.kind, event.summary].join("\u0000");
   const bufferedCounts = new Map<string, number>();
   for (const event of buffered) {
-    const key = lineKey(event);
+    const key = tailLineKey(event);
     bufferedCounts.set(key, (bufferedCounts.get(key) ?? 0) + 1);
   }
   const earlier: TailEvent[] = [];
   for (const event of replayed) {
-    const key = lineKey(event);
+    const key = tailLineKey(event);
     const count = bufferedCounts.get(key) ?? 0;
     if (count > 0) {
       bufferedCounts.set(key, count - 1);
@@ -2139,6 +2141,6 @@ export function mergeSessionHistory(
     earlier.push(event);
   }
   return [...earlier, ...buffered]
-    .sort((left, right) => left.ts - right.ts)
+    .sort(compareTailTimes)
     .slice(-limit);
 }

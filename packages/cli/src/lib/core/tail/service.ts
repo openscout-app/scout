@@ -13,6 +13,7 @@ export type ScoutTailRecentOptions = {
   cwd?: string;
   query?: string;
   transcripts?: boolean;
+  plain?: boolean;
   baseUrl?: string;
 };
 
@@ -61,6 +62,7 @@ export async function readScoutTailEvents(
       cwd: options.cwd,
       query: options.query,
       transcripts: options.transcripts,
+      plain: options.plain,
     });
   } finally {
     wsClient.close();

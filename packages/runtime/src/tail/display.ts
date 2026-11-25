@@ -58,6 +58,13 @@ export function isTailNoiseEvent(event: TailEvent): boolean {
   return false;
 }
 
+/** Plain CLI rows, shared with the broker so hidden rows cannot consume a backlog limit. */
+export function isPlainTailEvent(event: TailEvent): boolean {
+  if (isTailNoiseEvent(event) || (event.kind === "tool" && event.source !== "antigravity")) return false;
+  const summary = event.summary.trim().toLowerCase();
+  return !summary.startsWith("permission requested") && !summary.startsWith("permission allow");
+}
+
 export function filterTailEventsForDisplay(events: TailEvent[]): TailEvent[] {
   return events.filter((event) => !isTailNoiseEvent(event));
 }
