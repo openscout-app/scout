@@ -115,7 +115,17 @@ export interface KnowledgeSearchQuery {
   sourceUpdatedAfterMs?: number;
   sourceUpdatedBeforeMs?: number;
   limit?: number;
+  /** Skip this many ranked hits. Continue a page with the mode it first used. */
+  offset?: number;
+  /** Pin the FTS variant so a continuation page ranks the same way as page one. */
+  ftsMode?: "and" | "or";
   mode?: "lexical" | "semantic" | "hybrid";
+}
+
+export interface KnowledgeSearchPage {
+  hits: KnowledgeSearchHit[];
+  /** The FTS variant that produced the page; carry it into the next one. */
+  ftsMode: "and" | "or";
 }
 
 export type KnowledgeDrilldown =
