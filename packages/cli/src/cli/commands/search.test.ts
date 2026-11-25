@@ -13,6 +13,7 @@ let coverage: unknown;
 let hits: KnowledgeSearchHit[];
 let searches: number;
 let closes: number;
+let requested: Parameters<SQLiteKnowledgeStore["searchLexicalPage"]>[0] | undefined;
 
 beforeEach(() => {
   originalEnv = ENV_KEYS.map((key) => process.env[key]);
@@ -27,7 +28,11 @@ beforeEach(() => {
   // Supply both generations of coverage through the real readonly store. These
   // spies are restored after each test; no runtime module is replaced globally.
   spyOn(SQLiteKnowledgeStore.prototype, "assessCoverage").mockImplementation(() => coverage as ReturnType<SQLiteKnowledgeStore["assessCoverage"]>);
-  spyOn(SQLiteKnowledgeStore.prototype, "searchLexical").mockImplementation(() => { searches++; return hits; });
+  spyOn(SQLiteKnowledgeStore.prototype, "searchLexicalPage").mockImplementation((query) => {
+    searches++;
+    requested = query;
+    return { hits, ftsMode: query.ftsMode ?? "and" };
+  });
   const close = SQLiteKnowledgeStore.prototype.close;
   spyOn(SQLiteKnowledgeStore.prototype, "close").mockImplementation(function (this: SQLiteKnowledgeStore) { closes++; close.call(this); });
 });
@@ -106,4 +111,66 @@ test("JSON output preserves a bounded coverage tag and suggestion", async () => 
   expect(JSON.parse(lines.join("\n"))).toMatchObject({ hitCount: 0, hits: [], coverage });
   expect(searches).toBe(1);
   expect(closes).toBe(1);
+});
+
+function hit(chunkId: string): KnowledgeSearchHit {
+  return {
+    id: chunkId,
+    collectionId: "sessions/codex/session-1",
+    documentId: "doc-session-1-overview",
+    chunkId,
+    title: "Session 1",
+    snippet: "a matching passage",
+    score: 1,
+    scoreSource: "fts",
+    origin: "mechanical",
+    ownership: "derived",
+    freshness: "fresh",
+    sourceRefs: [],
+    drilldown: [],
+    facets: { harness: "codex" },
+  };
+}
+
+async function queryJson(args: string[] = []) {
+  const lines: string[] = [];
+  await runSearchCommand(createScoutCommandContext({ outputMode: "json", stdout: (line) => lines.push(line) }), ["query", "needle", ...args]);
+  return JSON.parse(lines.join("\n")) as { next: string | null; hitCount: number };
+}
+
+test("a full page prints a token that continues at the next offset", async () => {
+  hits = [hit("chunk-1"), hit("chunk-2")];
+  const first = await queryJson(["--limit", "2"]);
+  expect(first.hitCount).toBe(2);
+  expect(first.next).toBeString();
+  expect(requested?.offset).toBeUndefined();
+
+  hits = [hit("chunk-3")];
+  const second = await queryJson(["--limit", "2", "--after", first.next!]);
+  expect(second.hitCount).toBe(1);
+  expect(second.next).toBeNull();
+  expect(requested).toMatchObject({ offset: 2, ftsMode: "and", limit: 2 });
+});
+
+test("a page token is refused by a different query or window", async () => {
+  hits = [hit("chunk-1"), hit("chunk-2")];
+  const first = await queryJson(["--limit", "2"]);
+  await expect(queryJson(["--limit", "2", "--after", first.next!, "--days", "7"]))
+    .rejects.toThrow("That page token belongs to another search.");
+  expect(searches).toBe(1);
+
+  const other: string[] = [];
+  await expect(runSearchCommand(
+    createScoutCommandContext({ outputMode: "json", stdout: (line) => other.push(line) }),
+    ["query", "different", "--limit", "2", "--after", first.next!],
+  )).rejects.toThrow("That page token belongs to another search.");
+});
+
+test("a continuation with no further matches says so instead of blaming coverage", async () => {
+  hits = [hit("chunk-1"), hit("chunk-2")];
+  const first = await queryJson(["--limit", "2"]);
+  hits = [];
+  const lines: string[] = [];
+  await runSearchCommand(createScoutCommandContext({ stdout: (line) => lines.push(line) }), ["query", "needle", "--limit", "2", "--after", first.next!]);
+  expect(lines.join("\n")).toContain("No more matches in this window.");
 });

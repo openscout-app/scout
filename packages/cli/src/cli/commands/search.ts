@@ -13,6 +13,9 @@ import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
+// Matches the store's per-query ceiling. A page is a starting point: the token
+// it prints continues the same ranking where the page stopped.
+const SEARCH_PAGE_LIMIT = 500;
 
 const SEARCH_HELP = `scout search — explicit harness-session knowledge index and query
 
@@ -21,7 +24,7 @@ Indexing is explicit (not ambient). Warm a span, then query the built FTS index.
 Usage:
   scout search status
   scout search index [--source sessions] [--days N | --hours N] [--harness <id>] [--limit N] [--force]
-  scout search query <text> [--harness <id>] [--project <name>] [--limit N] [--hours N | --days N] [--on <host>]
+  scout search query <text> [--harness <id>] [--project <name>] [--limit N] [--hours N | --days N] [--after <page>] [--on <host>]
 
 Options:
   --source sessions     Only sessions is implemented for the first product slice
@@ -29,7 +32,9 @@ Options:
   --hours N             Lookback window in hours (overrides --days)
   --harness <id>        Filter by harness (codex, claude, kimi, antigravity). Repeatable.
   --project <name>      Query facet filter on project basename
-  --limit N             Index discovery cap or query hit limit
+  --limit N             Index discovery cap or query page size
+  --after <page>        Continue a query from the page token it printed.
+                        The query and filters must match that search.
   --on <host>           Run the query on another host in this mesh, over that
                         host's own index (scout hosts lists them; use the node
                         id when a name matches more than one)
@@ -41,6 +46,7 @@ Examples:
   scout search query "iOS build steps" --harness kimi --hours 12
   scout search query xcodebuild --harness kimi --project openscout --json
   scout search query "release notes" --on build-host-openscout --days 7
+  scout search query xcodebuild --limit 30 --after <page token from the previous run>
 `;
 
 function takeFlagValue(args: string[], index: number, flag: string): { value: string; nextIndex: number } {
@@ -305,6 +311,52 @@ async function runIndex(context: ScoutCommandContext, args: string[]): Promise<v
   });
 }
 
+type QueryCursor = {
+  v: 1;
+  q: string;
+  hours: number | null;
+  harness: string[];
+  project: string | null;
+  offset: number;
+  ftsMode: "and" | "or";
+};
+
+function encodeQueryCursor(cursor: QueryCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeQueryCursor(raw: string): QueryCursor {
+  let value: Partial<QueryCursor> | undefined;
+  try {
+    if (raw.length > 2048) throw new Error();
+    value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<QueryCursor>;
+  } catch {
+    throw new ScoutCliError("That page token is not valid.");
+  }
+  const harness = value?.harness;
+  if (
+    value?.v !== 1
+    || typeof value.q !== "string"
+    || value.hours === undefined
+    || (value.hours !== null && typeof value.hours !== "number")
+    || !Array.isArray(harness) || harness.some((entry) => typeof entry !== "string")
+    || (value.project !== null && typeof value.project !== "string")
+    || !Number.isInteger(value.offset) || (value.offset as number) < 0
+    || (value.ftsMode !== "and" && value.ftsMode !== "or")
+  ) {
+    throw new ScoutCliError("That page token is not valid.");
+  }
+  return {
+    v: 1,
+    q: value.q,
+    hours: value.hours,
+    harness,
+    project: value.project ?? null,
+    offset: value.offset as number,
+    ftsMode: value.ftsMode,
+  };
+}
+
 async function runQuery(context: ScoutCommandContext, args: string[]): Promise<void> {
   const { harness, rest } = parseHarnessList(args);
   const queryParts: string[] = [];
@@ -313,12 +365,19 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
   let hours: number | undefined;
   let days: number | undefined;
   let on: string | undefined;
+  let after: string | undefined;
 
   for (let i = 0; i < rest.length; i += 1) {
     const current = rest[i]!;
     if (current === "--on" || current.startsWith("--on=")) {
       const taken = takeFlagValue(rest, i, "--on");
       on = taken.value;
+      i = taken.nextIndex;
+      continue;
+    }
+    if (current === "--after" || current.startsWith("--after=")) {
+      const taken = takeFlagValue(rest, i, "--after");
+      after = taken.value;
       i = taken.nextIndex;
       continue;
     }
@@ -357,8 +416,23 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
     throw new ScoutCliError("search query requires text (try: scout search query \"…\")");
   }
 
+  const windowHours = hours ?? (days != null ? days * 24 : undefined);
+  let offset = 0;
+  let ftsMode: "and" | "or" | undefined;
+  if (after != null) {
+    if (on) throw new ScoutCliError("--after does not apply to a search on another host; run the query there");
+    const cursor = decodeQueryCursor(after);
+    const sameSearch = cursor.q === q
+      && cursor.hours === (windowHours ?? null)
+      && cursor.harness.join(",") === harness.join(",")
+      && cursor.project === (project ?? null);
+    if (!sameSearch) throw new ScoutCliError("That page token belongs to another search.");
+    offset = cursor.offset;
+    ftsMode = cursor.ftsMode;
+  }
+
   if (on) {
-    await runRemoteQuery(context, on, { q, harness, project, limit, hours: hours ?? (days != null ? days * 24 : undefined) });
+    await runRemoteQuery(context, on, { q, harness, project, limit, hours: windowHours });
     return;
   }
 
@@ -410,13 +484,28 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
       return;
     }
 
-    const hits = store.searchLexical({
+    const pageSize = Math.min(limit, SEARCH_PAGE_LIMIT);
+    const page = store.searchLexicalPage({
       q,
       sourceKinds: ["sessions"],
       facets: Object.keys(facets).length > 0 ? facets : undefined,
       sourceUpdatedAfterMs,
-      limit,
+      limit: pageSize,
+      offset: offset > 0 ? offset : undefined,
+      ftsMode,
     });
+    const hits = page.hits;
+    const next = hits.length === pageSize
+      ? encodeQueryCursor({
+        v: 1,
+        q,
+        hours: windowHours ?? null,
+        harness,
+        project: project ?? null,
+        offset: offset + hits.length,
+        ftsMode: page.ftsMode,
+      })
+      : null;
     const payload = {
       q,
       hitCount: hits.length,
@@ -427,6 +516,7 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
         chunks: status.chunks,
       },
       hits,
+      next,
     };
     context.output.writeValue(payload, (value) => {
       const header = [
@@ -434,6 +524,7 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
         ...formatCoverageNote(value.coverage),
       ];
       if (value.hits.length === 0) {
+        if (offset > 0) return [...header, "", "No more matches in this window."].join("\n");
         return [
           ...header,
           "",
@@ -447,6 +538,14 @@ async function runQuery(context: ScoutCommandContext, args: string[]): Promise<v
         ...header,
         "",
         ...value.hits.map((hit, index) => formatHit(hit, index)),
+        ...(value.next
+          ? ["", `More results: scout search query ${JSON.stringify(value.q)} --limit ${value.hits.length} ${[
+            ...harness.map((entry) => `--harness ${entry}`),
+            ...(project ? [`--project ${JSON.stringify(project)}`] : []),
+            ...(windowHours != null ? [`--hours ${windowHours}`] : []),
+            `--after ${value.next}`,
+          ].join(" ")}`]
+          : []),
       ].join("\n");
     });
   } finally {

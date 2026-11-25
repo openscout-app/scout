@@ -429,4 +429,51 @@ describe("SQLiteKnowledgeStore", () => {
       store.close();
     }
   });
+
+  test("searchLexicalPage continues at an offset and keeps the variant it started with", () => {
+    const paths = useTempSupportPaths();
+    const store = new SQLiteKnowledgeStore(undefined, paths);
+    try {
+      const storedCollection = collection(paths);
+      store.upsertCollection(storedCollection);
+      store.upsertDocument(document(storedCollection.id));
+      for (const ordinal of [1, 2, 3]) {
+        store.upsertChunk({
+          id: `chunk-page-${ordinal}`,
+          collectionId: storedCollection.id,
+          documentId: "doc-session-1-overview",
+          documentPath: "overview.md",
+          ordinal,
+          text: `pagingword passage number ${ordinal}`,
+          textHash: `sha256:page-${ordinal}`,
+          origin: "mechanical",
+          ownership: "derived",
+          sourceRefs: [sourceRef()],
+          facets: { harness: "codex" },
+        });
+      }
+
+      const first = store.searchLexicalPage({ q: "pagingword", limit: 2 });
+      expect(first.ftsMode).toBe("and");
+      expect(first.hits).toHaveLength(2);
+      const second = store.searchLexicalPage({
+        q: "pagingword", limit: 2, offset: 2, ftsMode: first.ftsMode,
+      });
+      expect(second.hits).toHaveLength(1);
+      const seen = new Set([...first.hits, ...second.hits].map((hit) => hit.chunkId));
+      expect(seen.size).toBe(3);
+
+      // OR recall carries across a page boundary too; re-deciding mid-search
+      // would rank page two differently.
+      const looseFirst = store.searchLexicalPage({ q: "pagingword absentterm", limit: 2 });
+      expect(looseFirst.ftsMode).toBe("or");
+      expect(looseFirst.hits).toHaveLength(2);
+      const looseSecond = store.searchLexicalPage({
+        q: "pagingword absentterm", limit: 2, offset: 2, ftsMode: looseFirst.ftsMode,
+      });
+      expect(looseSecond.hits).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
 });
