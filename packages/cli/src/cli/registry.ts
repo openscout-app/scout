@@ -28,6 +28,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "notify", hidden: true, summary: "Removed; use ask or reply" },
   { name: "decision", summary: "Read and answer operator asks as decision cards" },
   { name: "diff", summary: "Inspect worktree or session-scoped diffs" },
+  { name: "browser", summary: "Drive and introspect Chrome via Scout Computer's browser surface" },
   { name: "runtimes", summary: "Show harness catalog and readiness" },
   { name: "providers", summary: "Show provider usage quota windows" },
   { name: "crew", summary: "Manage crew role bindings, presets, and live reachability" },
