@@ -1,3 +1,4 @@
+import { isPlainTailEvent } from "./tail/display.js";
 import { compareRecentEvents, tailEventMatches } from "./tail/recent-filter.js";
 // Broker tRPC router — typed surface for cross-process consumers (bridge, web).
 //
@@ -24,7 +25,6 @@ import {
   subscribeControlEvents,
 } from "./broker-control-events.js";
 import {
-  isPlainTailEvent,
   getTailDiscovery,
   refreshTailDiscovery,
   readRecentLiveEvents,
