@@ -9,6 +9,7 @@ import { redactSecrets, redactSecretsDeep } from "@openscout/agent-sessions/secr
 import { findClaudePendingToolCall } from "@openscout/agent-sessions";
 import { readClaudeSessionRecords, type ClaudeSessionRecord } from "../claude-session-records.js";
 
+import { AntigravitySource, antigravityIdFromLogPath } from "./antigravity-source.js";
 import { ClaudeSource } from "./claude-source.js";
 import { withProcessListPass } from "./discover.js";
 import {
@@ -27,6 +28,7 @@ import { KimiSource } from "./kimi-source.js";
 import { OpenCodeSource } from "./opencode-source.js";
 import { ManagedAgentsSource } from "./managed-agents-source.js";
 import { PiSource } from "./pi-source.js";
+import { normalizedFilterSet } from "./recent-filter.js";
 import { sessionRegistryKey } from "./registry.js";
 import type {
   DiscoveredProcess,
@@ -135,7 +137,7 @@ const INTERNAL_PERSISTED_OBSERVED_SEED_LIMIT = readPositiveIntEnv(
   "OPENSCOUT_TAIL_PERSISTED_OBSERVED_SEED_LIMIT",
   4_096,
 );
-const NATIVE_TAIL_SOURCES = new Set<TranscriptSource["name"]>(["grok", "kimi", "opencode", "cursor"]);
+const NATIVE_TAIL_SOURCES = new Set<TranscriptSource["name"]>(["grok", "kimi", "opencode", "cursor", "antigravity"]);
 const TRANSCRIPT_REPLAY_MEMO_MAX_ENTRIES = readPositiveIntEnv("OPENSCOUT_TAIL_REPLAY_MEMO_MAX_ENTRIES", 256);
 const TRANSCRIPT_REPLAY_ACTIVE_GRACE_MS = readPositiveIntEnv("OPENSCOUT_TAIL_REPLAY_MEMO_ACTIVE_GRACE_MS", 2_000);
 
@@ -214,7 +216,7 @@ type Watcher = {
   pumpInFlight: Promise<void> | null;
 };
 
-const sources: TranscriptSource[] = [GrokSource, KimiSource, ClaudeSource, CodexSource, CursorSource, OpenCodeSource, PiSource, DevinSource, ManagedAgentsSource];
+const sources: TranscriptSource[] = [AntigravitySource, GrokSource, KimiSource, ClaudeSource, CodexSource, CursorSource, OpenCodeSource, PiSource, DevinSource, ManagedAgentsSource];
 
 const watchers = new Map<string, Watcher>(); // key = `${source}:${transcriptPath}` (one watcher per file, regardless of how many processes share it)
 const aggregateBuffer = new TailReplayBuffer(AGGREGATE_BUFFER_LIMIT);
@@ -292,12 +294,12 @@ function processForTranscript(
   processes: DiscoveredProcess[],
 ): DiscoveredProcess {
   const cwd = transcript.cwd?.trim();
-  if (cwd) {
-    const matches = processes.filter((proc) => proc.source === transcript.source && proc.cwd === cwd);
-    if (matches.length > 0) {
-      return pickPrimaryProcess(matches);
-    }
-  }
+  const matches = processes.filter((proc) => proc.source === transcript.source && (
+    proc.nativeSessionId !== undefined
+      ? proc.nativeSessionId !== null && proc.nativeSessionId === transcript.sessionId
+      : cwd && proc.cwd === cwd
+  ));
+  if (matches.length > 0) return pickPrimaryProcess(matches);
 
   return {
     pid: virtualPidForPath(transcript.transcriptPath),
@@ -1549,7 +1551,7 @@ export const __testing = {
 
 export async function readRecentLiveEvents(
   limit = 500,
-  options?: { kinds?: TailEventKind[] },
+  options?: { kinds?: TailEventKind[]; sources?: string[]; sessionId?: string },
 ): Promise<TailEvent[]> {
   // This is a snapshot read, not an ingestion trigger. The subscriber-owned
   // watcher loop keeps the event rings current through the bounded demand
@@ -1557,11 +1559,15 @@ export async function readRecentLiveEvents(
   // inventory-refresh semantics. Coupling every HTTP read to watcher pumping
   // made one `/tail/recent` request stat every retained transcript.
   const kinds = options?.kinds?.length ? new Set(options.kinds) : null;
-  if (!kinds) return snapshotRecentEvents(limit);
-  const source = kinds.size === 1 && kinds.has("assistant")
+  const sourceFilter = normalizedFilterSet(options?.sources);
+  const sessionId = options?.sessionId?.trim();
+  if (!kinds && !sourceFilter && !sessionId) return snapshotRecentEvents(limit);
+  const source = kinds?.size === 1 && kinds.has("assistant")
     ? assistantBuffer
     : aggregateBuffer.recent(AGGREGATE_BUFFER_LIMIT);
-  return source.filter((event) => kinds.has(event.kind)).slice(-limit);
+  return source.filter((event) => (!kinds || kinds.has(event.kind))
+    && (!sourceFilter || sourceFilter.has(event.source))
+    && (!sessionId || event.sessionId === sessionId)).slice(-limit);
 }
 
 async function readRecentTranscriptLines(
@@ -1721,6 +1727,13 @@ async function memoizedTranscriptReplay(
   return [...await promise];
 }
 
+// Replayed events carry the process and workspace discovered for this read.
+// A client can resume or release a session without writing to its transcript.
+function replayContextKey(transcript: DiscoveredTranscript, process: DiscoveredProcess): string {
+  return JSON.stringify([sessionRegistryKey(transcript), process.pid, process.ppid, process.harness,
+    process.cwd, transcript.cwd, transcript.project, transcript.harness]);
+}
+
 async function appendWatcherTranscriptEvents(
   events: TailEvent[],
   seenEvents: Set<string>,
@@ -1738,7 +1751,7 @@ async function appendWatcherTranscriptEvents(
       : RECENT_TRANSCRIPT_READ_BYTES;
     const parsed = await memoizedTranscriptReplay(
       transcriptPath,
-      `recent:file:${source.name}:${sessionRegistryKey(transcript)}:${readBytes}:${[...(options?.kinds ?? [])].sort().join(",")}`,
+      `recent:file:${source.name}:${replayContextKey(transcript, process)}:${readBytes}:${[...(options?.kinds ?? [])].sort().join(",")}`,
       async () => {
         const text = await readTranscriptText(transcriptPath, readBytes);
         if (!text) return [];
@@ -1763,7 +1776,7 @@ async function appendWatcherTranscriptEvents(
   const kindKey = [...(options?.kinds ?? [])].sort().join(",");
   const parsed = await memoizedTranscriptReplay(
     transcriptPath,
-    `recent:lines:${source.name}:${sessionRegistryKey(transcript)}:${lineLimit}:${RECENT_TRANSCRIPT_READ_BYTES}:${kindKey}:${options?.kindQuota ?? ""}`,
+    `recent:lines:${source.name}:${replayContextKey(transcript, process)}:${lineLimit}:${RECENT_TRANSCRIPT_READ_BYTES}:${kindKey}:${options?.kindQuota ?? ""}`,
     () => parseRecentTranscriptLineEvents({
       source,
       transcriptPath,
@@ -1785,7 +1798,8 @@ async function appendWatcherTranscriptEvents(
   );
   for (const event of parsed) {
     if (options?.kinds?.size && !options.kinds.has(event.kind)) continue;
-    const eventKey = [
+    // Antigravity numbers native steps independently of the reader offset.
+    const eventKey = source.name === AntigravitySource.name ? event.id : [
       event.source,
       event.sessionId,
       event.kind,
@@ -1799,6 +1813,7 @@ export async function readRecentTranscriptEvents(
   limit = 50,
   options?: {
     discovery?: DiscoverySnapshot | null;
+    sources?: string[];
     perTranscriptLineLimit?: number;
     kinds?: TailEventKind[];
     perTranscriptKindLimit?: number;
@@ -1824,12 +1839,14 @@ export async function readRecentTranscriptEvents(
   const kindQuota = kinds
     ? Math.max(1, options?.perTranscriptKindLimit ?? limit)
     : undefined;
+  const sourceFilter = normalizedFilterSet(options?.sources);
   const allowedPaths = options?.discovery?.transcripts
     ? new Set(options.discovery.transcripts.map((transcript) => transcript.transcriptPath))
     : null;
   const activeWatchers = [...watchers.values()]
     .filter((watcher) => (
-      (!allowedPaths || allowedPaths.has(watcher.transcriptPath))
+      (!sourceFilter || sourceFilter.has(watcher.source.name))
+      && (!allowedPaths || allowedPaths.has(watcher.transcriptPath))
       && (options?.since === undefined || watcher.transcript.mtimeMs >= options.since)
     ))
     .sort((left, right) => right.transcript.mtimeMs - left.transcript.mtimeMs)
@@ -1849,7 +1866,8 @@ export async function readRecentTranscriptEvents(
   if (options?.discovery?.transcripts?.length) {
     const discoveryTranscripts = [...options.discovery.transcripts]
       .filter((transcript) => (
-        !seenTranscriptPaths.has(transcript.transcriptPath)
+        (!sourceFilter || sourceFilter.has(transcript.source))
+        && !seenTranscriptPaths.has(transcript.transcriptPath)
         && (options.since === undefined || transcript.mtimeMs >= options.since)
       ))
       .sort((left, right) => right.mtimeMs - left.mtimeMs)
@@ -1885,6 +1903,8 @@ export async function readRecentTranscriptEvents(
 function normalizeTailSessionRef(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
+  const antigravityId = antigravityIdFromLogPath(trimmed);
+  if (antigravityId) return antigravityId;
   const leaf = basename(trimmed);
   return leaf.endsWith(".jsonl") ? leaf.slice(0, -".jsonl".length) : leaf;
 }
@@ -1942,8 +1962,8 @@ async function parseTranscriptSessionEvents(
     ? RECENT_TRANSCRIPT_KIND_SCAN_READ_BYTES
     : SESSION_TRANSCRIPT_READ_BYTES;
   const replayVariant = source.parseFile
-    ? `session:file:${source.name}:${sessionRegistryKey(transcript)}:${maxReadBytes}:${kindKey}`
-    : `session:lines:${source.name}:${sessionRegistryKey(transcript)}:${lineBudget}:${maxReadBytes}:${kindKey}:${options?.kindQuota ?? ""}`;
+    ? `session:file:${source.name}:${replayContextKey(transcript, process)}:${maxReadBytes}:${kindKey}`
+    : `session:lines:${source.name}:${replayContextKey(transcript, process)}:${lineBudget}:${maxReadBytes}:${kindKey}:${options?.kindQuota ?? ""}`;
 
   const parsed = await memoizedTranscriptReplay(transcript.transcriptPath, replayVariant, async () => {
     if (source.parseFile) {
@@ -1976,6 +1996,7 @@ export async function readTailEventsForSession(
     discovery?: DiscoverySnapshot;
     limit?: number;
     forceDiscovery?: boolean;
+    sources?: string[];
     /** Exact Tail history also supports Claude/Codex; Observe keeps its own adapters. */
     includeAllSources?: boolean;
   },
@@ -1985,11 +2006,13 @@ export async function readTailEventsForSession(
 
   const discovery = options?.discovery
     ?? await getTailDiscovery(options?.forceDiscovery ?? false);
-  const allowsSource = (source: string) => Boolean(options?.includeAllSources) || NATIVE_TAIL_SOURCES.has(source);
+  const sourceFilter = normalizedFilterSet(options?.sources);
+  const allowsSource = (source: string) => (!sourceFilter || sourceFilter.has(source))
+    && (Boolean(options?.includeAllSources) || NATIVE_TAIL_SOURCES.has(source));
   const transcript = discovery.transcripts.find(
     (candidate) => allowsSource(candidate.source)
       && transcriptMatchesSessionRef(candidate, normalizedRef),
-  ) ?? locateTranscriptOutsideDiscovery(normalizedRef, Boolean(options?.includeAllSources), allowsSource);
+  ) ?? locateTranscriptOutsideDiscovery(normalizedRef, sources.filter(source => allowsSource(source.name)));
   if (!transcript) return null;
 
   const limit = options?.limit ?? 2_000;
@@ -2059,18 +2082,17 @@ const locatedTranscripts = new Map<string, { transcript: DiscoveredTranscript | 
  */
 function locateTranscriptOutsideDiscovery(
   normalizedRef: string,
-  includeAllSources: boolean,
-  allowsSource: (source: string) => boolean,
+  candidates: TranscriptSource[],
 ): DiscoveredTranscript | null {
-  const key = `${includeAllSources ? "all" : "native"}\u0000${normalizedRef}`;
+  const key = `${candidates.map(source => source.name).join(",")}\u0000${normalizedRef}`;
   const now = Date.now();
   const cached = locatedTranscripts.get(key);
   const ttl = cached?.transcript ? LOCATED_TRANSCRIPT_TTL_MS : LOCATED_TRANSCRIPT_MISS_TTL_MS;
   if (cached && now - cached.checkedAt < ttl) return cached.transcript;
 
   let transcript: DiscoveredTranscript | null = null;
-  for (const source of sources) {
-    if (!source.findTranscript || !allowsSource(source.name)) continue;
+  for (const source of candidates) {
+    if (!source.findTranscript) continue;
     try {
       transcript = source.findTranscript(normalizedRef);
     } catch {

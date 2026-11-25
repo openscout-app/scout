@@ -1,0 +1,98 @@
+import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { AntigravitySource } from "./antigravity-source.js";
+import { brokerRouter } from "../broker-trpc-router.js";
+import { __testing, readTailEventsForSession } from "./service.js";
+import type { DiscoveredProcess, DiscoverySnapshot } from "./types.js";
+
+test("Antigravity discovery and history preserve native identity across conversations in one workspace", async () => {
+  const root = mkdtempSync(join(tmpdir(), "scout-agy-"));
+  const previous = process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT;
+  process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = root;
+  const first = "11111111-1111-4111-8111-111111111111", second = "22222222-2222-4222-8222-222222222222";
+  const empty = "33333333-3333-4333-8333-333333333333";
+  const cwd = join(root, "a project");
+  const logPath = (id: string) => join(root, "brain", id, ".system_generated", "logs");
+  try {
+    const index = new Database(join(root, "conversation_summaries.db"));
+    try {
+      index.exec("CREATE TABLE conversation_summaries (conversation_id, title, workspace_uris, status, last_modified_time)");
+      for (const id of [first, second, empty]) {
+        index.query("INSERT INTO conversation_summaries VALUES (?,?,?,?,?)").run(id, "Native title",
+          JSON.stringify([pathToFileURL(cwd).href]), "CASCADE_RUN_STATUS_IDLE", new Date().toISOString());
+        mkdirSync(logPath(id), { recursive: true });
+      }
+    } finally { index.close(); }
+
+    const steps = [
+      { type: "USER_INPUT", source: "USER_EXPLICIT", content: "<USER_REQUEST>Question</USER_REQUEST><ADDITIONAL_METADATA>private</ADDITIONAL_METADATA>" },
+      { type: "PLANNER_RESPONSE", thinking: "private", tool_calls: [{ name: "list_files", args: { token: "private" } }] },
+      { type: "PLANNER_RESPONSE", thinking: "private", content: "Answer" },
+      { type: "PLANNER_RESPONSE", thinking: "private" },
+      { type: "GENERIC", content: "private" },
+      { type: "USER_INPUT", source: "USER_EXPLICIT", content: "Question" },
+    ].map((step, step_index) => JSON.stringify({ ...step, step_index, created_at: "2025-01-01T00:00:00Z" })).join("\n");
+    for (const id of [first, second]) writeFileSync(join(logPath(id), "transcript.jsonl"), steps + "\n");
+
+    const processes: DiscoveredProcess[] = [{ pid: 7, ppid: 1, command: "agy", etime: "01:00", cwd,
+      parentChain: [], source: "antigravity", harness: "unattributed", nativeSessionId: first }];
+    const transcripts = await AntigravitySource.discoverTranscripts(processes, "hot");
+    expect(transcripts.map(row => row.sessionId).sort()).toEqual([first, second]);
+    expect(transcripts[0]).toMatchObject({ cwd, project: "a project", title: "Native title", status: "idle" });
+    const discovery: DiscoverySnapshot = { processes, transcripts, generatedAt: Date.now(),
+      totals: { total: 1, scoutManaged: 0, hudsonManaged: 0, unattributed: 1, transcripts: 2 } };
+    const a = await readTailEventsForSession(first, { discovery });
+    const b = await readTailEventsForSession(second, { discovery });
+    expect(a?.events.map(e => [e.kind, e.summary, e.pid])).toEqual([
+      ["user", "Question", 7], ["tool", "list_files", 7], ["assistant", "Answer", 7], ["user", "Question", 7],
+    ]);
+    expect(b?.events[0].pid).toBeLessThan(0);
+    const resumed = { ...discovery, processes: [{ ...processes[0]!, pid: 9, nativeSessionId: second }] };
+    expect((await readTailEventsForSession(second, { discovery: resumed }))?.events[0]?.pid).toBe(9);
+    expect((await readTailEventsForSession(first, { discovery: resumed }))?.events[0]?.pid).toBeLessThan(0);
+    expect(JSON.stringify(a?.events)).not.toContain("private");
+    expect(await readTailEventsForSession("transcript", { discovery })).toBeNull();
+    expect((await readTailEventsForSession(join(logPath(second), "transcript.jsonl"), { discovery }))?.transcript.sessionId).toBe(second);
+
+    // Exercise the same recent query that scout tail uses, with another harness
+    // occupying the newest slot and a file-backed conversation outside discovery.
+    const caller = brokerRouter.createCaller({});
+    const removeSubscriber = __testing.addPublicSubscriberWithoutLoop(() => {});
+    try {
+      await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
+      const history = await caller.tail.recent({ sources: ["antigravity"], transcripts: true, limit: 20 });
+      const repeats = history.events.filter(e => e.sessionId === first && e.summary === "Question");
+      expect(repeats.map(e => e.id).sort()).toEqual([`antigravity:${first}:0`, `antigravity:${first}:5`]);
+    } finally {
+      removeSubscriber();
+      __testing.clearWatchers();
+    }
+    await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
+    const reply = a!.events.at(-1)!;
+    __testing.pushEvent(reply);
+    __testing.pushEvent({ ...reply, id: "newer", source: "codex", ts: reply.ts + 1 });
+    const filter = { limit: 1, sources: ["antigravity"] };
+    expect((await caller.tail.recent(filter)).events.map(event => event.id)).toEqual([reply.id]);
+    expect((await caller.tail.recent({ ...filter, transcripts: true })).events).toHaveLength(1);
+    const old = new Date(0);
+    utimesSync(join(logPath(first), "transcript.jsonl"), old, old);
+    expect((await AntigravitySource.discoverTranscripts([], "hot")).map(t => t.sessionId)).toEqual([second]);
+    __testing.resetTailEventBuffers();
+    await __testing.refreshDiscovery([{ ...AntigravitySource, discoverProcesses: () => processes }]);
+    const exact = { ...filter, transcripts: true, sessionId: first };
+    expect((await caller.tail.recent(exact)).events[0]?.sessionId).toBe(first);
+    expect((await caller.tail.recent({ ...exact, sources: ["other"] })).events).toEqual([]);
+    expect(AntigravitySource.findTranscript?.("../" + first)).toBeNull();
+  } finally {
+    __testing.clearWatchers();
+    __testing.resetDiscovery();
+    __testing.resetTailEventBuffers();
+    if (previous === undefined) delete process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT;
+    else process.env.OPENSCOUT_TAIL_ANTIGRAVITY_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
