@@ -858,7 +858,7 @@
           "maximum": 9007199254740991
         },
         "runtime": {
-          "description": "Shell-safe RuntimeSpec: harness[/model[/effort]], such as codex/gpt-5.6-sol/xhigh.",
+          "description": "Shell-safe RuntimeSpec: harness[/model[/effort]], such as codex/gpt-5.6-sol/xhigh or antigravity/gemini-4-neon/high.",
           "type": "string"
         },
         "role": {
@@ -870,6 +870,7 @@
           "description": "Runtime preset base. Explicit harness/model/reasoningEffort fields may override compatible dimensions.",
           "type": "string",
           "enum": [
+            "antigravity",
             "fable",
             "kimi",
             "grok",
@@ -891,7 +892,10 @@
             "opencode",
             "pi",
             "devin",
-            "antigravity"
+            "antigravity",
+            "oc",
+            "agy",
+            "antigravity-acp"
           ]
         },
         "model": {

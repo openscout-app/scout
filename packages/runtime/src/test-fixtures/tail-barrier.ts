@@ -50,6 +50,9 @@ mock.module(join(runtimeDirectory, "tail/index.js"), () => ({
     return () => legacy.delete(fn);
   },
   readRecentLiveEvents: async () => [],
+  getTailDiscovery: async () => ({ readStatus: { initialized: true }, transcripts: [], processes: [] }),
+  refreshTailDiscovery: async () => ({ transcripts: [], processes: [] }),
+  readTailEventsForSession: async () => null,
   readRecentTranscriptEvents: async () => [],
 }));
 mock.module(join(runtimeDirectory, "tail/service.js"), () => ({

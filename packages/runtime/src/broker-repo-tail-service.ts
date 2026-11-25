@@ -50,12 +50,13 @@ export type BrokerRepoTailServiceOptions<TBrokerSnapshot> = {
   getTailDiscovery: (force?: boolean) => Promise<DiscoverySnapshot>;
   readRecentLiveEvents: (
     limit: number,
-    options?: { kinds?: TailEventKind[] },
+    options?: { kinds?: TailEventKind[]; sources?: string[] },
   ) => Promise<TailEvent[]>;
   readRecentTranscriptEvents: (
     limit: number,
     options?: {
       discovery?: DiscoverySnapshot | null;
+      sources?: string[];
       perTranscriptLineLimit?: number;
       kinds?: TailEventKind[];
       perTranscriptKindLimit?: number;
@@ -364,7 +365,7 @@ export class BrokerRepoTailService<TBrokerSnapshot> {
       // Read the named session before applying the limit. Filtering the global
       // recent buffer afterward loses quiet tasks behind busy siblings.
       const session = await measure("tail-session", () =>
-        (this.options.readTailEventsForSession ?? readTailEventsForSession)(sessionId, { limit, includeAllSources: true }));
+        (this.options.readTailEventsForSession ?? readTailEventsForSession)(sessionId, { limit, includeAllSources: true, sources: filters.sources }));
       const scoped = filterTailEventsForDisplay(session?.events ?? [])
         .filter((event) => event.sessionId === sessionId && (since === undefined || event.ts >= since) && tailEventMatches(event, filters));
       const events = (assistantRepliesOnly ? latestAssistantReplies(scoped) : scoped)
@@ -385,6 +386,7 @@ export class BrokerRepoTailService<TBrokerSnapshot> {
           Math.max(limit, 800),
           {
             discovery,
+            sources: filters.sources,
             perTranscriptLineLimit: Math.min(200, Math.max(50, limit)),
             kinds,
             ...(since !== undefined ? { since } : {}),
@@ -396,7 +398,7 @@ export class BrokerRepoTailService<TBrokerSnapshot> {
 
     const mergeStart = performance.now();
     const bufferedEvents = filterTailEventsForDisplay(
-      await measure("tail-live", () => this.options.readRecentLiveEvents(limit, { kinds })),
+      await measure("tail-live", () => this.options.readRecentLiveEvents(limit, { kinds, sources: filters.sources })),
     );
     // A replayed line the live buffer also holds is the same event under
     // another id; the live copy wins. Counted, so genuinely repeated lines in
