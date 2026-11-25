@@ -12,6 +12,7 @@ import { registerVercelBoardDispatcherTool, registerVercelBoardPlanTool } from "
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
 import { registerIntegrationTools } from "./integrations.ts";
 import { registerDiffTools } from "./diff-tools.ts";
+import { registerBrowserTools } from "./browser-tools.ts";
 import { loadScoutMeshOverview, renderScoutMeshOverviewLines, type ScoutMeshMachine, type ScoutMeshOverview } from "../lib/core/mesh/overview.ts";
 import { loadCliCrewWhoAmISummary, resolveCliCrewRoleForAsk } from "../lib/core/crew/service.ts";
 import type { CrewRoleAskResolution } from "@openscout/runtime/crew";
@@ -3509,6 +3510,7 @@ export function createScoutMcpServer(options: {
 
   registerIntegrationTools(server, aliasBrokerRequest, { env, get defaultCurrentDirectory() { return options.defaultCurrentDirectory; } });
   registerDiffTools(server, aliasBrokerRequest);
+  registerBrowserTools(server);
   registerSessionRenameTools(server, aliasBrokerRequest, env);
 
   registerChatListeningTools(server, (operation, body) => chatListeningRequest(

@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/browser-use/browser-use.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "Async spawn of external browser-use CLI for Scout BrowserAdapter execution",
+  "owner": "runtime"
+}
