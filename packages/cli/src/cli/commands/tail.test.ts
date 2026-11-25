@@ -144,6 +144,21 @@ describe("tail plain rendering", () => {
     expect(lines[1]).toContain("run_command → exit 0 · 2 files changed");
   });
 
+  test("looks up transcripts when every live row is hidden in plain output", async () => {
+    const lines: string[] = [];
+    const context = createScoutCommandContext({ cwd: ".", env: {}, stdout: line => lines.push(line) });
+    const reads: boolean[] = [];
+    await runTailCommand(context, ["--once"], async (options) => {
+      reads.push(options?.transcripts === true);
+      const events = options?.transcripts
+        ? [toolStart, event({ source: "antigravity", kind: "tool-result", summary: "run_command → exit 0" })]
+        : [toolStart];
+      return { generatedAt: 1, limit: 80, cursor: null, events };
+    });
+    expect(reads).toEqual([false, true]);
+    expect(lines.join("\n")).toContain("run_command → exit 0");
+  });
+
   test("a known noisy grok phase does not appear by default", () => {
     expect(renderTailEvents([
       event({ summary: "phase · streaming_reasoning" }),

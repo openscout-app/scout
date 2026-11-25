@@ -130,12 +130,14 @@ test("live Tail and history pair parallel Antigravity calls across a watcher res
     const watcher = await __testing.installWatcher({ source: AntigravitySource, process, transcript });
     appendFileSync(path, line(1, result(output)) + line(2, { ...result("Read failed", "ERROR"), error: "Missing file" })
       + line(3, planner) + line(5, result("Reading", "RUNNING"))
-      + line(6, result("Unattributed output")) + line(7, { type: "GENERIC", content: "private" }));
+      + line(6, result("Unattributed output")) + line(7, { type: "GENERIC", content: "private" })
+      + line(8, { type: "PLANNER_RESPONSE", tool_calls: [planner.tool_calls[1]] })
+      + line(9, result("Showing lines 2-5 of 10\nAPI_TOKEN=fixture-unregistered-secret\nfile body")));
     await __testing.pumpWatcher(watcher);
     const history = (await readTailEventsForSession(sessionId, { discovery }))!.events;
     const [message, command, file, finished, failed] = history;
     expect(history.map(e => e.kind)).toEqual(["assistant", "tool", "tool", "tool-result", "tool-result",
-      "assistant", "tool", "tool", "tool-result", "tool-result"]);
+      "assistant", "tool", "tool", "tool-result", "tool-result", "tool", "tool-result"]);
     expect(new Set(history.map(e => e.id)).size).toBe(history.length);
     expect(message?.id).toBe(`antigravity:${sessionId}:9`);
     expect(command).toMatchObject({ summary: "run_command · git diff --stat", raw: { input: { CommandLine: "git diff --stat" } } });
@@ -144,8 +146,11 @@ test("live Tail and history pair parallel Antigravity calls across a watcher res
       raw: { tool_use_id: command?.id, tool_name: "run_command", status: "DONE", output } });
     expect(failed).toMatchObject({ summary: "read_file → error · Missing file",
       raw: { tool_use_id: file?.id, error: "Missing file" } });
-    expect(history[8]).toMatchObject({ summary: "read_file → running · Reading", raw: { tool_use_id: history[7]?.id } });
-    expect(history[9]?.summary).toBe("tool → Unattributed output");
+    expect(history[8]).toMatchObject({ summary: "read_file → running", raw: { tool_use_id: history[7]?.id } });
+    expect(history[9]?.summary).toBe("tool → done");
+    expect(JSON.stringify(history)).not.toContain("fixture-unregistered-secret");
+    expect(history[11]?.summary).toBe("read_file → read lines 2–5");
+    expect(history[11]?.raw).toMatchObject({ output: "Showing lines 2-5 of 10\nAPI_TOKEN=[REDACTED]\nfile body" });
     expect(history[9]?.raw).not.toHaveProperty("tool_use_id");
     expect(live.map(e => [e.id, e.summary])).toEqual(history.slice(3).map(e => [e.id, e.summary]));
     expect(JSON.stringify(history)).not.toContain("private");

@@ -5,7 +5,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { oneLine, summarizeToolResult } from "./tool-format.js";
+import { redactDiagnosticText } from "../diagnostic-report.js";
+import { oneLine } from "./tool-format.js";
 import { execSystemFile } from "../system-probes/exec.js";
 import { buildParentChain, classifyAttribution, commandBasename, listProcesses, processResourceFields, readCwd } from "./discover.js";
 import type { DiscoveredProcess, DiscoveredTranscript, TailContext, TailDiscoveryScope, TailEvent, ParsedTailEvents, AnyTranscriptSource } from "./types.js";
@@ -140,11 +141,45 @@ const actionKeys = [
   "query", "domain", "Action", "TaskId", "Recipient", "Role", "ImageName", "CronExpression", "toolSummary",
 ] as const;
 
+function cleanToolText(text: string): string {
+  return redactDiagnosticText(redactSecrets(text));
+}
+
+// Plain Tail describes the outcome. File bodies, arbitrary stdout and MCP
+// response payloads belong in the bounded, scrubbed raw details.
+function resultSummary(name: string, status: string, output: string, error: string): string {
+  if (status === "RUNNING") return "running";
+  if (status === "ERROR") {
+    const reason = /\b(?:ENOENT|EACCES|ETIMEDOUT|missing file|file not found|permission denied)\b/iu.exec(error || output);
+    return reason ? `error · ${reason[0]}` : "error";
+  }
+  if (name === "run_command") {
+    const command = /^Command exited with code (-?\d+)\.\s*(?:Command output:\s*)?/u.exec(output);
+    if (command) {
+      const stdout = output.slice(command[0].length).trim();
+      if (!stdout) return `exit ${command[1]}`;
+      const lines = stdout.split("\n");
+      const diff = /^(?:\d+ files? changed)(?:, \d+ (?:insertions?\(\+\)|deletions?\(-\))){0,2}$/u.exec(lines.at(-1)!.trim());
+      return `exit ${command[1]} · ${diff?.[0] ?? `${lines.length} output line${lines.length === 1 ? "" : "s"}`}`;
+    }
+  }
+  if (name === "read_file") {
+    const range = /^Showing lines (\d+)-(\d+)\b/u.exec(output);
+    if (range) return `read lines ${range[1]}–${range[2]}`;
+  }
+  if (name === "edit_file") {
+    const edits = /^Made (\d+) replacements?\b/u.exec(output);
+    if (edits) return `${edits[1]} replacement${edits[1] === "1" ? "" : "s"}`;
+  }
+  if (name === "write_file" && output.startsWith("Created file")) return "created file";
+  return status === "DONE" ? "done" : "result received";
+}
+
 function describeCall(name: string, args: Record<string, unknown>) {
   const input: Record<string, string | number> = {};
   for (const key of actionKeys) {
     const value = args[key];
-    if (typeof value === "string") input[key] = redactSecrets(value);
+    if (typeof value === "string") input[key] = cleanToolText(value);
     else if (typeof value === "number" && Number.isFinite(value)) input[key] = value;
   }
   let subject = input.CommandLine ?? input.Path ?? input.query ?? input.Action ?? input.Recipient
@@ -206,14 +241,11 @@ function parseLine(line: string, ctx: TailContext): ParsedTailEvents {
       const call = pending?.get(step.step_index);
       pending?.delete(step.step_index);
       const body = content.replace(/^(?:(?:Created|Completed) At: [^\n]*(?:\n|$))+/u, "").trim();
-      const output = redactSecrets(body);
-      const error = typeof step.error === "string" ? redactSecrets(step.error) : "";
+      const output = cleanToolText(body);
+      const error = typeof step.error === "string" ? cleanToolText(step.error) : "";
       const status = typeof step.status === "string" ? step.status : "";
-      // Put the exit code and stdout together so both fit in the ordinary rail.
-      const concise = output.replace(/^Command exited with code (-?\d+)\.\s*(?:Command output:\s*)?/u, "exit $1 · ").trim();
-      const detail = summarizeToolResult(error || concise || status.toLowerCase());
-      const preview = status === "RUNNING" ? `running · ${detail}` : status === "ERROR" ? `error · ${detail}` : detail;
       const name = call?.name ?? "tool";
+      const preview = resultSummary(name, status, output, error);
       return event("tool-result", `${name} → ${preview}`, {
         status, output, ...(error && { error }), ...(call && { tool_name: name, tool_use_id: call.id, call: call.summary }),
       });

@@ -72,7 +72,7 @@ export function renderTailCommandHelp(): string {
     "  --limit <count>                   Initial backlog count (default 80)",
     "  --since <event-id>                Resume live streaming after a TailEvent id cursor",
     "  --once                            Print the backlog and exit",
-    "  --transcripts                     Always include recent transcript history (automatic on an empty backlog)",
+    "  --transcripts                     Always include recent transcript history (automatic when the backlog has no visible events)",
     "  --no-transcripts                  Read only the live backlog",
     "  --verbose, --debug                Show the full firehose including lifecycle noise",
     "  --raw                             Unfiltered plain output plus bounded raw payload JSON",
@@ -220,6 +220,7 @@ export function parseTailCommandOptions(args: string[]): ScoutTailCommandOptions
 export async function runTailCommand(
   context: ScoutCommandContext,
   args: string[],
+  readRecent = readScoutTailEvents,
 ): Promise<void> {
   if (args.some((arg) => HELP_FLAGS.has(arg))) {
     context.output.writeText(renderTailCommandHelp());
@@ -227,7 +228,7 @@ export async function runTailCommand(
   }
 
   const options = parseTailCommandOptions(args);
-  const readBacklog = (transcripts: boolean) => readScoutTailEvents({
+  const readBacklog = (transcripts: boolean) => readRecent({
     limit: options.limit,
     sources: options.sources,
     kinds: options.kinds,
@@ -240,15 +241,17 @@ export async function runTailCommand(
   let initial = options.since && !options.once
     ? { generatedAt: Date.now(), limit: options.limit, cursor: options.since, events: [] }
     : await readBacklog(options.transcripts === true);
-  if (!options.since && options.transcripts === undefined && initial.events.length === 0) {
-    initial = await readBacklog(true);
-  }
-
   const renderOptions: RenderTailEventOptions = {
     raw: options.raw,
     verbose: options.verbose,
     color: process.stdout.isTTY === true,
   };
+
+  if (!options.since && options.transcripts === undefined) {
+    const visible = context.output.mode === "json" ? initial.events.length > 0
+      : initial.events.some(event => includeTailEvent(event, renderOptions));
+    if (!visible) initial = await readBacklog(true);
+  }
 
   if (options.once) {
     context.output.writeValue(initial, (value) => {
