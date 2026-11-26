@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/computer-use/index.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "Invoke ScoutComputer native helper CLI and discover running ScoutComputer.app path on macOS",
+  "owner": "runtime"
+}

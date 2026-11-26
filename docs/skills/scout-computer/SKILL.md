@@ -1,66 +1,89 @@
 ---
 name: scout-computer
-description: Default Scout Computer skill covering both browser automation/introspection and native desktop control. Use Scout directly instead of Lattices action-browser: prioritizes Scout's Chrome Companion plugin and managed Chrome profiles, falls back to external browser adapters (browser-use), and uses native desktop control for macOS apps or regular Chrome.
+description: Default Scout Computer skill for real non-headless browser control (Chrome, Safari, Scout Browser Companion) and native macOS desktop automation. Load this BEFORE any web browsing, UI verification, DOM inspection, screenshot, or desktop app task. Never default to headless Playwright, Puppeteer, or headless Chromium when Scout Computer is available.
 ---
 
 # Scout Computer (Browser + Desktop)
 
-Use Scout directly for browser and desktop work under one lease, origin-scope,
-secret-cutoff, and receipt boundary.
+**Rule #1 — Real browsers first, never headless by default:**
+Whenever a task involves opening a web page, inspecting DOM/UI state, clicking,
+filling forms, testing responsive layouts, or taking screenshots, use **Scout's
+MCP tools** (`browser_*` and `computer_*`) or **`scout browser` / `scout computer`
+CLI** instead of headless Playwright, Puppeteer, or curl-scraping.
 
-## Browser surface (default for web tasks)
+## 1. Browser tools (default for web tasks)
 
-Use Scout's `browser_*` MCP tools or `scout browser ...` CLI first whenever
-the task is on a web page:
+All `browser_*` tools live inside the `scout` MCP server under one lease,
+origin allow-list, secret-cutoff, and receipt boundary:
 
-1. **`scout-companion`** (preferred when connected): Scout's MV3 Browser
-   Companion extension (Chrome and Safari) over the local bridge
-   (`ws://127.0.0.1:4321/browser-companion`) for live DOM/page introspection
-   and targeted actions.
-2. **`scout-native`**: Scout-owned non-headless Chrome identities under
-   `~/Library/Application Support/Scout/ChromeProfiles/<name>` (with
-   compatibility for existing `Action/ChromeProfiles/<name>` identities), full
-   CDP control, and domain-allowlisted cookie seeding.
-3. **`scout-safari`**: Direct macOS Safari tab control and DOM inspection
-   (AppleScript / `do JavaScript` or paired Safari Web Extension).
-4. **`browser-use`** (first external adapter): Wraps the `browser-use` CLI
-   behind Scout's lease, origin allow-list, and receipt contract.
+1. **`scout-companion`** (preferred when connected): Scout's Chrome/Safari MV3
+   Browser Companion extension over `http://127.0.0.1:4321` for live DOM
+   introspection and action inside your open browser.
+2. **`scout-native`** (real non-headless Chrome over CDP): Auto-launches a
+   persistent visible Chrome profile under `Scout/ChromeProfiles/<name>` (and
+   reuses existing `Action/ChromeProfiles/<name>` identities), discovering its
+   active DevTools port automatically via `DevToolsActivePort`.
+3. **`scout-safari`**: Direct macOS Safari tab control and DOM inspection.
+4. **`browser-use`**: External goal-driven adapter when explicitly requested.
+
+### MCP tools (part of `scout` default toolset)
 
 ```text
-browser_status                          # check companion, profiles, external adapters
-browser_profiles                        # list managed Chrome identities
-browser_open       { url, profile? }    # open URL (scout-companion -> scout-native -> browser-use)
-browser_snapshot                        # inspect DOM/accessibility before acting
-browser_click      { selector }
-browser_fill       { selector, text }
-browser_screenshot                      # capture visual confirmation
-browser_close      { scope }
+browser_status                                  # adapter health + active lease
+browser_profiles                                # list persistent Chrome profiles
+browser_open       { url, profile?, newTab? }   # open URL in real non-headless Chrome/Safari
+browser_tabs                                    # list open tabs
+browser_snapshot   { tabId?, url? }             # DOM + interactive elements + selectors + text
+browser_click      { selector?, label? }        # click by CSS selector or visible label
+browser_fill       { selector?, label?, text }  # fill input/textarea/contenteditable
+browser_resize     { width, height, mobile? }   # responsive viewport emulation (or reset: true)
+browser_screenshot { outputPath?, tabId? }      # save PNG screenshot and return file path
+browser_close      { scope?: "tab"|"browser" }  # close tab or managed browser
 ```
 
-CLI equivalent:
+### CLI equivalents
 
 ```bash
 scout browser status
-scout browser profiles
-scout browser open https://example.com --allow-origin https://example.com
+scout browser open https://example.com
 scout browser snapshot
-scout browser run "verify the header renders cleanly" --adapter browser-use
+scout browser click --label "Sign in"
+scout browser screenshot --output /tmp/page.png
 ```
 
-## Native desktop surface
+## 2. Native desktop tools (`computer_*`)
 
-Drop to Scout Computer's native screen/accessibility surface when:
+Use `computer_*` (or `scout computer ...`) when working with:
+- Any **native macOS app**, or
+- The operator's **regular Chrome window** (e.g., capturing a window screenshot,
+  focusing a tab/window, or interacting where passkeys/SSO prevent using a
+  managed profile).
 
-- The task is in a native macOS app, or
-- The user wants an action inside their regular Chrome profile where passkeys,
-  SSO device trust, or extension state prevent using a seeded managed identity
-  (`browser_open { mode: "regular" }` is open-only).
+### MCP tools (part of `scout` default toolset)
+
+```text
+computer_status                                          # helper binary, agent, TCC permissions
+computer_windows    { bundleId? | app? | pid? }          # list on-screen windows
+computer_screenshot { bundleId?, windowId?, outputPath? }# capture window, region, or screen PNG
+computer_focus      { bundleId?, title?, launch? }       # launch/activate app or raise window
+computer_inspect    { bundleId? | app? | pid? }          # read Accessibility UI tree
+computer_act        { kind: click|type|key|scroll|drag|ax_press|ax_set|ocr, ... }
+```
+
+### CLI equivalents
+
+```bash
+scout computer status
+scout computer windows --app "Google Chrome"
+scout computer screenshot --app "Google Chrome" --output /tmp/chrome.png
+scout computer focus --app "Google Chrome" --title "Scout"
+```
 
 ## Trust rules
 
-- **Observe before acting**: Always take a snapshot or screenshot before
-  clicking or filling unfamiliar controls.
-- **Single driver**: One lease at a time across browser and desktop.
-- **Origin allow-lists & secret cutoff**: Pass `allowOrigins` when driving
-  authenticated flows and stop automated observation before any
-  secret-revealing action.
+- **Observe before acting**: Run `browser_snapshot` / `computer_inspect` /
+  `computer_screenshot` before clicking unfamiliar controls.
+- **Origin allow-lists & secret cutoff**: Pass `allowOrigins` on authenticated
+  flows and stop observation before any secret-revealing action.
+- **Never launch `ScoutComputerAgent` directly**: `computer_*` talks to the
+  running helper automatically; invoking `agent` directly collides on port 4319.

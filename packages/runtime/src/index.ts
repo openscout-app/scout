@@ -72,6 +72,7 @@ export * from "./knowledge/index.js";
 export * from "./repo-watch/index.js";
 export * from "./repo-diff/index.js";
 export * from "./browser-use/index.js";
+export * from "./computer-use/index.js";
 
 // Canonical broker HTTP paths live in @openscout/protocol; re-exported here so
 // runtime-only consumers (e.g. the CLI) can reach them without a new dependency.

@@ -89,6 +89,7 @@ export * from "./slack-manifest.js";
 
 export * from "./room-listening.js";
 export * from "./browser-use.js";
+export * from "./computer-use.js";
 export * from "./mcp-events.js";
 
 export * from "./completion.js";

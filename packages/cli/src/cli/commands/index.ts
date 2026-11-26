@@ -28,6 +28,7 @@ export type ScoutCommandName =
   | "decision"
   | "diff"
   | "browser"
+  | "computer"
   | "down"
   | "doctor"
   | "report"
@@ -129,6 +130,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./diff.ts")).runDiffCommand;
     case "browser":
       return (await import("./browser.ts")).runBrowserCommand;
+    case "computer":
+      return (await import("./computer.ts")).runComputerCommand;
     case "down":
       return (await import("./down.ts")).runDownCommand;
     case "report":
