@@ -166,7 +166,7 @@ export type ScoutBrokerContext = {
   snapshot: ScoutBrokerSnapshot;
 };
 
-export type ScoutManagedLocalSessionTransport = "codex_app_server" | "tmux" | "ghostty";
+export type ScoutManagedLocalSessionTransport = "codex_app_server" | "antigravity_acp" | "tmux" | "ghostty";
 
 export type ScoutManagedLocalSessionAttachment = {
   ok: boolean;

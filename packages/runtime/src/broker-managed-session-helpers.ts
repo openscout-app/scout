@@ -14,7 +14,7 @@ import {
 import type { LiveTerminalSession } from "./live-terminal-session.js";
 import { resolveAgentLabel, type RuntimeSnapshot } from "./scout-dispatcher.js";
 
-export type ManagedLocalSessionTransport = "codex_app_server" | "claude_stream_json";
+export type ManagedLocalSessionTransport = "codex_app_server" | "claude_stream_json" | "antigravity_acp";
 
 export function localAgentMetadataSource(metadata: Record<string, unknown> | undefined): string | null {
   const source = metadata?.source;
@@ -179,9 +179,9 @@ export function managedLocalSessionDefaultDisplayName(input: {
   cwd: string;
 }): string {
   const projectName = basename(input.projectRoot ?? input.cwd) || input.cwd;
-  return input.transport === "codex_app_server"
-    ? `Codex (${projectName})`
-    : `Claude (${projectName})`;
+  if (input.transport === "codex_app_server") return `Codex (${projectName})`;
+  if (input.transport === "antigravity_acp") return `Antigravity (${projectName})`;
+  return `Claude (${projectName})`;
 }
 
 export function suggestedManagedLocalSessionSelector(input: {
@@ -190,7 +190,11 @@ export function suggestedManagedLocalSessionSelector(input: {
   cwd: string;
 }): string {
   const projectName = normalizeAgentSelectorSegment(basename(input.projectRoot ?? input.cwd) || "session") || "session";
-  const prefix = input.transport === "codex_app_server" ? "codex" : "claude";
+  const prefix = input.transport === "codex_app_server"
+    ? "codex"
+    : input.transport === "antigravity_acp"
+      ? "antigravity"
+      : "claude";
   return `@${prefix}-${projectName}`;
 }
 
@@ -237,7 +241,7 @@ export function buildManagedLocalSessionAgent(input: {
 export function buildManagedLocalSessionEndpointBinding(input: {
   agentId: string;
   transport: ManagedLocalSessionTransport;
-  harness: "codex" | "claude";
+  harness: "codex" | "claude" | "antigravity";
   sessionId: string;
   cwd: string;
   projectRoot?: string;
@@ -492,6 +496,7 @@ export function managedLocalSessionEndpointForAgent(
     && (
       endpoint.transport === "codex_app_server"
       || endpoint.transport === "claude_stream_json"
+      || endpoint.transport === "antigravity_acp"
       || endpoint.transport === "pairing_bridge"
       || ((endpoint.transport === "tmux" || endpoint.transport === "ghostty" || endpoint.transport === "rex") && endpoint.metadata?.attachedLive === true)
     )
