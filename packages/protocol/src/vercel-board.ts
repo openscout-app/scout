@@ -497,12 +497,59 @@ export interface VercelBoardMirroredMessage {
 
 export interface VercelBoardMessagesResponse {
   connectionId: string;
+  /** The board read, by ID, when the caller named one. Absent for the connected board's followed channels. */
+  board?: string;
   channel: string;
-  conversationId: string;
+  /** The channel's Scout room. Null for a channel the connection does not follow: it has no room. */
+  conversationId: string | null;
   state: VercelBoardMirrorState;
   /** Where a caller follows on from. */
   cursor: string | null;
   messages: VercelBoardMirroredMessage[];
+}
+
+/** One channel of a board, as the board list shows it: a name and the counts the board keeps. No content. */
+export interface VercelBoardChannelListing {
+  channel: string;
+  /** The channel's last feed index, where the board gives one. */
+  lastIndex?: number;
+  /** Message and thread counts. Vercel's board keeps none, so they are absent there. */
+  messages?: number;
+  threads?: number;
+  /** Whether the connection follows it (the connected board only). A followed channel has a Scout room. */
+  followed: boolean;
+  /** The connection's probe channel name: a scratch channel for setup checks, not team conversation. */
+  scratch: boolean;
+  /** For a followed channel: its mirror state and Scout room. */
+  mirror?: VercelBoardMirrorState;
+  conversationId?: string;
+}
+
+/** One of the team's boards and its channels. A board whose channels could not be read carries `error`. */
+export interface VercelBoardListing {
+  /** The board's ID. Pass it as `board` to read a channel's messages. */
+  id: string;
+  name: string;
+  /** The team's default board (General). */
+  isDefault: boolean;
+  /** The board this connection is connected to. */
+  connected: boolean;
+  channels: VercelBoardChannelListing[];
+  /** True when the board has more channels than the list holds. */
+  more: boolean;
+  error?: { code: string; message: string };
+}
+
+/**
+ * Every board the connection's credential can see on its team, with each
+ * board's channels: names and light counts only. Reading a channel's messages
+ * is a separate call, made when the channel is opened.
+ */
+export interface VercelBoardBoardsResponse {
+  connectionId: string;
+  boards: VercelBoardListing[];
+  /** When the runtime read the list. It is held briefly, so a client may see the same list twice. */
+  readAt: number;
 }
 
 /**

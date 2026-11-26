@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { VercelBoardCredentialReference, VercelBoardPlanTask } from "@openscout/protocol";
-import { VercelBoardHttpError, VercelBoardUnknownOutcomeError, type VercelBoardBlockKind, type VercelBoardClaimGrant, type VercelBoardMe, type VercelBoardTransport } from "./client.js";
+import { VercelBoardHttpError, VercelBoardUnknownOutcomeError, parseVercelBoardChannelRef, type VercelBoardBlockKind, type VercelBoardBoardRef, type VercelBoardChannelRef, type VercelBoardClaimGrant, type VercelBoardMe, type VercelBoardTransport } from "./client.js";
 import { boardResultExcerpt, parseVercelBoardEvent, parseVercelBoardMessage, parseVercelBoardMessagesPage, parseVercelBoardTaskSummary, type VercelBoardWireMessage } from "./wire.js";
 
 /**
@@ -450,5 +450,29 @@ export class VercelBoardWorkerTransport implements VercelBoardTransport {
 
   async labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }) {
     await this.call("labels", { id: messageId, change });
+  }
+
+  async boards(signal?: AbortSignal): Promise<VercelBoardBoardRef[]> {
+    const answer = record(await this.call("boards", {}, { signal }), "board list");
+    if (!Array.isArray(answer.boards) || answer.boards.length > 1000) throw invalid("board list");
+    return answer.boards.flatMap((value: unknown): VercelBoardBoardRef[] => {
+      if (!value || typeof value !== "object") return [];
+      const row = value as Record<string, unknown>;
+      if (typeof row.id !== "string" || !row.id || typeof row.name !== "string" || !row.name) return [];
+      return [{ id: row.id, name: row.name.slice(0, 64), isDefault: row.isDefault === true, connected: row.connected === true }];
+    });
+  }
+
+  async channels(query: { board: string; prefix?: string; after?: string; limit?: number }) {
+    const answer = record(await this.call("channels", { board: query.board, ...(query.prefix ? { prefix: query.prefix } : {}), ...(query.after ? { after: query.after } : {}), ...(query.limit ? { limit: query.limit } : {}) }), "channel list");
+    if (!Array.isArray(answer.channels)) throw invalid("channel list");
+    const channels = answer.channels.map(parseVercelBoardChannelRef).filter((row: VercelBoardChannelRef | null): row is VercelBoardChannelRef => row !== null);
+    return { channels, next: typeof answer.next === "string" && answer.next ? answer.next : null };
+  }
+
+  async boardMessages(query: { board: string; channel: string; limit?: number }) {
+    const limit = Math.max(1, Math.min(Math.floor(query.limit ?? 500), 500));
+    const answer = record(await this.call("boardMessages", { board: query.board, channel: query.channel, limit }), "messages page");
+    try { return parseVercelBoardMessagesPage(answer); } catch { throw invalid("message list"); }
   }
 }

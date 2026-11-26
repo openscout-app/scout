@@ -241,6 +241,11 @@ export class FakeVercelBoard {
     for (const message of this.messages.values()) this.expire(message);
     if (method === "GET" && path === "/me") return json(200, { ...this.actor(), expiresAt: null });
     if (method === "POST" && path === "/channels") { this.channels.add(body.path); return json(201, { channel: body.path }); }
+    if (method === "GET" && path === "/channels") {
+      const counts = new Map<string, number>();
+      for (const message of this.messages.values()) counts.set(message.channel, (counts.get(message.channel) ?? 0) + 1);
+      return json(200, { channels: [...this.channels].sort().map(channel => ({ path: channel, messages: counts.get(channel) ?? 0 })), cursor: "", next: null });
+    }
     if (method === "GET" && path === "/events") {
       const channel = query.get("channel");
       const afterRaw = query.get("after");

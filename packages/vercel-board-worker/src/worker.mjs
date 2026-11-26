@@ -27,6 +27,7 @@ export const VERCEL_API = "https://api.vercel.com";
 export const OPERATIONS = Object.freeze([
   "me", "ensureChannel", "events", "tasks", "messages", "message", "post", "postById", "createTask", "createBatch", "batch",
   "claim", "renew", "complete", "fail", "release", "block", "unblock", "labels",
+  "boards", "channels", "boardMessages",
 ]);
 const WRITES = new Set(["ensureChannel", "post", "createTask", "createBatch", "claim", "renew", "complete", "fail", "release", "block", "unblock", "labels"]);
 const BLOCK_KINDS = new Set(["needs_input", "awaiting_approval"]);
@@ -35,6 +36,9 @@ const CLAIM_PATH = /\/messageboard\/.*\/claim\/?$/;
 const TEAM = /^[^\s/]{1,128}$/;
 const VERCEL_BOARD_NAME = /^[^/]{1,64}$/;
 const PROFILE = /^[A-Za-z][A-Za-z0-9-]{0,31}$/;
+/** The narrowing for reads of the team's other boards, and of channels the connection does not follow: read, nothing else. */
+export const READ_ONLY_CAN = "*=read";
+const BOARD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** Thrown inside `fetch` to end a claim the SDK would otherwise send again. */
 class ClaimStop extends Error {
@@ -131,7 +135,18 @@ const withoutMentions = (message) => {
 };
 const lease = (value) => Number.isInteger(value) && value > 0 ? value : undefined;
 
-/** The operations. Each takes the narrowed client and plain arguments, and answers plain JSON. */
+const listLimit = (value, max) => Number.isInteger(value) ? Math.max(1, Math.min(value, max)) : max;
+const boardOf = (args) => {
+  const id = text(args.board, "board");
+  if (!BOARD_ID.test(id)) throw Object.assign(new Error("board must be a board ID"), { status: 400, code: "invalid_request" });
+  return id;
+};
+
+/**
+ * The operations. Each takes the narrowed client and plain arguments, and
+ * answers plain JSON. `reader` serves the read-only operations over the
+ * team's boards: `boards`, `channels` and `boardMessages`. None of them writes.
+ */
 export const operations = {
   async me(client) {
     const me = await client.me();
@@ -212,6 +227,27 @@ export const operations = {
   async unblock(client, args) {
     return { task: await client.tasks.unblock(text(args.taskId, "taskId")) };
   },
+  async boards(_client, _args, signal, reader) {
+    return { boards: await reader.boards(signal) };
+  },
+  async channels(_client, args, signal, reader) {
+    const client = await reader.client(boardOf(args), signal);
+    const page = await client.channels({
+      limit: listLimit(args.limit, 500), ...(args.prefix ? { prefix: String(args.prefix) } : {}), ...(args.after ? { after: String(args.after) } : {}),
+    });
+    const channels = (page.channels ?? []).map((channel) => ({
+      channel: channel.path ?? channel.name,
+      ...(Number.isInteger(channel.lastIndex) ? { lastIndex: channel.lastIndex } : {}),
+      ...(Number.isInteger(channel.messages) ? { messages: channel.messages } : {}),
+      ...(Number.isInteger(channel.threads) ? { threads: channel.threads } : {}),
+    })).filter((channel) => typeof channel.channel === "string" && channel.channel);
+    return { channels, next: page.next ?? null };
+  },
+  async boardMessages(_client, args, signal, reader) {
+    const client = await reader.client(boardOf(args), signal);
+    const page = await client.channel(text(args.channel, "channel")).messages({ limit: listLimit(args.limit, 500) });
+    return { messages: page.messages.map(withoutMentions), cursor: page.cursor ?? null };
+  },
   async labels(client, args) {
     const change = args.change && typeof args.change === "object" ? args.change : {};
     await client.label(text(args.id, "id"), {
@@ -221,12 +257,17 @@ export const operations = {
   },
 };
 
+const NO_READER = Object.freeze({
+  async boards() { throw Object.assign(new Error("This worker reads no other boards."), { status: 501, code: "not_supported" }); },
+  async client() { throw Object.assign(new Error("This worker reads no other boards."), { status: 501, code: "not_supported" }); },
+});
+
 /** Run one operation in its own call context. Answers `{ ok, value }` or `{ ok: false, error }`. */
-export async function runOperation(client, op, args, signal) {
+export async function runOperation(client, op, args, signal, reader = NO_READER) {
   if (!OPERATIONS.includes(op)) return { ok: false, error: { kind: "protocol", code: "unknown_operation", message: `${String(op).slice(0, 64)} is not a worker operation.` } };
   const call = { op, claimSent: false, claimStop: undefined };
   try {
-    const value = await callContext.run(call, () => operations[op](client, args && typeof args === "object" ? args : {}, signal));
+    const value = await callContext.run(call, () => operations[op](client, args && typeof args === "object" ? args : {}, signal, reader));
     return { ok: true, value };
   } catch (error) {
     return { ok: false, error: failureOf(op, error, call) };
@@ -320,6 +361,75 @@ export async function openBoard(bootstrap, { token, upstream } = {}) {
   return handle;
 }
 
+const boardKey = (name) => String(name).trim().normalize("NFC").toLowerCase();
+
+/**
+ * Read-only access to the team's boards. `boards` lists them, as the person,
+ * from Vercel's team route. `client` opens one board by ID: found by its name
+ * with `ensure: false`, so a read never makes a board, and narrowed to
+ * `READ_ONLY_CAN`. Reads of the connected board's unfollowed channels go
+ * through here too, so they stay read-only whatever the connection's narrowing.
+ */
+export function boardReader(bootstrap, handle, { token, upstream, open } = {}) {
+  const clients = new Map();
+  let named = new Map();
+  const connected = bootstrap.target.kind === "vercel" ? boardKey(bootstrap.target.board) : null;
+  const openNamed = open ?? (async (name) => {
+    const { board } = await import("@vercel/board");
+    return board({ team: bootstrap.target.team, name, ensure: false, fetch: scoutFetch(token, { upstream }) });
+  });
+  const list = async (signal) => {
+    if (bootstrap.target.kind !== "vercel") return [{ id: "memory", name: "memory", isDefault: true, connected: true }];
+    const team = bootstrap.target.team;
+    const url = new URL(`${VERCEL_API}/v1/messageboard/boards`);
+    url.searchParams.set(team.startsWith("team_") ? "teamId" : "slug", team);
+    let response;
+    try {
+      response = await scoutFetch(token, { upstream })(url.toString(), { method: "GET", headers: { accept: "application/json" }, ...(signal ? { signal } : {}) });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw Object.assign(new Error("Vercel's API did not answer the board list."), { status: 502, code: "unreachable" });
+    }
+    const body = await response.json().catch(() => undefined);
+    if (!response.ok) {
+      const error = body?.error && typeof body.error === "object" ? body.error : {};
+      throw Object.assign(new Error(typeof error.message === "string" ? error.message : `The board list answered ${response.status}.`), {
+        status: response.status, code: typeof error.code === "string" ? error.code : "remote_error",
+      });
+    }
+    if (!Array.isArray(body?.boards)) throw Object.assign(new Error("The board list named no boards."), { status: 502, code: "remote_error" });
+    const defaultId = typeof body.defaultBoardId === "string" ? body.defaultBoardId : null;
+    return body.boards
+      .filter((board) => typeof board?.id === "string" && BOARD_ID.test(board.id))
+      .map((board) => {
+        const isDefault = board.id === defaultId;
+        const name = typeof board.name === "string" && board.name ? board.name : isDefault ? "General" : board.id;
+        return { id: board.id, name, isDefault, connected: boardKey(name) === connected || (isDefault && connected === "general") };
+      });
+  };
+  return {
+    async boards(signal) {
+      const boards = await list(signal);
+      named = new Map(boards.map((board) => [board.id, board.name]));
+      return boards;
+    },
+    async client(id, signal) {
+      if (bootstrap.target.kind !== "vercel") return handle.as(bootstrap.profile, { can: READ_ONLY_CAN });
+      if (clients.has(id)) return clients.get(id);
+      if (!named.has(id)) await this.boards(signal);
+      const name = named.get(id);
+      if (!name) throw Object.assign(new Error(`No board ${id} on this team, or none this credential can see.`), { status: 404, code: "board_not_found" });
+      const other = await openNamed(name);
+      // Find the board as the person, as openBoard does, then narrow every read.
+      await other.discovery();
+      const client = other.as(bootstrap.profile, { can: READ_ONLY_CAN });
+      if (clients.size >= 32) clients.delete(clients.keys().next().value);
+      clients.set(id, client);
+      return client;
+    },
+  };
+}
+
 async function main() {
   // Nothing but protocol lines goes to stdout.
   const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -347,8 +457,12 @@ async function main() {
     fatal("VERCEL_BOARD_TOKEN is not set. The worker starts only under: secret run --map <entry>=VERCEL_BOARD_TOKEN -- <node> <worker>");
   }
   let clientFor;
-  try { clientFor = clientsFor(await openBoard(bootstrap, { token }), bootstrap); }
-  catch (error) { fatal(`The board client did not open: ${error?.message ?? error}`); }
+  let reader;
+  try {
+    const handle = await openBoard(bootstrap, { token });
+    clientFor = clientsFor(handle, bootstrap);
+    reader = boardReader(bootstrap, handle, { token });
+  } catch (error) { fatal(`The board client did not open: ${error?.message ?? error}`); }
   write({ ready: true, protocol: WORKER_PROTOCOL, generation: bootstrap.generation });
 
   const running = new Map();
@@ -369,7 +483,7 @@ async function main() {
     }
     const controller = new AbortController();
     running.set(id, controller);
-    void runOperation(client, message.op, message.args, controller.signal).then((answer) => {
+    void runOperation(client, message.op, message.args, controller.signal, reader).then((answer) => {
       running.delete(id);
       write({ id, ...answer });
     });

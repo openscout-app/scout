@@ -2,7 +2,7 @@
 // place of Vercel's API. No network: the stub answers every request.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clientsFor, failureOf, openClient, parseBootstrap, runOperation, scoutFetch } from "../src/worker.mjs";
+import { READ_ONLY_CAN, boardReader, clientsFor, failureOf, openClient, parseBootstrap, runOperation, scoutFetch } from "../src/worker.mjs";
 
 const TASK = "msg_00000000-0000-4000-8000-000000000001_1";
 const bootstrap = { generation: 1, profile: "scout", can: "work=read,post,react,label;scout-probe=read,post,react,label", target: { kind: "vercel", team: "team_test", board: "scout" } };
@@ -20,6 +20,40 @@ function stubApi(answerClaim) {
   };
   return { calls, upstream, claims: () => calls.filter(call => call.url.includes("/claim")).length };
 }
+
+test("the board list names the team's boards, and another board's channels are read by name, narrowed to read, and never made", async () => {
+  const calls = [];
+  const boards = [{ id: "brd_test", name: "scout" }, { id: "brd_other", name: "Design" }, { id: "brd_general", name: "General" }];
+  const upstream = async (url, init = {}) => {
+    const headers = new Headers(init.headers);
+    const parsed = new URL(url);
+    calls.push({ method: init.method ?? "GET", path: parsed.pathname, query: parsed.search, can: headers.get("x-board-can"), authorization: headers.get("authorization") });
+    if (parsed.pathname === "/v1/messageboard/boards") {
+      const name = parsed.searchParams.get("name");
+      return Response.json({ boards: name ? boards.filter(board => board.name.toLowerCase() === name.toLowerCase()) : boards, defaultBoardId: "brd_general" });
+    }
+    const one = /^\/v1\/messageboard\/boards\/([^/]+)$/.exec(parsed.pathname);
+    if (one) return Response.json({ board: boards.find(board => board.id === one[1]) });
+    if (parsed.pathname === "/v1/messageboard/boards/brd_other/channels") return Response.json({ channels: [{ id: "ch_1", name: "design/reviews" }, { id: "ch_2", name: "scout/decisions" }] });
+    return Response.json({ error: { code: "not_found", message: "Not here." } }, { status: 404 });
+  };
+  const handle = { as: () => { throw new Error("the connected board's handle is not used for another board"); } };
+  const reader = boardReader(bootstrap, handle, { token: "test-token", upstream });
+  const listed = await runOperation(null, "boards", {}, undefined, reader);
+  assert.deepEqual(listed, { ok: true, value: { boards: [
+    { id: "brd_test", name: "scout", isDefault: false, connected: true },
+    { id: "brd_other", name: "Design", isDefault: false, connected: false },
+    { id: "brd_general", name: "General", isDefault: true, connected: false },
+  ] } });
+  const channels = await runOperation(null, "channels", { board: "brd_other" }, undefined, reader);
+  assert.deepEqual(channels, { ok: true, value: { channels: [{ channel: "design/reviews" }, { channel: "scout/decisions" }], next: null } });
+  assert.equal(calls.filter(call => call.method !== "GET").length, 0, "a read makes no board and no channel");
+  for (const call of calls) assert.equal(call.authorization, "Bearer test-token");
+  const channelReads = calls.filter(call => call.path.endsWith("/channels"));
+  assert.ok(channelReads.length >= 1);
+  for (const call of channelReads) assert.equal(call.can, READ_ONLY_CAN);
+  assert.deepEqual(await runOperation(null, "channels", { board: "../x" }, undefined, reader), { ok: false, error: { kind: "http", status: 400, code: "invalid_request", message: "board must be a board ID" } });
+});
 
 test("a claim that answers 503 is sent once and reads as outcome unknown", async () => {
   const api = stubApi(() => Response.json({ error: { code: "unavailable", message: "Busy." } }, { status: 503 }));

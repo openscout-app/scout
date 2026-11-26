@@ -58,6 +58,33 @@ export interface VercelBoardTransport {
    */
   as(profile: string | null): VercelBoardTransport;
   labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }): Promise<void>;
+  /** The team's boards this credential can see. Read-only: names only. */
+  boards(signal?: AbortSignal): Promise<VercelBoardBoardRef[]>;
+  /** One page of a board's channels: names and the counts the board keeps. Narrowed to read. */
+  channels(query: { board: string; prefix?: string; after?: string; limit?: number }): Promise<{ channels: VercelBoardChannelRef[]; next: string | null }>;
+  /** A channel's newest messages on any of the team's boards, in one call. Narrowed to read; keeps nothing. */
+  boardMessages(query: { board: string; channel: string; limit?: number }): Promise<{ messages: VercelBoardWireMessage[]; cursor: string | null }>;
+}
+
+/** One of the team's boards, as a transport lists it. */
+export interface VercelBoardBoardRef { id: string; name: string; isDefault: boolean; connected: boolean }
+/** One channel of a board, as a transport lists it. Counts are absent where the board keeps none. */
+export interface VercelBoardChannelRef { channel: string; lastIndex?: number; messages?: number; threads?: number }
+
+/** The narrowing for read-only calls: board lists, and channels the connection does not follow. */
+export const VERCEL_BOARD_READ_ONLY_CAN = "*=read";
+/** The board ID a protocol board (one URL, one board) lists itself under. */
+export const VERCEL_BOARD_PROTOCOL_BOARD_ID = "board";
+
+const count = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 ? value as number : undefined;
+/** A channel row from Board's `GET /channels` or the worker, checked. */
+export function parseVercelBoardChannelRef(value: unknown): VercelBoardChannelRef | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const channel = typeof row.channel === "string" ? row.channel : typeof row.path === "string" ? row.path : typeof row.name === "string" ? row.name : null;
+  if (!channel || channel.length > 256) return null;
+  const lastIndex = count(row.lastIndex), messages = count(row.messages), threads = count(row.threads);
+  return { channel, ...(lastIndex !== undefined ? { lastIndex } : {}), ...(messages !== undefined ? { messages } : {}), ...(threads !== undefined ? { threads } : {}) };
 }
 
 export type VercelBoardFetch = (input: string, init: RequestInit) => Promise<Response>;
@@ -94,7 +121,7 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     this.can = vercelBoardCanHeader(connection);
   }
 
-  private async request<T>(method: "GET" | "POST", path: string, options: { query?: Record<string, string | undefined>; body?: unknown; signal?: AbortSignal; timeoutMs?: number; operation: string }): Promise<T> {
+  private async request<T>(method: "GET" | "POST", path: string, options: { query?: Record<string, string | undefined>; body?: unknown; signal?: AbortSignal; timeoutMs?: number; operation: string; can?: string }): Promise<T> {
     const url = new URL(`${this.base}${path}`);
     for (const [key, value] of Object.entries(options.query ?? {})) if (value !== undefined) url.searchParams.set(key, value);
     const timeout = AbortSignal.timeout(options.timeoutMs ?? (method === "GET" ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS));
@@ -102,7 +129,7 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
     const headers: Record<string, string> = {
       authorization: `Bearer ${await this.token()}`,
       ...(this.profile !== null ? { "x-board-profile": this.profile } : {}),
-      "x-board-can": this.can,
+      "x-board-can": options.can ?? this.can,
       accept: "application/json",
     };
     if (options.body !== undefined) headers["content-type"] = "application/json";
@@ -259,6 +286,36 @@ export class VercelBoardHttpTransport implements VercelBoardTransport {
 
   async labels(messageId: string, change: { set?: Record<string, string>; unset?: string[]; if?: Record<string, string | null> }) {
     await this.request("POST", `/messages/${encodeURIComponent(messageId)}/labels`, { body: change, operation: "labels" });
+  }
+
+  /** A protocol board is one board at one URL: it lists itself. */
+  async boards(): Promise<VercelBoardBoardRef[]> {
+    return [{ id: VERCEL_BOARD_PROTOCOL_BOARD_ID, name: new URL(this.base).host, isDefault: true, connected: true }];
+  }
+
+  private onlyBoard(board: string): void {
+    if (board !== VERCEL_BOARD_PROTOCOL_BOARD_ID) throw new VercelBoardHttpError(404, "board_not_found", `This board lists itself as ${VERCEL_BOARD_PROTOCOL_BOARD_ID}; there is no board ${board}.`);
+  }
+
+  async channels(query: { board: string; prefix?: string; after?: string; limit?: number }) {
+    this.onlyBoard(query.board);
+    const limit = Math.max(1, Math.min(Math.floor(query.limit ?? 500), 500));
+    const answer = await this.request<Record<string, any>>("GET", "/channels", {
+      query: { prefix: query.prefix, after: query.after, limit: String(limit) }, can: VERCEL_BOARD_READ_ONLY_CAN, operation: "channels",
+    });
+    if (!Array.isArray(answer.channels)) throw new VercelBoardHttpError(502, "remote_error", "GET /channels answered no channel list.");
+    const channels = answer.channels.map(parseVercelBoardChannelRef).filter((row): row is VercelBoardChannelRef => row !== null);
+    return { channels, next: typeof answer.next === "string" && answer.next ? answer.next : null };
+  }
+
+  async boardMessages(query: { board: string; channel: string; limit?: number }) {
+    this.onlyBoard(query.board);
+    const limit = Math.max(1, Math.min(Math.floor(query.limit ?? 500), 500));
+    const answer = await this.request<Record<string, any>>("GET", "/messages", {
+      query: { channel: query.channel, limit: String(limit) }, can: VERCEL_BOARD_READ_ONLY_CAN, operation: "messages",
+    });
+    try { return parseVercelBoardMessagesPage(answer); }
+    catch { throw new VercelBoardHttpError(502, "remote_error", "GET /messages answered no message list."); }
   }
 }
 

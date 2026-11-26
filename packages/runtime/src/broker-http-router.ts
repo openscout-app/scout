@@ -1135,7 +1135,11 @@ export function createBrokerHttpRouter(
       }
       const number = (name: string) => { const raw = url.searchParams.get(name); return raw === null || !/^\d+$/.test(raw) ? undefined : Number(raw); };
       if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/messages") {
-        json(response, 200, await board.messages({ connectionId: url.searchParams.get("connection") ?? "", channel: url.searchParams.get("channel") ?? "", limit: number("limit") }));
+        json(response, 200, await board.messages({ connectionId: url.searchParams.get("connection") ?? "", channel: url.searchParams.get("channel") ?? "", limit: number("limit"), board: url.searchParams.get("board") ?? undefined }));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/boards") {
+        json(response, 200, await board.boards({ connectionId: url.searchParams.get("connection") ?? "", fresh: url.searchParams.get("fresh") === "1" }));
         return;
       }
       if (method === "GET" && url.pathname === "/v1/integrations/vercel-board/handoffs") {
