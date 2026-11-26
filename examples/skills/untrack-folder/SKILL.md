@@ -1,17 +1,16 @@
 ---
 name: untrack-folder
 description: Keep a local copy of a folder and remove it from Git.
-inputs:
-  path: { label: Folder to untrack }
-  destination: { label: Copy to, default: "~/Documents/OpenScout/<repo>-<folder>" }
-delivery: Report the draft PR link and the absolute path of the verified copy.
 ---
 
-1. Identify the Git root. Confirm that {{path}} is a tracked directory inside
+Ask for the folder if the brief does not name one.
+
+1. Identify the Git root. Confirm that the folder named in the brief is a tracked directory inside
    it, not the root, a symlink, or a submodule. Inspect the worktree and index.
    Preserve unrelated changes. If the folder has local edits, ask before removal.
 2. Copy the whole directory, including hidden and untracked files, to
-   {{destination}}. For the default destination, replace <repo> and <folder>
+   the outside destination named in the brief, or
+   `~/Documents/OpenScout/<repo>-<folder>` by default. For the default destination, replace <repo> and <folder>
    with the repository and folder basenames. Use a new location outside the
    repository. Do not follow symlinks or overwrite an existing copy.
 3. Compare the source and copy, including file contents and symlink targets.
@@ -26,3 +25,5 @@ delivery: Report the draft PR link and the absolute path of the verified copy.
    Do not trigger hosted CI. If pushing or opening a PR would trigger it, stop
    before the push and report the blocker. Otherwise push the topic branch
    and open a draft PR against the repository's normal base. Do not merge.
+
+Report the draft PR link and the absolute path of the verified copy.
