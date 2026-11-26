@@ -29,7 +29,8 @@ PR with plain-sentence text and no trailers. Do not run hosted CI.
 ```
 
 The [complete example](../../examples/plays/untrack-folder.md) includes the
-checks before removal. Copy it into the playbook to use it. An input without
+checks before removal. Copy it into the playbook to use it. Input names start with a lowercase letter
+and can include lowercase letters, digits, hyphens and underscores. An input without
 a default is required. Defaults are strings. The optional `target` mapping
 accepts `project`, `harness` and `host`. Target fields are routing metadata,
 not instructions in the body.
@@ -46,7 +47,7 @@ scout run untrack-folder path=assets/renders --project . --harness codex
 template and prints its path. `play show <name>` prints the Markdown without
 changing the file. `play save <name> --from <invocation-or-flight-id>` drafts
 a file from the original ask, not the reply or transcript. It turns recognizable
-paths into inputs and prints the path for the operator to edit. Neither writer
+paths and URLs into inputs and prints the path for the operator to edit. Neither writer
 overwrites a play.
 
 `run` fills the declared inputs and substitutes `{{name}}` in the procedure

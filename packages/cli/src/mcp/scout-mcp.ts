@@ -7,6 +7,7 @@ import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
 import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
+import { listPlays, playbookDirectory, preparePlay } from "../lib/core/plays.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
 import { registerVercelBoardDispatcherTool, registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
@@ -4683,9 +4684,7 @@ export function createScoutMcpServer(options: {
     },
   );
 
-  server.registerTool(
-    "ask",
-    {
+  const askConfig = {
       title: "Ask",
       description: "Create a task and return on acceptance. For another mesh machine use on with projectPath. Use exactly one route: to, operator, channel (FYI only), projectPath/capability, ref (unfinished task follow-up), or continue (successor to a finished task). fyi deliberately creates only a message, never a task. cancel requires ref and explicitly cancels; text alone never cancels. Operator tasks request push; operator FYIs push only with notify. On an agent task, notify marks it Ready for the operator when it finishes (they get one ping and Continue or Hold); use it only for work the operator is waiting on. defaultAction completes after window seconds (default 1800) if unanswered. Use the returned handle to wait. Automatic harness final answers still complete tasks.",
       inputSchema: z.object({
@@ -4786,8 +4785,8 @@ export function createScoutMcpServer(options: {
           resolveTool: "agents_resolve",
         }),
       }),
-    },
-    async ({
+    };
+  const handleAsk = async ({
       requestId,
       operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image, decision,
       completion,
@@ -4818,7 +4817,7 @@ export function createScoutMcpServer(options: {
       workspace,
       session,
       wait,
-    }) => {
+    }: z.infer<typeof askConfig.inputSchema>) => {
       if ((completion || relation) && !requestId?.trim()) {
         throw new Error("Explicit completion asks require a stable requestId; reuse it when retrying.");
       }
@@ -5124,8 +5123,30 @@ export function createScoutMcpServer(options: {
           followUrl: followArtifacts.followUrl,
         },
       };
-    },
-  );
+    };
+  server.registerTool("ask", askConfig, handleAsk);
+
+  server.registerTool("plays_list", {
+    title: "List plays", description: "List the operator's local playbook with descriptions and inputs.",
+    inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async () => {
+    const plays = await listPlays(playbookDirectory(env));
+    return { content: createPlainTextContent(JSON.stringify(plays)), structuredContent: { plays } };
+  });
+  server.registerTool("plays_run", {
+    title: "Run a play", description: "Fill a local play and send one ordinary ask. Returns the ask receipt and follow link.",
+    inputSchema: z.object({ name: z.string().min(1), inputs: z.record(z.string(), z.string()).optional(),
+      projectPath: projectPathInputSchema, harness: askConfig.inputSchema.shape.harness,
+      on: askConfig.inputSchema.shape.on, requestId: askConfig.inputSchema.shape.requestId }).strict(),
+    outputSchema: askReceiptSchema,
+    annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false },
+  }, async ({ name, inputs, projectPath, harness, on, requestId }) => {
+    const run = await preparePlay(playbookDirectory(env), name, inputs ?? {}, {
+      ...(projectPath && { project: projectPath }), ...(harness && { harness }), ...(on && { host: on }),
+    }, options.defaultCurrentDirectory);
+    return handleAsk(askConfig.inputSchema.parse({ projectPath: run.target.project, harness: run.target.harness,
+      on: run.target.host, requestId, body: run.body }));
+  });
 
   if (env.OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK === "1") {
   server.registerTool(

@@ -12,6 +12,9 @@ export type ScoutCommandName =
   | "hub"
   | "notify"
   | "operator"
+  | "play"
+  | "plays"
+  | "run"
   | "ask"
   | "reply"
   | "show"
@@ -103,6 +106,12 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./status.ts")).runStatusCommand;
     case "reply":
       return (await import("./reply.ts")).runReplyCommand;
+    case "plays":
+      return (await import("./play.ts")).runPlaysCommand;
+    case "play":
+      return (await import("./play.ts")).runPlayCommand;
+    case "run":
+      return (await import("./play.ts")).runNamedPlayCommand;
     case "ask":
       return (await import("./ask.ts")).runAskCommand;
     case "show":

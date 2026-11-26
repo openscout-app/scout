@@ -325,6 +325,10 @@ shows and session materials (`ObservedSessionMaterials`,
   observed on demand, never imported into Scout records. See
   [`observed-surfaces.md`](./observed-surfaces.md).
 
+**Play.** A named procedure the operator gives an agent to run. The operator’s
+plays form the **playbook**. A skill supplies knowledge; a play specifies steps,
+inputs and a delivery. Each run is an ask. See [Plays](./specs/plays.md).
+
 **Helper.** A helper is a session-bound assistant acting on behalf of a person
 inside Scout's actor model. It is a Scout-local role, not a required interop
 concept: it lets Scout attribute actions to a person's helper in a given session

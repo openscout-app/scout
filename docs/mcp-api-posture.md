@@ -17,7 +17,7 @@ Opting into a group does not add it to Claude's default tool allowlist.
 | `messages_inbox`, `messages_channel`, `broker_feed`, `attachments_read` | Read recent broker context and inspect a supported attachment on an inbound message. |
 | `show` | Put a local file on the operator's project canvas. |
 
-Use `--profile full` for the previous local surface (67 tools). To add only
+Use `--profile full` to register all local tool groups. To add only
 the tools you need, pass one or more group names separated by commas. Every
 group adds to the default; selecting two groups gives you their union.
 
@@ -32,7 +32,7 @@ group adds to the default; selecting two groups gives you their union.
 | `routing` | `where`, `check`, `route_context` (also enables the Scout routing prompt) |
 | `sessions` | `agents_start`, `card_create`, `session_attach_current`, `sessions_inventory`, `sessions_search`, `sessions_names`, `sessions_rename`, `tail_events` |
 | `terminals` | `herdr_workspaces`, `rex_start_agent`, `rex_status`, `session_send` |
-| `work` | `flight_cancel`, `labels_brief`, `labels_feed`, `work_update`, `work_retry`, `work_move`, `work_review`, `work_lifecycle`, `derived_read`, `derived_write`, `derived_pending` |
+| `work` | `plays_list`, `plays_run`, `flight_cancel`, `labels_brief`, `labels_feed`, `work_update`, `work_retry`, `work_move`, `work_review`, `work_lifecycle`, `derived_read`, `derived_write`, `derived_pending` |
 
 ```sh
 scout mcp --profile git,work

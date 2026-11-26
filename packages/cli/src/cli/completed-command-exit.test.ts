@@ -4,7 +4,7 @@ import { exitAfterCompletedCommand, shouldExitAfterCommand } from "./completed-c
 
 describe("exit after a completed command", () => {
   test("ask and the commands that probe every host exit once answered", () => {
-    for (const command of ["ask", "hosts", "check", "locate"]) {
+    for (const command of ["ask", "run", "hosts", "check", "locate"]) {
       expect(shouldExitAfterCommand(command, [])).toBe(true);
     }
   });

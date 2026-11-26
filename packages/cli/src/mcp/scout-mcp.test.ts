@@ -781,6 +781,35 @@ describe("createScoutMcpServer", () => {
     });
   }
 
+  test("plays list and run use the playbook and return the normal ask receipt", async () => {
+    const home = mkdtempSync(join(tmpdir(), "mcp-plays-"));
+    tempPaths.add(home);
+    mkdirSync(join(home, "plays"));
+    writeFileSync(join(home, "plays", "review.md"), [
+      "---", "name: review", "description: Review a file.", "inputs:", "  path:", "target:", "  harness: codex",
+      "delivery: A review.", "---", "Read {{path}}.",
+    ].join("\n"));
+    const asks: ScoutAskCommand[] = [];
+    const { client } = await connectTestServer({
+      resolveSenderId: async () => "operator.main",
+      scoutAskHandler: async input => {
+        asks.push(input);
+        return { ok: true, state: "queued", ids: { invocationId: "inv-play", flightId: "flt-play", workId: "work-play" } };
+      },
+    }, { OPENSCOUT_SCOUT_HOME: home, OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test", OPENSCOUT_MCP_PROFILE: "work" });
+    expect((await client.callTool({ name: "plays_list", arguments: {} })).structuredContent)
+      .toMatchObject({ plays: [{ name: "review", inputs: { path: null } }] });
+    expect((await client.callTool({ name: "plays_run", arguments: { name: "review" } })).isError).toBe(true);
+    const result = await client.callTool({ name: "plays_run", arguments: {
+      name: "review", inputs: { path: "a.ts" }, projectPath: "~/code", on: "worker", requestId: "review-1",
+    } });
+    expect(result.isError).toBeFalsy();
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toMatchObject({ senderId: "operator.main", requestId: "review-1", projectPath: "~/code", host: "worker",
+      harness: "codex", body: expect.stringContaining("Read a.ts.") });
+    expect(result.structuredContent).toMatchObject({ ok: true, ids: { invocationId: "inv-play" }, followUrl: "http://scout.test/work/work-play" });
+  });
+
   test("ask wraps the ScoutAskHandler primitive", async () => {
     let receivedAsk: ScoutAskCommand | undefined;
     const { client } = await connectTestServer({

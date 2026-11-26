@@ -9,6 +9,7 @@
  */
 const EXIT_AFTER_ANSWER = new Set([
   "ask",
+  "run",
   // Commands that fan out to every host through mesh node-state.
   "hosts",
   "check",
