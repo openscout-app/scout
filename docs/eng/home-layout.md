@@ -8,20 +8,22 @@ Scout keeps its files in three places, each with one owner and one rule:
 
 | Place | Owner | Rule | Holds |
 | --- | --- | --- | --- |
-| `~/.scout` | the operator | You open it, edit it, or hand it to an agent. | config, plays, artifacts, reports, reviews, pairing identity, Scout Desk |
-| support directory | Scout | Scout writes it. You never edit it. | runtime, control plane, logs, instances, mesh identity, integrations |
+| `~/.scout` | the operator | You open it, edit it, or hand it to an agent. | config, plays, artifacts, reports, reviews, Scout Desk |
+| support directory | Scout | Scout writes it. You never edit it. | runtime, control plane, logs, instances, mesh and pairing identity, integrations |
 | cache directory | Scout | Scout can delete and rebuild it at any time. | Studio cache, build and release evidence, other derived files |
 
 On macOS the support directory is `~/Library/Application Support/OpenScout` and
 the cache directory is `~/Library/Caches/OpenScout`. On Linux they are
-`${XDG_DATA_HOME:-~/.local/share}/openscout` and
-`${XDG_CACHE_HOME:-~/.cache}/openscout`.
+`${XDG_STATE_HOME:-~/.local/state}/openscout` and
+`${XDG_CACHE_HOME:-~/.cache}/openscout`. Scout's state is databases, logs and
+identity that persist but are not portable data, which is what XDG's state
+directory is for.
 
 `~/.openscout` goes away. `~/.scout-desk` becomes `~/.scout/desk`.
 
 ## Current layout
 
-Measured on one operator's Mac (arts-mini), 26 November 2026:
+Measured on one operator's Mac, 26 November 2026:
 
 | Folder | Size | Written by | Contents |
 | --- | --- | --- | --- |
@@ -63,7 +65,8 @@ layout" with `root: null`.
 | `~/.openscout/run/` sockets | a short runtime directory (see Sockets) |
 | `~/.openscout/control-plane/`, `relay/`, `instances/`, `work-archives/`, `backups/` | support directory |
 | `~/.openscout/.studio/`, `release-evidence/`, `evidence/` | cache directory |
-| `~/.scout/pairing/`, `plays/`, `artifacts/`, `reports/`, `work/` | unchanged |
+| `~/.scout/plays/`, `artifacts/`, `reports/`, `work/` | unchanged |
+| `~/.scout/pairing/` | support directory |
 | `~/.scout/local-edge/`, `world-team*/` | support directory |
 | `~/.scout-desk/` | `~/.scout/desk/` |
 | support directory contents | unchanged, minus stray `.bak` and `.tmp` files |
@@ -75,6 +78,15 @@ prod-overlap guard in `packages/runtime/src/instance.ts` all move in the same
 change as `instances/`. Otherwise repair misses moved instances and the guard
 rejects their new roots.
 
+`pairing/` holds the host's pairing keys. `~/.scout` is the folder the operator
+hands to agents, so keys do not belong there; they join the mesh identity in
+the support directory.
+
+`config.json` moves to `~/.scout` because the operator edits it. Scout may
+still write to it (setup records ports there), so every write keeps the
+operator's other keys and formatting, and Scout's own computed values go to
+the support directory instead.
+
 `work/` stays in `~/.scout`. It holds live Git worktrees, and a directory
 rename breaks their links to the main repository. Moving them later needs
 `git worktree move`, not this migration.
@@ -82,15 +94,27 @@ rename breaks their links to the main repository. Moving them later needs
 ### Sockets
 
 Sockets never live under the support directory. A dev instance's broker socket
-there is `/Users/art/Library/Application Support/OpenScout/instances/dev-scout-home-layout/support/runtime/broker.sock`,
-108 bytes, which is over the macOS limit of 104 bytes, so the broker cannot
-bind.
+there is
+`~/Library/Application Support/OpenScout/instances/<name>/support/runtime/broker.sock`.
+With a home directory and an instance name of ordinary length, that path
+passes macOS's 104-byte limit for a socket path, and the broker cannot bind.
 
-All sockets go in a short private per-user runtime directory:
-`$TMPDIR/scout/<instance>/` on macOS and `$XDG_RUNTIME_DIR/scout/<instance>/`
-on Linux, with mode 0700. Socket names stay short (`broker.sock`,
-`app.sock`, `probes.sock`). Before it binds, the runtime checks the full path
-length in bytes and fails with an error that names the path and the limit.
+All sockets go in a short private per-user runtime directory, mode 0700:
+
+- macOS: `<user temp dir>/scout/<instance>/`. The runtime takes the user temp
+  dir from `confstr(_CS_DARWIN_USER_TEMP_DIR)`, not from `$TMPDIR`, so a process
+  started by launchd, a sandboxed helper and a shell all find the same path.
+- Linux: `$XDG_RUNTIME_DIR/scout/<instance>/`.
+
+Socket names stay short (`broker.sock`, `app.sock`, `probes.sock`). Before it
+binds, the runtime checks the full path length in bytes and fails with an error
+that names the path and the limit.
+
+macOS removes files in the user temp dir that have gone unused for a few days,
+and a socket that is listening counts as unused. So the runtime checks its
+socket paths on its health tick, and when one has gone it binds it again.
+Clients that cannot connect to a missing socket fall back to the runtime's
+HTTP port, as they do today.
 
 ### Variables
 
@@ -101,8 +125,18 @@ One variable per class. Each overrides only its own class:
 - `SCOUT_CACHE_DIR`: derived files. Default per platform, as above.
 
 `OPENSCOUT_HOME`, `OPENSCOUT_SCOUT_HOME` and `OPENSCOUT_SUPPORT_DIRECTORY` stay
-as deprecated aliases for one release. Each maps to exactly one class, and none
-maps to two. Setting an alias logs a single warning that names the new variable.
+as deprecated aliases for one release. Each maps to exactly one class:
+
+| Alias | Maps to | Why |
+| --- | --- | --- |
+| `OPENSCOUT_SCOUT_HOME` | `SCOUT_HOME` | It already names `~/.scout`. |
+| `OPENSCOUT_SUPPORT_DIRECTORY` | `SCOUT_SUPPORT_DIR` | It already names the support directory. |
+| `OPENSCOUT_HOME` | `SCOUT_SUPPORT_DIR` | Tests and second instances set it to isolate Scout's state, and most of what `~/.openscout` holds becomes support state. |
+
+`OPENSCOUT_HOME` no longer moves `~/.scout`. A setup that used it for that gets
+a warning at start: "OPENSCOUT_HOME now sets Scout's support directory only.
+Set SCOUT_HOME to move ~/.scout." The other aliases log one warning that names
+their new variable.
 
 The test-isolation guard `ensureOpenScoutCleanSlateSync` checks the effective
 isolated paths after variables and aliases resolve, not the presence of
@@ -125,14 +159,20 @@ places the file only in the new location, then only in the old one.
 
 ### Migration
 
-The runtime owns migration. It runs at startup, before the broker accepts work.
-A startup journal alone does not stop other writers, so migration first gets
-exclusive ownership:
+Migration is an explicit command, `scout home migrate`, not a step of runtime
+startup. launchd starts the runtime and restarts it when it exits, and the
+runtime cannot stop Scout.app, so a runtime that tried to stop every writer
+from its own startup would race the processes it needs stopped. Setup and the
+upgrade path run the command; the operator can run it by hand.
 
-1. Stop every writer: the broker, scoutd, the web server, the macOS app's
-   helpers and any CLI holding a database. Take an exclusive lock file in the
-   support directory that each of them checks at start. If a writer is still
-   running, stop and report it; move nothing.
+The command first gets exclusive ownership:
+
+1. Stop the runtime through its service manager (launchd or systemd), and ask
+   Scout.app and scoutd to quit. Take an exclusive lock file in the support
+   directory that the runtime, scoutd, the web server, the app's helpers and
+   the CLI each check at start; while it is held they wait or refuse with an
+   error that names the command. If a writer is still running, report it and
+   move nothing.
 2. Checkpoint each SQLite database (`PRAGMA wal_checkpoint(TRUNCATE)`) and
    close it, so no committed data stays only in the `-wal` file.
 3. Write a journal of planned moves to the support directory.
@@ -145,8 +185,13 @@ exclusive ownership:
    directories. After a crash, the runtime reads the journal, checks each
    entry's source and target on disk, and finishes or skips it. It never
    deletes a source whose target it has not confirmed.
-7. Release the lock. After all entries are done, leave `~/.openscout/MOVED.md`
-   naming the new places, and remove the folder after one release.
+7. Release the lock and start the runtime again. After all entries are done,
+   leave `~/.openscout/MOVED.md` naming the new places, and remove the folder
+   after one release.
+
+Until the command has run, the runtime starts on the legacy layout through the
+reader fallback and logs once that `scout home migrate` is pending. It never
+moves files itself.
 
 Readers keep the legacy fallback until the journal reports done.
 
@@ -159,12 +204,13 @@ path and logs the conflict.
 1. This document, reviewed.
 2. Fix the `OPENSCOUT_HOME` conflict, add the three new variables, update the
    test-isolation guard, and switch every reader to the resolvers, with tests.
-3. Sockets to the short runtime directory, with the path-length check.
+3. Sockets to the short runtime directory, with the path-length check and the
+   rebind on the health tick.
 4. Scout Desk: `~/.scout-desk` to `~/.scout/desk`.
 5. Config files to `~/.scout`.
 6. Heavy state to the support directory, `instances/` with the registry,
-   repair scan and guard, and derived files to the cache directory, through
-   the lock and the journal.
+   repair scan and guard, pairing keys to the support directory, and derived
+   files to the cache directory, all through `scout home migrate`.
 
 ## Out of scope
 
@@ -193,3 +239,14 @@ The three open questions are closed:
 2. Sockets go to a short private runtime directory, with the path checked
    before bind.
 3. `work/` stays in `~/.scout`. Moving live worktrees needs Git.
+
+A second review on 26 November 2026 changed five more things:
+
+1. Pairing keys move to the support directory. `~/.scout` is handed to agents.
+2. Sockets take the user temp dir from `confstr`, not `$TMPDIR`, and the runtime
+   binds a socket again when macOS cleans it away.
+3. `OPENSCOUT_HOME` maps to `SCOUT_SUPPORT_DIR`, with a warning for a setup that
+   used it to move `~/.scout`.
+4. Migration is the explicit `scout home migrate` command, not a runtime startup
+   step.
+5. On Linux the support directory is under `XDG_STATE_HOME`.
