@@ -6,6 +6,7 @@ import { assertValidCollaborationRecord, type QuestionRecord } from "@openscout/
 
 import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { claudeProjectDirectoryForCwd, type ClaudeSessionRecord } from "./claude-session-records.js";
+import { decideNativeToolSupervisor } from "./permission-supervisor.js";
 import { nativePermissionContext, describeNativePermission, nativePermissionDisplay, nativePermissionView, NativePermissionAskError, NativePermissionRequests, nativeAllowRuleUpdates } from "./native-permission.js";
 
 function session(overrides: Partial<ClaudeSessionRecord> = {}): ClaudeSessionRecord {
@@ -21,7 +22,15 @@ const ask = {
   toolName: "Bash", toolInput: { command: "rm -rf dist", description: "Remove the build output" },
 };
 
-function harness(options: { records?: ClaudeSessionRecord[]; launchedByScout?: boolean; leaseMs?: number; deliveryTimeoutMs?: number } = {}) {
+function harness(options: {
+  records?: ClaudeSessionRecord[];
+  launchedByScout?: boolean;
+  leaseMs?: number;
+  deliveryTimeoutMs?: number;
+  supervisor?: Parameters<typeof NativePermissionRequests.prototype.open>[0] extends never
+    ? never
+    : ConstructorParameters<typeof NativePermissionRequests>[0]["supervisor"];
+} = {}) {
   const records = new Map<string, QuestionRecord>();
   let ids = 0;
   const service = new BrokerPermissionService({
@@ -41,6 +50,7 @@ function harness(options: { records?: ClaudeSessionRecord[]; launchedByScout?: b
     readRecord: async () => registry,
     watch: (directory) => { watched.push(directory); return () => { unwatched++; }; },
     launchedByScout: async () => options.launchedByScout ?? false,
+    ...(options.supervisor ? { supervisor: options.supervisor } : {}),
     notify: ({ requestId }) => { notified.push(requestId); },
     leaseMs: options.leaseMs ?? 60_000, deliveryTimeoutMs: options.deliveryTimeoutMs ?? 1_000,
   });
@@ -317,5 +327,65 @@ test("open stores hook-time context from registry cwd even after the hook cwd mo
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previous;
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("antigravity native permissions auto-allow in-policy calls, skip non-escalating asks, and deliver Allow/Deny on escalations", async () => {
+  const policy = {
+    allowModel: false,
+    grants: [{ scope: "project" as const, path: "/tmp/project", level: "workspace" as const }],
+  };
+  const h = harness({
+    supervisor: (req) => decideNativeToolSupervisor({
+      projectRoot: req.cwd,
+      cwd: req.cwd,
+      toolName: req.toolName,
+      toolInput: req.toolInput,
+    }, policy),
+  });
+  try {
+    // 1. In-policy workspace test command auto-allows without raising a card.
+    const auto = await h.native.open({
+      harness: "antigravity",
+      sessionId: "agy-session-1",
+      cwd: "/tmp/project",
+      toolName: "run_command",
+      toolInput: { CommandLine: "bun test" },
+      escalate: false,
+    });
+    expect(auto).toMatchObject({ decision: "allow" });
+    expect(h.notified).toEqual([]);
+
+    // 2. Out-of-policy non-escalating call skips cleanly so Antigravity handles it locally.
+    const skipped = await h.native.open({
+      harness: "antigravity",
+      sessionId: "agy-session-1",
+      cwd: "/tmp/other",
+      toolName: "run_command",
+      toolInput: { CommandLine: "bun test" },
+      escalate: false,
+    });
+    expect(skipped).toEqual({ skipped: "no_escalation" });
+
+    // 3. Escalated command opens a live permission card and delivers Allow to the waiting hook.
+    const opened = await h.native.open({
+      harness: "antigravity",
+      sessionId: "agy-session-1",
+      cwd: "/tmp/project",
+      toolName: "run_command",
+      toolInput: { CommandLine: "git push origin main", toolSummary: "Push branch" },
+      escalate: true,
+    });
+    if (!("requestId" in opened)) throw new Error("Expected requestId for escalated Antigravity call");
+    expect(h.notified).toEqual([opened.requestId]);
+    const record = h.records.get(opened.requestId);
+    const meta = record?.metadata?.permissionRequest as { version: string; native?: { harness?: string; display?: { command?: string } } };
+    expect(meta.native).toMatchObject({ harness: "antigravity", display: { action: "Run a command", command: "git push origin main" } });
+
+    const waiting = h.native.wait(opened.requestId, 5_000);
+    await h.service.decide(opened.requestId, meta.version, "once");
+    expect(await waiting).toEqual({ state: "decided", decision: "allow" });
+  } finally {
+    await h.native.close();
   }
 });

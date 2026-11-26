@@ -167,7 +167,7 @@ export function scoutAntigravityHookCommands(hooksFile: Settings): string[] {
 
 function expectedAntigravityHookEntry(command: string): Record<string, unknown> {
   return {
-    PreToolUse: [{ matcher: ANTIGRAVITY_HOOK_MATCHER, hooks: [{ type: "command", command, timeout: 10 }] }],
+    PreToolUse: [{ matcher: ANTIGRAVITY_HOOK_MATCHER, hooks: [{ type: "command", command, timeout: 300 }] }],
     PostToolUse: [{ matcher: ANTIGRAVITY_HOOK_MATCHER, hooks: [{ type: "command", command, timeout: 10 }] }],
     Stop: [{ type: "command", command, timeout: 10 }],
   };

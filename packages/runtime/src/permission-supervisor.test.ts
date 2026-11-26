@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ContinuationPolicyFile } from "./continuation/grants.js";
-import { decidePermissionSupervisor } from "./permission-supervisor.js";
+import { decideNativeToolSupervisor, decidePermissionSupervisor } from "./permission-supervisor.js";
 
 const project = "/work/app";
 const grants = (level: "ask" | "workspace" | "unattended" | "silent" = "workspace"): ContinuationPolicyFile => ({
@@ -170,5 +170,56 @@ describe("permission supervisor", () => {
       expect(decidePermissionSupervisor(prompt(claude(command)), grants("silent")).act).toBe("continue");
       expect(decidePermissionSupervisor(prompt(codex(command, project)), grants("silent")).act).toBe("continue");
     }
+  });
+
+  test("decideNativeToolSupervisor governs Antigravity tool calls by project continuation policy", () => {
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "run_command",
+      toolInput: { CommandLine: "bun test packages/runtime" },
+    }, grants("ask")).act).toBe("notify");
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "run_command",
+      toolInput: { CommandLine: "bun test packages/runtime" },
+    }, grants("workspace"))).toMatchObject({ act: "continue", risk: "workspace" });
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "edit_file",
+      toolInput: { Path: `${project}/src/index.ts` },
+    }, grants("workspace"))).toMatchObject({ act: "continue", risk: "workspace" });
+
+    // Secrets, outside-project files, and destructive commands always escalate.
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "edit_file",
+      toolInput: { Path: `${project}/.env` },
+    }, grants("silent"))).toMatchObject({ act: "notify", risk: "secrets" });
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "edit_file",
+      toolInput: { Path: "/etc/hosts" },
+    }, grants("silent")).act).toBe("notify");
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "run_command",
+      toolInput: { CommandLine: "rm -rf dist" },
+    }, grants("silent"))).toMatchObject({ act: "notify", risk: "destructive" });
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "run_command",
+      toolInput: { CommandLine: "git push origin main" },
+    }, grants("workspace")).act).toBe("notify");
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "run_command",
+      toolInput: { CommandLine: "git push origin main" },
+    }, grants("silent"))).toMatchObject({ act: "continue", risk: "publish" });
   });
 });
