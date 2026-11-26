@@ -91,12 +91,15 @@ card starts a fresh session. To continue an exact harness session, use only
 instead.
 
 **Cards: this session vs. a new identity.** `card` with no other target, run
-inside a live session, means "give *this* conversation an address": use the
-`sessions` group's `session_attach_current`, which binds the address to this same process so
-asks land here. It works for Codex, and for Claude, Grok and other TUIs running
-in a tmux pane or a Ghostty terminal. If it refuses (another terminal with no
-tmux), say so plainly and offer `scout session transfer`, which moves this same
-conversation into tmux; don't fall back to `card_create`. Use `card_create` only when a fresh,
+inside a live session, means "give *this* conversation an address": call
+`session_attach_current` (included in the default Scout MCP tools), which binds
+the address to this same session so asks land here. It works for Codex
+(`CODEX_THREAD_ID`), Antigravity (pass `conversationId` from your current
+conversation metadata when `ANTIGRAVITY_CONVERSATION_ID` is not in the MCP env),
+and Claude, Grok, and other TUIs running in a tmux pane or Ghostty terminal. If
+`session_attach_current` refuses, report the exact reason in one turn (and for a
+TUI outside tmux, offer `scout session transfer`) — do not inspect Scout source
+code and don't fall back to `card_create`. Use `card_create` only when a fresh,
 separate identity is wanted: it starts a new session on first use and never
 reaches the conversation you're in.
 

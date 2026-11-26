@@ -537,7 +537,7 @@ type ScoutMcpDependencies = {
   }) => Promise<ScoutAgentStatus>;
   attachCurrentLocalSession: (input: {
     externalSessionId: string;
-    transport: "codex_app_server" | "tmux" | "ghostty";
+    transport: "codex_app_server" | "antigravity_acp" | "tmux" | "ghostty";
     currentDirectory: string;
     projectRoot?: string;
     agentId?: string;
@@ -1375,7 +1375,7 @@ const agentStartResultSchema = z.object({
 const currentSessionAttachResultSchema = z.object({
   currentDirectory: z.string(),
   externalSessionId: z.string(),
-  transport: z.enum(["codex_app_server", "tmux", "ghostty"]),
+  transport: z.enum(["codex_app_server", "antigravity_acp", "tmux", "ghostty"]),
   harness: z.string().optional(),
   surface: z.string().optional(),
   agentId: z.string(),
@@ -4288,10 +4288,13 @@ export function createScoutMcpServer(options: {
     {
       title: "Attach Current Session",
       description:
-        "Give the current live harness session a Scout address so other agents' messages and asks land in this same process. Codex attaches by CODEX_THREAD_ID. Claude, Grok and other TUIs attach when they run in a tmux pane or a Ghostty terminal: asks are typed into that surface (without changing focus) and Scout never starts a replacement beside it. In any other terminal the call refuses and says why instead of creating a spawn-on-demand card.",
+        "Give the current live harness session a Scout address so other agents' messages and asks land in this same session. Codex attaches by CODEX_THREAD_ID. Antigravity attaches by ANTIGRAVITY_CONVERSATION_ID or an explicit conversationId. Claude, Grok and other TUIs attach when they run in a tmux pane or a Ghostty terminal: asks are typed into that surface (without changing focus) and Scout never starts a replacement beside it. In any other terminal the call refuses and says why instead of creating a spawn-on-demand card.",
       inputSchema: z.object({
         currentDirectory: z.string().optional(),
         projectPath: z.string().optional(),
+        conversationId: z.string().optional().describe(
+          "Current Antigravity conversation ID (optional when ANTIGRAVITY_CONVERSATION_ID is set in the environment).",
+        ),
         agentId: z.string().optional(),
         alias: z.string().optional(),
         displayName: z.string().optional(),
@@ -4304,7 +4307,7 @@ export function createScoutMcpServer(options: {
         openWorldHint: false,
       },
     },
-    async ({ currentDirectory, projectPath, agentId, alias, displayName }) => {
+    async ({ currentDirectory, projectPath, conversationId, agentId, alias, displayName }) => {
       const resolvedCurrentDirectory = resolveToolCurrentDirectory(
         currentDirectory,
         options.defaultCurrentDirectory,
@@ -4335,6 +4338,31 @@ export function createScoutMcpServer(options: {
         return {
           content: createPlainTextContent(
             `Current Codex session attached as ${attached.selector ?? attached.agentId}.`,
+          ),
+          structuredContent,
+        };
+      }
+
+      const antigravityConversationId = conversationId?.trim() || env.ANTIGRAVITY_CONVERSATION_ID?.trim();
+      if (antigravityConversationId) {
+        const attached = await deps.attachCurrentLocalSession({
+          ...common,
+          externalSessionId: antigravityConversationId,
+          transport: "antigravity_acp",
+        });
+        const structuredContent = {
+          currentDirectory: resolvedCurrentDirectory,
+          externalSessionId: antigravityConversationId,
+          transport: "antigravity_acp" as const,
+          harness: "antigravity",
+          agentId: attached.agentId,
+          selector: attached.selector ?? null,
+          endpointId: attached.endpointId,
+          sessionId: attached.sessionId,
+        };
+        return {
+          content: createPlainTextContent(
+            `Current Antigravity session attached as ${attached.selector ?? attached.agentId}.`,
           ),
           structuredContent,
         };

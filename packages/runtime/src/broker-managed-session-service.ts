@@ -18,6 +18,7 @@ import {
   buildLiveTerminalEndpointBinding,
   buildLiveTerminalSessionAgent,
   buildManagedLocalSessionAgent,
+  buildManagedLocalSessionEndpointBinding,
   buildManagedLocalSessionPairingEndpointBinding,
   buildManagedPairingAgent,
   isLegacyPairingSessionMetadata,
@@ -324,12 +325,12 @@ export class BrokerManagedSessionService {
       throw new Error("externalSessionId is required");
     }
 
-    if (input.transport !== "codex_app_server" && input.transport !== "claude_stream_json") {
+    if (input.transport !== "codex_app_server" && input.transport !== "claude_stream_json" && input.transport !== "antigravity_acp") {
       throw new Error(`unsupported local session transport ${input.transport}`);
     }
 
-    if (input.transport !== "codex_app_server") {
-      throw new Error("local session attach currently supports codex_app_server only");
+    if (input.transport !== "codex_app_server" && input.transport !== "antigravity_acp") {
+      throw new Error("local session attach currently supports codex_app_server and antigravity_acp");
     }
 
     const cwd = resolve(input.cwd.trim() || process.cwd());
@@ -389,6 +390,35 @@ export class BrokerManagedSessionService {
       agent.id,
       this.options.nodeId,
     );
+
+    if (input.transport === "antigravity_acp") {
+      const endpoint = buildManagedLocalSessionEndpointBinding({
+        agentId: agent.id,
+        transport: "antigravity_acp",
+        harness: "antigravity",
+        sessionId: externalSessionId,
+        cwd,
+        projectRoot,
+        existingEndpoint: existingEndpoint?.transport === "antigravity_acp" ? existingEndpoint : null,
+        selector: agent.selector ?? agent.defaultSelector ?? null,
+        definitionId: agent.handle ?? agent.displayName,
+        nodeId: this.options.nodeId,
+      });
+
+      if (existingEndpoint && existingEndpoint.id !== endpoint.id && existingEndpoint.transport !== "pairing_bridge") {
+        await this.options.shutdownLocalSessionEndpoint(existingEndpoint).catch(() => undefined);
+      }
+      await this.options.upsertAgent(agent);
+      await this.options.persistEndpoint(endpoint);
+
+      return {
+        agentId: agent.id,
+        selector: agent.selector ?? agent.defaultSelector ?? null,
+        endpointId: endpoint.id,
+        sessionId: endpoint.sessionId ?? externalSessionId,
+      };
+    }
+
     const session = await this.options.ensurePairingSessionForCodexThread({
       threadId: externalSessionId,
       cwd,

@@ -283,6 +283,38 @@ describe("BrokerManagedSessionService", () => {
     })).rejects.toThrow("tmux attach needs liveTerminal");
   });
 
+  test("attaches and detaches an Antigravity conversation directly via antigravity_acp", async () => {
+    const harness = createHarness();
+    const attached = await harness.service.attachManagedLocalSession({
+      externalSessionId: "agy-conv-1234",
+      transport: "antigravity_acp",
+      cwd: "/tmp/demo-project",
+    });
+
+    expect(attached.selector).toBe("@antigravity-demo-project");
+    expect(attached.sessionId).toBe("agy-conv-1234");
+    const snapshot = harness.runtime.snapshot();
+    expect(snapshot.agents[attached.agentId]).toEqual(expect.objectContaining({
+      displayName: "Antigravity (demo-project)",
+      selector: "@antigravity-demo-project",
+    }));
+    expect(snapshot.endpoints[attached.endpointId]).toEqual(expect.objectContaining({
+      harness: "antigravity",
+      transport: "antigravity_acp",
+      sessionId: "agy-conv-1234",
+      state: "idle",
+      metadata: expect.objectContaining({
+        externalSessionId: "agy-conv-1234",
+        managedByScout: true,
+        source: "local-session",
+      }),
+    }));
+
+    const detached = await harness.service.detachManagedLocalSession({ agentId: attached.agentId });
+    expect(detached.detached).toBe(true);
+    expect(harness.runtime.snapshot().endpoints[attached.endpointId]?.state).toBe("offline");
+  });
+
   test("rejects a tmux attach without a live pane", async () => {
     const harness = createHarness();
     await expect(harness.service.attachManagedLocalSession({
