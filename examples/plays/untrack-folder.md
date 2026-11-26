@@ -17,9 +17,9 @@ delivery: Report the draft PR link and the absolute path of the verified copy.
 3. Compare the source and copy, including file contents and symlink targets.
    Stop if they differ. Keep the verified copy regardless of later Git or PR errors.
 4. On a topic branch, run git rm recursively with a literal pathspec for that
-   folder only. Do not force removal. Add a directory-only
-   ignore rule to the .gitignore in its parent, anchored there and escaped for
-   the literal folder name. Check the staged diff and verify Git ignores the path.
+   folder only. Do not force removal. If Git removed the now-empty parent
+   directory, recreate it. Add a directory-only ignore rule to that parent's
+   .gitignore, anchored there and escaped for the literal folder name. Check the staged diff and verify Git ignores the path.
 5. Commit only the removal and the ignore rule. Use plain sentences for the
    commit subject, PR title and body. Add no trailers. Run local checks only.
    Do not trigger hosted CI. If pushing or opening a PR would trigger it, stop
