@@ -138,13 +138,13 @@ export class BrokerManagedSessionHttpService {
       : Object.values(snapshot.endpoints).find((candidate) => (
         candidate.agentId === input.agentId?.trim()
         && candidate.nodeId === this.deps.nodeId
-        && (candidate.transport === "codex_app_server" || candidate.transport === "claude_stream_json")
+        && (candidate.transport === "codex_app_server" || candidate.transport === "claude_stream_json" || candidate.transport === "antigravity_acp")
         && candidate.state !== "offline"
       ));
     if (!endpoint) {
       throw new Error("local session endpoint not found");
     }
-    if (endpoint.transport !== "codex_app_server" && endpoint.transport !== "claude_stream_json") {
+    if (endpoint.transport !== "codex_app_server" && endpoint.transport !== "claude_stream_json" && endpoint.transport !== "antigravity_acp") {
       throw new Error(`endpoint ${endpoint.id} does not use a local session transport`);
     }
 

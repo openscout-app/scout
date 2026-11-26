@@ -6,7 +6,7 @@ import { ScoutCliError } from "../cli/errors.ts";
 export const LOCAL_MCP_TOOL_GROUPS = {
   routing: ["where", "check", "route_context"],
   aliases: ["aliases_list", "aliases_resolve", "aliases_set", "aliases_repoint", "aliases_unset"],
-  sessions: ["agents_start", "card_create", "session_attach_current", "sessions_inventory",
+  sessions: ["agents_start", "card_create", "sessions_inventory",
     "sessions_search", "sessions_names", "sessions_rename", "tail_events"],
   mailbox: ["sessions_attach", "sessions_get", "sessions_poll", "sessions_ack"],
   chat: ["chat_status", "chat_catch_up", "chat_ack"],

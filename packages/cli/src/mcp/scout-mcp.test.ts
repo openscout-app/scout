@@ -588,6 +588,49 @@ describe("createScoutMcpServer", () => {
     expect(structured.sessionId).toBe("pairing-019ddb1b");
   });
 
+  test("attaches the current Antigravity session via explicit conversationId or ANTIGRAVITY_CONVERSATION_ID", async () => {
+    const received: Array<{ externalSessionId: string; transport: string }> = [];
+    const { client } = await connectTestServer({
+      attachCurrentLocalSession: async (input) => {
+        received.push({ externalSessionId: input.externalSessionId, transport: input.transport });
+        return {
+          ok: true,
+          agentId: "antigravity.current.mini",
+          selector: "@antigravity-openscout",
+          endpointId: "endpoint.antigravity.current",
+          sessionId: input.externalSessionId,
+        };
+      },
+    }, { CODEX_THREAD_ID: "" });
+
+    const result = await client.callTool({
+      name: "session_attach_current",
+      arguments: {
+        currentDirectory: "/worktree/openscout",
+        conversationId: "eb5a4c6a-2860-4984-ab57-eb72939cfb02",
+        alias: "@antigravity-openscout",
+      },
+    });
+
+    const structured = result.structuredContent as {
+      externalSessionId: string;
+      transport: string;
+      harness?: string;
+      selector: string | null;
+      sessionId: string;
+    };
+
+    expect(received).toEqual([{
+      externalSessionId: "eb5a4c6a-2860-4984-ab57-eb72939cfb02",
+      transport: "antigravity_acp",
+    }]);
+    expect(structured.externalSessionId).toBe("eb5a4c6a-2860-4984-ab57-eb72939cfb02");
+    expect(structured.transport).toBe("antigravity_acp");
+    expect(structured.harness).toBe("antigravity");
+    expect(structured.selector).toBe("@antigravity-openscout");
+    expect(structured.sessionId).toBe("eb5a4c6a-2860-4984-ab57-eb72939cfb02");
+  });
+
   test("surfaces broker-backed search results", async () => {
     const { client } = await connectTestServer({
       resolveSenderId: async (_senderId, currentDirectory) =>
