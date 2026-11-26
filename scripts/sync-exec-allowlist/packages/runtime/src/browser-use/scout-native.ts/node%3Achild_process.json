@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/browser-use/scout-native.ts",
+  "symbol": "node:child_process",
+  "category": "process-lifecycle",
+  "reason": "Launch non-headless managed Chrome with remote debugging port and open regular Chrome tabs on demand",
+  "owner": "runtime"
+}

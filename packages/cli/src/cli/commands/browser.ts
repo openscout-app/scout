@@ -9,22 +9,25 @@ import { createDefaultBrowserRouter, type BrowserRouter } from "@openscout/runti
 import type { ScoutCommandContext } from "../context.ts";
 import { ScoutCliError } from "../errors.ts";
 
-const BROWSER_HELP = `scout browser — Scout Computer's browser surface (companion, managed Chrome, browser-use)
+const BROWSER_HELP = `scout browser — Scout Computer's real non-headless browser surface (companion, managed Chrome, Safari, browser-use)
 
 Usage:
   scout browser status [--json]
   scout browser profiles [--json]
-  scout browser open <url> [--profile <name>] [--adapter <id>] [--mode <companion|managed|regular|remote>] [--allow-origin <origin>] [--json]
-  scout browser snapshot [--adapter <id>] [--url <url>] [--json]
-  scout browser click <selector> [--adapter <id>] [--json]
-  scout browser fill <selector> <text> [--adapter <id>] [--json]
-  scout browser screenshot [--adapter <id>] [--url <url>] [--json]
+  scout browser open <url> [--profile <name>] [--adapter <id>] [--mode <companion|managed|regular|remote>] [--new-tab] [--background] [--allow-origin <origin>] [--json]
+  scout browser tabs [--profile <name>] [--adapter <id>] [--json]
+  scout browser snapshot [--profile <name>] [--tab <id>] [--adapter <id>] [--url <url>] [--json]
+  scout browser click <selector-or-label> [--label <text>] [--profile <name>] [--adapter <id>] [--json]
+  scout browser fill <selector-or-label> <text> [--label <text>] [--profile <name>] [--adapter <id>] [--json]
+  scout browser resize [--width <n> --height <n>] [--mobile] [--reset] [--profile <name>] [--adapter <id>] [--json]
+  scout browser screenshot [--output <path>] [--profile <name>] [--tab <id>] [--adapter <id>] [--url <url>] [--json]
   scout browser run <goal> [--adapter <id>] [--allow-origin <origin>] [--json]
-  scout browser close [--scope <tab|browser>] [--adapter <id>] [--json]
+  scout browser close [--scope <tab|browser>] [--profile <name>] [--tab <id>] [--adapter <id>] [--json]
 
 Adapters:
-  scout-companion   Scout Chrome Companion MV3 extension over the local bridge (default when connected)
-  scout-native      Scout-owned Chrome profiles over CDP (reads existing Action profiles too)
+  scout-companion   Scout Browser Companion MV3 extension over the local bridge (default when connected)
+  scout-native      Scout-owned non-headless Chrome over CDP (auto-launches; reads existing Action profiles too)
+  scout-safari      Direct macOS Safari tab control and DOM inspection
   browser-use       External browser-use CLI behind Scout's lease and origin policy`;
 
 function isAdapterId(value: string): value is BrowserAdapterId {
@@ -41,6 +44,15 @@ function parseFlags(args: string[]): {
   mode?: BrowserSurfaceMode;
   profile?: string;
   url?: string;
+  tabId?: string;
+  label?: string;
+  outputPath?: string;
+  width?: number;
+  height?: number;
+  mobile?: boolean;
+  reset?: boolean;
+  background?: boolean;
+  newTab?: boolean;
   scope?: "tab" | "browser";
   allowOrigins: string[];
   help: boolean;
@@ -51,6 +63,15 @@ function parseFlags(args: string[]): {
   let mode: BrowserSurfaceMode | undefined;
   let profile: string | undefined;
   let url: string | undefined;
+  let tabId: string | undefined;
+  let label: string | undefined;
+  let outputPath: string | undefined;
+  let width: number | undefined;
+  let height: number | undefined;
+  let mobile: boolean | undefined;
+  let reset: boolean | undefined;
+  let background: boolean | undefined;
+  let newTab: boolean | undefined;
   let scope: "tab" | "browser" | undefined;
   let help = false;
 
@@ -67,6 +88,10 @@ function parseFlags(args: string[]): {
     const arg = args[i] ?? "";
     if (arg === "--help" || arg === "-h") { help = true; continue; }
     if (arg === "--json") continue;
+    if (arg === "--mobile") { mobile = true; continue; }
+    if (arg === "--reset") { reset = true; continue; }
+    if (arg === "--background") { background = true; continue; }
+    if (arg === "--new-tab") { newTab = true; continue; }
     if (arg === "--adapter" || arg.startsWith("--adapter=")) {
       const [val, next] = takeValue(i, "--adapter");
       i = next;
@@ -93,6 +118,36 @@ function parseFlags(args: string[]): {
       url = val;
       continue;
     }
+    if (arg === "--tab" || arg.startsWith("--tab=")) {
+      const [val, next] = takeValue(i, "--tab");
+      i = next;
+      tabId = val;
+      continue;
+    }
+    if (arg === "--label" || arg.startsWith("--label=")) {
+      const [val, next] = takeValue(i, "--label");
+      i = next;
+      label = val;
+      continue;
+    }
+    if (arg === "--output" || arg.startsWith("--output=")) {
+      const [val, next] = takeValue(i, "--output");
+      i = next;
+      outputPath = val;
+      continue;
+    }
+    if (arg === "--width" || arg.startsWith("--width=")) {
+      const [val, next] = takeValue(i, "--width");
+      i = next;
+      width = Number(val);
+      continue;
+    }
+    if (arg === "--height" || arg.startsWith("--height=")) {
+      const [val, next] = takeValue(i, "--height");
+      i = next;
+      height = Number(val);
+      continue;
+    }
     if (arg === "--scope" || arg.startsWith("--scope=")) {
       const [val, next] = takeValue(i, "--scope");
       i = next;
@@ -109,7 +164,7 @@ function parseFlags(args: string[]): {
     if (arg.startsWith("--")) throw new ScoutCliError(`unknown option for scout browser: ${arg}`);
     positional.push(arg);
   }
-  return { positional, adapter, mode, profile, url, scope, allowOrigins, help };
+  return { positional, adapter, mode, profile, url, tabId, label, outputPath, width, height, mobile, reset, background, newTab, scope, allowOrigins, help };
 }
 
 export async function runBrowserCommand(
@@ -166,16 +221,18 @@ export async function runBrowserCommand(
 
   const actionMap: Record<string, BrowserActionKind> = {
     open: "open",
+    tabs: "tabs",
     snapshot: "snapshot",
     click: "click",
     fill: "fill",
+    resize: "resize",
     screenshot: "screenshot",
     run: "goal",
     close: "close",
   };
   const action = actionMap[subcommand];
   if (!action) {
-    throw new ScoutCliError(`unknown browser subcommand: ${subcommand} (try: scout browser status|profiles|open|snapshot|click|fill|screenshot|run|close)`);
+    throw new ScoutCliError(`unknown browser subcommand: ${subcommand} (try: scout browser status|profiles|open|tabs|snapshot|click|fill|resize|screenshot|run|close)`);
   }
 
   const request: BrowserActionRequest = {
@@ -185,6 +242,15 @@ export async function runBrowserCommand(
     mode: parsed.mode,
     profile: parsed.profile,
     url: parsed.url,
+    tabId: parsed.tabId,
+    label: parsed.label,
+    outputPath: parsed.outputPath,
+    reset: parsed.reset,
+    background: parsed.background,
+    newTab: parsed.newTab,
+    viewport: parsed.width && parsed.height
+      ? { width: parsed.width, height: parsed.height, mobile: parsed.mobile }
+      : undefined,
     scope: parsed.scope,
     policy: parsed.allowOrigins.length ? { allowOrigins: parsed.allowOrigins } : undefined,
   };
@@ -195,12 +261,12 @@ export async function runBrowserCommand(
     request.url = url;
   } else if (action === "click") {
     const selector = parsed.positional[0];
-    if (!selector) throw new ScoutCliError("scout browser click requires a <selector>");
+    if (!selector && !parsed.label) throw new ScoutCliError("scout browser click requires a <selector> or --label");
     request.selector = selector;
   } else if (action === "fill") {
     const selector = parsed.positional[0];
     const text = parsed.positional.slice(1).join(" ");
-    if (!selector || !text) throw new ScoutCliError("scout browser fill requires <selector> <text>");
+    if ((!selector && !parsed.label) || !text) throw new ScoutCliError("scout browser fill requires <selector> <text>");
     request.selector = selector;
     request.text = text;
   } else if (action === "goal") {

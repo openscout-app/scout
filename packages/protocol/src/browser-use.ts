@@ -89,9 +89,13 @@ export type BrowserActionRequest = {
   mode?: BrowserSurfaceMode;
   profile?: string;
   url?: string;
+  tabId?: string;
   selector?: string;
+  label?: string;
   text?: string;
   goal?: string;
+  outputPath?: string;
+  reset?: boolean;
   viewport?: BrowserViewport;
   newTab?: boolean;
   background?: boolean;
