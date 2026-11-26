@@ -220,9 +220,13 @@ test("Scoutbot's configured stdio server reads a turn attachment from its own Sc
 test("default, additive groups and full partition the actual local registrations", async () => {
   const names = (env: NodeJS.ProcessEnv) => withClient({ env }, async c => (await c.listTools()).tools.map(t => t.name).sort());
   const defaults = await names({});
-  expect(defaults).toHaveLength(14);
+  expect(defaults).toHaveLength(30);
   expect(defaults).toEqual([
-    "agents_resolve", "agents_search", "ask", "attachments_read", "broker_feed", "current_reply_context",
+    "agents_resolve", "agents_search", "ask", "attachments_read", "broker_feed",
+    "browser_click", "browser_close", "browser_fill", "browser_open", "browser_profiles",
+    "browser_resize", "browser_screenshot", "browser_snapshot", "browser_status", "browser_tabs",
+    "computer_act", "computer_focus", "computer_inspect", "computer_screenshot", "computer_status", "computer_windows",
+    "current_reply_context",
     "hosts_list", "invocations_get", "invocations_wait", "messages_channel", "messages_inbox", "reply", "show", "whoami",
   ]);
   const legacyFlag = { OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK: "1" };
