@@ -23,7 +23,8 @@ import type { ScoutCommandContext } from "../context.ts";
  * - `antigravity`: Antigravity's `PreToolUse` / `PostToolUse` / `Stop` hook.
  *   Records when a conversation pauses on a question, unsandboxed command,
  *   plan review, or out-of-workspace file access, and immediately writes `{}`
- *   so Antigravity's own UI is never delayed or double-prompted.
+ *   so Antigravity's own UI is never delayed or double-prompted. PreToolUse replies
+ *   `{"decision":"ask"}` (Antigravity denies a call when the decision is missing).
  */
 
 const MAX_INPUT_BYTES = 256 * 1024;
@@ -42,6 +43,20 @@ type HookInput = {
   transcript_path?: unknown;
   permission_suggestions?: unknown;
 };
+
+/**
+ * Antigravity requires a `decision` on every PreToolUse reply and treats a missing one as "deny".
+ * "ask" hands the call back to Antigravity's own approval rules, so the hook only observes.
+ * Other events expect an empty object.
+ */
+const ANTIGRAVITY_DEFER = '{"decision":"ask"}\n';
+const ANTIGRAVITY_EMPTY = "{}\n";
+
+function antigravityReplyFor(event: string): string {
+  return event === "PostToolUse" || event === "Stop" || event === "PreInvocation" || event === "PostInvocation" || event === "SessionStart"
+    ? ANTIGRAVITY_EMPTY
+    : ANTIGRAVITY_DEFER;
+}
 
 type AntigravityHookInput = {
   hookEventName?: unknown;
@@ -71,7 +86,7 @@ export async function runPermissionHookCommand(_context: ScoutCommandContext, ar
   }
   const raw = await readBoundedStdin(MAX_INPUT_BYTES);
   if (raw === null) {
-    if (target === "antigravity") process.stdout.write("{}\n");
+    if (target === "antigravity") process.stdout.write(ANTIGRAVITY_DEFER);
     return;
   }
   if (target === "antigravity") {
@@ -166,17 +181,18 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
   const write = deps.write ?? ((text: string) => { process.stdout.write(text); });
   const now = (deps.now ?? Date.now)();
   const directory = deps.recordsDirectory;
+  let event = "";
   try {
     const input = JSON.parse(raw) as AntigravityHookInput;
     const sessionId = typeof input?.conversationId === "string" ? input.conversationId.trim() : "";
-    const event = typeof input?.hookEventName === "string" ? input.hookEventName.trim() : "";
+    event = typeof input?.hookEventName === "string" ? input.hookEventName.trim() : "";
     if (!isValidAntigravitySessionId(sessionId)) {
-      write("{}\n");
+      write(antigravityReplyFor(event));
       return;
     }
     if (event === "PostToolUse" || event === "Stop") {
       await removeAntigravitySessionRecord(sessionId, { directory });
-      write("{}\n");
+      write(ANTIGRAVITY_EMPTY);
       return;
     }
     if (event === "PreToolUse") {
@@ -225,7 +241,7 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
   } catch {
     // Never block Antigravity when hook input or disk state fails.
   }
-  write("{}\n");
+  write(antigravityReplyFor(event));
 }
 
 async function postJson<T>(path: string, body: unknown, timeoutMs: number): Promise<T> {

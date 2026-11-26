@@ -85,7 +85,16 @@ test("passes transcript_path to the runtime without interpreting it", async () =
 });
 
 describe("scout permission-hook antigravity", () => {
-  test("records unsandboxed commands and ask_question on PreToolUse, clears on PostToolUse/Stop, and always emits {}", async () => {
+  test("never answers PreToolUse without a decision, even for bad input", async () => {
+    const out: string[] = [];
+    const write = (t: string) => out.push(t);
+    await handleAntigravityPermissionHook("not json", { write });
+    await handleAntigravityPermissionHook(JSON.stringify({ hookEventName: "PreToolUse", conversationId: "bad id" }), { write });
+    await handleAntigravityPermissionHook(JSON.stringify({ hookEventName: "Stop", conversationId: "bad id" }), { write });
+    expect(out.map((line) => JSON.parse(line))).toEqual([{ decision: "ask" }, { decision: "ask" }, {}]);
+  });
+
+  test("records unsandboxed commands and ask_question on PreToolUse, clears on PostToolUse/Stop, and defers PreToolUse to Antigravity with decision ask", async () => {
     const recordsDirectory = mkdtempSync(join(tmpdir(), "scout-agy-hook-"));
     const sessionId = "3a102f26-6237-46c4-ae20-6152148eecaa";
     const out: string[] = [];
@@ -99,7 +108,7 @@ describe("scout permission-hook antigravity", () => {
         toolCall: { id: "t1", name: "run_command", args: { CommandLine: "bun test", BypassSandbox: false } },
       }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
       expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
-      expect(out).toEqual(["{}\n"]);
+      expect(out).toEqual(['{"decision":"ask"}\n']);
 
       await handleAntigravityPermissionHook(JSON.stringify({
         hookEventName: "PreToolUse",
@@ -123,7 +132,7 @@ describe("scout permission-hook antigravity", () => {
         toolCall: { id: "t2", name: "run_command", args: {} },
       }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
       expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
-      expect(out).toEqual(["{}\n", "{}\n", "{}\n"]);
+      expect(out).toEqual(['{"decision":"ask"}\n', '{"decision":"ask"}\n', "{}\n"]);
     } finally {
       rmSync(recordsDirectory, { recursive: true, force: true });
     }
