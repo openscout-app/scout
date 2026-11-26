@@ -3,7 +3,7 @@ import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsCon
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { NativePermissionAskError } from "./native-permission.js";
 import { HarnessHooksError } from "./harness-hooks.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrokerRequestReceipts, canonicalRequest } from "./broker-request-receipts.js";
@@ -317,6 +317,57 @@ describe("createBrokerHttpRouter", () => {
     expect(inputs).toHaveLength(1);
     const absent = await requestRouter(createHarness(), "GET", "/v1/mesh/knowledge/search?q=x");
     expect(absent.response.status).toBe(404);
+  });
+
+  test("Desk can list fields and run by name through one attributed, replayable task ask", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "runtime-plays-"));
+    const original = process.env.OPENSCOUT_SCOUT_HOME;
+    process.env.OPENSCOUT_SCOUT_HOME = dir;
+    const transportContext = { transport: "loopback" as const };
+    const calls: unknown[] = [];
+    const h = createHarness({ requestReceipts: new BrokerRequestReceipts(join(dir, "receipts")), brokerService: {
+      ...createHarness().deps.brokerService,
+      deliver: async payload => {
+        calls.push(payload);
+        return { kind: "delivery", accepted: true, receipt: { requestId: payload.requestId, conversationId: "dm.test",
+          messageId: "msg-test", flightId: "flt-test" }, flight: { id: "flt-test", invocationId: "inv-test" }, workItem: { id: "work-test" } } as never;
+      },
+    } });
+    try {
+      mkdirSync(join(dir, "plays"));
+      writeFileSync(join(dir, "plays", "report.md"), [
+        "---", "name: report", "description: Write a report.", "inputs:", "  path: { label: Source file }",
+        "  note: { required: false }", "  format: Markdown", "target: { project: /reports }",
+        "delivery: A {{format}} report.", "---", "Read {{path}}. Note: {{note}}.",
+      ].join("\n"));
+      expect((await requestRouter(h, "GET", "/v1/plays", { transportContext })).body).toEqual({ plays: [{
+        name: "report", description: "Write a report.", inputs: [
+          { name: "path", label: "Source file", required: true, default: null },
+          { name: "note", label: "Note", required: false, default: null },
+          { name: "format", label: "Format", required: false, default: "Markdown" },
+        ],
+      }] });
+      const run = (body: unknown) => requestRouter(h, "POST", "/v1/plays/run", { transportContext, body });
+      expect((await run({ name: "report" })).body).toMatchObject({ error: "missing_play_inputs", missingInputs: ["path"] });
+      expect((await run({ name: "../report", inputs: { path: "a" } })).response.status).toBe(400);
+      expect((await run({ name: "report", body: "replace procedure" })).response.status).toBe(400);
+      const body = { name: "report", inputs: { path: "a.md" }, requestId: "desk-1" };
+      expect((await requestRouter(h, "POST", "/v1/plays/run", { body, transportContext, headers: { origin: "https://other.test" } })).response.status).toBe(403);
+      expect((await requestRouter(h, "GET", "/v1/plays", { transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
+      expect(calls).toHaveLength(0);
+      const first = await run(body);
+      expect(first.response.status).toBe(202);
+      expect(first.body).toMatchObject({ receipt: { requestId: "desk-1", flightId: "flt-test", invocationId: "inv-test", workId: "work-test" },
+        followUrl: expect.stringMatching(/\/work\/work-test$/) });
+      expect((await run(body)).body).toEqual(first.body);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ task: { version: 1 }, intent: "consult", caller: { actorId: "local-unverified" },
+        target: { kind: "project_path", projectPath: "/reports" }, body: expect.stringContaining("Read a.md. Note: ."),
+        invocationMetadata: { play: "report", attribution: { source: "unverified" } } });
+    } finally {
+      if (original === undefined) delete process.env.OPENSCOUT_SCOUT_HOME; else process.env.OPENSCOUT_SCOUT_HOME = original;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("requestId dedupes ask/send acceptance at the broker and exposes the original receipt", async () => {

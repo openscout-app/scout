@@ -37,6 +37,8 @@ export const scoutBrokerPaths = {
     invocations: "/v1/invocations",
     flights: "/v1/flights",
     deliver: "/v1/deliver",
+    plays: "/v1/plays",
+    playsRun: "/v1/plays/run",
     rendezvousMatch: "/v1/rendezvous/match",
     aliases: "/v1/aliases",
     aliasesResolve: "/v1/aliases/resolve",

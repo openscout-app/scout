@@ -781,33 +781,34 @@ describe("createScoutMcpServer", () => {
     });
   }
 
-  test("plays list and run use the playbook and return the normal ask receipt", async () => {
-    const home = mkdtempSync(join(tmpdir(), "mcp-plays-"));
-    tempPaths.add(home);
-    mkdirSync(join(home, "plays"));
-    writeFileSync(join(home, "plays", "review.md"), [
-      "---", "name: review", "description: Review a file.", "inputs:", "  path:", "target:", "  harness: codex",
-      "delivery: A review.", "---", "Read {{path}}.",
-    ].join("\n"));
-    const asks: ScoutAskCommand[] = [];
-    const { client } = await connectTestServer({
-      resolveSenderId: async () => "operator.main",
-      scoutAskHandler: async input => {
-        asks.push(input);
-        return { ok: true, state: "queued", ids: { invocationId: "inv-play", flightId: "flt-play", workId: "work-play" } };
-      },
-    }, { OPENSCOUT_SCOUT_HOME: home, OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://scout.test", OPENSCOUT_MCP_PROFILE: "work" });
-    expect((await client.callTool({ name: "plays_list", arguments: {} })).structuredContent)
-      .toMatchObject({ plays: [{ name: "review", inputs: { path: null } }] });
-    expect((await client.callTool({ name: "plays_run", arguments: { name: "review" } })).isError).toBe(true);
-    const result = await client.callTool({ name: "plays_run", arguments: {
-      name: "review", inputs: { path: "a.ts" }, projectPath: "~/code", on: "worker", requestId: "review-1",
+  test("plays tools call the runtime with the caller session and present its follow link", async () => {
+    const calls: string[] = [];
+    const broker = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+      const path = new URL(req.url).pathname;
+      calls.push(`${req.method} ${path}`);
+      if (path === "/v1/plays") return Response.json({ plays: [{ name: "review", description: "Review a file.",
+        inputs: [{ name: "path", label: "File to review", required: true, default: null }] }] });
+      const input = await req.json();
+      expect(input).toMatchObject({ name: "review", inputs: { path: "a.ts" }, target: { project: "~/code", host: "worker" },
+        requestId: "review-1", replyToSessionId: "019ddb1b-test-thread", senderId: "operator.main", source: "scout-mcp" });
+      expect(input).not.toHaveProperty("body");
+      return Response.json({ receipt: { invocationId: "inv-play", flightId: "flt-play", workId: "work-play" },
+        followUrl: "http://runtime.test/work/work-play" });
     } });
-    expect(result.isError).toBeFalsy();
-    expect(asks).toHaveLength(1);
-    expect(asks[0]).toMatchObject({ senderId: "operator.main", requestId: "review-1", projectPath: "~/code", host: "worker",
-      harness: "codex", body: expect.stringContaining("Read a.ts.") });
-    expect(result.structuredContent).toMatchObject({ ok: true, ids: { invocationId: "inv-play" }, followUrl: "http://scout.test/work/work-play" });
+    try {
+      const { client } = await connectTestServer({
+        resolveBrokerUrl: () => broker.url.origin, resolveSenderId: async () => "operator.main",
+      }, { OPENSCOUT_MCP_PROFILE: "work", OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://different-client.test" });
+      expect((await client.callTool({ name: "plays_list", arguments: {} })).structuredContent)
+        .toMatchObject({ plays: [{ name: "review", inputs: [{ name: "path", required: true }] }] });
+      const result = await client.callTool({ name: "plays_run", arguments: {
+        name: "review", inputs: { path: "a.ts" }, projectPath: "~/code", on: "worker", requestId: "review-1",
+      } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({ ok: true, ids: { invocationId: "inv-play" },
+        followUrl: "http://runtime.test/work/work-play", links: { work: "http://runtime.test/work/work-play" } });
+      expect(calls).toEqual(["GET /v1/plays", "POST /v1/plays/run"]);
+    } finally { await broker.stop(true); }
   });
 
   test("ask wraps the ScoutAskHandler primitive", async () => {

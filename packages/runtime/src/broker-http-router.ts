@@ -1,3 +1,5 @@
+import { listPlays, MissingPlayInputs, playbookDirectory } from "./playbook.js";
+import { playAsk, playRunSchema, playRunResult } from "./broker-plays.js";
 import { HostLaunchDeferred } from "./host-launch-admission.js";
 import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
 import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
@@ -3771,10 +3773,27 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  if (method === "POST" && url.pathname === "/v1/deliver") {
+  const listPlaybook = method === "GET" && url.pathname === "/v1/plays";
+  const runPlay = method === "POST" && url.pathname === "/v1/plays/run";
+  if (listPlaybook || runPlay) {
+    const context = request.transportContext;
+    if (!context || !["unix-socket", "loopback"].includes(context.transport) || context.guest || context.peer || context.scoped
+      || request.headers.origin !== undefined || request.headers["x-openscout-forwarded-node-id"] !== undefined) {
+      json(response, 403, { error: "local_playbook_required" }); return;
+    }
+    if (listPlaybook) {
+      try { json(response, 200, { plays: await listPlays(playbookDirectory(process.env)) }); }
+      catch (error) { badRequest(response, error); }
+      return;
+    }
+  }
+
+  if (method === "POST" && (url.pathname === "/v1/deliver" || runPlay)) {
     const signal = requestAbortSignal(request, response);
     try {
-      const payload = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      const payload = runPlay
+        ? brokerDeliverRequestSchema.parse(await playAsk(playbookDirectory(process.env), await readValidatedRequestBody(request, playRunSchema)))
+        : await readValidatedRequestBody(request, brokerDeliverRequestSchema);
       const snapshot = currentAttributionSnapshot();
       const parentFlight = payload.relation?.parentFlightId ? snapshot.flights?.[payload.relation.parentFlightId] : undefined;
       const parent = brokerAttributionFromMetadata(parentFlight ? snapshot.invocations?.[parentFlight.invocationId]?.metadata : undefined)
@@ -3836,7 +3855,7 @@ export function createBrokerHttpRouter(
         json(
           response,
           result.kind === "delivery" ? 202 : result.kind === "question" ? 409 : 422,
-          result,
+          runPlay && result.kind === "delivery" ? playRunResult(result) : result,
         );
       };
       const claims = brokerService.assistantClaims;
@@ -3846,7 +3865,9 @@ export function createBrokerHttpRouter(
       if (signal.aborted || response.destroyed || response.writableEnded) {
         return;
       }
-      badRequest(response, error);
+      if (runPlay && error instanceof MissingPlayInputs) {
+        json(response, 400, { error: "missing_play_inputs", detail: error.message, missingInputs: error.missingInputs });
+      } else badRequest(response, error);
     }
     return;
   }

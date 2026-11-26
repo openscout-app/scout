@@ -25,6 +25,12 @@
       "import": "./dist/facades/daemon.js",
       "default": "./dist/facades/daemon.js"
     },
+    "./playbook": {
+      "bun": "./src/playbook.ts",
+      "types": "./dist/playbook.d.ts",
+      "import": "./dist/playbook.js",
+      "default": "./dist/playbook.js"
+    },
     "./config": {
       "bun": "./src/facades/config.ts",
       "types": "./dist/facades/config.d.ts",

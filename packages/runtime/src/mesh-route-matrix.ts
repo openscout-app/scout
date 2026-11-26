@@ -259,6 +259,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/conversations/:id/pins": "local",
   "POST /v1/conversations/:id/title": "local",
   "POST /v1/decisions/answer": "local",
+  "GET /v1/plays": "local",
+  "POST /v1/plays/run": "local",
   "POST /v1/deliver": "local",
   "POST /v1/deliveries/claim": "local",
   "POST /v1/deliveries/status": "local",

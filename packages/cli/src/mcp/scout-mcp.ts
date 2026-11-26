@@ -7,7 +7,7 @@ import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
 import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
-import { listPlays, playbookDirectory, preparePlay } from "../lib/core/plays.ts";
+import { playClient, playAskReceipt } from "../lib/core/broker/play-client.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
 import { registerVercelBoardDispatcherTool, registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
@@ -1887,6 +1887,7 @@ function buildScoutFollowArtifacts(
     targetAgentId: string | null;
   },
   env: NodeJS.ProcessEnv,
+  runtimeFollowUrl?: string,
 ): { ids: ScoutFollowIds; links: ScoutFollowLinks; followUrl: string | null } {
   const ids: ScoutFollowIds = {
     flightId: input.flight?.id ?? input.flightId ?? null,
@@ -1899,7 +1900,7 @@ function buildScoutFollowArtifacts(
     sessionId: input.targetSessionId ?? null,
     targetAgentId: input.targetAgentId ?? input.flight?.targetAgentId ?? null,
   };
-  const origin = resolveScoutWebOrigin(env);
+  const origin = runtimeFollowUrl ? new URL(runtimeFollowUrl).origin : resolveScoutWebOrigin(env);
   const observePath = ids.sessionId && ids.targetAgentId
     ? `/agents/${encodeURIComponent(ids.targetAgentId)}/sessions/${encodeURIComponent(ids.sessionId)}`
     : ids.sessionId
@@ -1912,7 +1913,7 @@ function buildScoutFollowArtifacts(
     ?? (ids.conversationId ? `/c/${encodeURIComponent(ids.conversationId)}` : null)
     ?? buildFollowPath(ids, "tail");
 
-  const follow = followPath ? buildScoutPath(origin, followPath) : null;
+  const follow = runtimeFollowUrl ?? (followPath ? buildScoutPath(origin, followPath) : null);
   const tailPath = buildFollowPath(ids, "tail");
   const sessionPath = buildFollowPath(ids, "session");
   const observe = observePath ? buildScoutPath(origin, observePath) : null;
@@ -1924,7 +1925,7 @@ function buildScoutFollowArtifacts(
       ? buildScoutPath(origin, `/c/${encodeURIComponent(ids.conversationId)}`)
       : null,
     work: ids.workId
-      ? buildScoutPath(origin, `/work/${encodeURIComponent(ids.workId)}`)
+      ? follow
       : null,
     agent: ids.targetAgentId
       ? buildScoutPath(origin, `/agents/${encodeURIComponent(ids.targetAgentId)}?tab=message`)
@@ -4839,7 +4840,6 @@ export function createScoutMcpServer(options: {
         awaitReply: wait,
         replyMode,
       });
-      const replyNotificationsEnabled = areMcpReplyNotificationsEnabled(env);
       if (to && targetSessionId) throw new Error("use exactly one of to or targetSessionId");
       const targetSession = targetSessionId?.trim();
       const targetTo = targetSession ? `session:${targetSession}` : to?.trim();
@@ -5004,133 +5004,143 @@ export function createScoutMcpServer(options: {
             } : undefined,
           });
 
-      if (structuredContent.ok && resolvedReplyMode === "inline" && structuredContent.ids.flightId) {
-        try {
-          const flight = await deps.waitForFlight(
-            deps.resolveBrokerUrl(),
-            structuredContent.ids.flightId,
-            timeoutSeconds ? { timeoutSeconds } : undefined,
-          );
-          structuredContent = {
-            ...structuredContent,
-            state: flight.state === "completed"
-              ? "completed"
-              : flight.state === "failed" || flight.state === "cancelled"
-                ? "failed"
-                : "queued",
-            ok: flight.state !== "failed" && flight.state !== "cancelled",
-            ids: {
-              ...structuredContent.ids,
-              targetAgentId: flight.targetAgentId,
-              invocationId: flight.invocationId,
-              flightId: flight.id,
-            },
-          };
-        } catch {
-          // Keep the initial receipt; callers can follow by flight id.
-        }
-      } else if (
-        structuredContent.ok && resolvedReplyMode === "notify"
-        && replyNotificationsEnabled
-        && structuredContent.ids.flightId
-      ) {
-        // Queued dispatches materialize their flight after the receipt
-        // returns, so schedule by flight id and let the scheduler's wait
-        // absorb materialization instead of gating on an immediate fetch.
-        const flight = await deps.getFlight(
+      return presentAskReceipt(structuredContent, { resolvedReplyMode, timeoutSeconds, resolvedCurrentDirectory, resolvedSenderId,
+        targetLabel: targetTo ?? targetProjectPath, targetSession });
+    };
+
+  async function presentAskReceipt(structuredContent: ScoutAskReceipt, context: {
+    resolvedReplyMode: "notify" | "inline" | "none"; timeoutSeconds?: number; resolvedCurrentDirectory: string;
+    resolvedSenderId: string; targetLabel?: string; targetSession?: string; followUrl?: string;
+  }) {
+    const { resolvedReplyMode, timeoutSeconds, resolvedCurrentDirectory, resolvedSenderId, targetSession } = context;
+    if (structuredContent.ok && resolvedReplyMode === "inline" && structuredContent.ids.flightId) {
+      try {
+        const flight = await deps.waitForFlight(
           deps.resolveBrokerUrl(),
           structuredContent.ids.flightId,
-        ).catch(() => null);
-        const followArtifacts = buildScoutFollowArtifacts(
-          {
-            flight,
-            workId: structuredContent.ids.workId,
-            workPageUnavailable: structuredContent.workPageUnavailable,
-            flightId: structuredContent.ids.flightId,
-            invocationId: structuredContent.ids.invocationId,
-            conversationId: structuredContent.ids.conversationId ?? null,
-            workItem: null,
-            targetAgentId: structuredContent.ids.targetAgentId ?? flight?.targetAgentId ?? null,
-          },
-          env,
+          timeoutSeconds ? { timeoutSeconds } : undefined,
         );
-        scheduleScoutReplyNotification({
-          server,
-          deps,
-          brokerUrl: deps.resolveBrokerUrl(),
-          flight: flight ?? { id: structuredContent.ids.flightId },
-          context: {
-            currentDirectory: resolvedCurrentDirectory,
-            senderId: resolvedSenderId,
-            targetAgentId: structuredContent.ids.targetAgentId ?? flight?.targetAgentId ?? null,
-            targetLabel: targetTo ?? targetProjectPath ?? null,
-            conversationId: structuredContent.ids.conversationId ?? null,
-            messageId: structuredContent.ids.messageId ?? null,
-            bindingRef: structuredContent.ids.bindingRef ? `ref:${structuredContent.ids.bindingRef}` : null,
-            flightId: structuredContent.ids.flightId,
-            workItem: null,
-            workId: structuredContent.ids.workId ?? null,
-            workUrl: followArtifacts.links.work,
-            ids: followArtifacts.ids,
-            links: followArtifacts.links,
-            followUrl: followArtifacts.followUrl,
-          },
-        });
         structuredContent = {
           ...structuredContent,
-          delivery: "mcp_notification" as const,
-          notification: {
-            method: "notifications/scout/reply" as const,
-            status: "scheduled" as const,
+          state: flight.state === "completed"
+            ? "completed"
+            : flight.state === "failed" || flight.state === "cancelled"
+              ? "failed"
+              : "queued",
+          ok: flight.state !== "failed" && flight.state !== "cancelled",
+          ids: {
+            ...structuredContent.ids,
+            targetAgentId: flight.targetAgentId,
+            invocationId: flight.invocationId,
+            flightId: flight.id,
           },
         };
+      } catch {
+        // Keep the initial receipt; callers can follow by flight id.
       }
-      if (structuredContent.ok && !structuredContent.delivery) {
-        structuredContent = {
-          ...structuredContent,
-          delivery: resolvedReplyMode === "inline"
-            ? "inline"
-            : "none",
-          ...(resolvedReplyMode === "notify"
-            ? {
-                notification: {
-                  method: "notifications/scout/reply" as const,
-                  status: "not_scheduled" as const,
-                },
-              }
-            : {}),
-        };
-      }
-
-      const followArtifacts = buildScoutFollowArtifacts({
-        flight: null,
-        flightId: structuredContent.ids.flightId,
-        invocationId: structuredContent.ids.invocationId,
-        workId: structuredContent.ids.workId,
-        workPageUnavailable: structuredContent.workPageUnavailable,
-        workItem: null,
-        conversationId: structuredContent.ids.conversationId ?? null,
-        targetAgentId: structuredContent.ids.targetAgentId ?? null,
-        targetSessionId: targetSession ?? null,
-      }, env);
-      return {
-        content: createPlainTextContent(
-          renderMcpAskPrimitiveSummary(structuredContent) + renderFollowLinkText(followArtifacts),
-        ),
-        structuredContent: {
-          ...structuredContent,
+    } else if (
+      structuredContent.ok && resolvedReplyMode === "notify"
+      && areMcpReplyNotificationsEnabled(env)
+      && structuredContent.ids.flightId
+    ) {
+      // Queued dispatches materialize their flight after the receipt
+      // returns, so schedule by flight id and let the scheduler's wait
+      // absorb materialization instead of gating on an immediate fetch.
+      const flight = await deps.getFlight(
+        deps.resolveBrokerUrl(),
+        structuredContent.ids.flightId,
+      ).catch(() => null);
+      const followArtifacts = buildScoutFollowArtifacts(
+        {
+          flight,
+          workId: structuredContent.ids.workId,
+          workPageUnavailable: structuredContent.workPageUnavailable,
+          flightId: structuredContent.ids.flightId,
+          invocationId: structuredContent.ids.invocationId,
+          conversationId: structuredContent.ids.conversationId ?? null,
+          workItem: null,
+          targetAgentId: structuredContent.ids.targetAgentId ?? flight?.targetAgentId ?? null,
+        },
+        env, context.followUrl,
+      );
+      scheduleScoutReplyNotification({
+        server,
+        deps,
+        brokerUrl: deps.resolveBrokerUrl(),
+        flight: flight ?? { id: structuredContent.ids.flightId },
+        context: {
+          currentDirectory: resolvedCurrentDirectory,
+          senderId: resolvedSenderId,
+          targetAgentId: structuredContent.ids.targetAgentId ?? flight?.targetAgentId ?? null,
+          targetLabel: context.targetLabel ?? null,
+          conversationId: structuredContent.ids.conversationId ?? null,
+          messageId: structuredContent.ids.messageId ?? null,
+          bindingRef: structuredContent.ids.bindingRef ? `ref:${structuredContent.ids.bindingRef}` : null,
+          flightId: structuredContent.ids.flightId,
+          workItem: null,
+          workId: structuredContent.ids.workId ?? null,
+          workUrl: followArtifacts.links.work,
+          ids: followArtifacts.ids,
           links: followArtifacts.links,
           followUrl: followArtifacts.followUrl,
         },
+      });
+      structuredContent = {
+        ...structuredContent,
+        delivery: "mcp_notification" as const,
+        notification: {
+          method: "notifications/scout/reply" as const,
+          status: "scheduled" as const,
+        },
       };
+    }
+    if (structuredContent.ok && !structuredContent.delivery) {
+      structuredContent = {
+        ...structuredContent,
+        delivery: resolvedReplyMode === "inline"
+          ? "inline"
+          : "none",
+        ...(resolvedReplyMode === "notify"
+          ? {
+              notification: {
+                method: "notifications/scout/reply" as const,
+                status: "not_scheduled" as const,
+              },
+            }
+          : {}),
+      };
+    }
+
+    const followArtifacts = buildScoutFollowArtifacts({
+      flight: null,
+      flightId: structuredContent.ids.flightId,
+      invocationId: structuredContent.ids.invocationId,
+      workId: structuredContent.ids.workId,
+      workPageUnavailable: structuredContent.workPageUnavailable,
+      workItem: null,
+      conversationId: structuredContent.ids.conversationId ?? null,
+      targetAgentId: structuredContent.ids.targetAgentId ?? null,
+      targetSessionId: targetSession ?? null,
+    }, env, context.followUrl);
+    return {
+      content: createPlainTextContent(
+        renderMcpAskPrimitiveSummary(structuredContent) + (context.followUrl ? ` Follow the task: ${context.followUrl}` : renderFollowLinkText(followArtifacts)),
+      ),
+      structuredContent: {
+        ...structuredContent,
+        links: followArtifacts.links,
+        followUrl: followArtifacts.followUrl,
+      },
     };
+  }
+
   server.registerTool("ask", askConfig, handleAsk);
 
   server.registerTool("plays_list", {
     title: "List plays", description: "List the operator's local playbook with descriptions and inputs.",
     inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true, destructiveHint: false },
   }, async () => {
-    const plays = await listPlays(playbookDirectory(env));
+    const { plays } = await playClient(deps.resolveBrokerUrl()).list();
     return { content: createPlainTextContent(JSON.stringify(plays)), structuredContent: { plays } };
   });
   server.registerTool("plays_run", {
@@ -5141,11 +5151,16 @@ export function createScoutMcpServer(options: {
     outputSchema: askReceiptSchema,
     annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false },
   }, async ({ name, inputs, projectPath, harness, on, requestId }) => {
-    const run = await preparePlay(playbookDirectory(env), name, inputs ?? {}, {
-      ...(projectPath && { project: projectPath }), ...(harness && { harness }), ...(on && { host: on }),
-    }, options.defaultCurrentDirectory);
-    return handleAsk(askConfig.inputSchema.parse({ projectPath: run.target.project, harness: run.target.harness,
-      on: run.target.host, requestId, body: run.body }));
+    const resolvedCurrentDirectory = options.defaultCurrentDirectory;
+    const resolvedSenderId = await resolveMcpSenderId(deps, undefined, resolvedCurrentDirectory, env);
+    const replyToSessionId = resolveMcpReplyToSessionId(undefined, env);
+    const result = await playClient(deps.resolveBrokerUrl()).run({
+      name, inputs, target: { project: projectPath, harness, host: on }, currentDirectory: resolvedCurrentDirectory,
+      requestId: requestId ?? `ask-${randomUUID()}`, senderId: resolvedSenderId, replyToSessionId,
+      replyToSessionHarness: claimedSessionHarness(replyToSessionId, env), source: "scout-mcp",
+    });
+    return presentAskReceipt(playAskReceipt(result), { resolvedReplyMode: "notify", resolvedCurrentDirectory,
+      resolvedSenderId, targetLabel: result.receipt.targetLabel, followUrl: result.followUrl });
   });
 
   if (env.OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK === "1") {

@@ -1,23 +1,31 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { normalizeScoutLaunchableHarness } from "@openscout/protocol";
-import { deriveOpenScoutInstanceLayout } from "@openscout/runtime/config";
+import { isAbsolute, join, resolve } from "node:path";
+import { normalizeScoutLaunchableHarness, type ScoutPlayInput, type ScoutPlaySummary, type ScoutPlayTarget } from "@openscout/protocol";
+import { deriveOpenScoutInstanceLayout } from "./instance.js";
 import { z } from "zod";
 
 const namePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const inputPattern = /^[a-z][a-z0-9_-]*$/;
 const nonempty = z.string().trim().min(1);
-const targetFields = z.object({ project: nonempty.optional(), harness: nonempty.optional(), host: nonempty.optional() }).strict();
+const inputField = z.union([z.string(), z.null(), z.object({
+  label: nonempty.optional(), required: z.boolean().optional(), default: z.string().optional(),
+}).strict().refine(v => !(v.required && v.default !== undefined), "A required input cannot have a default")]);
+function normalizeInput(name: string, field: z.infer<typeof inputField>): ScoutPlayInput {
+  const spec = typeof field === "string" ? { default: field } : field ?? {};
+  const words = name.replace(/[-_]/g, " ");
+  return { name, label: spec.label ?? words[0]!.toUpperCase() + words.slice(1),
+    required: spec.required ?? spec.default === undefined, default: spec.default ?? null };
+}
+export const playTargetSchema = z.object({ project: nonempty.optional(), harness: nonempty.optional(), host: nonempty.optional() }).strict();
 const header = z.object({
   name: z.string().regex(namePattern),
   description: nonempty,
   delivery: nonempty,
-  inputs: z.record(z.string().regex(inputPattern), z.string().nullable()).default({}),
-  target: targetFields.default({}),
+  inputs: z.record(z.string().regex(inputPattern), inputField).default({}).transform(fields => Object.entries(fields).map(([name, field]) => normalizeInput(name, field))),
+  target: playTargetSchema.default({}),
 });
 type Play = z.infer<typeof header> & { procedure: string };
-export type PlayTarget = Play["target"];
 
 export function playbookDirectory(env: NodeJS.ProcessEnv): string {
   const home = env.OPENSCOUT_SCOUT_HOME?.trim() ||
@@ -51,7 +59,7 @@ export async function readPlayFile(dir: string, name: string): Promise<string> {
   }
 }
 
-export async function listPlays(dir: string) {
+export async function listPlays(dir: string): Promise<ScoutPlaySummary[]> {
   let entries;
   try { entries = await readdir(dir, { withFileTypes: true }); }
   catch (error) {
@@ -65,38 +73,46 @@ export async function listPlays(dir: string) {
   }));
 }
 
-export function renderPlay(play: Play, inputs: Record<string, string>, overrides: PlayTarget, cwd: string) {
+export class MissingPlayInputs extends Error {
+  constructor(name: string, readonly missingInputs: string[]) {
+    super(`Missing required input for ${name}: ${missingInputs.join(", ")}`);
+  }
+}
+
+export function renderPlay(play: Play, inputs: Record<string, string>, overrides: ScoutPlayTarget, cwd?: string) {
   const values = new Map<string, string>();
   for (const key of Object.keys(inputs)) {
-    if (!Object.hasOwn(play.inputs, key)) throw new Error(`Unknown input for ${play.name}: ${key}`);
+    if (!play.inputs.some(field => field.name === key)) throw new Error(`Unknown input for ${play.name}: ${key}`);
   }
-  for (const [key, fallback] of Object.entries(play.inputs)) {
-    const value = Object.hasOwn(inputs, key) ? inputs[key] : fallback;
-    if (value == null || (fallback === null && !value.trim())) throw new Error(`Missing required input for ${play.name}: ${key}`);
-    values.set(key, value);
+  const missing: string[] = [];
+  for (const field of play.inputs) {
+    const value = Object.hasOwn(inputs, field.name) ? inputs[field.name]! : field.default ?? "";
+    if (field.required && !value.trim()) missing.push(field.name);
+    values.set(field.name, value);
   }
+  if (missing.length) throw new MissingPlayInputs(play.name, missing);
   const fill = (s: string) => s.replace(/\{\{([a-z][a-z0-9_-]*)\}\}/g, (_, key: string) => {
     if (!values.has(key)) throw new Error(`Undeclared input in ${play.name}: ${key}`);
     return values.get(key)!;
   });
-  const target = targetFields.parse({ ...play.target, ...overrides });
-  if (target.harness) {
-    const harness = normalizeScoutLaunchableHarness(target.harness);
-    if (!harness) throw new Error(`Unsupported harness: ${target.harness}. See scout runtimes.`);
-    target.harness = harness;
-  }
+  const target = playTargetSchema.parse({ ...play.target, ...overrides });
+  const harness = normalizeScoutLaunchableHarness(target.harness) ?? undefined;
+  if (target.harness && !harness) throw new Error(`Unsupported harness: ${target.harness}. See scout runtimes.`);
   if (target.host && !target.project) throw new Error(`Specify --project for host ${target.host}.`);
-  const project = target.host ? target.project! : resolve(cwd, target.project ?? ".");
+  if (!target.host && !isAbsolute(target.project ?? "") && (!cwd || !isAbsolute(cwd))) {
+    throw new Error("Specify an absolute target project or the caller's absolute currentDirectory.");
+  }
+  const project = target.host ? target.project! : isAbsolute(target.project ?? "") ? target.project! : resolve(cwd!, target.project ?? ".");
   const body = [
     `Run the ${play.name} play. Ask when unsure.`,
     ...(values.size ? ["Inputs:\n" + [...values].map(([k, v]) => `${k}: ${v}`).join("\n")] : []),
     fill(play.procedure),
     "Delivery: " + fill(play.delivery),
   ].join("\n\n");
-  return { target: { ...target, project }, body };
+  return { target: { ...target, harness, project }, body };
 }
 
-export async function preparePlay(dir: string, name: string, inputs: Record<string, string>, overrides: PlayTarget, cwd: string) {
+export async function preparePlay(dir: string, name: string, inputs: Record<string, string>, overrides: ScoutPlayTarget, cwd?: string) {
   return renderPlay(parsePlay(name, await readPlayFile(dir, name)), inputs, overrides, cwd);
 }
 

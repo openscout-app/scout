@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createScoutCommandContext } from "../context.ts";
-import { draftPlay, parsePlay, renderPlay } from "../../lib/core/plays.ts";
+import { draftPlay, parsePlay } from "@openscout/runtime/playbook";
 import { runNamedPlayCommand, runPlayCommand, runPlaysCommand } from "./play.ts";
 
 const homes: string[] = [];
@@ -16,39 +16,17 @@ async function fixture() {
   return { ctx, home, result: () => JSON.parse(output.pop()!) };
 }
 
-const markdown = [
-  "---", "name: report", 'description: "Write a report: Markdown."', "inputs:", "  path:", "  format: Markdown",
-  "target:", "  project: ~/work", "  host: worker", "  harness: codex", "delivery: A {{format}} file.",
-  "---", "Read {{path}}.", "---", "Summarize the findings.",
-].join("\r\n");
-
-test("fills YAML defaults, procedure and delivery once; remote paths belong to the target", () => {
-  const play = parsePlay("report", markdown);
-  const run = renderPlay(play, { path: "dir/{{format}} $1" }, { host: "other" }, "/local");
-  expect(run.target).toEqual({ project: "~/work", host: "other", harness: "codex" });
-  expect(run.body).toContain("Read dir/{{format}} $1.\n---\nSummarize the findings.");
-  expect(run.body).toEndWith("Delivery: A Markdown file.");
-  expect(() => parsePlay("another", markdown)).toThrow("name must match");
-  expect(() => parsePlay("report", markdown.replace("  host:", "  hostname:"))).toThrow("hostname");
-  expect(() => renderPlay(play, { path: "a", typo: "b" }, {}, "/local")).toThrow("typo");
-  expect(() => renderPlay({ ...play, delivery: "{{typo}}" }, { path: "a" }, {}, "/local")).toThrow("typo");
-});
-
-test("new, list, show and dry-run use the same operator playbook and never overwrite a play", async () => {
+test("new, show and offline dry-run use the operator playbook and never overwrite a play", async () => {
   const { ctx, home, result } = await fixture();
-  await runPlaysCommand(ctx, []);
-  expect(result()).toEqual([]);
   await runPlayCommand(ctx, ["new", "report"]);
   const { path } = result();
   expect(path).toBe(join(home, ".scout", "plays", "report.md"));
   await runPlayCommand(ctx, ["show", "report"]);
   expect(result().markdown).toBe(await readFile(path, "utf8"));
-  await runPlaysCommand(ctx, []);
-  expect(result()).toMatchObject([{ name: "report", inputs: { path: null } }]);
   await expect(runPlayCommand(ctx, ["new", "report"])).rejects.toThrow("already exists");
   await expect(runPlayCommand(ctx, ["new", "../outside"])).rejects.toThrow("Invalid play name");
-  await expect(runNamedPlayCommand(ctx, ["report"])).rejects.toThrow("Missing required input for report: path");
-  await expect(runNamedPlayCommand(ctx, ["report", "path=foo", "--on", "elsewhere"])).rejects.toThrow("--project");
+  await expect(runNamedPlayCommand(ctx, ["report", "--dry-run"])).rejects.toThrow("Missing required input for report: path");
+  await expect(runNamedPlayCommand(ctx, ["report", "path=foo", "--on", "elsewhere", "--dry-run"])).rejects.toThrow("--project");
   await runNamedPlayCommand(ctx, ["report", "path=a b=c", "--project", "repo", "--dry-run"]);
   expect(result()).toMatchObject({ target: { project: join(home, "repo") }, body: expect.stringContaining("Inspect a b=c.") });
 });
@@ -70,14 +48,37 @@ test("save drafts the original brief by invocation or flight id; repeated paths 
     for (const [name, id] of [["first", "inv-original"], ["second", "flt-original"]]) {
       await runPlayCommand(ctx, ["save", name, "--from", id]);
       const play = parsePlay(name, await readFile(result().path, "utf8"));
-      expect(play.inputs).toEqual({ path: null, path2: null, url: null });
+      expect(play.inputs.map(field => field.name)).toEqual(["path", "path2", "url"]);
       expect(play.delivery).toBe("Post to {{url}}.");
       expect(play.procedure).toBe('Read "{{path}}" and {{path2}}. Compare {{path2}} again.\nDelivery: Post to {{url}}.');
     }
     expect(requests).toEqual(["/v1/invocations/inv-original", "/v1/flights/flt-original", "/v1/invocations/inv-original"]);
-    expect(parsePlay("notes", draftPlay("notes", "Explain this design.")).inputs).toEqual({});
+    expect(parsePlay("notes", draftPlay("notes", "Explain this design.")).inputs).toEqual([]);
   } finally {
     if (prev === undefined) delete process.env.OPENSCOUT_BROKER_URL; else process.env.OPENSCOUT_BROKER_URL = prev;
     await broker.stop(true);
   }
+});
+
+
+test("list and run call the broker, not the CLI playbook", async () => {
+  const { ctx, result } = await fixture();
+  const calls: string[] = [];
+  const broker = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
+    const path = new URL(req.url).pathname;
+    calls.push(`${req.method} ${path}`);
+    if (path === "/v1/plays") return Response.json({ plays: [{ name: "remote-book", description: "Only on the runtime", inputs: [] }] });
+    const input = await req.json();
+    expect(input).toMatchObject({ name: "remote-book", inputs: { owner: "A" }, requestId: "run-1", currentDirectory: ctx.cwd });
+    expect(input).not.toHaveProperty("body");
+    return Response.json({ receipt: { requestId: "run-1", flightId: "flt-test" }, followUrl: "http://runtime.test/work/w" });
+  } });
+  ctx.env.OPENSCOUT_BROKER_URL = broker.url.origin;
+  try {
+    await runPlaysCommand(ctx, []);
+    expect(result()[0].name).toBe("remote-book");
+    await runNamedPlayCommand(ctx, ["remote-book", "owner=A", "--request-id", "run-1"]);
+    expect(result().receipt.flightId).toBe("flt-test");
+    expect(calls).toEqual(["GET /v1/plays", "POST /v1/plays/run"]);
+  } finally { await broker.stop(true); }
 });
