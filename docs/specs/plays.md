@@ -17,8 +17,8 @@ description, then instructions in the body.
 name: untrack-folder
 description: Keep a local copy of a folder and remove it from Git.
 inputs:
-  path:
-  destination: "~/Documents/OpenScout/<repo>-<folder>"
+  path: { label: Folder to untrack }
+  destination: { label: Copy to, default: "~/Documents/OpenScout/<repo>-<folder>" }
 delivery: Report the draft PR link and the location of the verified copy.
 ---
 
@@ -29,11 +29,14 @@ PR with plain-sentence text and no trailers. Do not run hosted CI.
 ```
 
 The [complete example](../../examples/plays/untrack-folder.md) includes the
-checks before removal. Copy it into the playbook to use it. Input names start with a lowercase letter
-and can include lowercase letters, digits, hyphens and underscores. An input without
-a default is required. Defaults are strings. The optional `target` mapping
-accepts `project`, `harness` and `host`. Target fields are routing metadata,
-not instructions in the body.
+checks before removal. Copy it into the playbook to use it. Input names start
+with a lowercase letter and can include lowercase letters, digits, hyphens and
+underscores. A label defaults to the input name in plain words. An input with
+no default is required unless marked `required: false`; an omitted optional
+input with no default fills as empty text. A string default makes an input
+optional. The short forms `path:` and `format: Markdown` still work. The
+optional `target` mapping accepts `project`, `harness` and `host`. Routing
+comes from these fields, never from the procedure.
 
 ## Run a play
 
@@ -57,10 +60,31 @@ rejects unknown inputs before sending anything. `--project`, `--harness` and
 uses the current directory; a run on another host requires its project path.
 `--dry-run` prints the target and filled brief without sending an ask.
 
-A run sends one ordinary ask. Its receipt and follow link come from the ask
-path; acceptance does not mean the agent finished the procedure. The local
-MCP server exposes `plays_list` and `plays_run` in the `work` profile. There
-is no separate play-run record or execution engine.
+### Runtime contract
 
-Schedules, agent-proposed edits, sharing, project playbooks, folders and UI
-are out of scope.
+The CLI and local MCP tools (`plays_list` and `plays_run`, `work` profile)
+call the same local broker operations available to native clients:
+
+- `GET /v1/plays` → `{plays: [{name, description, inputs}]}`. Inputs are
+  ordered fields with `name`, `label`, `required` and `default` (string or null).
+- `POST /v1/plays/run` accepts `{"name":"untrack-folder","inputs":{"path":"assets/renders"},"target":{"project":"/repo"}}`.
+  Supply a project in the target, the file, or the caller's absolute
+  `currentDirectory`. The broker never guesses from its own working directory.
+  A caller can supply a stable `requestId` for retries.
+
+The runtime reads its playbook, validates the inputs and submits one ordinary
+ask. Acceptance returns HTTP 202 with its `receipt` and `followUrl`; it is not
+completion. Missing inputs are reported before dispatch. Local Markdown
+authoring and offline CLI previews do not need a running broker. There is no
+separate play-run record or execution engine.
+
+## Surfaces
+
+**Next, not built:** Scout Desk's menu bar pop-up can list the playbook and
+run a play in a click or two, asking only for missing required inputs. A Desk
+notification can show the receipt first and the result when the ask finishes.
+A finished ask in Desk can offer **Make that a play** to draft a file for the
+operator to edit.
+
+Desk UI and notifications, schedules, agent-proposed edits, sharing, project
+playbooks and folders are out of scope for v1.
