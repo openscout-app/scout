@@ -41,7 +41,7 @@ import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
-import { decidePermissionSupervisor } from "./permission-supervisor.js";
+import { decideNativeToolSupervisor, decidePermissionSupervisor } from "./permission-supervisor.js";
 import { permissionWaitPatch } from "./broker-blocked-reply.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
@@ -3539,9 +3539,15 @@ const permissionService = new BrokerPermissionService({
 });
 configureManagedPermissionHandler((invocation, prompt) => permissionService.wait(invocation, prompt));
 
-/** Permission dialogs of Claude Code sessions the operator started, raised by their PermissionRequest hook. */
+/** Permission dialogs of Claude Code and Antigravity sessions, raised by their hooks. */
 const nativePermissions = new NativePermissionRequests({
   permissions: permissionService,
+  supervisor: (ask) => decideNativeToolSupervisor({
+    projectRoot: ask.cwd,
+    cwd: ask.cwd,
+    toolName: ask.toolName,
+    toolInput: ask.toolInput,
+  }),
   launchedByScout: async (record) => isScoutBackgroundCopy(record)
     || Boolean(record.tmux?.session && (await listScoutLaunchedTmuxSessions()).has(record.tmux.session)),
   notify: ({ requestId, prompt, actorId, view }) => {

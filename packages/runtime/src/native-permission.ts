@@ -18,6 +18,7 @@ import {
   type ClaudeSessionRecord,
 } from "./claude-session-records.js";
 import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-permission.js";
+import type { PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
 /**
  * Permission requests from native Claude Code sessions: ones the operator
@@ -35,7 +36,7 @@ import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-perm
  */
 
 export type NativePermissionAsk = {
-  harness: "claude";
+  harness: "claude" | "antigravity";
   sessionId: string;
   cwd: string;
   toolName: string;
@@ -43,11 +44,18 @@ export type NativePermissionAsk = {
   transcriptPath?: string;
   /** Claude Code's `permission_suggestions` for this dialog, as the hook received them. */
   suggestions?: unknown;
+  /**
+   * When false (e.g. routine in-workspace Antigravity calls), only auto-allow
+   * if the policy supervisor approves; otherwise skip raising an operator card.
+   * Defaults to true.
+   */
+  escalate?: boolean;
 };
 
 export type NativePermissionOpened =
   | { requestId: string }
-  | { skipped: "no_live_session" | "scout_managed" };
+  | { decision: "allow"; reason: string; grant: string }
+  | { skipped: "no_live_session" | "scout_managed" | "no_escalation" };
 
 /** One `addRules` allow entry, in Claude Code's own PermissionUpdate shape. */
 export type NativeAllowRuleUpdate = {
@@ -107,6 +115,8 @@ export type NativePermissionDeps = {
   watch?: (directory: string, onChange: (file: string) => void) => () => void;
   /** Whether Scout launched this session itself; those already raise requests of their own. */
   launchedByScout?: (record: ClaudeSessionRecord) => Promise<boolean>;
+  /** Optional policy supervisor: auto-allows calls covered by an operator continuation grant. */
+  supervisor?: (ask: NativePermissionAsk) => PermissionSupervisorVerdict;
   notify?: (input: { requestId: string; prompt: ManagedPermissionPrompt; actorId: string; view: AgentNotificationView }) => void;
   leaseMs?: number;
   deliveryTimeoutMs?: number;
@@ -122,15 +132,79 @@ export class NativePermissionRequests {
     this.directory = deps.directory ?? resolveClaudeSessionRecordsDirectory();
   }
 
-  /** The hook saw a permission dialog: open a request for it, unless Scout already handles the session. */
+  /** The hook saw a permission dialog: open a request for it, unless Scout already handles or auto-allows it. */
   async open(ask: NativePermissionAsk): Promise<NativePermissionOpened> {
     validateAsk(ask);
+
+    if (ask.harness === "antigravity") {
+      const verdict = this.deps.supervisor?.(ask);
+      if (verdict?.act === "continue") {
+        return { decision: "allow", reason: verdict.reason, grant: verdict.grant };
+      }
+      if (ask.escalate === false) {
+        return { skipped: "no_escalation" };
+      }
+
+      const now = (this.deps.now ?? Date.now)();
+      const live: Live = {
+        id: "",
+        pid: 0,
+        procStart: null,
+        sessionId: ask.sessionId,
+        file: "",
+        sawWaiting: true,
+        decision: deferred(),
+        always: [],
+        delivered: deferred(),
+        ended: deferred(),
+        lease: null,
+      };
+      const prompt: ManagedPermissionPrompt = {
+        sessionId: ask.sessionId,
+        projectRoot: ask.cwd,
+        cwd: ask.cwd,
+        text: describeNativePermission(ask),
+        version: createHash("sha256").update(JSON.stringify([ask.harness, ask.sessionId, ask.toolName, ask.toolInput ?? null, now])).digest("hex"),
+        decisions: ["once", "deny"],
+        isCurrent: async () => !live.ended.settled,
+        answer: async (decision) => {
+          if (live.ended.settled) throw new Error("The session no longer waits on this request.");
+          live.decision.resolve(decision);
+          const taken = await Promise.race([
+            live.delivered.promise.then(() => true),
+            live.ended.promise.then(() => false),
+            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), this.deps.deliveryTimeoutMs ?? DELIVERY_TIMEOUT_MS)),
+          ]);
+          if (!taken) throw new Error("The session's hook did not take the decision. Answer it in the session.");
+        },
+      };
+      const actorId = `native:antigravity:${ask.sessionId}`;
+      live.id = await this.deps.permissions.raise({
+        prompt,
+        actorId,
+        native: {
+          harness: "antigravity",
+          tool: ask.toolName,
+          display: nativePermissionDisplay(ask),
+        },
+      });
+      this.live.set(live.id, live);
+      this.renew(live);
+      this.deps.notify?.({ requestId: live.id, prompt, actorId, view: nativePermissionView(ask) });
+      return { requestId: live.id };
+    }
+
     const records = (await (this.deps.readRecords ?? (() => readClaudeSessionRecords({ directory: this.directory })))())
       .filter((record) => record.sessionId === ask.sessionId);
     const record = records.find((candidate) => candidate.status === "waiting")
       ?? records.sort((a, b) => (b.statusUpdatedAt ?? 0) - (a.statusUpdatedAt ?? 0))[0];
     if (!record) return { skipped: "no_live_session" };
     if (await (this.deps.launchedByScout ?? (async () => false))(record)) return { skipped: "scout_managed" };
+
+    const claudeVerdict = this.deps.supervisor?.(ask);
+    if (claudeVerdict?.act === "continue") {
+      return { decision: "allow", reason: claudeVerdict.reason, grant: claudeVerdict.grant };
+    }
 
     const now = (this.deps.now ?? Date.now)();
     const always = nativeAllowRuleUpdates(ask.suggestions);
@@ -285,7 +359,9 @@ async function readRegistryRecord(directory: string, file: string): Promise<Clau
 }
 
 function validateAsk(ask: NativePermissionAsk): void {
-  if (ask?.harness !== "claude") throw new NativePermissionAskError("harness must be claude");
+  if (ask?.harness !== "claude" && ask?.harness !== "antigravity") {
+    throw new NativePermissionAskError("harness must be claude or antigravity");
+  }
   if (typeof ask.sessionId !== "string" || !SESSION_ID.test(ask.sessionId)) throw new NativePermissionAskError("sessionId is required");
   if (typeof ask.cwd !== "string" || !ask.cwd.startsWith("/") || ask.cwd.length > 4096) throw new NativePermissionAskError("cwd must be an absolute path");
   if (typeof ask.toolName !== "string" || !ask.toolName.trim() || ask.toolName.length > 200) throw new NativePermissionAskError("toolName is required");

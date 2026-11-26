@@ -94,11 +94,12 @@ describe("scout permission-hook antigravity", () => {
     expect(out.map((line) => JSON.parse(line))).toEqual([{ decision: "ask" }, { decision: "ask" }, {}]);
   });
 
-  test("records unsandboxed commands and ask_question on PreToolUse, clears on PostToolUse/Stop, and defers PreToolUse to Antigravity with decision ask", async () => {
+  test("records unsandboxed commands and ask_question on PreToolUse, clears on PostToolUse/Stop, and defers PreToolUse to Antigravity with decision ask when broker is offline", async () => {
     const recordsDirectory = mkdtempSync(join(tmpdir(), "scout-agy-hook-"));
     const sessionId = "3a102f26-6237-46c4-ae20-6152148eecaa";
     const out: string[] = [];
     const now = 1_800_000_000_000;
+    const offlinePost = async () => { throw new Error("ECONNREFUSED"); };
     try {
       await handleAntigravityPermissionHook(JSON.stringify({
         hookEventName: "PreToolUse",
@@ -106,7 +107,7 @@ describe("scout permission-hook antigravity", () => {
         cwd: "/tmp/workspace",
         workspacePaths: ["/tmp/workspace"],
         toolCall: { id: "t1", name: "run_command", args: { CommandLine: "bun test", BypassSandbox: false } },
-      }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
+      }), { recordsDirectory, now: () => now, post: offlinePost, write: (t) => out.push(t) });
       expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
       expect(out).toEqual(['{"decision":"ask"}\n']);
 
@@ -116,7 +117,7 @@ describe("scout permission-hook antigravity", () => {
         cwd: "/tmp/workspace",
         workspacePaths: ["/tmp/workspace"],
         toolCall: { id: "t2", name: "run_command", args: { CommandLine: "gh pr create", BypassSandbox: true, toolSummary: "Create PR" } },
-      }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
+      }), { recordsDirectory, now: () => now, post: offlinePost, write: (t) => out.push(t) });
       const waiting = await readAntigravitySessionRecords({ directory: recordsDirectory, now });
       expect(waiting).toHaveLength(1);
       expect(waiting[0]).toMatchObject({
@@ -130,9 +131,64 @@ describe("scout permission-hook antigravity", () => {
         conversationId: sessionId,
         cwd: "/tmp/workspace",
         toolCall: { id: "t2", name: "run_command", args: {} },
-      }), { recordsDirectory, now: () => now, write: (t) => out.push(t) });
+      }), { recordsDirectory, now: () => now, post: offlinePost, write: (t) => out.push(t) });
       expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
       expect(out).toEqual(['{"decision":"ask"}\n', '{"decision":"ask"}\n', "{}\n"]);
+    } finally {
+      rmSync(recordsDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("auto-allows in-policy Antigravity calls immediately and waits on Scout escalations for Allow or Deny", async () => {
+    const recordsDirectory = mkdtempSync(join(tmpdir(), "scout-agy-engine-"));
+    const sessionId = "3a102f26-6237-46c4-ae20-6152148eecaa";
+    const now = 1_800_000_000_000;
+    try {
+      // 1. Policy auto-allow returns decision: allow with zero polls.
+      const autoRun = runtime([{ decision: "allow", reason: "workspace continues workspace", grant: "project:/tmp/workspace" }]);
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "t1", name: "run_command", args: { CommandLine: "bun test", BypassSandbox: false } },
+      }), { ...autoRun.deps, recordsDirectory, now: () => now });
+      expect(autoRun.posts).toEqual([{
+        path: "/v1/permissions/native",
+        body: {
+          harness: "antigravity",
+          sessionId,
+          cwd: "/tmp/workspace",
+          toolName: "run_command",
+          toolInput: { CommandLine: "bun test", BypassSandbox: false },
+          escalate: false,
+        },
+      }]);
+      expect(autoRun.out.map((l) => JSON.parse(l))).toEqual([{ decision: "allow" }]);
+
+      // 2. Escalation approved in Scout returns decision: allow and clears waiting record.
+      const allowRun = runtime([{ requestId: "perm-agy-1" }, { state: "open" }, { state: "decided", decision: "allow" }]);
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "t2", name: "run_command", args: { CommandLine: "git push origin main", BypassSandbox: true } },
+      }), { ...allowRun.deps, recordsDirectory, now: () => now });
+      expect(allowRun.posts[0]).toMatchObject({ path: "/v1/permissions/native", body: { harness: "antigravity", escalate: true } });
+      expect(allowRun.out.map((l) => JSON.parse(l))).toEqual([{ decision: "allow" }]);
+      expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
+
+      // 3. Escalation denied in Scout returns decision: deny with reason.
+      const denyRun = runtime([{ requestId: "perm-agy-2" }, { state: "decided", decision: "deny" }]);
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "t3", name: "run_command", args: { CommandLine: "rm -rf /tmp/foo", BypassSandbox: true } },
+      }), { ...denyRun.deps, recordsDirectory, now: () => now });
+      expect(denyRun.out.map((l) => JSON.parse(l))).toEqual([{ decision: "deny", reason: "The operator denied this from Scout." }]);
     } finally {
       rmSync(recordsDirectory, { recursive: true, force: true });
     }

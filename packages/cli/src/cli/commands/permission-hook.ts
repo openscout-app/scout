@@ -31,6 +31,7 @@ const MAX_INPUT_BYTES = 256 * 1024;
 const OPEN_TIMEOUT_MS = 3_000;
 const WAIT_MS = 8_000;
 const WAIT_TIMEOUT_MS = WAIT_MS + 4_000;
+const ANTIGRAVITY_MAX_WAIT_MS = 270_000;
 const MAX_FAILED_POLLS = 3;
 const DENIED_MESSAGE = "The operator denied this from Scout.";
 
@@ -68,7 +69,7 @@ type AntigravityHookInput = {
   toolCall?: unknown;
 };
 
-type Opened = { requestId?: string; skipped?: string };
+type Opened = { requestId?: string; skipped?: string; decision?: "allow"; reason?: string; grant?: string };
 type Outcome = { state?: "open" | "decided" | "ended"; decision?: "allow" | "deny"; updatedPermissions?: unknown; reason?: string };
 
 export type PermissionHookDeps = {
@@ -76,6 +77,7 @@ export type PermissionHookDeps = {
   write?: (text: string) => void;
   recordsDirectory?: string;
   now?: () => number;
+  maxWaitMs?: number;
 };
 
 export async function runPermissionHookCommand(_context: ScoutCommandContext, args: string[]): Promise<void> {
@@ -115,6 +117,10 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
       ...(Array.isArray(input.permission_suggestions) ? { suggestions: input.permission_suggestions } : {}),
     }, OPEN_TIMEOUT_MS);
   } catch {
+    return;
+  }
+  if (opened?.decision === "allow") {
+    write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } })}\n`);
     return;
   }
   const requestId = opened?.requestId;
@@ -177,10 +183,30 @@ function shouldRecordAntigravityWaiting(
   return false;
 }
 
+function isAntigravityInteractivePromptTool(toolName: string): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  return normalized === "ask_question" || normalized === "notify_user" || normalized === "plan_input";
+}
+
+function isAntigravityPolicyGatedTool(toolName: string): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  return (
+    normalized === "run_command"
+    || normalized === "shell_exec"
+    || normalized === "write_file"
+    || normalized === "edit_file"
+    || normalized === "read_file"
+    || normalized === "view_file"
+  );
+}
+
 export async function handleAntigravityPermissionHook(raw: string, deps: PermissionHookDeps = {}): Promise<void> {
+  const post = deps.post ?? postJson;
   const write = deps.write ?? ((text: string) => { process.stdout.write(text); });
-  const now = (deps.now ?? Date.now)();
+  const nowFn = deps.now ?? Date.now;
+  const now = nowFn();
   const directory = deps.recordsDirectory;
+  const maxWaitMs = deps.maxWaitMs ?? ANTIGRAVITY_MAX_WAIT_MS;
   let event = "";
   try {
     const input = JSON.parse(raw) as AntigravityHookInput;
@@ -209,8 +235,13 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
         ? [input.artifactDirectoryPath.trim()]
         : [];
       const allowedRoots = [...workspaces, ...(cwd ? [cwd] : []), ...artifactDir, "/tmp", "/private/tmp"];
+      const transcriptPath = typeof input.transcriptPath === "string" && input.transcriptPath.trim()
+        ? input.transcriptPath.trim()
+        : null;
+      const needsEscalation = Boolean(toolName && shouldRecordAntigravityWaiting(toolName, args, allowedRoots));
 
-      if (toolName && shouldRecordAntigravityWaiting(toolName, args, allowedRoots)) {
+      const recordWaiting = async () => {
+        if (!toolName) return;
         const described = describeAntigravityToolCall(toolName, args);
         const waitingFor = formatAntigravityWaitingFor({
           toolUseId: typeof toolObj?.id === "string" ? toolObj.id : "hook",
@@ -222,9 +253,7 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
         await writeAntigravitySessionRecord({
           sessionId,
           cwd,
-          transcriptPath: typeof input.transcriptPath === "string" && input.transcriptPath.trim()
-            ? input.transcriptPath.trim()
-            : null,
+          transcriptPath,
           status: "waiting",
           waitingFor,
           statusUpdatedAt: now,
@@ -234,6 +263,83 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
             args,
           },
         }, { directory });
+      };
+
+      // Interactive questions and plan reviews stay observe-only so Antigravity's native UI handles them.
+      if (toolName && isAntigravityInteractivePromptTool(toolName)) {
+        await recordWaiting();
+        write(ANTIGRAVITY_DEFER);
+        return;
+      }
+
+      // Route tool calls through Scout's permission engine: in-policy actions auto-allow
+      // immediately, and true escalations open an Allow/Deny card across Scout surfaces.
+      const effectiveCwd = cwd ?? workspaces[0] ?? null;
+      if (toolName && effectiveCwd && isAntigravityPolicyGatedTool(toolName)) {
+        let opened: Opened | null = null;
+        try {
+          opened = await post<Opened>(scoutBrokerPaths.v1.permissionsNative, {
+            harness: "antigravity",
+            sessionId,
+            cwd: effectiveCwd,
+            toolName,
+            toolInput: args,
+            ...(transcriptPath ? { transcriptPath } : {}),
+            escalate: needsEscalation,
+          }, OPEN_TIMEOUT_MS);
+        } catch {
+          opened = null;
+        }
+
+        if (opened?.decision === "allow") {
+          await removeAntigravitySessionRecord(sessionId, { directory });
+          write(`${JSON.stringify({ decision: "allow" })}\n`);
+          return;
+        }
+
+        if (typeof opened?.requestId === "string" && opened.requestId) {
+          const requestId = opened.requestId;
+          await recordWaiting();
+          const deadline = nowFn() + maxWaitMs;
+          let failed = 0;
+          while (nowFn() < deadline) {
+            let outcome: Outcome;
+            try {
+              const remaining = Math.max(100, deadline - nowFn());
+              outcome = await post<Outcome>(
+                scoutBrokerPaths.v1.permissionsNativeWait,
+                { requestId, waitMs: Math.min(WAIT_MS, remaining) },
+                WAIT_TIMEOUT_MS,
+              );
+              failed = 0;
+            } catch {
+              if (++failed >= MAX_FAILED_POLLS) break;
+              await new Promise((resolve) => setTimeout(resolve, 1_000));
+              continue;
+            }
+            if (outcome?.state === "decided") {
+              await removeAntigravitySessionRecord(sessionId, { directory });
+              if (outcome.decision === "allow") {
+                write(`${JSON.stringify({ decision: "allow" })}\n`);
+              } else {
+                write(`${JSON.stringify({ decision: "deny", reason: DENIED_MESSAGE })}\n`);
+              }
+              return;
+            }
+            if (outcome?.state !== "open") {
+              await removeAntigravitySessionRecord(sessionId, { directory });
+              write(ANTIGRAVITY_DEFER);
+              return;
+            }
+          }
+          // Timed out or broker disconnected: hand back to Antigravity's native UI.
+          write(ANTIGRAVITY_DEFER);
+          return;
+        }
+      }
+
+      if (needsEscalation) {
+        await recordWaiting();
       } else {
         await removeAntigravitySessionRecord(sessionId, { directory });
       }
