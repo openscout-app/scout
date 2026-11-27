@@ -193,4 +193,38 @@ describe("scout permission-hook antigravity", () => {
       rmSync(recordsDirectory, { recursive: true, force: true });
     }
   });
+
+  test("never escalates an Antigravity file read outside the workspace, but still escalates a write there", async () => {
+    const recordsDirectory = mkdtempSync(join(tmpdir(), "scout-agy-read-"));
+    const sessionId = "4b213f37-7348-47d7-bf30-7263a39ffbbf";
+    const now = 1_800_000_000_000;
+    const outside = "/Users/someone/.gemini/antigravity/builtin/skills/native_swarm/SKILL.md";
+    try {
+      for (const name of ["read_file", "view_file"]) {
+        const read = runtime([{ skipped: "no_escalation" }]);
+        await handleAntigravityPermissionHook(JSON.stringify({
+          hookEventName: "PreToolUse",
+          conversationId: sessionId,
+          cwd: "/tmp/workspace",
+          workspacePaths: ["/tmp/workspace"],
+          toolCall: { id: `r-${name}`, name, args: { Path: outside } },
+        }), { ...read.deps, recordsDirectory, now: () => now });
+        expect(read.posts[0]).toMatchObject({ body: { toolName: name, escalate: false } });
+        expect(read.out).toEqual(['{"decision":"ask"}\n']);
+        expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
+      }
+
+      const write = runtime([{ requestId: "perm-agy-w" }, { state: "decided", decision: "allow" }]);
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "w1", name: "write_file", args: { Path: outside } },
+      }), { ...write.deps, recordsDirectory, now: () => now });
+      expect(write.posts[0]).toMatchObject({ body: { toolName: "write_file", escalate: true } });
+    } finally {
+      rmSync(recordsDirectory, { recursive: true, force: true });
+    }
+  });
 });

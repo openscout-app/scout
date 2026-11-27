@@ -175,6 +175,8 @@ function shouldRecordAntigravityWaiting(
   if (normalized === "write_file" || normalized === "edit_file" || normalized === "read_file" || normalized === "view_file") {
     const metadata = unwrapAntigravityToolArgs(args.ArtifactMetadata);
     if (metadata.RequestFeedback === true || metadata.RequestFeedback === "true") return true;
+    // A read changes nothing, so it never raises a card. Antigravity's own policy still decides it.
+    if (normalized === "read_file" || normalized === "view_file") return false;
     const rawPath = typeof args.Path === "string" ? args.Path.trim() : "";
     if (rawPath && allowedRoots.length > 0 && !isWithinAllowedRoots(rawPath, allowedRoots)) {
       return true;
