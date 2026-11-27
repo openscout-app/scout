@@ -109,6 +109,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   // Cross-host session search: one bounded query over the answering host's
   // own index. Hits carry transcript snippets, so control, not observe.
   "GET /v1/mesh/knowledge/search": "control",
+  "GET /v1/mesh/skills": "control",
   // Cross-machine approvals: control tier AND a per-peer share opt-in on this
   // machine (mesh-approvals.ts) — the tier alone never exposes them.
   "GET /v1/mesh/approvals/config": "local",
@@ -259,8 +260,8 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "POST /v1/conversations/:id/pins": "local",
   "POST /v1/conversations/:id/title": "local",
   "POST /v1/decisions/answer": "local",
-  "GET /v1/plays": "local",
-  "POST /v1/plays/run": "local",
+  "GET /v1/skills": "local",
+  "POST /v1/skills/run": "local",
   "POST /v1/deliver": "local",
   "POST /v1/deliveries/claim": "local",
   "POST /v1/deliveries/status": "local",

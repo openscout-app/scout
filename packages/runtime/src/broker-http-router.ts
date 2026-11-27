@@ -1,5 +1,6 @@
-import { listPlays, MissingPlayInputs, playbookDirectory } from "./playbook.js";
-import { playAsk, playRunSchema, playRunResult } from "./broker-plays.js";
+import { homedir } from "node:os";
+import { listSkills, SkillLookupError } from "./skills.js";
+import { skillAsk, skillRunSchema, skillRunResult, targetSkills } from "./broker-skills.js";
 import { HostLaunchDeferred } from "./host-launch-admission.js";
 import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
 import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
@@ -3773,26 +3774,39 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  const listPlaybook = method === "GET" && url.pathname === "/v1/plays";
-  const runPlay = method === "POST" && url.pathname === "/v1/plays/run";
-  if (listPlaybook || runPlay) {
-    const context = request.transportContext;
-    if (!context || !["unix-socket", "loopback"].includes(context.transport) || context.guest || context.peer || context.scoped
-      || request.headers.origin !== undefined || request.headers["x-openscout-forwarded-node-id"] !== undefined) {
-      json(response, 403, { error: "local_playbook_required" }); return;
+  const skillHome = () => process.env.HOME || homedir();
+  const listLocalSkills = method === "GET" && url.pathname === "/v1/skills";
+  const listPeerSkills = method === "GET" && url.pathname === "/v1/mesh/skills";
+  const runSkill = method === "POST" && url.pathname === "/v1/skills/run";
+  if (listLocalSkills || listPeerSkills || runSkill) {
+    const ctx = request.transportContext;
+    const allowed = listPeerSkills ? ctx?.peer?.tier === "control"
+      : ctx && ["unix-socket", "loopback"].includes(ctx.transport) && !ctx.peer && !forwardedNodeId;
+    if (!allowed || ctx?.guest || ctx?.scoped || request.headers.origin !== undefined) {
+      json(response, 403, { error: "forbidden" }); return;
     }
-    if (listPlaybook) {
-      try { json(response, 200, { plays: await listPlays(playbookDirectory(process.env)) }); }
-      catch (error) { badRequest(response, error); }
+    if (!runSkill) {
+      const harness = url.searchParams.get("harness") ?? undefined;
+      try {
+        const skills = listPeerSkills ? await listSkills(skillHome(), harness)
+          : await targetSkills(skillHome(), harness, url.searchParams.get("host") ?? undefined, forwardRouteAliasRequest);
+        json(response, 200, { skills });
+      } catch (error) {
+        if (error instanceof SkillLookupError) json(response, error.status, { error: error.code, detail: error.message });
+        else badRequest(response, error);
+      }
       return;
     }
   }
 
-  if (method === "POST" && (url.pathname === "/v1/deliver" || runPlay)) {
+  if (method === "POST" && (url.pathname === "/v1/deliver" || runSkill)) {
     const signal = requestAbortSignal(request, response);
     try {
-      const payload = runPlay
-        ? brokerDeliverRequestSchema.parse(await playAsk(playbookDirectory(process.env), await readValidatedRequestBody(request, playRunSchema)))
+      const skillInput = runSkill ? await readValidatedRequestBody(request, skillRunSchema) : undefined;
+      const payload = skillInput
+        ? brokerDeliverRequestSchema.parse(skillAsk(
+            await targetSkills(skillHome(), skillInput.target?.harness, skillInput.target?.host, forwardRouteAliasRequest),
+            skillInput, skillHome()))
         : await readValidatedRequestBody(request, brokerDeliverRequestSchema);
       const snapshot = currentAttributionSnapshot();
       const parentFlight = payload.relation?.parentFlightId ? snapshot.flights?.[payload.relation.parentFlightId] : undefined;
@@ -3855,7 +3869,7 @@ export function createBrokerHttpRouter(
         json(
           response,
           result.kind === "delivery" ? 202 : result.kind === "question" ? 409 : 422,
-          runPlay && result.kind === "delivery" ? playRunResult(result) : result,
+          runSkill && result.kind === "delivery" ? skillRunResult(result) : result,
         );
       };
       const claims = brokerService.assistantClaims;
@@ -3865,8 +3879,8 @@ export function createBrokerHttpRouter(
       if (signal.aborted || response.destroyed || response.writableEnded) {
         return;
       }
-      if (runPlay && error instanceof MissingPlayInputs) {
-        json(response, 400, { error: "missing_play_inputs", detail: error.message, missingInputs: error.missingInputs });
+      if (runSkill && error instanceof SkillLookupError) {
+        json(response, error.status, { error: error.code, detail: error.message, candidates: error.candidates });
       } else badRequest(response, error);
     }
     return;

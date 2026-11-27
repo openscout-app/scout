@@ -7,7 +7,7 @@ import { prepareDecision, readDecisionFile } from "../cli/decision-file.ts";
 import { readBrokerDecisions, renderDecisionView } from "../cli/commands/decision.ts";
 import { readTaskCallbackFile } from "../cli/input-file.ts";
 import { replyToScoutTask } from "../lib/core/broker/service.ts";
-import { playClient, playAskReceipt } from "../lib/core/broker/play-client.ts";
+import { skillClient, skillAskReceipt } from "../lib/core/broker/skill-client.ts";
 import { registerFlightCancelTool } from "./flight-cancel.ts";
 import { registerVercelBoardDispatcherTool, registerVercelBoardPlanTool } from "./vercel-board-plan.ts";
 import { cancelScoutFlight } from "../lib/core/broker/service.ts";
@@ -5136,30 +5136,30 @@ export function createScoutMcpServer(options: {
 
   server.registerTool("ask", askConfig, handleAsk);
 
-  server.registerTool("plays_list", {
-    title: "List plays", description: "List the operator's local playbook with descriptions and inputs.",
-    inputSchema: z.object({}).strict(), annotations: { readOnlyHint: true, destructiveHint: false },
-  }, async () => {
-    const { plays } = await playClient(deps.resolveBrokerUrl()).list();
-    return { content: createPlainTextContent(JSON.stringify(plays)), structuredContent: { plays } };
+  server.registerTool("skills_list", {
+    title: "List Scout skills", description: "List SKILL.md names, descriptions and paths on the selected host.",
+    inputSchema: z.object({ harness: askConfig.inputSchema.shape.harness, on: askConfig.inputSchema.shape.on }).strict(), annotations: { readOnlyHint: true, destructiveHint: false },
+  }, async ({ harness, on }) => {
+    const { skills } = await skillClient(deps.resolveBrokerUrl()).list(harness, on);
+    return { content: createPlainTextContent(JSON.stringify(skills)), structuredContent: { skills } };
   });
-  server.registerTool("plays_run", {
-    title: "Run a play", description: "Fill a local play and send one ordinary ask. Returns the ask receipt and follow link.",
-    inputSchema: z.object({ name: z.string().min(1), inputs: z.record(z.string(), z.string()).optional(),
+  server.registerTool("skills_run", {
+    title: "Run a Scout skill", description: "Ask an agent to use a skill on the target machine with this brief. Returns the receipt and follow link.",
+    inputSchema: z.object({ name: z.string().min(1), brief: z.string().trim().min(1),
       projectPath: projectPathInputSchema, harness: askConfig.inputSchema.shape.harness,
       on: askConfig.inputSchema.shape.on, requestId: askConfig.inputSchema.shape.requestId }).strict(),
     outputSchema: askReceiptSchema,
     annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false },
-  }, async ({ name, inputs, projectPath, harness, on, requestId }) => {
+  }, async ({ name, brief, projectPath, harness, on, requestId }) => {
     const resolvedCurrentDirectory = options.defaultCurrentDirectory;
     const resolvedSenderId = await resolveMcpSenderId(deps, undefined, resolvedCurrentDirectory, env);
     const replyToSessionId = resolveMcpReplyToSessionId(undefined, env);
-    const result = await playClient(deps.resolveBrokerUrl()).run({
-      name, inputs, target: { project: projectPath, harness, host: on }, currentDirectory: resolvedCurrentDirectory,
+    const result = await skillClient(deps.resolveBrokerUrl()).run({
+      name, brief, target: { project: projectPath, harness, host: on }, currentDirectory: resolvedCurrentDirectory,
       requestId: requestId ?? `ask-${randomUUID()}`, senderId: resolvedSenderId, replyToSessionId,
       replyToSessionHarness: claimedSessionHarness(replyToSessionId, env), source: "scout-mcp",
     });
-    return presentAskReceipt(playAskReceipt(result), { resolvedReplyMode: "notify", resolvedCurrentDirectory,
+    return presentAskReceipt(skillAskReceipt(result), { resolvedReplyMode: "notify", resolvedCurrentDirectory,
       resolvedSenderId, targetLabel: result.receipt.targetLabel, followUrl: result.followUrl });
   });
 

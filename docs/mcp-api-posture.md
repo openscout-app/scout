@@ -32,7 +32,7 @@ group adds to the default; selecting two groups gives you their union.
 | `routing` | `where`, `check`, `route_context` (also enables the Scout routing prompt) |
 | `sessions` | `agents_start`, `card_create`, `session_attach_current`, `sessions_inventory`, `sessions_search`, `sessions_names`, `sessions_rename`, `tail_events` |
 | `terminals` | `herdr_workspaces`, `rex_start_agent`, `rex_status`, `session_send` |
-| `work` | `plays_list`, `plays_run`, `flight_cancel`, `labels_brief`, `labels_feed`, `work_update`, `work_retry`, `work_move`, `work_review`, `work_lifecycle`, `derived_read`, `derived_write`, `derived_pending` |
+| `work` | `skills_list`, `skills_run`, `flight_cancel`, `labels_brief`, `labels_feed`, `work_update`, `work_retry`, `work_move`, `work_review`, `work_lifecycle`, `derived_read`, `derived_write`, `derived_pending` |
 
 ```sh
 scout mcp --profile git,work

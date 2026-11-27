@@ -1,30 +1,55 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
-  ScoutDeliverAcceptedResponse, ScoutDeliverHttpRequest, ScoutPlayRunRequest, ScoutPlayRunResult,
+  ScoutDeliverAcceptedResponse, ScoutDeliverHttpRequest, ScoutSkillRunRequest, ScoutSkillRunResult, ScoutSkillSummary,
 } from "@openscout/protocol";
 import { resolveHost, resolveWebPort } from "./local-config.js";
-import { playTargetSchema, preparePlay } from "./playbook.js";
+import { listSkills, prepareSkill, skillHarness, SkillLookupError } from "./skills.js";
 
 const text = z.string().trim().min(1);
-export const playRunSchema = z.object({
+export const skillRunSchema = z.object({
   name: text,
-  inputs: z.record(z.string(), z.string()).optional(),
-  target: playTargetSchema.optional(),
+  brief: z.string().refine(s => Boolean(s.trim()), "A skill needs a brief."),
+  target: z.object({ project: text.optional(), harness: text.optional(), host: text.optional() }).strict().optional(),
   currentDirectory: text.optional(),
   requestId: text.max(256).optional(),
   senderId: text.optional(),
   replyToSessionId: text.optional(),
   replyToSessionHarness: text.optional(),
   source: text.optional(),
-}).strict() satisfies z.ZodType<ScoutPlayRunRequest>;
+}).strict() satisfies z.ZodType<ScoutSkillRunRequest>;
 
-// Feed the ordinary task-ask boundary. Clients provide a name and inputs,
-// never a path to a play, a rendered body, or a claim of verified attribution.
-export async function playAsk(dir: string, input: ScoutPlayRunRequest): Promise<ScoutDeliverHttpRequest> {
-  const { target, body } = await preparePlay(dir, input.name, input.inputs ?? {}, input.target ?? {}, input.currentDirectory);
+// A remote selection must be checked on that host. Only catalog metadata
+// crosses the authenticated broker connection. A null response denotes self.
+type ForwardCatalog = (input: { nodeSelector: string; method: "GET"; path: string }) => Promise<{ status: number; body: unknown } | null>;
+const wireCatalog = z.object({ skills: z.array(z.object({
+  name: text, description: text, path: z.string().regex(/^~\/\.(?:agents|claude|codex|cursor)\/skills\/[^/]+\/SKILL\.md$/),
+})) });
+export async function targetSkills(home: string, harnessName?: string, host?: string, forward?: ForwardCatalog) {
+  const harness = skillHarness(harnessName);
+  if (host !== undefined) {
+    if (!host.trim()) throw new Error("Specify a host.");
+    if (!forward) throw new SkillLookupError(503, "skill_catalog_unavailable", "No broker connection to the target host.");
+    const query = harness ? "?" + new URLSearchParams({ harness }) : "";
+    const remote = await forward({ nodeSelector: host, method: "GET", path: "/v1/mesh/skills" + query });
+    if (remote) {
+      const catalog = wireCatalog.safeParse(remote.body);
+      if (remote.status !== 200 || !catalog.success) {
+        throw new SkillLookupError(503, "skill_catalog_unavailable",
+          `Cannot read skills on ${host} (HTTP ${remote.status}). Check the host, its broker version and the mesh control grant.`);
+      }
+      return catalog.data.skills;
+    }
+  }
+  return listSkills(home, harness);
+}
+
+// The ordinary ask is bound to the file in the target machine's catalog.
+export function skillAsk(skills: ScoutSkillSummary[], input: ScoutSkillRunRequest, home: string): ScoutDeliverHttpRequest {
+  const { skill, target, body } = prepareSkill(skills, input, home);
   const metadata = {
-    play: input.name,
+    skill: skill.name,
+    skillPath: skill.path,
     replyMode: "notify",
     ...(input.replyToSessionId && { replyToSessionId: input.replyToSessionId }),
     ...(input.replyToSessionHarness && { replyToSessionHarness: input.replyToSessionHarness }),
@@ -35,7 +60,7 @@ export async function playAsk(dir: string, input: ScoutPlayRunRequest): Promise<
     caller: {
       actorId: input.senderId ?? "operator",
       currentDirectory: input.currentDirectory,
-      metadata: { source: input.source ?? "scout-play" },
+      metadata: { source: input.source ?? "scout-skill" },
     },
     target: { kind: "project_path", projectPath: target.project, ...(target.host && { host: target.host }) },
     targetLabel: target.project,
@@ -61,7 +86,7 @@ function webOrigin(): string {
   return `http://${hostname}:${resolveWebPort()}`;
 }
 
-export function playRunResult(delivery: ScoutDeliverAcceptedResponse): ScoutPlayRunResult {
+export function skillRunResult(delivery: ScoutDeliverAcceptedResponse): ScoutSkillRunResult {
   const receipt = {
     ...delivery.receipt,
     flightId: delivery.flight?.id ?? delivery.receipt.flightId,

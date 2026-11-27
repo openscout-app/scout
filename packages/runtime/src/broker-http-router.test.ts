@@ -246,14 +246,14 @@ async function requestRouter(
     beforeBody?: () => Promise<void>;
     rawBody?: string;
     headers?: Record<string, string>;
-    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean };
+    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean | { keyId: string; tier: "observe" | "control" } };
   } = {},
 ): Promise<{ body: unknown; rawBody: string; response: FakeResponse }> {
   const request = new PassThrough() as PassThrough & {
     headers: Record<string, string>;
     method: string;
     url: string;
-    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean };
+    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean | { keyId: string; tier: "observe" | "control" } };
   };
   request.headers = { host: "broker.test", ...options.headers };
   request.method = method;
@@ -319,53 +319,59 @@ describe("createBrokerHttpRouter", () => {
     expect(absent.response.status).toBe(404);
   });
 
-  test("Desk can list fields and run by name through one attributed, replayable task ask", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "runtime-plays-"));
-    const original = process.env.OPENSCOUT_SCOUT_HOME;
-    process.env.OPENSCOUT_SCOUT_HOME = dir;
-    const transportContext = { transport: "loopback" as const };
-    const calls: unknown[] = [];
-    const h = createHarness({ requestReceipts: new BrokerRequestReceipts(join(dir, "receipts")), brokerService: {
-      ...createHarness().deps.brokerService,
-      deliver: async payload => {
+  test("Desk lists skills and sends a single attributed ask with the selected path and plain brief", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "runtime-skills-"));
+    const original = process.env.HOME;
+    process.env.HOME = dir;
+    const local = { transport: "loopback" as const };
+    const calls: unknown[] = [], forwards: unknown[] = [];
+    const remote = { name: "remote-review", description: "Review there.", path: "~/.claude/skills/remote-review/SKILL.md" };
+    const h = createHarness({
+      requestReceipts: new BrokerRequestReceipts(join(dir, "receipts")),
+      forwardRouteAliasRequest: async input => { forwards.push(input); return input.nodeSelector === "worker"
+        ? { status: 200, body: { skills: [remote] } } : { status: 404, body: {} }; },
+      brokerService: { ...createHarness().deps.brokerService, deliver: async payload => {
         calls.push(payload);
         return { kind: "delivery", accepted: true, receipt: { requestId: payload.requestId, conversationId: "dm.test",
           messageId: "msg-test", flightId: "flt-test" }, flight: { id: "flt-test", invocationId: "inv-test" }, workItem: { id: "work-test" } } as never;
-      },
-    } });
+      } },
+    });
     try {
-      mkdirSync(join(dir, "plays"));
-      writeFileSync(join(dir, "plays", "report.md"), [
-        "---", "name: report", "description: Write a report.", "inputs:", "  path: { label: Source file }",
-        "  note: { required: false }", "  format: Markdown", "target: { project: /reports }",
-        "delivery: A {{format}} report.", "---", "Read {{path}}. Note: {{note}}.",
-      ].join("\n"));
-      expect((await requestRouter(h, "GET", "/v1/plays", { transportContext })).body).toEqual({ plays: [{
-        name: "report", description: "Write a report.", inputs: [
-          { name: "path", label: "Source file", required: true, default: null },
-          { name: "note", label: "Note", required: false, default: null },
-          { name: "format", label: "Format", required: false, default: "Markdown" },
-        ],
-      }] });
-      const run = (body: unknown) => requestRouter(h, "POST", "/v1/plays/run", { transportContext, body });
-      expect((await run({ name: "report" })).body).toMatchObject({ error: "missing_play_inputs", missingInputs: ["path"] });
-      expect((await run({ name: "../report", inputs: { path: "a" } })).response.status).toBe(400);
-      expect((await run({ name: "report", body: "replace procedure" })).response.status).toBe(400);
-      const body = { name: "report", inputs: { path: "a.md" }, requestId: "desk-1" };
-      expect((await requestRouter(h, "POST", "/v1/plays/run", { body, transportContext, headers: { origin: "https://other.test" } })).response.status).toBe(403);
-      expect((await requestRouter(h, "GET", "/v1/plays", { transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
+      const make = (root: string) => {
+        const path = join(dir, root, "skills", "review");
+        mkdirSync(path, { recursive: true });
+        writeFileSync(join(path, "SKILL.md"), "---\nname: review\ndescription: Review here.\n---\nPrivate instructions.");
+      };
+      make(".agents");
+      const get = (path: string) => requestRouter(h, "GET", path, { transportContext: local });
+      const run = (body: unknown) => requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local });
+      const shared = { name: "review", description: "Review here.", path: "~/.agents/skills/review/SKILL.md" };
+      expect((await get("/v1/skills")).body).toEqual({ skills: [shared] });
+      expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "control" } } })).body).toEqual({ skills: [shared] });
+      expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
+      expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "observe" } } })).response.status).toBe(403);
+      expect((await get("/v1/skills?harness=claude&host=worker")).body).toEqual({ skills: [remote] });
+      expect(forwards[0]).toEqual({ nodeSelector: "worker", method: "GET", path: "/v1/mesh/skills?harness=claude" });
+      make(".claude");
+      const body = { name: "review", brief: "Review this release.", currentDirectory: "/code" };
+      expect((await run(body)).body).toMatchObject({ error: "ambiguous_skill", candidates: [shared.path, "~/.claude/skills/review/SKILL.md"] });
+      expect((await run({ ...body, brief: "" })).response.status).toBe(400);
+      expect((await run({ ...body, target: { host: "offline", project: "/project" } })).response.status).toBe(503);
+      expect((await run({ ...body, target: { host: "worker", project: "/project" } })).response.status).toBe(404);
+      expect((await requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);
       expect(calls).toHaveLength(0);
-      const first = await run(body);
+      const task = { ...body, name: remote.name, requestId: "desk-1", target: { host: "worker", harness: "claude", project: "/reports" } };
+      const first = await run(task);
       expect(first.response.status).toBe(202);
       expect(first.body).toMatchObject({ receipt: { requestId: "desk-1", flightId: "flt-test", invocationId: "inv-test", workId: "work-test" },
         followUrl: expect.stringMatching(/\/work\/work-test$/) });
-      expect((await run(body)).body).toEqual(first.body);
+      expect((await run(task)).body).toEqual(first.body);
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ task: { version: 1 }, intent: "consult", caller: { actorId: "local-unverified" },
-        target: { kind: "project_path", projectPath: "/reports" }, body: expect.stringContaining("Read a.md. Note: ."),
-        invocationMetadata: { play: "report", attribution: { source: "unverified" } } });
+        target: { kind: "project_path", projectPath: "/reports", host: "worker" }, body: expect.stringContaining('Brief:\nReview this release.'),
+        invocationMetadata: { skill: remote.name, skillPath: remote.path, attribution: { source: "unverified" } } });
     } finally {
-      if (original === undefined) delete process.env.OPENSCOUT_SCOUT_HOME; else process.env.OPENSCOUT_SCOUT_HOME = original;
+      if (original === undefined) delete process.env.HOME; else process.env.HOME = original;
       rmSync(dir, { recursive: true, force: true });
     }
   });

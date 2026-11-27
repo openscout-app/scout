@@ -116,4 +116,4 @@ export * from "./access-evaluator-cases.js";
 export * from "./turn-credentials.js";
 export * from "./crew.js";
 
-export type { ScoutPlayInput, ScoutPlaySummary, ScoutPlayTarget, ScoutPlayRunRequest, ScoutPlayRunResult } from "./plays.js";
+export type { ScoutSkillSummary, ScoutSkillTarget, ScoutSkillRunRequest, ScoutSkillRunResult } from "./skills.js";
