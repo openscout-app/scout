@@ -108,7 +108,7 @@ test("add clones one standard skill from Git without modifying its source or ove
     const git = async (...args: string[]) => {
       const child = Bun.spawn(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
         "-C", source, ...args], { env, stdout: "ignore", stderr: "pipe" });
-      if (await child.exited) throw new Error(await child.stderr.text());
+      if (await child.exited) throw new Error(await new Response(child.stderr).text());
     };
     await git("init", "--quiet");
     await git("commit", "-q", "--allow-empty", "-m", "Create the fixture");

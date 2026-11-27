@@ -359,6 +359,10 @@ describe("createBrokerHttpRouter", () => {
       expect((await run({ ...body, brief: "" })).response.status).toBe(400);
       expect((await get("/v1/skills?host=offline")).response.status).toBe(503);
       expect((await requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);
+      const native = { requestId: "named-ask", intent: "task_ask", body: body.brief, task: { version: 1, skill: "review" },
+        target: { kind: "project_path", projectPath: "/code" } };
+      expect((await requestRouter(h, "POST", "/v1/deliver", { body: native, transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
+      expect((await requestRouter(h, "POST", "/v1/deliver", { body: native, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);
       expect(calls).toHaveLength(0);
       const task = { ...body, name: remote.name, requestId: "desk-1", target: { host: "worker", harness: "claude", project: "/reports" } };
       const first = await run(task);

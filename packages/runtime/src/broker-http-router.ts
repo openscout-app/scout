@@ -3778,11 +3778,14 @@ export function createBrokerHttpRouter(
   const listLocalSkills = method === "GET" && url.pathname === "/v1/skills";
   const listPeerSkills = method === "GET" && url.pathname === "/v1/mesh/skills";
   const runSkill = method === "POST" && url.pathname === "/v1/skills/run";
-  if (listLocalSkills || listPeerSkills || runSkill) {
+  const mayReadSkills = (peer: boolean) => {
     const ctx = request.transportContext;
-    const allowed = listPeerSkills ? ctx?.peer?.tier === "control"
-      : ctx && ["unix-socket", "loopback"].includes(ctx.transport) && !ctx.peer && !forwardedNodeId;
-    if (!allowed || ctx?.guest || ctx?.scoped || request.headers.origin !== undefined) {
+    if (!ctx || ctx.guest || ctx.scoped || request.headers.origin !== undefined) return false;
+    return peer ? ctx.peer?.tier === "control"
+      : ["unix-socket", "loopback"].includes(ctx.transport) && !ctx.peer && !forwardedNodeId;
+  };
+  if (listLocalSkills || listPeerSkills || runSkill) {
+    if (!mayReadSkills(listPeerSkills)) {
       json(response, 403, { error: "forbidden" }); return;
     }
     if (!runSkill) {
@@ -3806,6 +3809,8 @@ export function createBrokerHttpRouter(
       const payload = skillInput
         ? brokerDeliverRequestSchema.parse(skillAsk(skillInput, skillHome()))
         : await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      // Naming a skill on /v1/deliver must not widen access to the host's catalog.
+      if (payload.task?.skill && !mayReadSkills(false)) { json(response, 403, { error: "forbidden" }); return; }
       const snapshot = currentAttributionSnapshot();
       const parentFlight = payload.relation?.parentFlightId ? snapshot.flights?.[payload.relation.parentFlightId] : undefined;
       const parent = brokerAttributionFromMetadata(parentFlight ? snapshot.invocations?.[parentFlight.invocationId]?.metadata : undefined)
