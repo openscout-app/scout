@@ -222,4 +222,55 @@ describe("permission supervisor", () => {
       toolInput: { CommandLine: "git push origin main" },
     }, grants("silent"))).toMatchObject({ act: "continue", risk: "publish" });
   });
+
+  describe("absolute paths inside the granted project", () => {
+    const parent = "/work";
+    const parentGrant = (level: "workspace" | "silent" = "workspace", extra: ContinuationPolicyFile["grants"] = []): ContinuationPolicyFile => ({
+      allowModel: false,
+      grants: [{ scope: "project", path: parent, level }, ...extra],
+    });
+    const run = (command: string, policy = parentGrant()) => decideNativeToolSupervisor({
+      projectRoot: parent, cwd: parent, toolName: "run_command", toolInput: { CommandLine: command },
+    }, policy);
+
+    test("continues builds and reads that address a worktree by absolute path", () => {
+      for (const command of [
+        "bun --cwd /work/app-hero/landing/site next build",
+        "bun run --cwd /work/app-hero landing:build",
+        "bun test /work/app-hero/packages/runtime",
+        "git -C /work/app-hero status --short",
+        "cat /work/app-hero/README.md",
+      ]) expect(run(command)).toMatchObject({ act: "continue", risk: "workspace", level: "workspace" });
+    });
+
+    test("still escalates what workspace never covered", () => {
+      for (const command of [
+        "git -C /work/app-hero push origin site/hero",
+        "bun --cwd /work/app-hero next dev --port 3099",
+        "bun /home/agent/scratch/capture.mjs",
+        "bun --cwd /work/../etc next build",
+        "bun --cwd /elsewhere next build",
+        "cat /work/app-hero/.env",
+        "cd /work/app-hero && bun run build",
+        "bun run --cwd /work/app-hero deploy",
+        "git -C /work/app-hero log --output=/tmp/out",
+      ]) expect(run(command).act).toBe("notify");
+    });
+
+    test("a narrower grant below the project keeps its say", () => {
+      const policy = parentGrant("workspace", [{ scope: "project", path: "/work/locked", level: "ask" }]);
+      expect(run("bun --cwd /work/locked next build", policy).act).toBe("notify");
+      expect(run("bun --cwd /work/open next build", policy).act).toBe("continue");
+    });
+
+    test("Codex and Claude pane commands get the same reading", () => {
+      const codexPrompt = { projectRoot: parent, text: codex("git -C /work/app-hero diff", parent), decisions: ["once", "deny"] as Array<"once" | "deny"> };
+      expect(decidePermissionSupervisor(codexPrompt, parentGrant())).toMatchObject({ act: "continue", risk: "workspace" });
+      const pane = { projectRoot: parent, text: claude("bun --cwd /work/app-hero next build"), decisions: ["once", "deny"] as Array<"once" | "deny"> };
+      expect(decidePermissionSupervisor(pane, parentGrant())).toMatchObject({ act: "continue", risk: "workspace" });
+      const panePush = { ...pane, text: claude("git -C /work/app-hero push origin main") };
+      expect(decidePermissionSupervisor(panePush, parentGrant()).act).toBe("notify");
+    });
+  });
 });
+

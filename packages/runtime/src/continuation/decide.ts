@@ -50,6 +50,8 @@ const OUTSIDE_PATH = /(?:^|\s|=|@)(?:~|\/)|\.\./;
 const WORKSPACE_COMMAND = new RegExp([
   "^(?:bun|npm|pnpm|yarn)\\s+(?:test|run\\s+[\\w:.-]+|lint|typecheck|check|build)(?:\\s|$)",
   "^(?:bunx|npx)\\s+tsc(?:\\s|$)",
+  // A project's own framework build, run from its node_modules; bun never fetches a missing bin.
+  "^bun\\s+(?:next|vite)\\s+build(?:\\s|$)",
   "^(?:cargo|go|swift)\\s+(?:test|build|check|vet)(?:\\s|$)",
   "^(?:pytest|tsc|make)(?:\\s|$)",
   "^(?:ls|pwd|cat|head|tail|wc|grep|rg)(?:\\s|$)",

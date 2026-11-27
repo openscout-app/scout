@@ -172,8 +172,14 @@ function deepestProjectGrant(
 export type ContinuationAuditEntry = {
   at: number;
   outcome: "attempt" | "sent" | "failed" | "mismatch" | "claimed-elsewhere";
-  herdrSession: string;
-  paneId: string;
+  /** Where the answer went: a tmux/Herdr pane, a native harness hook, or a Scout-managed session. */
+  backend?: string;
+  herdrSession?: string;
+  paneId?: string;
+  sessionId?: string;
+  requestId?: string;
+  projectRoot?: string;
+  tool?: string;
   level: ContinuationLevel;
   grant: string;
   command: string | null;

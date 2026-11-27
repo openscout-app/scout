@@ -41,7 +41,8 @@ import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
-import { decideNativeToolSupervisor, decidePermissionSupervisor } from "./permission-supervisor.js";
+import { decideNativeToolSupervisor, decidePermissionSupervisor, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
+import { appendContinuationAudit } from "./continuation/grants.js";
 import { permissionWaitPatch } from "./broker-blocked-reply.js";
 import { BrokerPermissionService } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
@@ -3503,6 +3504,10 @@ const permissionService = new BrokerPermissionService({
   nodeId,
   createId: () => createRuntimeId("permission"),
   supervisor: decidePermissionSupervisor,
+  audit: ({ requestId, prompt, verdict, delivered }) => auditSupervisorAnswer({
+    backend: "managed", outcome: delivered ? "sent" : "failed", requestId,
+    sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, command: prompt.text, verdict,
+  }),
   record: recordCollaborationDurably,
   read: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
   requests: () => Object.values(runtime.snapshot().collaborationRecords)
@@ -3542,12 +3547,22 @@ configureManagedPermissionHandler((invocation, prompt) => permissionService.wait
 /** Permission dialogs of Claude Code and Antigravity sessions, raised by their hooks. */
 const nativePermissions = new NativePermissionRequests({
   permissions: permissionService,
-  supervisor: (ask) => decideNativeToolSupervisor({
-    projectRoot: ask.cwd,
-    cwd: ask.cwd,
-    toolName: ask.toolName,
-    toolInput: ask.toolInput,
-  }),
+  supervisor: (ask) => {
+    const verdict = decideNativeToolSupervisor({
+      projectRoot: ask.cwd,
+      cwd: ask.cwd,
+      toolName: ask.toolName,
+      toolInput: ask.toolInput,
+    });
+    // The hook takes the allow straight back; this line is the only trace of it.
+    if (verdict.act === "continue") {
+      auditSupervisorAnswer({
+        backend: `native:${ask.harness}`, outcome: "sent", sessionId: ask.sessionId, projectRoot: ask.cwd,
+        tool: ask.toolName, command: describeNativeToolInput(ask.toolInput), verdict,
+      });
+    }
+    return verdict;
+  },
   launchedByScout: async (record) => isScoutBackgroundCopy(record)
     || Boolean(record.tmux?.session && (await listScoutLaunchedTmuxSessions()).has(record.tmux.session)),
   notify: ({ requestId, prompt, actorId, view }) => {
@@ -3557,6 +3572,47 @@ const nativePermissions = new NativePermissionRequests({
     });
   },
 });
+
+let supervisorAnswers = 0;
+
+/** One audit line per permission the supervisor answered without the operator. */
+function auditSupervisorAnswer(input: {
+  backend: string;
+  outcome: "sent" | "failed";
+  requestId?: string;
+  sessionId: string;
+  projectRoot: string;
+  tool?: string;
+  command: string | null;
+  verdict: PermissionSupervisorVerdict;
+}): void {
+  try {
+    appendContinuationAudit({
+      at: Date.now(), outcome: input.outcome, backend: input.backend,
+      ...(input.requestId ? { requestId: input.requestId } : {}),
+      sessionId: input.sessionId, projectRoot: input.projectRoot,
+      ...(input.tool ? { tool: input.tool } : {}),
+      level: input.verdict.level ?? "ask", grant: input.verdict.grant,
+      command: input.command ? input.command.slice(0, 500) : null, risk: input.verdict.risk,
+      keys: null, source: "rules", reason: input.verdict.reason,
+    });
+  } catch (error) {
+    console.warn(`[openscout-runtime] continuation audit write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (input.outcome === "sent") {
+    supervisorAnswers += 1;
+    console.log(`[openscout-runtime] permission supervisor answered for you (${supervisorAnswers} since start): ${input.backend} ${input.tool ?? ""} ${input.verdict.reason}`.replace(/\s+/g, " "));
+  }
+}
+
+function describeNativeToolInput(input: unknown): string | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const record = input as Record<string, unknown>;
+  for (const key of ["CommandLine", "command", "Path", "file_path", "TargetFile"]) {
+    if (typeof record[key] === "string") return record[key] as string;
+  }
+  return null;
+}
 
 /** A restart loses every live permission waiter. Rebind each request to its session, or settle it. */
 function reconcilePermissionRequests(reason: "startup" | "periodic"): void {

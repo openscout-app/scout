@@ -7,6 +7,7 @@ import {
   type ContinuationRisk,
 } from "./continuation/decide.js";
 import { parseContinuationDialog } from "./continuation/dialog.js";
+import type { ContinuationLevel } from "./continuation/policy.js";
 import {
   loadContinuationPolicy,
   resolveContinuationGrant,
@@ -17,6 +18,8 @@ export const PERMISSION_SUPERVISOR_ACTOR_ID = "permission-supervisor";
 
 export type PermissionSupervisorVerdict = {
   act: "continue" | "notify";
+  /** The grant level that let a `continue` through. */
+  level?: ContinuationLevel;
   reason: string;
   risk: ContinuationRisk;
   grant: string;
@@ -45,25 +48,34 @@ export function decidePermissionSupervisor(
   if (grant.level === "ask") return notify("no project continuation grant");
   if (!prompt.decisions.includes("once")) return notify("one-time approval is not offered");
 
+  const inProject = projectPathScope(prompt.projectRoot, policy, grant.source);
   if (codex) {
-    const risk = classifyPermissionCommandRisk(codex.command);
+    const risk = classifyPermissionCommandRisk(codex.command, inProject);
     if (!continuationAllowsRisk(grant.level, risk)) {
       return notify(`${grant.level} does not auto-continue ${risk}`, risk);
     }
-    return { act: "continue", reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
+    return { act: "continue", level: grant.level, reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
   }
 
   const dialog = parseContinuationDialog(prompt.text);
   const verdict = decideContinuation({ paneBody: prompt.text, policy: grant.level });
-  if (verdict.act !== "continue") return notify(verdict.reason, verdict.risk);
+  const localizedOnly = verdict.act === "notify" && verdict.risk === "unknown" && dialog.commandExact
+    && dialog.action !== "edit" && dialog.action !== "write" && verdict.reason === `${grant.level} does not auto-continue unknown`;
+  if (verdict.act !== "continue" && !localizedOnly) return notify(verdict.reason, verdict.risk);
   const risk = dialog.commandExact && dialog.action !== "edit" && dialog.action !== "write"
-    ? classifyPermissionCommandRisk(dialog.command)
+    ? classifyPermissionCommandRisk(dialog.command, inProject)
     : verdict.risk;
   if (!continuationAllowsRisk(grant.level, risk)) return notify(`${grant.level} does not auto-continue ${risk}`, risk);
-  return { act: "continue", reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
+  return { act: "continue", level: grant.level, reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
 }
 
-const LOCAL_SCRIPT = /^(?:test|lint|typecheck|check|build)(?::[\w.-]+)*$/;
+/** A package script that tests, checks or builds, optionally namespaced (`landing:build`, `test:unit`). */
+const LOCAL_SCRIPT = /^(?:[\w.-]+:)*(?:test|lint|typecheck|check|build)(?::[\w.-]+)*$/;
+/** Characters after which a command's words are no longer plain; the classifier refuses these itself. */
+const UNPLAIN = /[;&|<>`\n\\$"'#*?{}[\]!]/;
+/** Options that only move a package manager or git into another directory. */
+const DIRECTORY_OPTION = new Set(["--cwd", "--prefix", "--dir", "-C"]);
+const DIRECTORY_TOOLS = new Set(["bun", "npm", "pnpm", "yarn", "git"]);
 const OUTSIDE_PROJECT_PATH = /(?:^|\s|=|@)(?:~|\/)|\.\./;
 const ATTACHED_ABSOLUTE_PATH = /^--?[A-Za-z][A-Za-z0-9-]*=?(?:\/|~)/;
 const HTTP_URL = /^https?:\/\/\S+$/i;
@@ -116,11 +128,11 @@ export function decideNativeToolSupervisor(
   if (tool === "run_command" || tool === "bash" || tool === "shell_exec") {
     const command = stringField(input.toolInput, ["CommandLine", "command"]);
     if (!command) return notify("command is missing");
-    const risk = classifyPermissionCommandRisk(command);
+    const risk = classifyPermissionCommandRisk(command, projectPathScope(input.projectRoot, policy, grant.source));
     if (!continuationAllowsRisk(grant.level, risk)) {
       return notify(`${grant.level} does not auto-continue ${risk}`, risk);
     }
-    return { act: "continue", reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
+    return { act: "continue", level: grant.level, reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
   }
 
   if (
@@ -142,13 +154,58 @@ export function decideNativeToolSupervisor(
     if (!continuationAllowsRisk(grant.level, "workspace")) {
       return notify(`${grant.level} does not auto-continue workspace`, "workspace");
     }
-    return { act: "continue", reason: `${grant.level} continues workspace`, risk: "workspace", grant: grant.source };
+    return { act: "continue", level: grant.level, reason: `${grant.level} continues workspace`, risk: "workspace", grant: grant.source };
   }
 
   return notify(`${input.toolName} requires operator approval`);
 }
 
-function classifyPermissionCommandRisk(command: string | null): ContinuationRisk {
+/** Answers whether an absolute path lies inside the project under the same grant that covers the request. */
+type ProjectPathScope = (path: string) => string | null;
+
+function projectPathScope(projectRoot: string, policy: ContinuationPolicyFile, grantSource: string): ProjectPathScope {
+  return (path) => {
+    if (path.split("/").includes("..") || !withinProject(projectRoot, path)) return null;
+    // A path under a narrower (or different) grant keeps that grant's say.
+    const own = resolveContinuationGrant(policy, { herdrSession: "", paneId: "", cwd: projectRoot, foregroundCwd: path });
+    if (own.source !== grantSource) return null;
+    return relative(resolve(projectRoot), resolve(path)) || ".";
+  };
+}
+
+/**
+ * Rewrites absolute paths that stay inside the granted project as project-relative
+ * ones, then drops a leading directory option (`bun --cwd x`, `bun run --cwd x`,
+ * `git -C x`) that only moves the command deeper into the project. Agents that
+ * run from a parent folder address every worktree by absolute path; without this
+ * every one of their commands reads as leaving the project. Anything that is not
+ * plain words is returned unchanged, for the classifier to refuse.
+ */
+export function localizeProjectCommand(command: string, inProject: ProjectPathScope): string {
+  if (UNPLAIN.test(command)) return command;
+  const words = command.trim().split(/\s+/).map((word) => {
+    const attached = /^(--?[A-Za-z][A-Za-z0-9-]*=)(\/.*)$/.exec(word);
+    const prefix = attached?.[1] ?? "";
+    const path = attached?.[2] ?? word;
+    if (!path.startsWith("/")) return word;
+    const local = inProject(path);
+    return local === null ? word : `${prefix}${local}`;
+  });
+  if (!DIRECTORY_TOOLS.has(words[0] ?? "")) return words.join(" ");
+  const at = words[0] !== "git" && words[1] === "run" ? 2 : 1;
+  const option = words[at] ?? "";
+  const [name, inline] = option.includes("=") ? [option.slice(0, option.indexOf("=")), option.slice(option.indexOf("=") + 1)] : [option, undefined];
+  if (!DIRECTORY_OPTION.has(name) || (name === "-C") !== (words[0] === "git" || words[0] === "pnpm")) return words.join(" ");
+  const target = inline ?? words[at + 1];
+  if (!target || target.startsWith("/") || target.startsWith("~") || target.split("/").includes("..") || target.startsWith("-")) {
+    return words.join(" ");
+  }
+  words.splice(at, inline === undefined ? 2 : 1);
+  return words.join(" ");
+}
+
+function classifyPermissionCommandRisk(rawCommand: string | null, inProject?: ProjectPathScope): ContinuationRisk {
+  const command = rawCommand && inProject ? localizeProjectCommand(rawCommand, inProject) : rawCommand;
   const risk = classifyContinuationRisk(command);
   if (!command) return risk;
   const words = command.trim().split(/\s+/);
