@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { InvocationRequest } from "@openscout/protocol";
+import type { PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
 export type PermissionDecision = "once" | "project" | "deny";
 export type ManagedPermissionPrompt = {
@@ -10,6 +11,8 @@ export type ManagedPermissionPrompt = {
   version: string;
   decisions: PermissionDecision[];
   decisionLabels?: Partial<Record<PermissionDecision, string>>;
+  /** Structured policy result. Null requires an operator; undefined uses the dialog supervisor. */
+  supervisorVerdict?: PermissionSupervisorVerdict | null;
   /** Must revalidate the prompt immediately before writing to its live process. */
   answer: (decision: PermissionDecision) => Promise<void>;
   isCurrent: () => Promise<boolean>;

@@ -79,6 +79,7 @@ type AcpToolCallUpdate = {
   status?: "pending" | "in_progress" | "completed" | "failed" | null;
   content?: AcpToolCallContent[] | null;
   rawInput?: unknown;
+  locations?: unknown;
   rawOutput?: unknown;
 };
 
@@ -454,7 +455,7 @@ function outputFromToolContent(content: AcpToolCallContent[] | null | undefined)
 }
 
 function toolName(input: AcpToolCallUpdate): string {
-  return input.title?.trim() || input.kind?.trim() || "ACP tool call";
+  return stringValue(input.title) || stringValue(input.kind) || "ACP tool call";
 }
 
 function buildToolAction(input: AcpToolCallUpdate): Action {
@@ -1393,6 +1394,15 @@ export class AcpAdapter extends BaseAdapter {
         version: 1,
         description: toolName(toolCall),
         risk: "medium",
+        acpToolCall: {
+          title: toolCall.title,
+          kind: toolCall.kind,
+          rawInput: toolCall.rawInput,
+          locations: toolCall.locations,
+          offersAllowOnce: allowOptionId !== null
+            && options.filter(option => option.optionId === allowOptionId).length === 1
+            && options.some(option => option.optionId === allowOptionId && option.kind === "allow_once"),
+        },
       },
     });
   }

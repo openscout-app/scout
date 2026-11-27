@@ -1,3 +1,4 @@
+import type { AcpPermissionToolCall } from "../protocol/primitives.js";
 import { AcpAdapter } from "../adapters/acp/adapter.js";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -158,6 +159,7 @@ export type LocalAgentPermissionRequest = {
   blockId: string;
   description: string;
   version: number;
+  acpToolCall?: AcpPermissionToolCall;
 };
 
 export type LocalAgentClientTurnOptions = {
@@ -525,6 +527,7 @@ export async function waitForTurnEnd(options: {
             blockId: event.blockId,
             description: event.approval.description?.trim() || "Permission requested",
             version: event.approval.version,
+            acpToolCall: event.approval.acpToolCall,
           };
           const answer = (decision: LocalAgentPermissionDecision): void => {
             try {

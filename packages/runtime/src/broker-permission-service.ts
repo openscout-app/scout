@@ -61,7 +61,9 @@ export class BrokerPermissionService {
     this.pending.set(id, pending);
     try {
       await this.deps.record(record);
-      const automatic = this.deps.supervisor?.(prompt);
+      const automatic = prompt.supervisorVerdict === undefined
+        ? this.deps.supervisor?.(prompt)
+        : prompt.supervisorVerdict;
       while (pending.busy && !pending.done) await this.sleep(500);
       if (pending.error) throw pending.error;
       if (!pending.done && automatic?.act === "continue") {
