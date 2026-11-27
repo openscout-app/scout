@@ -24,7 +24,7 @@ export type ScoutTaskAsk = {
    * reason; for an agent task it rides to the worker as context.
    */
   because?: string;
-  /** Folder name (or a catalog path to distinguish copies) on the worker's machine. */
+  /** Registered Scout skill name on the worker's machine. */
   skill?: string;
   /**
    * JavaScript that the runtime on the worker's host runs when the task ends.
@@ -92,10 +92,7 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   // (--because) is context the receiver reads, so it rides on any ask.
   if (task.permission && !task.operator) throw new Error("--permission requires --operator: only the operator can grant a permission request");
   if (task.skill !== undefined) {
-    const folder = task.skill.replace(/^~\/\.(?:agents|claude|codex|cursor)\/skills\/([^/]+)\/SKILL\.md$/, "$1");
-    if (!isSkillFolderName(folder)) {
-      throw new Error("--skill takes a skill folder name or a path listed by scout skills");
-    }
+    if (!isSkillFolderName(task.skill)) throw new Error("--skill takes a registered skill folder name");
     if (task.operator || task.fyi || task.ref || task.continue || task.cancel || route.channel) throw new Error("--skill requires a new agent ask");
   }
   if (task.because !== undefined && !task.because.trim()) throw new Error("--because cannot be empty");

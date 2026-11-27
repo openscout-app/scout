@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { cp, lstat, mkdir, mkdtemp, readlink, realpath, rename, rm, rmdir, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isSkillFolderName } from "@openscout/protocol";
-import { harnessRoots, listSkills, readSkillDescription, selectSkill } from "@openscout/runtime/skills";
+import { readSkillDescription, registeredSkill, scoutSkillRoot } from "@openscout/runtime/skills";
 
 function checkName(name: string) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || name.length > 64) {
@@ -10,7 +10,6 @@ function checkName(name: string) {
   }
 }
 
-const personalRoot = (home: string) => join(home, ".agents", "skills");
 const errorCode = (error: unknown) => (error as NodeJS.ErrnoException).code;
 async function existing(path: string) {
   try { return await lstat(path); } catch (error) { if (errorCode(error) !== "ENOENT") throw error; }
@@ -24,47 +23,22 @@ async function reserve(dir: string) {
 
 export async function newSkill(home: string, name: string) {
   checkName(name);
-  const root = personalRoot(home), dir = join(root, name), path = join(dir, "SKILL.md");
-  await mkdir(root, { recursive: true });
+  const root = await scoutSkillRoot(home, true), dir = join(root, name), path = join(dir, "SKILL.md");
   await reserve(dir);
   const title = name.replaceAll("-", " ");
   await writeFile(path, `---\nname: "${name}"\ndescription: "Use this skill for ${title}."\n---\n\n## Steps\n\n1. Read the brief.\n2. Describe the work to do here.\n3. Report the result.\n`, { flag: "wx" });
-
-  return linkHarnesses(home, name);
+  return path;
 }
 
-async function linkHarnesses(home: string, name: string) {
-  const dir = join(personalRoot(home), name);
-  const path = join(dir, "SKILL.md");
-  // Point at the user's folder, not through it: a later fork can replace a
-  // linked skill with a personal copy without invalidating the harness links.
-  const canonical = join(await realpath(dirname(dir)), name);
-  const links = [];
-  for (const [harness, folder] of Object.entries(harnessRoots)) {
-    const dest = join(home, folder, "skills", name);
-    let status: string;
-    try {
-      await mkdir(dirname(dest), { recursive: true });
-      // A harness root may itself be a link. Make the target relative to its real parent.
-      const parent = await realpath(dirname(dest)), source = await realpath(dir);
-      try { await symlink(relative(parent, canonical), dest, "dir"); status = "linked"; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        status = await realpath(dest).catch(() => null) === source ? "already linked" : "conflict; left unchanged";
-      }
-    } catch (error) { status = `not linked: ${(error as NodeJS.ErrnoException).code ?? "unavailable"}`; }
-    links.push({ harness, path: dest, status });
+export async function localSkillPath(home: string, name: string, editing = false) {
+  const skill = await registeredSkill(home, name);
+  if (editing) {
+    if (skill.source === "linked") throw new Error(`Fork this linked skill before editing: scout skills fork ${name}`);
+    if (!skill.path.startsWith(skill.directory + sep) || (await stat(skill.path)).nlink !== 1) {
+      throw new Error("Replace the linked SKILL.md with a personal file before editing.");
+    }
   }
-  return { path, links };
-}
-
-async function chooseLocalSkill(home: string, selector: string) {
-  const name = selector.startsWith(home + "/") ? "~/" + selector.slice(home.length + 1) : selector;
-  return selectSkill(await listSkills(home), name);
-}
-
-export async function localSkillPath(home: string, name: string) {
-  return join(home, (await chooseLocalSkill(home, name)).path.slice(2));
+  return skill.path;
 }
 
 // $EDITOR can include arguments such as --wait or a quoted executable path.
@@ -130,13 +104,12 @@ function gitSource(input: string) {
   return { protocol, name: basename(decodeURIComponent(url.pathname)).replace(/\.git$/, "") };
 }
 
-export async function addSkill(home: string, input: string, cwd: string, env: NodeJS.ProcessEnv) {
+export async function addSkill(home: string, input: string, cwd: string, env: NodeJS.ProcessEnv, as?: string) {
   const git = gitSource(input);
   const local = resolve(cwd, input.startsWith("~/") ? join(home, input.slice(2)) : input);
-  const name = git?.name ?? basename(local);
+  const name = as ?? git?.name ?? basename(local);
   if (!isSkillFolderName(name)) throw new Error("Use a source with a visible skill folder name.");
-  const root = personalRoot(home), dest = join(root, name);
-  await mkdir(root, { recursive: true });
+  const root = await scoutSkillRoot(home, true), dest = join(root, name);
   if (git) {
     if (await existing(dest)) throw new Error(`Already exists: ${dest}. No files changed.`);
     const tmp = await mkdtemp(join(root, ".install-"));
@@ -157,17 +130,15 @@ export async function addSkill(home: string, input: string, cwd: string, env: No
       if (await realpath(dest).catch(() => null) !== source) throw new Error(`Already exists: ${dest}. No files changed.`);
     }
   }
-  return linkHarnesses(home, name);
+  return join(dest, "SKILL.md");
 }
 
 export async function forkSkill(home: string, selector: string) {
-  const skill = await chooseLocalSkill(home, selector);
-  const source = await realpath(dirname(join(home, skill.path.slice(2))));
-  const root = personalRoot(home), dest = join(root, skill.name);
-  const old = await existing(dest);
-  if (old && await realpath(dest).catch(() => null) !== source) throw new Error(`Already exists: ${dest}. No files changed.`);
-  if (old?.isDirectory()) return linkHarnesses(home, skill.name); // Already a personal folder.
-  await mkdir(root, { recursive: true });
+  const skill = await registeredSkill(home, selector);
+  const source = skill.directory, root = await scoutSkillRoot(home), dest = join(root, skill.name);
+  const old = await lstat(dest);
+  if (await realpath(dest) !== source) throw new Error(`The registration changed: ${dest}. No files changed.`);
+  if (!old.isSymbolicLink()) return join(dest, "SKILL.md"); // Already personal.
   const tmp = await mkdtemp(join(root, ".fork-")), staged = join(tmp, "copy"), backup = join(tmp, "original");
   let keepBackup = false;
   try {
@@ -190,12 +161,10 @@ export async function forkSkill(home: string, selector: string) {
       return true;
     } });
     await requireSkill(staged);
-    if (old) {
-      await rename(dest, backup);
-      keepBackup = true;
-      const moved = await lstat(backup);
-      if (moved.dev !== old.dev || moved.ino !== old.ino) throw new Error("The source changed during the copy.");
-    }
+    await rename(dest, backup);
+    keepBackup = true;
+    const moved = await lstat(backup);
+    if (moved.dev !== old.dev || moved.ino !== old.ino) throw new Error("The source changed during the copy.");
     await installDirectory(staged, dest);
     keepBackup = false;
   } catch (error) {
@@ -208,5 +177,5 @@ export async function forkSkill(home: string, selector: string) {
     }
     throw error;
   } finally { if (!keepBackup) await rm(tmp, { recursive: true, force: true }); }
-  return linkHarnesses(home, skill.name);
+  return join(dest, "SKILL.md");
 }

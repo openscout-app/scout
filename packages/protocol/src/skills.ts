@@ -2,22 +2,25 @@ import type { ScoutDeliveryReceipt } from "./scout-delivery.js";
 
 /** Use names that can be referenced as a single visible folder. */
 export function isSkillFolderName(name: string): boolean {
-  return Boolean(name.trim()) && !/^[.-]|[/\\\x00-\x1f\x7f]/.test(name) && name.length <= 255;
+  return name.length > 0 && name === name.trim() && !/^[.-]|[/\\\x00-\x1f\x7f]/.test(name) && name.length <= 255;
 }
 
-/** Metadata only. The path is relative to the target host's home (`~/...`). */
+/** Metadata on the target host. Never contains the instructions. */
 export interface ScoutSkillSummary {
+  /** The registration name, or the folder name in an explicit discovery result. */
   name: string;
   description: string;
+  /** Real absolute path to the instruction file. */
   path: string;
-  /** The personal copy wins; without one, equal names require a path. */
-  status: "active" | "shadowed" | "ambiguous";
+  /** Real absolute skill folder for scripts and assets. */
+  directory: string;
+  source: "personal" | "linked" | "unregistered";
 }
 
 export interface ScoutSkillTarget { project?: string; harness?: string; host?: string }
 
 export interface ScoutSkillRunRequest {
-  /** A skill name, or an exact path returned by the target host's listing. */
+  /** A registered Scout skill name on the target host. */
   name: string;
   brief: string;
   target?: ScoutSkillTarget;

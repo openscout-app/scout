@@ -1,9 +1,9 @@
-import { open, readdir, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { isSkillFolderName, normalizeScoutLaunchableHarness, type ScoutSkillRunRequest, type ScoutSkillSummary } from "@openscout/protocol";
 
-export const harnessRoots: Record<string, string> = { claude: ".claude", codex: ".codex", cursor: ".cursor" };
+const harnessRoots = [".agents", ".claude", ".codex", ".cursor"] as const;
 const headerLimit = 64 * 1024;
 
 export function skillHarness(value?: string) {
@@ -37,76 +37,76 @@ function absent(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException)?.code ?? "");
 }
 
-export async function listSkills(home: string, harnessName?: string): Promise<ScoutSkillSummary[]> {
-  const harness = skillHarness(harnessName);
-  const specific = harness && harnessRoots[harness];
-  const roots = harness ? (specific ? [".agents", specific] : [".agents"]) : [".agents", ...Object.values(harnessRoots)];
-  const folders = new Map<string, Omit<ScoutSkillSummary, "status">>();
-  for (const root of roots) {
-    const dir = join(home, root, "skills");
-    let entries;
-    try { entries = await readdir(dir, { withFileTypes: true }); }
-    catch (error) { if (absent(error)) continue; throw error; }
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!isSkillFolderName(entry.name) || !(entry.isDirectory() || entry.isSymbolicLink())) continue;
-      try {
-        const physical = await realpath(join(dir, entry.name));
-        if (folders.has(physical)) continue;
-        const description = await readSkillDescription(join(physical, "SKILL.md"));
-        if (description) folders.set(physical, { name: entry.name, description, path: `~/${root}/skills/${entry.name}/SKILL.md` });
-      } catch (error) { if (!absent(error)) throw error; }
+// Only individual registrations may be pointers. Refuse to mistake a symlink
+// to a harness root for the user-owned Scout directory, even during authoring.
+export async function scoutSkillRoot(home: string, create = false): Promise<string> {
+  const parent = join(home, ".scout"), root = join(parent, "skills");
+  for (const dir of [parent, root]) {
+    if (create) {
+      try { await mkdir(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     }
+    try {
+      if (!(await lstat(dir)).isDirectory()) throw new Error(`Scout needs a plain directory at ${dir}, not a link or file.`);
+    } catch (error) { if (!create && (error as NodeJS.ErrnoException).code === "ENOENT") break; throw error; }
   }
-  const groups = new Map<string, Omit<ScoutSkillSummary, "status">[]>();
-  for (const s of folders.values()) {
-    const group = groups.get(s.name);
-    if (group) group.push(s); else groups.set(s.name, [s]);
-  }
-  return [...groups.values()].flatMap(copies => {
-    const personal = copies.find(s => s.path.startsWith("~/.agents/skills/"));
-    return copies.map((s): ScoutSkillSummary => ({ ...s, status: personal
-      ? (s === personal ? "active" : "shadowed") : copies.length === 1 ? "active" : "ambiguous" }));
-  }).sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+  return root;
+}
+
+async function summarize(root: string, name: string, registered: boolean): Promise<ScoutSkillSummary | undefined> {
+  const entry = join(root, name);
+  try {
+    const info = await lstat(entry);
+    if (!info.isDirectory() && !info.isSymbolicLink()) return;
+    const directory = await realpath(entry), path = await realpath(join(directory, "SKILL.md"));
+    const description = await readSkillDescription(path);
+    if (description) return { name, description, path, directory, source: !registered ? "unregistered" : info.isSymbolicLink() ? "linked" : "personal" };
+  } catch (error) { if (!absent(error)) throw error; }
 }
 
 export class SkillLookupError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string, readonly candidates?: string[]) { super(message); }
+  constructor(readonly status: number, readonly code: string, message: string) { super(message); }
 }
 
-/** Resolve only from the catalog. Never open an arbitrary caller-supplied path. */
-export function selectSkill(skills: ScoutSkillSummary[], selector: string): ScoutSkillSummary {
-  const exact = skills.find(s => s.path === selector);
-  if (exact) return exact;
-  const copies = skills.filter(s => s.name === selector);
-  if (!copies.length) throw new SkillLookupError(404, "skill_not_found", `No skill named ${selector} in the selected roots. List them with scout skills.`);
-  const active = copies.filter(s => s.status === "active");
-  if (active.length === 1) return active[0]!;
-  const paths = copies.map(s => s.path);
-  throw new SkillLookupError(409, "ambiguous_skill", `More than one skill named ${selector}. Use one of these paths:\n${paths.join("\n")}`, paths);
+export async function registeredSkill(home: string, name: string): Promise<ScoutSkillSummary> {
+  if (!isSkillFolderName(name)) throw new SkillLookupError(400, "invalid_skill_name", "Use a registered skill folder name, not a path.");
+  const skill = await summarize(await scoutSkillRoot(home), name, true);
+  if (!skill) throw new SkillLookupError(404, "skill_not_found", `No skill named ${name} is registered on this machine. Use scout skills or scout skills add <path>.`);
+  return skill;
+}
+
+export async function listSkills(home: string, all = false): Promise<ScoutSkillSummary[]> {
+  const out: ScoutSkillSummary[] = [], known = new Set<string>();
+  const roots = [await scoutSkillRoot(home), ...(all ? harnessRoots.map(dir => join(home, dir, "skills")) : [])];
+  for (const [index, root] of roots.entries()) {
+    let names: string[];
+    try { names = await readdir(root); } catch (error) { if (absent(error)) continue; throw error; }
+    for (const name of names.sort()) {
+      if (!isSkillFolderName(name)) continue;
+      const skill = await summarize(root, name, index === 0);
+      // Two explicitly registered aliases remain usable by their own names.
+      // Suppress duplicate physical folders only in the read-only inventory.
+      if (skill && (index === 0 || !known.has(skill.directory))) { out.push(skill); known.add(skill.directory); }
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function skillBrief(skill: ScoutSkillSummary, brief: string): string {
-  return `Use the ${skill.name} skill. Read ${JSON.stringify(skill.path)} on this machine, with its bundled resources. If it is unavailable, ask rather than substituting another skill.\n\nBrief:\n${brief}`;
+  return `For this ask only, use the Scout skill ${JSON.stringify(skill.name)}. Read ${JSON.stringify(skill.path)} on this machine. Resolve its scripts and assets relative to ${JSON.stringify(skill.directory)}. Do not install it for other sessions. If it is unavailable, ask rather than substituting another skill.\n\nBrief:\n${brief}`;
 }
 
-/** Normalize the route and selector without consulting a catalog. Receipt retries
- * must not depend on a file that may have been renamed after acceptance. */
-export function skillRunInput(input: ScoutSkillRunRequest, home: string) {
+/** Normalize the route without consulting the filesystem; receipt retries can
+ * still succeed after the skill is renamed. */
+export function skillRunInput(input: ScoutSkillRunRequest) {
   const { name, brief } = input;
+  if (!isSkillFolderName(name)) throw new SkillLookupError(400, "invalid_skill_name", "Use a registered skill folder name, not a path.");
   if (!brief?.trim()) throw new Error("A skill needs a brief.");
   const target = input.target ?? {};
   const harness = skillHarness(target.harness);
-  const selector = !target.host && name.startsWith(home + "/") ? "~/" + name.slice(home.length + 1) : name;
   if (target.host && !target.project) throw new Error(`Specify --project for host ${target.host}.`);
   if (!target.host && !isAbsolute(target.project ?? "") && !isAbsolute(input.currentDirectory ?? "")) {
     throw new Error("Specify an absolute target project or the caller's absolute currentDirectory.");
   }
   const project = target.host || isAbsolute(target.project ?? "") ? target.project! : resolve(input.currentDirectory!, target.project ?? ".");
-  return { selector, target: { ...target, harness, project } };
-}
-
-export function prepareSkill(skills: ScoutSkillSummary[], input: ScoutSkillRunRequest, home: string) {
-  const { selector, target } = skillRunInput(input, home);
-  const skill = selectSkill(skills, selector);
-  return { skill, target, body: skillBrief(skill, input.brief) };
+  return { name, target: { ...target, harness, project } };
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,36 +14,33 @@ test("skills and run use the broker catalog, preserve the brief, and print the n
     const url = new URL(req.url);
     calls.push(`${req.method} ${url.pathname}${url.search}`);
     if (url.pathname === "/v1/skills") return Response.json({ skills: [
-      { name: "review", description: "Review a change.", status: "active", path: "~/.agents/skills/review/SKILL.md" },
+      { name: "review", description: "Review a change.", source: "personal", directory: "/remote/.scout/skills/review", path: "/remote/.scout/skills/review/SKILL.md" },
     ] });
     input = await req.json();
     return Response.json({ receipt: { requestId: "run-1", flightId: "flt-test", targetAgentId: "reviewer" }, followUrl: "http://runtime.test/work/w" });
   } });
   try {
     const ctx = createScoutCommandContext({ cwd: "/project", env: { OPENSCOUT_BROKER_URL: broker.url.origin }, stdout: t => output.push(t), stderr: () => {} });
-    await runSkillsCommand(ctx, ["--harness", "codex", "--on", "worker"]);
-    expect(output.pop()).toContain("review  Review a change.  [active] ~/.agents/skills/review/SKILL.md");
+    await runSkillsCommand(ctx, ["--all", "--on", "worker"]);
+    expect(output.pop()).toContain("review  Review a change.  [personal] /remote/.scout/skills/review/SKILL.md");
     const brief = "Review a.md, not a=b.";
     await runNamedSkillCommand(ctx, ["review", brief, "--harness", "codex", "--on", "worker", "--project", "/code", "--request-id", "run-1"]);
     expect(input).toMatchObject({ name: "review", brief, currentDirectory: "/project", requestId: "run-1",
       target: { harness: "codex", host: "worker", project: "/code" } });
     expect(output.pop()).toContain("Follow the task: http://runtime.test/work/w");
     await expect(runNamedSkillCommand(ctx, ["review"])).rejects.toThrow("brief");
-    expect(calls).toEqual(["GET /v1/skills?harness=codex&host=worker", "POST /v1/skills/run"]);
+    expect(calls).toEqual(["GET /v1/skills?all=true&host=worker", "POST /v1/skills/run"]);
   } finally { await broker.stop(true); }
 });
 
-test("new, edit and path operate on one user file; existing files and harness links are never replaced", async () => {
+test("new, edit and path stay in Scout; no harness directory is created or changed", async () => {
   const home = await mkdtemp(join(tmpdir(), "skills user "));
-  const name = "daily-notes", dir = join(home, ".agents", "skills", name), file = join(dir, "SKILL.md");
+  const name = "daily-notes", dir = join(home, ".scout", "skills", name), file = join(dir, "SKILL.md");
   const conflict = join(home, ".claude", "skills", name);
   const stdout: string[] = [], stderr: string[] = [];
   try {
     await mkdir(conflict, { recursive: true });
     await writeFile(join(conflict, "SKILL.md"), "---\nname: daily-notes\ndescription: Vendor copy.\n---\nKeep me.");
-    await mkdir(join(home, ".codex"));
-    await mkdir(join(home, ".agents", "skills"), { recursive: true });
-    await symlink(join(home, ".agents", "skills"), join(home, ".codex", "skills"));
     const editor = join(home, "my editor.ts");
     await writeFile(editor, `if (Bun.argv[2] !== "--wait") process.exit(23);
       const f = Bun.argv[3]; const text = await Bun.file(f).text();
@@ -53,15 +50,15 @@ test("new, edit and path operate on one user file; existing files and harness li
     await expect(runSkillsCommand(ctx, ["new", "../outside"])).rejects.toThrow("folder name");
     await runSkillsCommand(ctx, ["new", name]);
     expect(stdout.pop()).toBe(file);
-    expect(stderr.join("\n")).toContain("claude: conflict; left unchanged");
-    expect(stderr.join("\n")).toContain("codex: already linked");
-    expect(stderr.join("\n")).toContain("cursor: linked");
-    expect(await realpath(join(home, ".cursor", "skills", name))).toBe(await realpath(dir));
+    expect(stderr).toEqual([]);
+    for (const root of [".agents", ".codex", ".cursor"]) await expect(readdir(join(home, root))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(join(home, ".claude", "skills"))).toEqual([name]);
     await runSkillsCommand(ctx, ["edit", name]);
     await runSkillsCommand(ctx, ["path", name]);
-    expect(stdout.pop()).toBe(file);
+    expect(stdout.pop()).toBe(await realpath(file));
     const skills = await listSkills(home);
-    expect(skills.map(s => [s.description, s.status])).toEqual([["Summarize today.", "active"], ["Vendor copy.", "shadowed"]]);
+    expect(skills.map(s => [s.description, s.source])).toEqual([["Summarize today.", "personal"]]);
+    expect(await readFile(join(conflict, "SKILL.md"), "utf8")).toContain("Keep me.");
     await expect(runSkillsCommand(ctx, ["new", name])).rejects.toThrow("Already exists");
     expect(await readFile(file, "utf8")).toContain("Summarize today.");
     ctx.env.EDITOR = "/usr/bin/false";
@@ -69,17 +66,18 @@ test("new, edit and path operate on one user file; existing files and harness li
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test("add links a local folder; fork detaches its files and keeps harnesses on the personal copy", async () => {
+test("add registers an alias without touching the source; fork makes its editable personal copy", async () => {
   const home = await mkdtemp(join(tmpdir(), "skills-fork-"));
-  const source = join(home, "sources", "review"), own = join(home, ".agents", "skills", "review");
+  const source = join(home, ".agents", "skills", "native"), own = join(home, ".scout", "skills", "review");
   const file = "SKILL.md", text = "---\nname: review\ndescription: Standard copy.\n---\nCheck the file.";
   const ctx = createScoutCommandContext({ cwd: home, env: { HOME: home }, stdout: () => {}, stderr: () => {} });
   try {
     await mkdir(join(source, "scripts"), { recursive: true });
     await writeFile(join(source, file), text);
     await writeFile(join(source, "scripts", "check"), "original");
-    await runSkillsCommand(ctx, ["add", "./sources/review"]);
+    await runSkillsCommand(ctx, ["add", source, "--as", "review"]);
     expect(await realpath(own)).toBe(await realpath(source));
+    await expect(runSkillsCommand(ctx, ["edit", "review"])).rejects.toThrow("scout skills fork review");
     // A fork must not silently carry links that write outside the copied folder.
     const external = join(home, "outside");
     await writeFile(external, "unchanged"); await symlink(external, join(source, "other"));
@@ -90,10 +88,9 @@ test("add links a local folder; fork detaches its files and keeps harnesses on t
     expect(await realpath(own)).not.toBe(await realpath(source));
     await writeFile(join(own, "scripts", "check"), "personal");
     expect(await readFile(join(source, "scripts", "check"), "utf8")).toBe("original");
-    for (const root of [".claude", ".codex", ".cursor"]) {
-      expect(await readFile(join(home, root, "skills", "review", "scripts", "check"), "utf8")).toBe("personal");
-    }
-    await expect(runSkillsCommand(ctx, ["add", source])).rejects.toThrow("Already exists");
+    expect(await readdir(join(home, ".agents", "skills"))).toEqual(["native"]);
+    for (const root of [".claude", ".codex", ".cursor"]) await expect(readdir(join(home, root))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(runSkillsCommand(ctx, ["add", source, "--as", "review"])).rejects.toThrow("Already exists");
     expect((await listSkills(home)).map(s => s.name)).toEqual(["review"]);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
@@ -112,7 +109,7 @@ test("add clones one standard skill from Git without modifying its source or ove
     };
     await git("init", "--quiet");
     await git("commit", "-q", "--allow-empty", "-m", "Create the fixture");
-    const url = pathToFileURL(source).href, destination = join(home, ".agents", "skills", "one-skill");
+    const url = pathToFileURL(source).href, destination = join(home, ".scout", "skills", "one-skill");
     await expect(runSkillsCommand(ctx, ["add", url])).rejects.toThrow("Expected a SKILL.md");
     await expect(realpath(destination)).rejects.toMatchObject({ code: "ENOENT" });
     await writeFile(join(source, file), "---\nname: one-skill\ndescription: Check a file.\n---\nRead one file.");
@@ -122,5 +119,16 @@ test("add clones one standard skill from Git without modifying its source or ove
     await expect(runSkillsCommand(ctx, ["add", url])).rejects.toThrow("Already exists");
     await writeFile(join(destination, file), "personal");
     expect(await readFile(join(source, file), "utf8")).toContain("Read one file.");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("a linked Scout root cannot redirect creation into a harness", async () => {
+  const home = await mkdtemp(join(tmpdir(), "skills-root-")), harness = join(home, ".claude", "skills");
+  try {
+    await mkdir(harness, { recursive: true }); await mkdir(join(home, ".scout"));
+    await symlink(harness, join(home, ".scout", "skills"));
+    const ctx = createScoutCommandContext({ env: { HOME: home } });
+    await expect(runSkillsCommand(ctx, ["new", "notes"])).rejects.toThrow("plain directory");
+    expect(await readdir(harness)).toEqual([]);
   } finally { await rm(home, { recursive: true, force: true }); }
 });

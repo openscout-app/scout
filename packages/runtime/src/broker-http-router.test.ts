@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { BrokerAssistantClaims, protectAssistantService, ASSISTANT_CLAIM_HEADER } from "./broker-assistant-claims.js";
 import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsConfig } from "./mesh-approvals.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
@@ -325,7 +326,7 @@ describe("createBrokerHttpRouter", () => {
     process.env.HOME = dir;
     const local = { transport: "loopback" as const };
     const calls: unknown[] = [], forwards: unknown[] = [];
-    const remote = { name: "remote-review", description: "Review there.", status: "active", path: "~/.claude/skills/remote-review/SKILL.md" };
+    const remote = { name: "remote-review", description: "Review there.", source: "linked", directory: "/worker/shared/review", path: "/worker/shared/review/SKILL.md" };
     const h = createHarness({
       requestReceipts: new BrokerRequestReceipts(join(dir, "receipts")),
       forwardRouteAliasRequest: async input => { forwards.push(input); return input.nodeSelector === "worker"
@@ -342,20 +343,26 @@ describe("createBrokerHttpRouter", () => {
         mkdirSync(path, { recursive: true });
         writeFileSync(join(path, "SKILL.md"), "---\nname: review\ndescription: Review here.\n---\nPrivate instructions.");
       };
-      make(".agents");
+      make(".scout");
       const get = (path: string) => requestRouter(h, "GET", path, { transportContext: local });
       const run = (body: unknown) => requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local });
-      const shared = { name: "review", description: "Review here.", status: "active", path: "~/.agents/skills/review/SKILL.md" };
+      const folder = realpathSync(join(dir, ".scout", "skills", "review"));
+      const shared = { name: "review", description: "Review here.", source: "personal", directory: folder, path: join(folder, "SKILL.md") };
       expect((await get("/v1/skills")).body).toEqual({ skills: [shared] });
       expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "control" } } })).body).toEqual({ skills: [shared] });
       expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
       expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "observe" } } })).response.status).toBe(403);
-      expect((await get("/v1/skills?harness=claude&host=worker")).body).toEqual({ skills: [remote] });
-      expect(forwards[0]).toEqual({ nodeSelector: "worker", method: "GET", path: "/v1/mesh/skills?harness=claude" });
+      expect((await get("/v1/skills?host=worker&name=remote-review")).body).toEqual({ skills: [remote] });
+      expect(forwards[0]).toEqual({ nodeSelector: "worker", method: "GET", path: "/v1/mesh/skills?name=remote-review" });
+      expect((await get("/v1/skills?host=worker&name=other")).response.status).toBe(503); // A peer must return the named registration.
+      expect((await get("/v1/skills?host=worker&name=..")).response.status).toBe(400);
+      expect(forwards).toHaveLength(2);
       make(".claude");
       const body = { name: "review", brief: "Review this release.", currentDirectory: "/code" };
-      expect((await get("/v1/skills")).body).toEqual({ skills: [shared,
-        { ...shared, path: "~/.claude/skills/review/SKILL.md", status: "shadowed" }] });
+      expect((await get("/v1/skills")).body).toEqual({ skills: [shared] });
+      expect((await get("/v1/skills?all=true")).body).toMatchObject({ skills: [shared, { name: "review", source: "unregistered" }] });
+      expect((await get("/v1/skills?name=missing")).response.status).toBe(404);
+      expect((await get("/v1/skills?name=remote-review&all=true")).response.status).toBe(400);
       expect((await run({ ...body, brief: "" })).response.status).toBe(400);
       expect((await get("/v1/skills?host=offline")).response.status).toBe(503);
       expect((await requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);

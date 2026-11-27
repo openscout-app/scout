@@ -319,7 +319,6 @@ import { locateHarnessSession } from "./session-locator.js";
 import { findHarnessEntry } from "./harness-catalog.js";
 import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
-import { selectSkill } from "./skills.js";
 import { targetSkills } from "./broker-skills.js";
 import { createBrokerHttpRouter, type BrokerHttpRouterDeps } from "./broker-http-router.js";
 import { BrokerRequestReceipts, ProvenRequestFailure, RetryablePreEffectFailure } from "./broker-request-receipts.js";
@@ -3937,8 +3936,7 @@ const forwardOwnerRequest: NonNullable<BrokerHttpRouterDeps["forwardRouteAliasRe
 
 const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
   workPageAvailable: () => projection.statusSnapshot().state === "ready",
-  resolveTaskSkill: async (selector, harness, host) => selectSkill(
-    await targetSkills(homedir(), harness, host, forwardOwnerRequest), selector),
+  resolveTaskSkill: async (name, host) => (await targetSkills(homedir(), { name, host }, forwardOwnerRequest))[0]!,
   taskAsk: payload => taskService.ask(payload),
   recoverTaskFollowup: (actor, requestId) => taskService.recoverFollowup(actor, requestId),
   withTaskImage: (message, image, commit) => {

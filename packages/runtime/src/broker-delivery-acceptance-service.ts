@@ -110,7 +110,7 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
   /** Binds the task image and a decision card's pictures in one transaction. */
   withTaskImages?: <T>(message: MessageRecord, uploads: Array<{ id: string; upload: NonNullable<ScoutDeliverRequest["image"]> }>, commit: () => Promise<T>) => Promise<T>;
   recoverTaskFollowup?: (actor: string, requestId: string) => Promise<ScoutDeliverResponse | null>;
-  resolveTaskSkill?: (selector: string, harness: string | undefined, host: string | undefined) => Promise<ScoutSkillSummary>;
+  resolveTaskSkill?: (name: string, host?: string) => Promise<ScoutSkillSummary>;
   taskAsk?: (payload: ScoutDeliverRequest) => Promise<ScoutDeliverResponse | null>;
   checkTaskPeer?: (payload: ScoutDeliverRequest) => void;
   nodeId: string;
@@ -455,15 +455,14 @@ export class BrokerDeliveryAcceptanceService {
     }
     const skillSelector = payload.task?.skill;
     let selectedSkill: ScoutSkillSummary | undefined, skillNodeId: string | undefined;
-    const lookupSkill = (harness?: string, host?: string) => {
+    const lookupSkill = (host?: string) => {
       if (!skillSelector || !this.options.resolveTaskSkill) throw new Error("This broker cannot resolve skills; update the runtime.");
-      return this.options.resolveTaskSkill(skillSelector, harness, host);
+      return this.options.resolveTaskSkill(skillSelector, host);
     };
     // This catalog read precedes any launch, wake or delivery. A missing skill
     // is safe to fix and retry with the same request id, not an unknown outcome.
-    const preflightHarness = payload.target?.kind === "project_path" ? payload.execution?.harness : undefined;
     if (skillSelector && payload.target?.kind === "project_path") {
-      try { selectedSkill = await lookupSkill(preflightHarness, projectHostRouteTarget(payload)); }
+      try { selectedSkill = await lookupSkill(projectHostRouteTarget(payload)); }
       catch (error) { throw new RetryablePreEffectFailure(error instanceof Error ? error.message : String(error), { cause: error }); }
     }
     const requestId = payload.requestId?.trim() || payload.id?.trim() || this.options.createId("deliver");
@@ -1192,9 +1191,8 @@ export class BrokerDeliveryAcceptanceService {
         // can differ from its authority, while an exact session has its own node.
         skillNodeId = resolved.kind === "resolved" ? resolved.agent.authorityNodeId ?? endpoint?.nodeId : endpoint?.nodeId;
         if (!skillNodeId) throw new Error("Cannot locate the skill without a target machine. Specify a project or an exact session.");
-        const harness = shouldCreateCardlessProjectSession ? endpoint?.harness : execution?.harness ?? (endpoint?.nodeId === skillNodeId ? endpoint.harness : undefined);
-        if (!selectedSkill || !shouldCreateCardlessProjectSession || harness !== preflightHarness) {
-          selectedSkill = await lookupSkill(harness, skillNodeId === this.options.nodeId ? undefined : skillNodeId);
+        if (!selectedSkill || !shouldCreateCardlessProjectSession) {
+          selectedSkill = await lookupSkill(skillNodeId === this.options.nodeId ? undefined : skillNodeId);
         }
         const reference = { skill: selectedSkill.name, skillPath: selectedSkill.path };
         payload = { ...payload, messageMetadata: { ...payload.messageMetadata, ...reference }, invocationMetadata: { ...payload.invocationMetadata, ...reference } };

@@ -1765,23 +1765,23 @@ describe("two-verb acceptance", () => {
       snapshot: { ...testSnapshot({ endpoints: { [peer.id]: peer } }), nodes: {
         [peer.nodeId]: { id: peer.nodeId, capabilities: ["ask-reply/1"] } as never,
       } },
-      resolveTaskSkill: async (selector, harness, host) => {
-        calls.push([selector, harness, host]);
+      resolveTaskSkill: async (selector, host) => {
+        calls.push([selector, host]);
         if (selector !== "review") throw new Error("No skill named " + selector);
-        return { name: selector, description: "Review a file.", path: "~/.agents/skills/review/SKILL.md", status: "active" };
+        return { name: selector, description: "Review a file.", path: "/worker/review/SKILL.md", directory: "/worker/review", source: "linked" };
       },
     });
     const body = "Check the README.", target = { kind: "agent_id" as const, agentId: "agent-1" };
     const payload: ScoutDeliverRequest = { intent: "consult", requesterId: "operator", requestId: "named", task: { version: 1, skill: "review" }, target, body };
     expect(await h.service.accept(payload)).toMatchObject({ accepted: true });
-    expect(calls).toEqual([["review", "claude", "worker-host"]]);
-    expect(h.postedMessages[0]).toMatchObject({ body, metadata: { skill: "review", skillPath: "~/.agents/skills/review/SKILL.md" } });
+    expect(calls).toEqual([["review", "worker-host"]]);
+    expect(h.postedMessages[0]).toMatchObject({ body, metadata: { skill: "review", skillPath: "/worker/review/SKILL.md" } });
     expect(h.acceptedInvocations[0]?.targetNodeId).toBe("worker-host");
-    expect(h.acceptedInvocations[0]?.task).toContain('"~/.agents/skills/review/SKILL.md"');
+    expect(h.acceptedInvocations[0]?.task).toContain('"/worker/review/SKILL.md"');
     expect(h.acceptedInvocations[0]?.task).toEndWith(body);
     await expect(h.service.accept({ ...payload, requestId: "missing", target: { kind: "project_path", projectPath: "/worker", host: "far" },
       execution: { harness: "codex" }, task: { version: 1, skill: "absent" } })).rejects.toThrow("No skill named absent");
-    expect(calls[1]).toEqual(["absent", "codex", "far"]);
+    expect(calls[1]).toEqual(["absent", "far"]);
     expect(h.cardlessProjectSessionCalls).toHaveLength(0);
     expect(h.acceptedInvocations).toHaveLength(1);
   });

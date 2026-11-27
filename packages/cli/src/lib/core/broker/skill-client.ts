@@ -6,9 +6,10 @@ import type { ScoutAskReceipt } from "./ask-types.ts";
 export function skillClient(url: string) {
   const socketPath = resolveBrokerSocketPathForBaseUrl(url);
   return {
-    list: (harness?: string, host?: string) => {
+    list: ({ all, host, name }: { all?: boolean; host?: string; name?: string } = {}) => {
       const query = new URLSearchParams();
-      if (harness !== undefined) query.set("harness", harness);
+      if (all) query.set("all", "true");
+      if (name !== undefined) query.set("name", name);
       if (host !== undefined) query.set("host", host);
       return requestScoutBrokerJson<{ skills: ScoutSkillSummary[] }>(url,
         scoutBrokerPaths.v1.skills + (query.size ? "?" + query : ""), { socketPath });

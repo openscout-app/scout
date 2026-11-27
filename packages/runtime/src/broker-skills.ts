@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { isSkillFolderName } from "@openscout/protocol";
 import type {
   ScoutDeliverAcceptedResponse, ScoutDeliverHttpRequest, ScoutSkillRunRequest, ScoutSkillRunResult,
 } from "@openscout/protocol";
 import { resolveHost, resolveWebPort } from "./local-config.js";
-import { listSkills, skillRunInput, skillHarness, SkillLookupError } from "./skills.js";
+import { listSkills, registeredSkill, skillRunInput, SkillLookupError } from "./skills.js";
 
 const text = z.string().trim().min(1);
 export const skillRunSchema = z.object({
@@ -23,30 +25,39 @@ export const skillRunSchema = z.object({
 // crosses the authenticated broker connection. A null response denotes self.
 type ForwardCatalog = (input: { nodeSelector: string; method: "GET"; path: string }) => Promise<{ status: number; body: unknown } | null>;
 const wireCatalog = z.object({ skills: z.array(z.object({
-  name: text, description: text, status: z.enum(["active", "shadowed", "ambiguous"]), path: z.string().regex(/^~\/\.(?:agents|claude|codex|cursor)\/skills\/[^/]+\/SKILL\.md$/),
+  name: text, description: text, source: z.enum(["personal", "linked", "unregistered"]),
+  path: text.refine(isAbsolute), directory: text.refine(isAbsolute),
 })) });
-export async function targetSkills(home: string, harnessName?: string, host?: string, forward?: ForwardCatalog) {
-  const harness = skillHarness(harnessName);
+export async function targetSkills(home: string, query: { name?: string; all?: boolean; host?: string }, forward?: ForwardCatalog) {
+  const { name, all, host } = query;
+  if (name !== undefined && !isSkillFolderName(name)) throw new SkillLookupError(400, "invalid_skill_name", "Use a registered skill folder name, not a path.");
+  if (name !== undefined && all) throw new Error("Only registered skills can be referenced by name.");
   if (host !== undefined) {
     if (!host.trim()) throw new Error("Specify a host.");
     if (!forward) throw new SkillLookupError(503, "skill_catalog_unavailable", "No broker connection to the target host.");
-    const query = harness ? "?" + new URLSearchParams({ harness }) : "";
-    const remote = await forward({ nodeSelector: host, method: "GET", path: "/v1/mesh/skills" + query });
+    const params = new URLSearchParams();
+    if (name !== undefined) params.set("name", name);
+    if (all) params.set("all", "true");
+    const remote = await forward({ nodeSelector: host, method: "GET", path: "/v1/mesh/skills" + (params.size ? "?" + params : "") });
     if (remote) {
       const catalog = wireCatalog.safeParse(remote.body);
-      if (remote.status !== 200 || !catalog.success) {
+      if (remote.status === 404 && name !== undefined && (remote.body as { error?: string } | null)?.error === "skill_not_found") {
+        throw new SkillLookupError(404, "skill_not_found", `No skill named ${name} is registered on ${host}.`);
+      }
+      if (remote.status !== 200 || !catalog.success || (!all && catalog.data.skills.some(s => s.source === "unregistered"))
+        || (name !== undefined && (catalog.data.skills.length !== 1 || catalog.data.skills[0]?.name !== name))) {
         throw new SkillLookupError(503, "skill_catalog_unavailable",
           `Cannot read skills on ${host} (HTTP ${remote.status}). Check the host, its broker version and the mesh control grant.`);
       }
       return catalog.data.skills;
     }
   }
-  return listSkills(home, harness);
+  return name === undefined ? listSkills(home, all) : [await registeredSkill(home, name)];
 }
 
 // This is the same native task field as ask --skill, not a second execution path.
-export function skillAsk(input: ScoutSkillRunRequest, home: string): ScoutDeliverHttpRequest {
-  const { selector, target } = skillRunInput(input, home);
+export function skillAsk(input: ScoutSkillRunRequest): ScoutDeliverHttpRequest {
+  const { name, target } = skillRunInput(input);
   const metadata = {
     replyMode: "notify",
     ...(input.replyToSessionId && { replyToSessionId: input.replyToSessionId }),
@@ -54,7 +65,7 @@ export function skillAsk(input: ScoutSkillRunRequest, home: string): ScoutDelive
   };
   return {
     requestId: input.requestId ?? `ask-${randomUUID()}`,
-    intent: "task_ask", task: { version: 1, skill: selector }, body: input.brief,
+    intent: "task_ask", task: { version: 1, skill: name }, body: input.brief,
     caller: {
       actorId: input.senderId ?? "operator",
       currentDirectory: input.currentDirectory,

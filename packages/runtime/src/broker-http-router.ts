@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { listSkills, SkillLookupError } from "./skills.js";
+import { SkillLookupError } from "./skills.js";
 import { skillAsk, skillRunSchema, skillRunResult, targetSkills } from "./broker-skills.js";
 import { HostLaunchDeferred } from "./host-launch-admission.js";
 import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
@@ -3789,10 +3789,11 @@ export function createBrokerHttpRouter(
       json(response, 403, { error: "forbidden" }); return;
     }
     if (!runSkill) {
-      const harness = url.searchParams.get("harness") ?? undefined;
       try {
-        const skills = listPeerSkills ? await listSkills(skillHome(), harness)
-          : await targetSkills(skillHome(), harness, url.searchParams.get("host") ?? undefined, forwardRouteAliasRequest);
+        const rawAll = url.searchParams.get("all");
+        if (rawAll !== null && rawAll !== "true" && rawAll !== "false") throw new Error("all must be true or false.");
+        const skills = await targetSkills(skillHome(), { name: url.searchParams.get("name") ?? undefined, all: rawAll === "true",
+          host: listPeerSkills ? undefined : url.searchParams.get("host") ?? undefined }, forwardRouteAliasRequest);
         json(response, 200, { skills });
       } catch (error) {
         if (error instanceof SkillLookupError) json(response, error.status, { error: error.code, detail: error.message });
@@ -3807,7 +3808,7 @@ export function createBrokerHttpRouter(
     try {
       const skillInput = runSkill ? await readValidatedRequestBody(request, skillRunSchema) : undefined;
       const payload = skillInput
-        ? brokerDeliverRequestSchema.parse(skillAsk(skillInput, skillHome()))
+        ? brokerDeliverRequestSchema.parse(skillAsk(skillInput))
         : await readValidatedRequestBody(request, brokerDeliverRequestSchema);
       // Naming a skill on /v1/deliver must not widen access to the host's catalog.
       if (payload.task?.skill && !mayReadSkills(false)) { json(response, 403, { error: "forbidden" }); return; }
@@ -3884,7 +3885,7 @@ export function createBrokerHttpRouter(
       }
       const lookup = error instanceof Error && error.cause instanceof SkillLookupError ? error.cause : error;
       if (lookup instanceof SkillLookupError) {
-        json(response, lookup.status, { error: lookup.code, detail: lookup.message, candidates: lookup.candidates });
+        json(response, lookup.status, { error: lookup.code, detail: lookup.message });
       } else badRequest(response, error);
     }
     return;

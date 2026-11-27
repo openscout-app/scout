@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { parseArgs } from "node:util";
-import { listSkills, prepareSkill } from "@openscout/runtime/skills";
+import { registeredSkill, skillBrief, skillRunInput } from "@openscout/runtime/skills";
 import { defaultScoutContextDirectory, type ScoutCommandContext } from "../context.ts";
 import { claimedSessionHarness, claimedSessionId } from "../../lib/core/broker/sender.js";
 import { resolveHumanAskSenderName, resolveScoutBrokerUrl, resolveScoutSenderId } from "../../lib/core/broker/service.ts";
@@ -10,32 +10,32 @@ import { renderScoutAskReceipt } from "./ask.ts";
 import { addSkill, editSkill, forkSkill, localSkillPath, newSkill } from "../skills-files.ts";
 
 const broker = (ctx: ScoutCommandContext) => skillClient(ctx.env.OPENSCOUT_BROKER_URL || resolveScoutBrokerUrl());
-const listUsage = "scout skills [--harness <harness>] [--on <host>]\nscout skills new|edit|path|fork <name>\nscout skills add <path|git-url>";
+const listUsage = "scout skills [--all] [--on <host>]\nscout skills new|edit|path|fork <name>\nscout skills add <path|git-url> [--as <name>]";
 const runUsage = 'scout run <skill> "brief" [--project <path>] [--harness <harness>] [--on <host>] [--request-id <id>] [--dry-run]';
 const targetOptions = { harness: { type: "string" }, on: { type: "string" } } as const;
 
 export async function runSkillsCommand(ctx: ScoutCommandContext, args: string[]) {
   if (args[0] && ["new", "edit", "path", "fork", "add"].includes(args[0])) {
-    const [action, name] = args;
-    const usage = `scout skills ${action} ${action === "add" ? "<path|git-url>" : "<name>"}`;
-    if (name === "--help" || name === "-h") return ctx.output.writeText(usage);
-    if (args.length !== 2 || !name?.trim() || name.startsWith("-")) throw new Error(`Usage: ${usage}`);
+    const action = args[0];
+    const usage = `scout skills ${action} ${action === "add" ? "<path|git-url> [--as <name>]" : "<name>"}`;
+    const { positionals, values } = parseArgs({ args: args.slice(1), allowPositionals: true,
+      options: { help: { type: "boolean", short: "h" }, ...(action === "add" ? { as: { type: "string" as const } } : {}) } });
+    if (values.help) return ctx.output.writeText(usage);
+    const [name] = positionals;
+    if (positionals.length !== 1 || !name?.trim()) throw new Error(`Usage: ${usage}`);
     const home = ctx.env.HOME || homedir();
-    if (action === "new" || action === "fork" || action === "add") {
-      const result = action === "new" ? await newSkill(home, name) : action === "fork" ? await forkSkill(home, name)
-        : await addSkill(home, name, ctx.cwd, ctx.env);
-      if (ctx.output.mode !== "json") for (const link of result.links) ctx.stderr(`${link.harness}: ${link.status}  ${link.path}`);
-      return ctx.output.writeValue(result, s => s.path);
-    }
-    const path = await localSkillPath(home, name);
+    const path = action === "new" ? await newSkill(home, name)
+      : action === "fork" ? await forkSkill(home, name)
+      : action === "add" ? await addSkill(home, name, ctx.cwd, ctx.env, typeof values.as === "string" ? values.as : undefined)
+      : await localSkillPath(home, name, action === "edit");
     if (action === "edit") await editSkill(path, ctx.env.EDITOR || ctx.env.VISUAL || (ctx.isTty ? "vi" : ""), ctx.env);
     return ctx.output.writeValue({ path }, s => s.path);
   }
-  const { values } = parseArgs({ args, options: { ...targetOptions, help: { type: "boolean", short: "h" } } });
+  const { values } = parseArgs({ args, options: { all: { type: "boolean" }, on: { type: "string" }, help: { type: "boolean", short: "h" } } });
   if (values.help) return ctx.output.writeText(listUsage);
-  const { skills } = await broker(ctx).list(values.harness, values.on);
-  ctx.output.writeValue(skills, items => items.map(s => `${s.name}  ${s.description}  [${s.status}] ${s.path}`).join("\n")
-    || "No skills found for the selected harness.");
+  const { skills } = await broker(ctx).list({ all: values.all, host: values.on });
+  ctx.output.writeValue(skills, items => items.map(s => `${s.name}  ${s.description}  [${s.source}] ${s.path}`).join("\n")
+    || "No Scout skills registered. Use scout skills new <name> or scout skills add <path>.");
 }
 
 export async function runNamedSkillCommand(ctx: ScoutCommandContext, args: string[]) {
@@ -54,8 +54,10 @@ export async function runNamedSkillCommand(ctx: ScoutCommandContext, args: strin
   const input = { name, brief, target, currentDirectory: cwd };
   if (values["dry-run"]) {
     const home = ctx.env.HOME || homedir();
-    const skills = target.host ? (await broker(ctx).list(target.harness, target.host)).skills : await listSkills(home, target.harness);
-    const run = prepareSkill(skills, input, home);
+    const route = skillRunInput(input);
+    const skill = target.host ? (await broker(ctx).list({ name, host: target.host })).skills[0] : await registeredSkill(home, name);
+    if (!skill || skill.name !== name || skill.source === "unregistered") throw new Error(`No registered skill named ${name}.`);
+    const run = { skill, target: route.target, body: skillBrief(skill, brief) };
     return ctx.output.writeValue(run, () => [
       "Dry run. No ask sent.", `Project: ${run.target.project}`, ...(target.host ? [`Host: ${target.host}`] : []),
       ...(run.target.harness ? [`Harness: ${run.target.harness}`] : []), "", run.body,

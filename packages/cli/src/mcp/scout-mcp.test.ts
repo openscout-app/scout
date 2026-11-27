@@ -787,7 +787,7 @@ describe("createScoutMcpServer", () => {
       const path = new URL(req.url).pathname;
       calls.push(`${req.method} ${path}`);
       if (path === "/v1/skills") return Response.json({ skills: [{ name: "review", description: "Review a file.",
-        status: "active", path: "~/.agents/skills/review/SKILL.md" }] });
+        source: "personal", directory: "/worker/.scout/skills/review", path: "/worker/.scout/skills/review/SKILL.md" }] });
       const input = await req.json();
       expect(input).toMatchObject({ name: "review", brief: "Review a.ts", target: { project: "~/code", host: "worker" },
         requestId: "review-1", replyToSessionId: "019ddb1b-test-thread", senderId: "operator.main", source: "scout-mcp" });
@@ -800,7 +800,7 @@ describe("createScoutMcpServer", () => {
         resolveBrokerUrl: () => broker.url.origin, resolveSenderId: async () => "operator.main",
       }, { OPENSCOUT_MCP_PROFILE: "work", OPENSCOUT_WEB_PUBLIC_ORIGIN: "http://different-client.test" });
       expect((await client.callTool({ name: "skills_list", arguments: {} })).structuredContent)
-        .toMatchObject({ skills: [{ name: "review", status: "active", path: "~/.agents/skills/review/SKILL.md" }] });
+        .toMatchObject({ skills: [{ name: "review", source: "personal", directory: "/worker/.scout/skills/review", path: "/worker/.scout/skills/review/SKILL.md" }] });
       const result = await client.callTool({ name: "skills_run", arguments: {
         name: "review", brief: "Review a.ts", projectPath: "~/code", on: "worker", requestId: "review-1",
       } });
