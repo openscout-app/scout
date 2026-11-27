@@ -121,11 +121,21 @@ export type AgentNotification = AgentNotificationView & {
 };
 
 export type AgentNotificationCollapse = {
-  /** Lock-screen title: Scout and the originating host, when known. */
+  /**
+   * Lock-screen title: Scout and the originating host, when known. An
+   * approval names the agent and what it wants: "Antigravity wants to push".
+   */
   title: string;
-  /** Empty so the OS does not add a second emphasized line. */
+  /**
+   * Empty so the OS does not add a second emphasized line. An approval
+   * carries its project and host here.
+   */
   subtitle: string;
-  /** Regular-weight body: sender and project, followed by the request and context. */
+  /**
+   * Regular-weight body: sender and project, followed by the request and
+   * context. An approval carries the command (or files, or tool target) and
+   * why.
+   */
   body: string;
   /** Row headline in the app: what is wanted, without who. */
   headline: string;
@@ -168,7 +178,7 @@ function editTarget(files: AgentNotificationFileChange[]): string {
 /** What is wanted, as a verb phrase that follows the agent's name. Empty for `text`. */
 function wantPhrase(n: AgentNotification): string {
   switch (n.view) {
-    case "turn.approve.command": return "wants to run a command";
+    case "turn.approve.command": return commandWant(n.command);
     case "turn.approve.edit": return `wants to edit ${editTarget(n.files)}`;
     case "turn.approve.tool": return `wants to use ${n.tool}`;
     case "turn.question.choice": return "asks you to choose";
@@ -324,10 +334,82 @@ export function notificationSenderLabel(sender: AgentNotification["sender"]): st
   return tail ? `${name} ${tail}` : name;
 }
 
+/**
+ * The verb phrase for a command, named for what it does when the command is
+ * one the operator decides on often: a push, a pull request, a merge. A
+ * command chained after `cd` or `&&` is read segment by segment.
+ */
+function commandWant(command: string): string {
+  const segments = command.split(/&&|\|\||;|\n/u).map((part) => part.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/u, ""));
+  for (const segment of segments) {
+    if (/^git\s+push\b/u.test(segment)) return "wants to push";
+    if (/^gh\s+pr\s+create\b/u.test(segment)) return "wants to open a pull request";
+    if (/^gh\s+pr\s+merge\b/u.test(segment)) return "wants to merge a pull request";
+    if (/^git\s+commit\b/u.test(segment)) return "wants to commit";
+    if (/^git\s+reset\s+--hard\b/u.test(segment)) return "wants to reset the branch";
+    if (/^rm\s/u.test(segment)) return "wants to delete files";
+  }
+  return "wants to run a command";
+}
+
+const COMMAND_LINE_MAX = 200;
+
+/**
+ * A command as one line for the lock screen: its lines joined with "; " (what
+ * a newline means to the shell), whitespace collapsed, nothing stripped from
+ * it (markdown rules would eat its quotes and stars), and cut at a word with
+ * an ellipsis.
+ */
+function commandLine(command: string): string {
+  const line = command.replace(/\r/gu, "").split("\n").map((part) => part.replace(/\s+/gu, " ").trim()).filter(Boolean).join("; ");
+  if (line.length <= COMMAND_LINE_MAX) return line;
+  const head = line.slice(0, COMMAND_LINE_MAX - 1);
+  const space = head.lastIndexOf(" ");
+  return `${(space >= COMMAND_LINE_MAX * 0.6 ? head.slice(0, space) : head).replace(/[\s;&|]+$/u, "")}…`;
+}
+
+function isApprovalView(n: AgentNotification): n is AgentNotification & { view: "turn.approve.command" | "turn.approve.edit" | "turn.approve.tool" } {
+  return n.view === "turn.approve.command" || n.view === "turn.approve.edit" || n.view === "turn.approve.tool";
+}
+
+/** What an approval asks for, then why, each on its own line, never repeated. */
+function approvalBody(n: AgentNotification & { view: "turn.approve.command" | "turn.approve.edit" | "turn.approve.tool" }): string {
+  let what = "";
+  let why = "";
+  switch (n.view) {
+    case "turn.approve.command":
+      what = commandLine(n.command);
+      why = notificationPlainLine(n.why);
+      break;
+    case "turn.approve.edit":
+      what = notificationPlainLine(n.files.map((f) => f.path).join(", "));
+      why = notificationPlainLine(n.summary);
+      break;
+    case "turn.approve.tool":
+      what = notificationPlainLine(n.summary);
+      why = notificationPlainLine(n.why);
+      break;
+  }
+  return [what, why].filter((line, index, all) => line && all.indexOf(line) === index).join("\n");
+}
+
 export function collapseAgentNotification(n: AgentNotification): AgentNotificationCollapse {
   const host = n.host?.trim().replace(/\s+/gu, " ");
   const project = n.project?.trim().replace(/\s+/gu, " ");
   const sender = notificationSenderLabel(n.sender).replace(/\s+/gu, " ");
+  if (isApprovalView(n)) {
+    // A decision the operator makes from the lock screen: who wants what as
+    // the title, where as the subtitle, and the command itself as the body.
+    return {
+      title: `${sender} ${wantPhrase(n)}`,
+      subtitle: [project, host].filter(Boolean).join(" · "),
+      body: approvalBody(n),
+      headline: agentNotificationHeadline(n),
+      category: agentNotificationCategory(n),
+      threadId: `scout.agent.${n.sender.agentId ?? n.sender.name}`,
+      level: n.level,
+    };
+  }
   const source = [sender, project].filter(Boolean).join(" · ");
   const preview = agentNotificationPreview(n);
   return {
