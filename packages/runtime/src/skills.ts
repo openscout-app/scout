@@ -1,9 +1,9 @@
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { normalizeScoutLaunchableHarness, type ScoutSkillRunRequest, type ScoutSkillSummary } from "@openscout/protocol";
+import { isSkillFolderName, normalizeScoutLaunchableHarness, type ScoutSkillRunRequest, type ScoutSkillSummary } from "@openscout/protocol";
 
-const harnessRoots: Record<string, string> = { claude: ".claude", codex: ".codex", cursor: ".cursor" };
+export const harnessRoots: Record<string, string> = { claude: ".claude", codex: ".codex", cursor: ".cursor" };
 const headerLimit = 64 * 1024;
 
 export function skillHarness(value?: string) {
@@ -15,7 +15,7 @@ export function skillHarness(value?: string) {
 
 // Parse only a bounded frontmatter prefix. Neither a listing nor an ask
 // imports the skill body or sends its scripts to the caller.
-async function readMetadata(file: string): Promise<Pick<ScoutSkillSummary, "name" | "description"> | undefined> {
+export async function readSkillDescription(file: string): Promise<string | undefined> {
   const info = await stat(file);
   if (!info.isFile() || info.size === 0) return;
   const handle = await open(file, "r");
@@ -28,8 +28,8 @@ async function readMetadata(file: string): Promise<Pick<ScoutSkillSummary, "name
     try { header = parseYaml(match[1]!, { logLevel: "silent" }); } catch { return; }
     if (!header || typeof header !== "object" || !("name" in header) || !("description" in header)
       || typeof header.name !== "string" || typeof header.description !== "string") return;
-    const name = header.name.trim(), description = header.description.trim();
-    if (name && description && !/[\/\r\n]/.test(name)) return { name, description };
+    // Frontmatter remains portable; the enclosing folder is the stable reference.
+    if (header.name.trim()) return header.description.trim().replace(/\s+/g, " ") || undefined;
   } finally { await handle.close(); }
 }
 
@@ -41,24 +41,32 @@ export async function listSkills(home: string, harnessName?: string): Promise<Sc
   const harness = skillHarness(harnessName);
   const specific = harness && harnessRoots[harness];
   const roots = harness ? (specific ? [".agents", specific] : [".agents"]) : [".agents", ...Object.values(harnessRoots)];
-  const files = new Map<string, ScoutSkillSummary>();
+  const folders = new Map<string, Omit<ScoutSkillSummary, "status">>();
   for (const root of roots) {
     const dir = join(home, root, "skills");
     let entries;
     try { entries = await readdir(dir, { withFileTypes: true }); }
     catch (error) { if (absent(error)) continue; throw error; }
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.name.startsWith(".") || !(entry.isDirectory() || entry.isSymbolicLink())) continue;
-      const path = join(dir, entry.name, "SKILL.md");
+      if (!isSkillFolderName(entry.name) || !(entry.isDirectory() || entry.isSymbolicLink())) continue;
       try {
-        const physical = await realpath(path);
-        if (files.has(physical)) continue;
-        const metadata = await readMetadata(physical);
-        if (metadata) files.set(physical, { ...metadata, path: `~/${root}/skills/${entry.name}/SKILL.md` });
+        const physical = await realpath(join(dir, entry.name));
+        if (folders.has(physical)) continue;
+        const description = await readSkillDescription(join(physical, "SKILL.md"));
+        if (description) folders.set(physical, { name: entry.name, description, path: `~/${root}/skills/${entry.name}/SKILL.md` });
       } catch (error) { if (!absent(error)) throw error; }
     }
   }
-  return [...files.values()].sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+  const groups = new Map<string, Omit<ScoutSkillSummary, "status">[]>();
+  for (const s of folders.values()) {
+    const group = groups.get(s.name);
+    if (group) group.push(s); else groups.set(s.name, [s]);
+  }
+  return [...groups.values()].flatMap(copies => {
+    const personal = copies.find(s => s.path.startsWith("~/.agents/skills/"));
+    return copies.map((s): ScoutSkillSummary => ({ ...s, status: personal
+      ? (s === personal ? "active" : "shadowed") : copies.length === 1 ? "active" : "ambiguous" }));
+  }).sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
 }
 
 export class SkillLookupError extends Error {
@@ -66,24 +74,39 @@ export class SkillLookupError extends Error {
 }
 
 /** Resolve only from the catalog. Never open an arbitrary caller-supplied path. */
-export function prepareSkill(skills: ScoutSkillSummary[], input: ScoutSkillRunRequest, home: string) {
+export function selectSkill(skills: ScoutSkillSummary[], selector: string): ScoutSkillSummary {
+  const exact = skills.find(s => s.path === selector);
+  if (exact) return exact;
+  const copies = skills.filter(s => s.name === selector);
+  if (!copies.length) throw new SkillLookupError(404, "skill_not_found", `No skill named ${selector} in the selected roots. List them with scout skills.`);
+  const active = copies.filter(s => s.status === "active");
+  if (active.length === 1) return active[0]!;
+  const paths = copies.map(s => s.path);
+  throw new SkillLookupError(409, "ambiguous_skill", `More than one skill named ${selector}. Use one of these paths:\n${paths.join("\n")}`, paths);
+}
+
+export function skillBrief(skill: ScoutSkillSummary, brief: string): string {
+  return `Use the ${skill.name} skill. Read ${JSON.stringify(skill.path)} on this machine, with its bundled resources. If it is unavailable, ask rather than substituting another skill.\n\nBrief:\n${brief}`;
+}
+
+/** Normalize the route and selector without consulting a catalog. Receipt retries
+ * must not depend on a file that may have been renamed after acceptance. */
+export function skillRunInput(input: ScoutSkillRunRequest, home: string) {
   const { name, brief } = input;
   if (!brief?.trim()) throw new Error("A skill needs a brief.");
   const target = input.target ?? {};
   const harness = skillHarness(target.harness);
   const selector = !target.host && name.startsWith(home + "/") ? "~/" + name.slice(home.length + 1) : name;
-  const matches = skills.filter(s => s.name === selector || s.path === selector);
-  if (matches.length === 0) throw new SkillLookupError(404, "skill_not_found", `No skill named ${name} in the selected roots. List them with scout skills.`);
-  if (matches.length > 1) {
-    const paths = matches.map(s => s.path);
-    throw new SkillLookupError(409, "ambiguous_skill", `More than one skill named ${name}. Use one of these paths:\n${paths.join("\n")}`, paths);
-  }
   if (target.host && !target.project) throw new Error(`Specify --project for host ${target.host}.`);
   if (!target.host && !isAbsolute(target.project ?? "") && !isAbsolute(input.currentDirectory ?? "")) {
     throw new Error("Specify an absolute target project or the caller's absolute currentDirectory.");
   }
   const project = target.host || isAbsolute(target.project ?? "") ? target.project! : resolve(input.currentDirectory!, target.project ?? ".");
-  const skill = matches[0]!;
-  const body = `Use the ${skill.name} skill. Read ${JSON.stringify(skill.path)} on this machine, with its bundled resources. If it is unavailable, ask rather than substituting another skill.\n\nBrief:\n${brief}`;
-  return { skill, target: { ...target, harness, project }, body };
+  return { selector, target: { ...target, harness, project } };
+}
+
+export function prepareSkill(skills: ScoutSkillSummary[], input: ScoutSkillRunRequest, home: string) {
+  const { selector, target } = skillRunInput(input, home);
+  const skill = selectSkill(skills, selector);
+  return { skill, target, body: skillBrief(skill, input.brief) };
 }

@@ -4693,6 +4693,7 @@ export function createScoutMcpServer(options: {
         cancel: z.boolean().optional(), fyi: z.boolean().optional(), notify: z.boolean().optional(),
         defaultAction: z.string().min(1).optional(), options: z.array(z.string().min(1)).optional(),
         permission: z.boolean().optional(), because: z.string().min(1).optional(), window: z.number().positive().optional(),
+        skill: z.string().min(1).optional().describe("Skill folder name on the worker's machine. New agent asks only."),
         callback: z.string().min(1).optional().describe("Local path of a JavaScript module file, e.g. open-page.js holding: export default ({ result, scout }) => scout.open(result.files[0]); The file is read here and sent with the task. The runtime on the worker's host runs it when the task ends, in a sandbox with no file, process or network access and no imports. Its default export gets { result, scout }: result has taskId, state (completed, failed or cancelled), reply (the final reply text) and files (existing files the reply names by absolute path); scout.open(path) opens an html, pdf or image file; console.log writes to the runtime log. It is not part of the worker's prompt. New tasks only."),
         image: z.string().optional().describe("Local image path."),
         decision: z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional().describe("Operator tasks only: a decision card, as a local JSON file path (our shape or a decision-pack pack.json, path#id picks one decision) or the card itself. Exactly one pick, 2-3 options keyed A, B, C with label, result and undo (easy or hard), door one_way or two_way, a defaultKey only on a two-way door. Option pictures are local paths ({ path, callouts }); they upload as attachments. Labels become options. See docs/agent/decision-cards.agent.md."),
@@ -4789,7 +4790,7 @@ export function createScoutMcpServer(options: {
     };
   const handleAsk = async ({
       requestId,
-      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window, callback, image, decision,
+      operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, skill, window, callback, image, decision,
       completion,
       relation,
       to,
@@ -4900,7 +4901,7 @@ export function createScoutMcpServer(options: {
       const taskDecision = decision === undefined ? undefined : typeof decision === "string"
         ? await readDecisionFile(resolve(resolvedCurrentDirectory, decision))
         : await prepareDecision(decision, resolvedCurrentDirectory);
-      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, window,
+      const task = { version: 1 as const, operator, ref, continue: predecessor, cancel, fyi, notify, defaultAction, options: answerOptions, permission, because, skill, window,
         ...(taskCallback ? { callback: taskCallback } : {}), ...(taskDecision ? { decision: taskDecision.decision } : {}) };
       validateTaskAsk(task, { to: targetTo, channel, capability: !predecessor && Boolean(targetProjectPath || profile),
         execution: Boolean(effectiveRuntime || harness || model || reasoningEffort || placement || effectiveOnHost || projectPath || profile || shouldResolveRole || workspace === "new_worktree" || session === "new"), relation: Boolean(relation),
@@ -5137,7 +5138,7 @@ export function createScoutMcpServer(options: {
   server.registerTool("ask", askConfig, handleAsk);
 
   server.registerTool("skills_list", {
-    title: "List Scout skills", description: "List SKILL.md names, descriptions and paths on the selected host.",
+    title: "List Scout skills", description: "List skill folder names, one-line descriptions, active status and paths on the selected host.",
     inputSchema: z.object({ harness: askConfig.inputSchema.shape.harness, on: askConfig.inputSchema.shape.on }).strict(), annotations: { readOnlyHint: true, destructiveHint: false },
   }, async ({ harness, on }) => {
     const { skills } = await skillClient(deps.resolveBrokerUrl()).list(harness, on);

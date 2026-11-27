@@ -45,6 +45,7 @@ export function renderAskCommandHelp(): string {
     "  --default-action <X>  proceed with X at the answer deadline unless answered",
     "  --window <seconds>    default-action answer window (default 1800 seconds)",
     "  --permission          blocking operator permission request (needs --operator)",
+    "  --skill <name>        ask the agent to use this skill on its machine",
     "  --because <reason>    why you ask; rides on any ask (operator: the blocked reason)",
     "  --notify              operator FYI: push. Agent task: tell the operator when it is done",
     "                        (Ready, with Continue or Hold). Use it only for work the operator",

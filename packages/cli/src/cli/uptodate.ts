@@ -14,7 +14,7 @@ export function shouldEnsureBrokerUptodateForCommand(command: string | null, arg
   // download commands only restart the web server, never the broker. Signing
   // in only talks to the download host.
   if (command === "web" || command === "auth") return false;
-  // Catalog reads and previews never dispatch an ask.
+  // Editing personal files, reading catalogs and previewing a run never dispatch work.
   if (command === "skills" || (command === "run" && args.includes("--dry-run"))) return false;
   // Settings are local files the CLI reads and writes; the broker is not involved.
   if (command === "settings") return false;

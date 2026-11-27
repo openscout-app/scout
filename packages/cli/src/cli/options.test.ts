@@ -182,6 +182,11 @@ describe("parseSendCommandOptions", () => {
 });
 
 describe("parseAskCommandOptions", () => {
+  test("a named skill stays separate from the brief and route", () => {
+    expect(parseAskCommandOptions(["--to", "worker", "--skill=review", "Check notes."], "/repo"))
+      .toMatchObject({ task: { skill: "review" }, message: "Check notes." });
+    expect(() => parseAskCommandOptions(["--to", "worker", "--skill", "a", "--skill", "b", "Check."], "/repo")).toThrow("only once");
+  });
   test("--on keeps the project path as typed, for the other machine to resolve", () => {
     const parsed = parseAskCommandOptions(
       ["--on", "archie", "--project", "~/renders/arsenal-x", "--runtime", "codex/gpt-6-astra/high", "build the arsenal"],

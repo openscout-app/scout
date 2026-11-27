@@ -1,3 +1,4 @@
+import { skillBrief } from "./skills.js";
 import { manualReviewDeliveryGuard } from "./manual-review-dispatch.js";
 import { sessionSenderMetadata } from "./broker-session-sender-profile.js";
 import { isOperatorDeliveryTarget } from "./broker-conversation-helpers.js";
@@ -27,6 +28,7 @@ import {
   type ScoutDeliverRequest,
   type ScoutDeliverResponse,
   type ScoutDeliverRouteKind,
+  type ScoutSkillSummary,
   type ScoutDispatchEnvelope,
   type ScoutDispatchRecord,
   type ScoutDispatchUnavailableTarget,
@@ -108,6 +110,7 @@ export type BrokerDeliveryAcceptanceServiceOptions = SessionInputDeliveryOptions
   /** Binds the task image and a decision card's pictures in one transaction. */
   withTaskImages?: <T>(message: MessageRecord, uploads: Array<{ id: string; upload: NonNullable<ScoutDeliverRequest["image"]> }>, commit: () => Promise<T>) => Promise<T>;
   recoverTaskFollowup?: (actor: string, requestId: string) => Promise<ScoutDeliverResponse | null>;
+  resolveTaskSkill?: (selector: string, harness: string | undefined, host: string | undefined) => Promise<ScoutSkillSummary>;
   taskAsk?: (payload: ScoutDeliverRequest) => Promise<ScoutDeliverResponse | null>;
   checkTaskPeer?: (payload: ScoutDeliverRequest) => void;
   nodeId: string;
@@ -450,6 +453,19 @@ export class BrokerDeliveryAcceptanceService {
     if (payload.sessionDelivery && payload.target?.kind === "session_id" && payload.target.harness === "codex") {
       payload = { ...payload, target: { ...payload.target, forkIfLive: true } };
     }
+    const skillSelector = payload.task?.skill;
+    let selectedSkill: ScoutSkillSummary | undefined, skillNodeId: string | undefined;
+    const lookupSkill = (harness?: string, host?: string) => {
+      if (!skillSelector || !this.options.resolveTaskSkill) throw new Error("This broker cannot resolve skills; update the runtime.");
+      return this.options.resolveTaskSkill(skillSelector, harness, host);
+    };
+    // This catalog read precedes any launch, wake or delivery. A missing skill
+    // is safe to fix and retry with the same request id, not an unknown outcome.
+    const preflightHarness = payload.target?.kind === "project_path" ? payload.execution?.harness : undefined;
+    if (skillSelector && payload.target?.kind === "project_path") {
+      try { selectedSkill = await lookupSkill(preflightHarness, projectHostRouteTarget(payload)); }
+      catch (error) { throw new RetryablePreEffectFailure(error instanceof Error ? error.message : String(error), { cause: error }); }
+    }
     const requestId = payload.requestId?.trim() || payload.id?.trim() || this.options.createId("deliver");
     const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt)
       ? payload.createdAt
@@ -686,6 +702,9 @@ export class BrokerDeliveryAcceptanceService {
       ? await this.options.resolveBrokerMessageRef(this.options.runtimeSnapshot(), messageRef)
       : null;
     throwIfAborted(options.signal);
+    if (payload.task?.skill && (replyTarget || isLocalScoutProductTarget || this.options.isOperatorDeliveryTarget(payload))) {
+      throw new Error("--skill requires an agent or project target.");
+    }
     if (replyTarget) {
       await this.options.ensureBrokerActorForDelivery(requesterId);
       await this.options.ensureBrokerActorForDelivery(replyTarget.actorId);
@@ -1090,7 +1109,7 @@ export class BrokerDeliveryAcceptanceService {
           projectPath: projectPath!,
           // Explicitly name this node to prevent the project resolver from
           // falling back to a mesh peer if the local directory disappears.
-          ...(reviewGuard ? { host: this.options.nodeId } : projectHost ? { host: projectHost } : {}),
+          ...(reviewGuard || (skillSelector && !projectHost) ? { host: this.options.nodeId } : projectHost ? { host: projectHost } : {}),
           execution,
           projectAgent: payload.projectAgent,
           ...(askWorkspaceFromPayload(payload) === "new_worktree" ? { workspace: "new_worktree" as const } : {}),
@@ -1168,6 +1187,18 @@ export class BrokerDeliveryAcceptanceService {
       const peer = endpoint && snapshot.nodes[endpoint.nodeId];
       if (endpoint && endpoint.nodeId !== this.options.nodeId && !peer?.capabilities?.includes(SCOUT_TASKS_CAPABILITY))
         throw new Error(`target runtime requires ${SCOUT_TASKS_CAPABILITY}; upgrade it before dispatch`);
+      if (skillSelector) {
+        // Match the node that plans the invocation. A card's preferred endpoint
+        // can differ from its authority, while an exact session has its own node.
+        skillNodeId = resolved.kind === "resolved" ? resolved.agent.authorityNodeId ?? endpoint?.nodeId : endpoint?.nodeId;
+        if (!skillNodeId) throw new Error("Cannot locate the skill without a target machine. Specify a project or an exact session.");
+        const harness = shouldCreateCardlessProjectSession ? endpoint?.harness : execution?.harness ?? (endpoint?.nodeId === skillNodeId ? endpoint.harness : undefined);
+        if (!selectedSkill || !shouldCreateCardlessProjectSession || harness !== preflightHarness) {
+          selectedSkill = await lookupSkill(harness, skillNodeId === this.options.nodeId ? undefined : skillNodeId);
+        }
+        const reference = { skill: selectedSkill.name, skillPath: selectedSkill.path };
+        payload = { ...payload, messageMetadata: { ...payload.messageMetadata, ...reference }, invocationMetadata: { ...payload.invocationMetadata, ...reference } };
+      }
     }
     const aliasResolution = resolved.aliasResolution;
     const sessionFork = resolved.kind === "resolved_session" ? resolved.sessionFork : undefined;
@@ -1405,9 +1436,9 @@ export class BrokerDeliveryAcceptanceService {
       requesterId,
       requesterNodeId,
       targetAgentId: target.actorId,
-      ...((completion || payload.relation) ? { targetNodeId: this.options.nodeId } : {}),
+      ...((completion || payload.relation) ? { targetNodeId: this.options.nodeId } : skillNodeId ? { targetNodeId: skillNodeId } : {}),
       action: payload.intent === "tell" ? "wake" : "consult",
-      task: payload.body.trim(),
+      task: selectedSkill ? skillBrief(selectedSkill, payload.body) : payload.body.trim(),
       ...(collaborationRecordId ? { collaborationRecordId } : {}),
       conversationId: conversation.id,
       messageId,
@@ -1525,6 +1556,7 @@ async function firstMatchingMessage(records: Record<string, MessageRecord>, pred
 export function validateTaskDelivery(payload: ScoutDeliverRequest, operatorActorId = "operator"): void {
   const task = payload.task;
   if (!task) return;
+  if (task.skill && payload.sessionDelivery) throw new Error("--skill requires a new agent ask, not direct session input");
   if (payload.image) {
     const upload = postWithAttachmentsSchema.shape.attachments.element.parse(payload.image);
     if (!imageMimes.has(upload.mediaType)) throw new Error("task evidence must be an image");

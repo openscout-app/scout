@@ -3804,9 +3804,7 @@ export function createBrokerHttpRouter(
     try {
       const skillInput = runSkill ? await readValidatedRequestBody(request, skillRunSchema) : undefined;
       const payload = skillInput
-        ? brokerDeliverRequestSchema.parse(skillAsk(
-            await targetSkills(skillHome(), skillInput.target?.harness, skillInput.target?.host, forwardRouteAliasRequest),
-            skillInput, skillHome()))
+        ? brokerDeliverRequestSchema.parse(skillAsk(skillInput, skillHome()))
         : await readValidatedRequestBody(request, brokerDeliverRequestSchema);
       const snapshot = currentAttributionSnapshot();
       const parentFlight = payload.relation?.parentFlightId ? snapshot.flights?.[payload.relation.parentFlightId] : undefined;
@@ -3879,8 +3877,9 @@ export function createBrokerHttpRouter(
       if (signal.aborted || response.destroyed || response.writableEnded) {
         return;
       }
-      if (runSkill && error instanceof SkillLookupError) {
-        json(response, error.status, { error: error.code, detail: error.message, candidates: error.candidates });
+      const lookup = error instanceof Error && error.cause instanceof SkillLookupError ? error.cause : error;
+      if (lookup instanceof SkillLookupError) {
+        json(response, lookup.status, { error: lookup.code, detail: lookup.message, candidates: lookup.candidates });
       } else badRequest(response, error);
     }
     return;

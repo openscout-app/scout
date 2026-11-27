@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
-  ScoutDeliverAcceptedResponse, ScoutDeliverHttpRequest, ScoutSkillRunRequest, ScoutSkillRunResult, ScoutSkillSummary,
+  ScoutDeliverAcceptedResponse, ScoutDeliverHttpRequest, ScoutSkillRunRequest, ScoutSkillRunResult,
 } from "@openscout/protocol";
 import { resolveHost, resolveWebPort } from "./local-config.js";
-import { listSkills, prepareSkill, skillHarness, SkillLookupError } from "./skills.js";
+import { listSkills, skillRunInput, skillHarness, SkillLookupError } from "./skills.js";
 
 const text = z.string().trim().min(1);
 export const skillRunSchema = z.object({
@@ -23,7 +23,7 @@ export const skillRunSchema = z.object({
 // crosses the authenticated broker connection. A null response denotes self.
 type ForwardCatalog = (input: { nodeSelector: string; method: "GET"; path: string }) => Promise<{ status: number; body: unknown } | null>;
 const wireCatalog = z.object({ skills: z.array(z.object({
-  name: text, description: text, path: z.string().regex(/^~\/\.(?:agents|claude|codex|cursor)\/skills\/[^/]+\/SKILL\.md$/),
+  name: text, description: text, status: z.enum(["active", "shadowed", "ambiguous"]), path: z.string().regex(/^~\/\.(?:agents|claude|codex|cursor)\/skills\/[^/]+\/SKILL\.md$/),
 })) });
 export async function targetSkills(home: string, harnessName?: string, host?: string, forward?: ForwardCatalog) {
   const harness = skillHarness(harnessName);
@@ -44,19 +44,17 @@ export async function targetSkills(home: string, harnessName?: string, host?: st
   return listSkills(home, harness);
 }
 
-// The ordinary ask is bound to the file in the target machine's catalog.
-export function skillAsk(skills: ScoutSkillSummary[], input: ScoutSkillRunRequest, home: string): ScoutDeliverHttpRequest {
-  const { skill, target, body } = prepareSkill(skills, input, home);
+// This is the same native task field as ask --skill, not a second execution path.
+export function skillAsk(input: ScoutSkillRunRequest, home: string): ScoutDeliverHttpRequest {
+  const { selector, target } = skillRunInput(input, home);
   const metadata = {
-    skill: skill.name,
-    skillPath: skill.path,
     replyMode: "notify",
     ...(input.replyToSessionId && { replyToSessionId: input.replyToSessionId }),
     ...(input.replyToSessionHarness && { replyToSessionHarness: input.replyToSessionHarness }),
   };
   return {
     requestId: input.requestId ?? `ask-${randomUUID()}`,
-    intent: "task_ask", task: { version: 1 }, body,
+    intent: "task_ask", task: { version: 1, skill: selector }, body: input.brief,
     caller: {
       actorId: input.senderId ?? "operator",
       currentDirectory: input.currentDirectory,

@@ -121,6 +121,7 @@ function testSnapshot(input: {
 
 function createHarness(input: {
   resolution?: InvocationResolution;
+  resolveTaskSkill?: BrokerDeliveryAcceptanceServiceOptions["resolveTaskSkill"];
   resolveDeliveryTarget?: BrokerDeliveryAcceptanceServiceOptions["resolveBrokerDeliveryTargetWithImplicitProjectAgent"];
   conversation?: ConversationDefinition;
   conversationForRequest?: (
@@ -183,6 +184,7 @@ function createHarness(input: {
   let idCounter = 0;
 
   const service = new BrokerDeliveryAcceptanceService({
+    resolveTaskSkill: input.resolveTaskSkill,
     requestReceipts: input.requestReceipts,
     submitSessionInput: input.submitSessionInput,
     upsertSessionInputActor: async actor => { snapshot.actors[actor.id] = actor; },
@@ -1754,6 +1756,34 @@ describe("two-verb acceptance", () => {
       target: { kind: "agent_label", label: "operator" }, task: { version: 1, operator: true, fyi: true, notify } });
     expect(h.acceptedInvocations).toHaveLength(0); expect(h.recordedWorkItemPayloads).toHaveLength(0);
     expect(h.postedMessages[0]?.metadata?.notificationPolicy).toEqual({ requested: notify, priority: "interrupting" });
+  });
+  test("ask with a skill reads the destination catalog, keeps the human brief and sends the reference to the worker", async () => {
+    const peer = testEndpoint({ nodeId: "worker-host", harness: "claude" });
+    const calls: unknown[] = [];
+    const h = createHarness({
+      resolution: { kind: "resolved", agent: testAgent({ authorityNodeId: peer.nodeId }) },
+      snapshot: { ...testSnapshot({ endpoints: { [peer.id]: peer } }), nodes: {
+        [peer.nodeId]: { id: peer.nodeId, capabilities: ["ask-reply/1"] } as never,
+      } },
+      resolveTaskSkill: async (selector, harness, host) => {
+        calls.push([selector, harness, host]);
+        if (selector !== "review") throw new Error("No skill named " + selector);
+        return { name: selector, description: "Review a file.", path: "~/.agents/skills/review/SKILL.md", status: "active" };
+      },
+    });
+    const body = "Check the README.", target = { kind: "agent_id" as const, agentId: "agent-1" };
+    const payload: ScoutDeliverRequest = { intent: "consult", requesterId: "operator", requestId: "named", task: { version: 1, skill: "review" }, target, body };
+    expect(await h.service.accept(payload)).toMatchObject({ accepted: true });
+    expect(calls).toEqual([["review", "claude", "worker-host"]]);
+    expect(h.postedMessages[0]).toMatchObject({ body, metadata: { skill: "review", skillPath: "~/.agents/skills/review/SKILL.md" } });
+    expect(h.acceptedInvocations[0]?.targetNodeId).toBe("worker-host");
+    expect(h.acceptedInvocations[0]?.task).toContain('"~/.agents/skills/review/SKILL.md"');
+    expect(h.acceptedInvocations[0]?.task).toEndWith(body);
+    await expect(h.service.accept({ ...payload, requestId: "missing", target: { kind: "project_path", projectPath: "/worker", host: "far" },
+      execution: { harness: "codex" }, task: { version: 1, skill: "absent" } })).rejects.toThrow("No skill named absent");
+    expect(calls[1]).toEqual(["absent", "codex", "far"]);
+    expect(h.cardlessProjectSessionCalls).toHaveLength(0);
+    expect(h.acceptedInvocations).toHaveLength(1);
   });
   test("an agent task carries the asker's reason to the worker without --operator", async () => {
     const h = createHarness();

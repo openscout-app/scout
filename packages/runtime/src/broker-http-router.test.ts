@@ -325,7 +325,7 @@ describe("createBrokerHttpRouter", () => {
     process.env.HOME = dir;
     const local = { transport: "loopback" as const };
     const calls: unknown[] = [], forwards: unknown[] = [];
-    const remote = { name: "remote-review", description: "Review there.", path: "~/.claude/skills/remote-review/SKILL.md" };
+    const remote = { name: "remote-review", description: "Review there.", status: "active", path: "~/.claude/skills/remote-review/SKILL.md" };
     const h = createHarness({
       requestReceipts: new BrokerRequestReceipts(join(dir, "receipts")),
       forwardRouteAliasRequest: async input => { forwards.push(input); return input.nodeSelector === "worker"
@@ -345,7 +345,7 @@ describe("createBrokerHttpRouter", () => {
       make(".agents");
       const get = (path: string) => requestRouter(h, "GET", path, { transportContext: local });
       const run = (body: unknown) => requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local });
-      const shared = { name: "review", description: "Review here.", path: "~/.agents/skills/review/SKILL.md" };
+      const shared = { name: "review", description: "Review here.", status: "active", path: "~/.agents/skills/review/SKILL.md" };
       expect((await get("/v1/skills")).body).toEqual({ skills: [shared] });
       expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "control" } } })).body).toEqual({ skills: [shared] });
       expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
@@ -354,10 +354,10 @@ describe("createBrokerHttpRouter", () => {
       expect(forwards[0]).toEqual({ nodeSelector: "worker", method: "GET", path: "/v1/mesh/skills?harness=claude" });
       make(".claude");
       const body = { name: "review", brief: "Review this release.", currentDirectory: "/code" };
-      expect((await run(body)).body).toMatchObject({ error: "ambiguous_skill", candidates: [shared.path, "~/.claude/skills/review/SKILL.md"] });
+      expect((await get("/v1/skills")).body).toEqual({ skills: [shared,
+        { ...shared, path: "~/.claude/skills/review/SKILL.md", status: "shadowed" }] });
       expect((await run({ ...body, brief: "" })).response.status).toBe(400);
-      expect((await run({ ...body, target: { host: "offline", project: "/project" } })).response.status).toBe(503);
-      expect((await run({ ...body, target: { host: "worker", project: "/project" } })).response.status).toBe(404);
+      expect((await get("/v1/skills?host=offline")).response.status).toBe(503);
       expect((await requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);
       expect(calls).toHaveLength(0);
       const task = { ...body, name: remote.name, requestId: "desk-1", target: { host: "worker", harness: "claude", project: "/reports" } };
@@ -367,9 +367,9 @@ describe("createBrokerHttpRouter", () => {
         followUrl: expect.stringMatching(/\/work\/work-test$/) });
       expect((await run(task)).body).toEqual(first.body);
       expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({ task: { version: 1 }, intent: "consult", caller: { actorId: "local-unverified" },
-        target: { kind: "project_path", projectPath: "/reports", host: "worker" }, body: expect.stringContaining('Brief:\nReview this release.'),
-        invocationMetadata: { skill: remote.name, skillPath: remote.path, attribution: { source: "unverified" } } });
+      expect(calls[0]).toMatchObject({ task: { version: 1, skill: remote.name }, intent: "consult", caller: { actorId: "local-unverified" },
+        target: { kind: "project_path", projectPath: "/reports", host: "worker" }, body: "Review this release.",
+        invocationMetadata: { attribution: { source: "unverified" } } });
     } finally {
       if (original === undefined) delete process.env.HOME; else process.env.HOME = original;
       rmSync(dir, { recursive: true, force: true });
