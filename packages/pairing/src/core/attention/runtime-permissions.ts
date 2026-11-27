@@ -24,7 +24,7 @@ import {
 } from "../broker/service.ts";
 import type { MobileInboxItem } from "../pairing/runtime/bridge/router.ts";
 
-export type MobilePermissionDecision = "approve" | "deny";
+export type MobilePermissionDecision = "approve" | "always" | "deny";
 
 export type MobilePermissionDecideResult =
   | { ok: true }
@@ -155,6 +155,7 @@ function harnessFor(snapshot: ScoutBrokerSnapshot, permission: OpenPermission): 
 function mobileDecisions(decisions: string[]): MobilePermissionDecision[] {
   return [
     ...(decisions.includes("once") ? ["approve" as const] : []),
+    ...(decisions.includes("project") ? ["always" as const] : []),
     ...(decisions.includes("deny") ? ["deny" as const] : []),
   ];
 }
@@ -236,7 +237,8 @@ function decideFailure(error: unknown): MobilePermissionDecideResult {
 
 /**
  * The operator's decision on a runtime permission request. Approve sends
- * allow-once; deny sends deny. Expected refusals are values, not errors.
+ * allow-once; always sends project-scoped allow-always; deny sends deny.
+ * Expected refusals are values, not errors.
  */
 export async function decideMobilePermission(
   input: { requestId: string; decision: MobilePermissionDecision },
@@ -247,7 +249,10 @@ export async function decideMobilePermission(
   const record = broker.snapshot.collaborationRecords?.[input.requestId];
   const permission = record ? openPermission(record) : null;
   if (!permission) return failure("ended");
-  const decision = input.decision === "approve" ? "once" : "deny";
+  const decision =
+    input.decision === "approve" ? "once"
+    : input.decision === "always" ? "project"
+    : "deny";
   try {
     await (deps.decide ?? decideScoutPermission)({
       requestId: input.requestId,
