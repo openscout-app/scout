@@ -3496,6 +3496,7 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
     return (endpoints.find((endpoint) => endpoint.preferred) ?? endpoints[0])?.harness ?? null;
   },
   warn: (message) => console.warn(message),
+  log: (message) => console.log(message),
 });
 
 const permissionService = new BrokerPermissionService({

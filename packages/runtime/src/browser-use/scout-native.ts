@@ -601,7 +601,7 @@ export function createScoutNativeBrowserAdapter(options: ScoutNativeBrowserOptio
           leaseId: lease?.leaseId,
           url: request.url,
           controlAvailable: false,
-          error: "Regular Chrome is open-only; use managed Chrome (scout-native), Scout Browser Companion (scout-companion), or computer_* tools.",
+          error: "Regular Chrome is open-only; use managed Chrome (scout-native), Scout Browser Companion (scout-companion), or scout_computer_* tools.",
           at,
         };
       }

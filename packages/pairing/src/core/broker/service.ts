@@ -4079,7 +4079,7 @@ export async function readScoutChatQuestionHistory(baseUrl: string, channelId: s
   return pages.flat();
 }
 
-export async function decideScoutPermission(input: { requestId: string; version: string; decision: "once" | "project" | "deny"; baseUrl?: string }): Promise<void> {
+export async function decideScoutPermission(input: { requestId: string; version: string; decision: "once" | "project" | "deny"; via?: "ios" | "mac-companion" | "web" | "cli"; baseUrl?: string }): Promise<void> {
   const { baseUrl: givenBaseUrl, ...body } = input;
   const baseUrl = givenBaseUrl ?? (await loadScoutBrokerContext())?.baseUrl;
   if (!baseUrl) throw new Error("Local broker is unavailable");
