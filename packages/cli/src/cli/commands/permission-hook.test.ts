@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { readAntigravitySessionRecords } from "@openscout/runtime";
 
-import { handleAntigravityPermissionHook, handleClaudePermissionHook } from "./permission-hook.ts";
+import { handleAntigravityPermissionHook, handleClaudePermissionHook, resolvePermissionHookBrokerUrl } from "./permission-hook.ts";
 
 const hook = JSON.stringify({
   hook_event_name: "PermissionRequest", session_id: "0f10496b", cwd: "/tmp/project", permission_mode: "default",
@@ -226,5 +226,28 @@ describe("scout permission-hook antigravity", () => {
     } finally {
       rmSync(recordsDirectory, { recursive: true, force: true });
     }
+  });
+});
+
+describe("permission hook broker URL", () => {
+  const local = { controlUrl: () => "http://127.0.0.1:43110", hostNames: () => new Set(["192.168.18.22", "arts-mini", "arts-mini.local"]) };
+
+  test("uses the local control URL when no broker URL is inherited", () => {
+    expect(resolvePermissionHookBrokerUrl({}, local)).toBe("http://127.0.0.1:43110");
+  });
+
+  test("replaces this machine's mesh URL with the local control URL", () => {
+    for (const inherited of ["https://192.168.18.22:43110", "https://arts-mini.local:43110", "http://0.0.0.0:43110"]) {
+      expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: inherited }, local), inherited).toBe("http://127.0.0.1:43110");
+    }
+  });
+
+  test("keeps another instance's port on loopback", () => {
+    expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: "https://192.168.18.22:24400" }, local)).toBe("http://127.0.0.1:24400");
+  });
+
+  test("keeps an explicit loopback URL and a URL for another host", () => {
+    expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: "http://127.0.0.1:24400" }, local)).toBe("http://127.0.0.1:24400");
+    expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: "https://192.168.18.40:43110" }, local)).toBe("https://192.168.18.40:43110");
   });
 });

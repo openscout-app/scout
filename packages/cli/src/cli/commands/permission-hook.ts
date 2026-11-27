@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { homedir, hostname, networkInterfaces } from "node:os";
 import { resolve } from "node:path";
 
 import { scoutBrokerPaths } from "@openscout/protocol";
@@ -11,7 +11,7 @@ import {
   writeAntigravitySessionRecord,
 } from "@openscout/runtime";
 
-import { resolveScoutBrokerUrl } from "../../lib/core/broker/service.ts";
+import { resolveScoutBrokerControlUrl } from "@openscout/runtime/daemon";
 import type { ScoutCommandContext } from "../context.ts";
 
 /**
@@ -352,8 +352,50 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
   write(antigravityReplyFor(event));
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+
+function thisHostNames(): Set<string> {
+  const names = new Set<string>();
+  const name = hostname().toLowerCase();
+  names.add(name);
+  names.add(name.endsWith(".local") ? name.slice(0, -".local".length) : `${name}.local`);
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) names.add(entry.address.toLowerCase());
+  }
+  return names;
+}
+
+/**
+ * The broker a permission hook talks to. The hook always runs beside its
+ * harness on this machine, so it uses the local control URL. A session can
+ * inherit `OPENSCOUT_BROKER_URL` set to this machine's mesh address
+ * (`https://<lan-ip>:43110`); that listener's certificate is self-signed, so a
+ * plain fetch fails and the hook falls back to "ask". The mesh URL is kept
+ * only when it names another host.
+ */
+export function resolvePermissionHookBrokerUrl(
+  env: Record<string, string | undefined> = process.env,
+  local: { controlUrl?: () => string; hostNames?: () => Set<string> } = {},
+): string {
+  const controlUrl = (local.controlUrl ?? resolveScoutBrokerControlUrl)();
+  const explicit = env.OPENSCOUT_BROKER_URL?.trim();
+  if (!explicit) return controlUrl;
+  let url: URL;
+  try { url = new URL(explicit); } catch { return controlUrl; }
+  const host = url.hostname.toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return explicit;
+  const sameHost = host === "0.0.0.0" || (local.hostNames ?? thisHostNames)().has(host.replace(/^\[|\]$/g, ""));
+  if (!sameHost) return explicit;
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  let control: URL | null = null;
+  try { control = new URL(controlUrl); } catch { control = null; }
+  // Same machine: the control URL when it is the same broker, else that broker's loopback address.
+  if (control && control.port === port) return controlUrl;
+  return `http://127.0.0.1:${port}`;
+}
+
 async function postJson<T>(path: string, body: unknown, timeoutMs: number): Promise<T> {
-  const response = await fetch(new URL(path, resolveScoutBrokerUrl()), {
+  const response = await fetch(new URL(path, resolvePermissionHookBrokerUrl()), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
