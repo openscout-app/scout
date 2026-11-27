@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { assertValidCollaborationRecord, type FlightRecord, type InvocationRequest, type QuestionRecord } from "@openscout/protocol";
-import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type PermissionReattachment } from "./broker-permission-service.js";
+import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, permissionAnswerVia, type PermissionReattachment } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler, withManagedPermissionContext } from "./managed-permission.js";
 import { parseTmuxPermission, tmuxPermissionPrompt, waitForTmuxPermission } from "./tmux-permission.js";
 import { waitForReadyComposer } from "./local-agents.js";
@@ -568,5 +568,27 @@ describe("permission supervisor lifecycle", () => {
     expect(h.records.get("permission-1")?.metadata?.permissionActuation).toMatchObject({
       attribution: { actorId: "operator", rootActorId: "agent", source: "local-admin" },
     });
+  });
+
+  test("an operator decision records the surface that answered it", async () => {
+    const h = harness();
+    const waiting = h.service.wait(invocation, {
+      sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"],
+      isCurrent: async () => true, answer: async () => {},
+    });
+    await until(() => h.notifications.length === 1);
+    await h.service.decide("permission-1", "v", "once", undefined, { actorId: "operator", rootActorId: "operator", source: "local-admin" }, "ios");
+    await waiting;
+    expect(h.records.get("permission-1")?.metadata?.permissionActuation).toMatchObject({
+      via: "ios", attribution: { source: "local-admin" },
+    });
+  });
+
+  test("a surface name is accepted only from the known list, and never as the watcher", () => {
+    expect(permissionAnswerVia("mac-companion")).toBe("mac-companion");
+    expect(permissionAnswerVia("web")).toBe("web");
+    expect(permissionAnswerVia("watcher")).toBeUndefined();
+    expect(permissionAnswerVia("phone")).toBeUndefined();
+    expect(permissionAnswerVia(3)).toBeUndefined();
   });
 });

@@ -8,6 +8,7 @@ import {
 
 import {
   BrokerOperatorAttentionService,
+  permissionPushOutcome,
   type OperatorDeliveryIssueInput,
 } from "./broker-operator-attention-service.js";
 import type {
@@ -401,4 +402,28 @@ test("APNs enforces the durable FYI policy and interrupting override", async () 
   await h.service.sendOperatorSignalAlert(input); expect(h.alerts).toHaveLength(0);
   await h.service.sendOperatorSignalAlert({ ...input, signal: { ...input.signal, notificationPolicy: { requested: true, priority: "interrupting" } } });
   expect(h.alerts).toHaveLength(1); expect(h.alerts[0]).toMatchObject({ urgency: "interrupt", sound: "default" });
+
 });
+
+describe("permission push trace", () => {
+  test("each permission push leaves one line naming its request and outcome", async () => {
+    const harness = createHarness({ broadcastResult: result({ attemptedCount: 1, failedCount: 1, failures: [{ deviceId: "phone", tokenSuffix: "relay", status: 429, reason: "TooManyProviderTokenUpdates" }] }) });
+    await harness.service.sendPermissionRequestAlert({
+      requestId: "permission-9", text: "Bash command\n  git push", agentId: "session-a", requesterNodeId: "node-1", projectRoot: "/work/app",
+    });
+    expect(harness.warnings.find((line) => line.includes("permission push permission-9"))).toMatch(/failed: TooManyProviderTokenUpdates in \d+ms$/);
+  });
+
+  test("a push outcome reads as delivered, skipped with its reason, or failed with Apple's reason", () => {
+    expect(permissionPushOutcome(result({ attemptedCount: 1, deliveredCount: 1 }))).toBe("delivered to 1 of 1");
+    expect(permissionPushOutcome(result({}))).toBe("skipped: no phone registered for pushes");
+    expect(permissionPushOutcome(result({ configMissing: true }))).toBe("skipped: no push credentials");
+    expect(permissionPushOutcome(result({ rateLimited: true, rateLimitWindow: "minute", retryAfterSeconds: 30 }))).toBe("failed: relay rate-limited (minute), retry in 30s");
+    expect(permissionPushOutcome(result({ attemptedCount: 2, deliveredCount: 1, failures: [{ deviceId: "b", tokenSuffix: "x", status: 410, reason: "Unregistered" }] })))
+      .toBe("delivered to 1 of 2, failed: Unregistered");
+  });
+});
+
+function result(partial: Partial<MobilePushBroadcastResult>): MobilePushBroadcastResult {
+  return { attemptedCount: 0, deliveredCount: 0, skippedCount: 0, failedCount: 0, configMissing: false, failures: [], ...partial };
+}

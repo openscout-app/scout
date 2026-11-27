@@ -3,6 +3,15 @@ import { brokerAttributionFromMetadata } from "./broker-attribution.js";
 import type { ManagedPermissionPrompt, PermissionDecision } from "./managed-permission.js";
 import { PERMISSION_SUPERVISOR_ACTOR_ID, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
 
+/** The surface that answered a permission request: the phone, the Mac Companion, the web app, the CLI, or the watcher. */
+export const PERMISSION_ANSWER_VIAS = ["ios", "mac-companion", "web", "cli", "watcher"] as const;
+export type PermissionAnswerVia = typeof PERMISSION_ANSWER_VIAS[number];
+
+export function permissionAnswerVia(value: unknown): PermissionAnswerVia | undefined {
+  return typeof value === "string" && (PERMISSION_ANSWER_VIAS as readonly string[]).includes(value) && value !== "watcher"
+    ? value as PermissionAnswerVia : undefined;
+}
+
 export class PermissionDeliveryUnconfirmedError extends Error { readonly failureCause = "harness_error" as const; }
 /** Nothing can answer this request any more. Its record is settled. */
 export class PermissionRequestEndedError extends Error {
@@ -148,7 +157,7 @@ export class BrokerPermissionService {
     try { this.deps.audit?.({ requestId, prompt, verdict, delivered }); } catch { /* The record already carries the actuation. */ }
   }
 
-  async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict, operatorAttribution?: ScoutAttribution): Promise<void> {
+  async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict, operatorAttribution?: ScoutAttribution, via?: PermissionAnswerVia): Promise<void> {
     const opened = this.deps.read(id);
     if (!opened || opened.state !== "open") throw new PermissionRequestEndedError("Permission request is already settled.", false);
     // A restart loses the waiter. Rebind to the session, or settle the record.
@@ -178,6 +187,8 @@ export class BrokerPermissionService {
       // Mark actuation durably before keys. A failed send is ambiguous: never replay automatically.
       await this.deps.record({ ...record, updatedAt: Date.now(), metadata: { ...record.metadata, permissionActuation: {
         decision, at: Date.now(), status: "attempt", attribution,
+        // Which surface answered. `attribution.source` says how far the caller is trusted, not where it sat.
+        ...(automatic ? { via: "watcher" } : via ? { via } : {}),
         ...(automatic ? { initiatedBy: PERMISSION_SUPERVISOR_ACTOR_ID, reason: automatic.reason, grant: automatic.grant, risk: automatic.risk } : {}),
       } } });
       // An adopted prompt outlived its flight. The session itself is still waiting on it.

@@ -24,7 +24,7 @@ import { MeshPingError, type createMeshPing } from "./mesh-ping.js";
 import type { MeshDiagnostics } from "./mesh-diagnostics.js";
 import { TaskClosedError, isTaskReadyDecision, completionReply, type SessionNameListResult, type SessionNameSetRequest } from "@openscout/protocol";
 import { SessionNameTargetError, type SessionNameService } from "./session-names.js";
-import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, type BrokerPermissionService } from "./broker-permission-service.js";
+import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, permissionAnswerVia, type BrokerPermissionService } from "./broker-permission-service.js";
 import { DecisionAnswerError, type BrokerDecisionCardService } from "./broker-decision-cards.js";
 import { NativePermissionAskError, type NativePermissionAsk, type NativePermissionRequests } from "./native-permission.js";
 import { HarnessHooksError, type HarnessHooks } from "./harness-hooks.js";
@@ -804,13 +804,14 @@ export function createBrokerHttpRouter(
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
     if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
     try {
-      const body = await readRequestBody<{ requestId?: unknown; version?: unknown; decision?: unknown }>(request);
+      const body = await readRequestBody<{ requestId?: unknown; version?: unknown; decision?: unknown; via?: unknown }>(request);
       if (typeof body.requestId !== "string" || typeof body.version !== "string"
         || !["once", "project", "deny"].includes(String(body.decision))) throw new Error("requestId, version, and decision (once/project/deny) are required");
       if (!deps.permissionService) throw new Error("Permission decisions are unavailable");
       const attribution = brokerAttributionFor({ claimedActorId: "operator", context: request.transportContext,
         personActorIds: brokerPersonActorIds(currentAttributionSnapshot()), unverifiedPeer: url.pathname.startsWith("/v1/mesh/") });
-      await deps.permissionService.decide(body.requestId, body.version, body.decision as "once" | "project" | "deny", undefined, attribution);
+      await deps.permissionService.decide(body.requestId, body.version, body.decision as "once" | "project" | "deny", undefined, attribution,
+        permissionAnswerVia(body.via));
       json(response, 200, { ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

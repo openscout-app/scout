@@ -178,7 +178,7 @@ describe("decideMobilePermission", () => {
     );
 
     expect(result).toEqual({ ok: true });
-    expect(received).toEqual([{ requestId: "perm-1", version: "v-1", decision: sent }]);
+    expect(received).toEqual([{ requestId: "perm-1", version: "v-1", decision: sent, via: "ios" }]);
   });
 
   test.each([

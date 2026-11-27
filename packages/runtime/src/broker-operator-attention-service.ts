@@ -104,6 +104,8 @@ export type BrokerOperatorAttentionServiceOptions = {
   /** The agent's harness ("codex"), so a generated handle reads as it. */
   agentHarness?: (actorId: string) => string | null | undefined;
   warn?: (message: string) => void;
+  /** Ordinary trace lines, such as the outcome of each permission push. */
+  log?: (message: string) => void;
   now?: () => number;
 };
 
@@ -138,6 +140,7 @@ export class BrokerOperatorAttentionService {
 
   queuePermissionRequest(input: PermissionRequestInput): void {
     void this.sendPermissionRequestAlert(input).catch((error) => {
+      this.logPermissionPush(input.requestId, `failed: ${error instanceof Error ? error.message : String(error)}`);
       this.options.warn?.(
         `[openscout-runtime] failed to notify operator about permission request: ${
           error instanceof Error ? error.message : String(error)
@@ -194,6 +197,7 @@ export class BrokerOperatorAttentionService {
   }
 
   async sendPermissionRequestAlert(input: PermissionRequestInput): Promise<void> {
+    const startedAt = this.now();
     const notification = agentNotificationForPermissionRequest({
       requestId: input.requestId,
       text: input.text,
@@ -229,7 +233,13 @@ export class BrokerOperatorAttentionService {
       notification,
     });
 
+    this.logPermissionPush(input.requestId, `${permissionPushOutcome(result)} in ${this.now() - startedAt}ms`);
     this.warnForBroadcastResult(result);
+  }
+
+  /** One line per permission push, so a missing push can be traced to its request. */
+  private logPermissionPush(requestId: string, outcome: string): void {
+    (this.options.log ?? this.options.warn)?.(`[openscout-runtime] permission push ${requestId}: ${outcome}`);
   }
 
   async sendOperatorSignalAlert(input: OperatorSignalInput): Promise<void> {
@@ -414,4 +424,17 @@ export class BrokerOperatorAttentionService {
   private now(): number {
     return (this.options.now ?? Date.now)();
   }
+}
+
+/** What happened to one push, in words: delivered, skipped with its reason, or failed with Apple's reason. */
+export function permissionPushOutcome(result: MobilePushBroadcastResult): string {
+  const reasons = [...new Set(result.failures.map((failure) => failure.reason ?? (failure.status ? `HTTP ${failure.status}` : "unknown")))];
+  if (result.rateLimited) return `failed: relay rate-limited (${result.rateLimitWindow ?? "unknown"}), retry in ${result.retryAfterSeconds ?? "?"}s`;
+  if (result.attemptedCount === 0 && result.failures.length === 0) {
+    return result.configMissing ? "skipped: no push credentials" : "skipped: no phone registered for pushes";
+  }
+  if (result.deliveredCount > 0 && result.failures.length === 0) return `delivered to ${result.deliveredCount} of ${result.attemptedCount}`;
+  if (result.deliveredCount > 0) return `delivered to ${result.deliveredCount} of ${result.attemptedCount}, failed: ${reasons.join(", ")}`;
+  if (result.failures.length === 0) return result.configMissing ? "skipped: no push credentials" : `skipped on ${result.skippedCount} of ${result.attemptedCount}`;
+  return `failed: ${reasons.join(", ")}`;
 }
