@@ -326,8 +326,9 @@ shows and session materials (`ObservedSessionMaterials`,
   [`observed-surfaces.md`](./observed-surfaces.md).
 
 **Scout skill.** A personal folder or link under `~/.scout/skills` names a
-standard `SKILL.md`. Scout gives it to an agent only when an ask names it,
-not at session startup. Each run is an ordinary ask with a receipt. See
+standard `SKILL.md`. Only `scout-skills`, the catalog entry point, is visible
+to the harness at startup. It looks up a name or matches a request on demand.
+A tracked run is an ordinary ask with a receipt. See
 [Scout skills](./specs/skills.md).
 
 **Helper.** A helper is a session-bound assistant acting on behalf of a person

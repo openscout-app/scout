@@ -7,14 +7,21 @@ import { claimedSessionHarness, claimedSessionId } from "../../lib/core/broker/s
 import { resolveHumanAskSenderName, resolveScoutBrokerUrl, resolveScoutSenderId } from "../../lib/core/broker/service.ts";
 import { skillAskReceipt, skillClient } from "../../lib/core/broker/skill-client.ts";
 import { renderScoutAskReceipt } from "./ask.ts";
+import { installSkillEntry } from "../skills-entry.ts";
 import { addSkill, editSkill, forkSkill, localSkillPath, newSkill } from "../skills-files.ts";
 
 const broker = (ctx: ScoutCommandContext) => skillClient(ctx.env.OPENSCOUT_BROKER_URL || resolveScoutBrokerUrl());
-const listUsage = "scout skills [--all] [--on <host>]\nscout skills new|edit|path|fork <name>\nscout skills add <path|git-url> [--as <name>]";
+const listUsage = "scout skills [--json] [--all] [--on <host>]\nscout skills setup\nscout skills new|edit|path|fork <name>\nscout skills add <path|git-url> [--as <name>]";
 const runUsage = 'scout run <skill> "brief" [--project <path>] [--harness <harness>] [--on <host>] [--request-id <id>] [--dry-run]';
 const targetOptions = { harness: { type: "string" }, on: { type: "string" } } as const;
 
 export async function runSkillsCommand(ctx: ScoutCommandContext, args: string[]) {
+  if (args[0] === "setup") {
+    const { values } = parseArgs({ args: args.slice(1), options: { help: { type: "boolean", short: "h" } } });
+    if (values.help) return ctx.output.writeText("scout skills setup — install the scout-skills entry point for Claude, Codex and Cursor");
+    const result = await installSkillEntry(ctx.env.HOME || homedir());
+    return ctx.output.writeValue(result, ({ path, links }) => [path, ...links].join("\n"));
+  }
   if (args[0] && ["new", "edit", "path", "fork", "add"].includes(args[0])) {
     const action = args[0];
     const usage = `scout skills ${action} ${action === "add" ? "<path|git-url> [--as <name>]" : "<name>"}`;

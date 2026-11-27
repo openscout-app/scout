@@ -132,3 +132,35 @@ test("a linked Scout root cannot redirect creation into a harness", async () => 
     expect(await readdir(harness)).toEqual([]);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+
+test("setup installs one shared entry point and never registers or exposes individual skills", async () => {
+  const home = await mkdtemp(join(tmpdir(), "scout-entry-"));
+  const ctx = createScoutCommandContext({ env: { HOME: home }, stdout: () => {} });
+  const native = [".claude", ".codex", ".cursor"].map(root => join(home, root, "skills"));
+  try {
+    await runSkillsCommand(ctx, ["new", "notes"]);
+    await runSkillsCommand(ctx, ["setup"]);
+    await runSkillsCommand(ctx, ["setup"]); // Safe to repeat.
+    const entry = join(home, ".agents", "skills", "scout-skills", "SKILL.md");
+    const installed = await readFile(entry, "utf8");
+    expect(installed).toMatch(/^---\nname: scout-skills\n/);
+    expect(installed).toContain("scout skills --json");
+    for (const root of native) {
+      expect(await readdir(root)).toEqual(["scout-skills"]);
+      expect(await realpath(join(root, "scout-skills", "SKILL.md"))).toBe(await realpath(entry));
+    }
+    expect((await listSkills(home)).map(s => s.name)).toEqual(["notes"]);
+    await rm(join(native[0]!, "scout-skills"));
+    await mkdir(join(native[0]!, "scout-skills"));
+    await expect(runSkillsCommand(ctx, ["setup"])).rejects.toThrow("not replaced");
+    expect(await readdir(join(native[0]!, "scout-skills"))).toEqual([]);
+    await rm(native[0]!, { recursive: true });
+    await symlink(join(home, ".scout", "skills"), native[0]!);
+    await expect(runSkillsCommand(ctx, ["setup"])).rejects.toThrow("separate");
+    expect(await readdir(join(home, ".scout", "skills"))).toEqual(["notes"]);
+    await rm(native[0]!);
+    await writeFile(entry, installed + "\nMy instructions.\n");
+    await expect(runSkillsCommand(ctx, ["setup"])).rejects.toThrow("Compare it");
+    expect(await readFile(entry, "utf8")).toEndWith("My instructions.\n");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

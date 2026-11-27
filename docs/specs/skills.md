@@ -3,7 +3,8 @@
 A Scout skill is a folder you own, with a standard `SKILL.md` and optional
 scripts and assets. Its home is `~/.scout/skills/<name>/`, outside the
 harnesses' skill directories. Creating a skill does not make it available
-to every agent session. Someone must name it in an ask.
+to every agent session. The agent reads it only when someone asks for it by
+name or describes the work it does.
 
 ## Set up and personalize
 
@@ -29,9 +30,27 @@ changed. A later add cannot overwrite that copy.
 `scout skills` lists only registered names, their one-line descriptions and
 real paths on the selected machine. `--all` also shows unregistered skills from
 the user’s Agents, Claude, Codex and Cursor directories, read-only. Seeing one
-there does not register it. Scout never writes to these directories or links a
-Scout skill back into them. A skill already installed in a harness remains
-subject to that harness's own discovery.
+there does not register it. Scout does not link catalog entries into harnesses.
+An independently installed native skill remains subject to its harness's own discovery.
+
+## One entry point in the harness
+
+Run `scout skills setup` once per machine. It installs the short
+[`scout-skills` entry point](../../packages/cli/skills/scout-skills/SKILL.md)
+in `~/.agents/skills` and links that one folder into Claude, Codex and Cursor.
+It leaves the communications skill (`scout`) alone. Run setup again to restore
+missing links; it reports conflicts instead of overwriting personal files.
+To undo it, remove these three links and the `scout-skills` folder, not the catalog.
+
+When someone asks “what skills do I have?”, the entry point runs
+`scout skills --json` and lists names and descriptions without opening a skill.
+For “share this grab”, it checks the same live catalog, chooses by name or
+description, and reads only the matched file. If several match, it asks which;
+if none matches, it offers to create one. No reinstall is needed after a new
+registration, edit or fork. Work stays in the current session unless another
+agent or machine should own it or the user wants a tracked run. Harnesses
+choose skills by description, not by a keyword hook. If Claude interprets a
+request as a question about its native menu, invoke `/scout-skills` explicitly.
 
 ## Load one skill for one ask
 
