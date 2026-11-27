@@ -222,4 +222,110 @@ describe("permission supervisor", () => {
       toolInput: { CommandLine: "git push origin main" },
     }, grants("silent"))).toMatchObject({ act: "continue", risk: "publish" });
   });
+
+  describe("absolute paths inside the granted project", () => {
+    const parent = "/work";
+    const parentGrant = (level: "workspace" | "silent" = "workspace", extra: ContinuationPolicyFile["grants"] = []): ContinuationPolicyFile => ({
+      allowModel: false,
+      grants: [{ scope: "project", path: parent, level }, ...extra],
+    });
+    const run = (command: string, policy = parentGrant()) => decideNativeToolSupervisor({
+      projectRoot: parent, cwd: parent, toolName: "run_command", toolInput: { CommandLine: command },
+    }, policy);
+
+    test("continues builds and reads that address a worktree by absolute path", () => {
+      for (const command of [
+        "bun --cwd /work/app-hero/landing/site next build",
+        "bun run --cwd /work/app-hero landing:build",
+        "bun test /work/app-hero/packages/runtime",
+        "git -C /work/app-hero status --short",
+        "cat /work/app-hero/README.md",
+      ]) expect(run(command)).toMatchObject({ act: "continue", risk: "workspace", level: "workspace" });
+    });
+
+    test("still escalates what workspace never covered", () => {
+      for (const command of [
+        "git -C /work/app-hero push origin site/hero",
+        "bun --cwd /work/app-hero next dev --port 3099",
+        "bun /home/agent/scratch/capture.mjs",
+        "bun --cwd /work/../etc next build",
+        "bun --cwd /elsewhere next build",
+        "cat /work/app-hero/.env",
+        "cd /work/app-hero && bun run build",
+        "bun run --cwd /work/app-hero deploy",
+        "git -C /work/app-hero log --output=/tmp/out",
+      ]) expect(run(command).act).toBe("notify");
+    });
+
+    test("a narrower grant below the project keeps its say", () => {
+      const policy = parentGrant("workspace", [{ scope: "project", path: "/work/locked", level: "ask" }]);
+      expect(run("bun --cwd /work/locked next build", policy).act).toBe("notify");
+      expect(run("bun --cwd /work/open next build", policy).act).toBe("continue");
+    });
+
+    test("Codex and Claude pane commands get the same reading", () => {
+      const codexPrompt = { projectRoot: parent, text: codex("git -C /work/app-hero diff", parent), decisions: ["once", "deny"] as Array<"once" | "deny"> };
+      expect(decidePermissionSupervisor(codexPrompt, parentGrant())).toMatchObject({ act: "continue", risk: "workspace" });
+      const pane = { projectRoot: parent, text: claude("bun --cwd /work/app-hero next build"), decisions: ["once", "deny"] as Array<"once" | "deny"> };
+      expect(decidePermissionSupervisor(pane, parentGrant())).toMatchObject({ act: "continue", risk: "workspace" });
+      const panePush = { ...pane, text: claude("git -C /work/app-hero push origin main") };
+      expect(decidePermissionSupervisor(panePush, parentGrant()).act).toBe("notify");
+    });
+  });
+
+  describe("gh under a workspace grant", () => {
+    const run = (command: string, level: "workspace" | "silent" = "workspace") => decideNativeToolSupervisor({
+      projectRoot: project, cwd: project, toolName: "run_command", toolInput: { CommandLine: command },
+    }, grants(level));
+
+    test("continues reads and reversible pull request changes", () => {
+      for (const command of [
+        "gh pr list --repo arach/scout --state open --limit 50 --json number,title,headRefName",
+        "gh pr view 306 --repo arach/scout --json state",
+        "gh pr diff 306",
+        "gh pr checks 306",
+        "gh pr status",
+        "gh pr comment 2268 --repo arach/scout --body-file notes/comment.md",
+        "gh pr edit 2272 --repo arach/scout --add-label ready",
+        "gh pr ready 2268 --repo arach/scout",
+        "gh run list --limit 5",
+        "gh run view 123 --log",
+        "gh issue list",
+        "gh issue view 9",
+        "gh api repos/arach/scout/pulls",
+        "gh api repos/arach/scout/pulls --paginate --jq .total_count",
+        "gh api -X GET repos/arach/scout/actions/runs",
+        "gh api --method=GET repos/arach/scout/issues",
+      ]) expect(run(command), command).toMatchObject({ act: "continue", risk: "workspace" });
+    });
+
+    test("keeps publishing, CI triggers, and writes escalating", () => {
+      for (const command of [
+        "git push origin main",
+        "gh pr create --repo arach/scout --base main --fill",
+        "gh pr merge 306 --squash",
+        "gh pr close 306",
+        "gh workflow run ci.yml",
+        "gh run rerun 123",
+        "gh run cancel 123",
+        "gh api -X POST repos/arach/scout/issues",
+        "gh api --method=PATCH repos/arach/scout/pulls/1",
+        "gh api repos/arach/scout/issues -f title=x",
+        "gh api repos/arach/scout/issues --input body.json",
+        "gh api -H X-HTTP-Method-Override:DELETE repos/arach/scout/issues/1",
+        "gh api graphql",
+        "gh api repos/a/b repos/c/d",
+        "gh pr comment 1 --body-file /tmp/outside.md",
+        "gh repo delete arach/scout",
+        "gh secret list",
+      ]) expect(run(command).act, command).toBe("notify");
+    });
+
+    test("higher levels do not turn CI triggers or merges into answers", () => {
+      for (const command of ["gh workflow run ci.yml", "gh run rerun 123", "gh pr merge 306", "gh api -X DELETE repos/a/b"]) {
+        expect(run(command, "silent").act, command).toBe("notify");
+      }
+    });
+  });
 });
+

@@ -286,10 +286,44 @@ spoke last. The rules for how the next-move baton passes live in
 [`agents-and-collaboration.md`](./agents-and-collaboration.md).
 
 **Artifact.** An artifact is a durable published output, linked back to the work
-and execution that produced it where possible. Today text output maps cleanly to
-artifacts; richer file and data artifacts are typed but not yet fully persisted.
-It is the thing you keep after the flight lands — the result, distinct from the
-messages about it.
+and execution that produced it where possible. Flight text output maps to A2A
+text artifacts today; visual and document files that an agent intentionally puts
+in front of the operator are recorded as shows (`ScoutShow`), while turn-level
+and checkout-level visual evidence is projected through observed surfaces
+(`ScoutSurfaceInventory`). Keep the result distinct from the messages about it
+and from raw file-touch telemetry.
+
+**Show (`ScoutShow`).** A show is an immutable, runtime-owned snapshot of a
+screenshot, recording, or finished document that an agent intentionally
+publishes with `scout show` or MCP `show` (`POST /v1/shows`). Unlike a message
+attachment, a show is independent of any chat thread: the runtime validates the
+path, copies the bytes into its local `shows/` store, computes a SHA-256 digest,
+and links repeat publications of the same `[projectRoot, worktree, sourcePath]`
+tuple through `itemId` and `supersedes`. Clients list shows with `GET /v1/shows`
+(per project or host-wide), subscribe to `GET /v1/shows/events`, and read ranges
+from `GET /v1/shows/:id/bytes`.
+
+**Observed Surfaces (`ScoutSurfaceInventory`, `ScoutSurfaceItem`).** Observed
+surfaces (`scout.observed-surfaces/v1`) are the runtime's local read projection
+(`GET /v1/observed-surfaces` and `GET /v1/observed-surfaces/:id/bytes`) over
+screens, standalone HTML studies, and editorial documents across active projects
+on a host. Every item carries one of four provenance values
+(`ScoutSurfaceProvenance` — `shown`, `captured`, `written`, or `workspace`) and
+stacks 1-based `revision` numbers plus `supersedes` links per
+`(projectRoot, subject.key)`. Observed surfaces stay distinct from both durable
+shows and session materials (`ObservedSessionMaterials`,
+`GET /v1/observed-sessions/materials`):
+
+- `ScoutShow` (`POST /v1/shows`) is an **agent-authored durable copy** stored by
+  the runtime; it appears in `ScoutSurfaceInventory` under provenance `shown`.
+- `ObservedSessionMaterials` (`scout.session-materials/v1`) is a **per-session
+  file-touch audit** (`read` vs `modified` worktree paths and touch counts)
+  derived from one session's tool history, including ordinary source code.
+- `ScoutSurfaceInventory` (`scout.observed-surfaces/v1`) is a **visual and
+  editorial surface inventory** across projects and harnesses. Inline transcript
+  images stay in harness logs and workspace files stay in the checkout —
+  observed on demand, never imported into Scout records. See
+  [`observed-surfaces.md`](./observed-surfaces.md).
 
 **Helper.** A helper is a session-bound assistant acting on behalf of a person
 inside Scout's actor model. It is a Scout-local role, not a required interop

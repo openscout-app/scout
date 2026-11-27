@@ -11,6 +11,7 @@ const tool = `Bash command\n rm -rf dist\nThis command requires approval\nDo you
 const invocation = { id: "inv", targetAgentId: "agent", conversationId: "chn-test" } as InvocationRequest;
 function harness(options: { reattach?: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>; localInvocation?: boolean; supervisor?: () => PermissionSupervisorVerdict } = {}) {
   const records = new Map<string, QuestionRecord>();
+  const audits: Array<{ requestId: string; delivered: boolean; reason: string }> = [];
   const states: string[] = [];
   const notifications: QuestionRecord[] = [];
   const lookups: string[] = [];
@@ -20,11 +21,12 @@ function harness(options: { reattach?: (request: { sessionId: string; projectRoo
     read: id => records.get(id), requests: () => [...records.values()], flight: () => ({ id: "flt", state } as FlightRecord),
     localInvocation: () => options.localInvocation ?? true,
     supervisor: options.supervisor,
+    audit: ({ requestId, delivered, verdict }) => { audits.push({ requestId, delivered, reason: verdict.reason }); },
     reattach: async request => { lookups.push(request.sessionId); return options.reattach ? options.reattach(request) : { sessionOpen: false }; },
     transition: async (_, value) => { states.push(value); state = value; },
     notify: (_, record) => { notifications.push(record); }, sleep: async () => { await new Promise(resolve => setTimeout(resolve, 1)); },
   });
-  return { service, records, states, notifications, lookups, cancel: () => { state = "cancelled"; } };
+  return { service, records, states, notifications, lookups, audits, cancel: () => { state = "cancelled"; } };
 }
 /** An open request as the previous runtime left it: durable record, no waiter. */
 function orphan(h: ReturnType<typeof harness>, text: string, permissionRequest: Record<string, unknown> = {}, metadata: Record<string, unknown> = {}, id = "permission-0"): QuestionRecord {
@@ -411,6 +413,7 @@ describe("permission supervisor lifecycle", () => {
     expect(answers).toEqual(["once"]);
     expect(h.notifications).toHaveLength(0);
     expect(h.states).toEqual(["running"]);
+    expect(h.audits).toEqual([{ requestId: "permission-1", delivered: true, reason: approve.reason }]);
     expect(h.records.get("permission-1")).toMatchObject({
       state: "closed", answer: "once", answeredById: "permission-supervisor",
       metadata: { permissionActuation: {
@@ -506,6 +509,7 @@ describe("permission supervisor lifecycle", () => {
     });
     await expect(waiting).rejects.toBeInstanceOf(PermissionDeliveryUnconfirmedError);
     expect(answers).toBe(1);
+    expect(h.audits).toEqual([{ requestId: "permission-1", delivered: false, reason: approve.reason }]);
     expect(h.notifications).toHaveLength(1);
     expect(h.notifications[0]?.state).toBe("declined");
     expect(h.records.get("permission-1")).toMatchObject({

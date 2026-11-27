@@ -37,6 +37,7 @@ export const TRPC_UPGRADE_ROUTE = "GET /trpc";
  */
 const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   "GET /v1/integrations/vercel-board/dispatcher": "local",
+  "GET /v1/integrations/vercel-board/boards": "local",
   "GET /v1/integrations/vercel-board/handoffs": "local",
   "GET /v1/integrations/vercel-board/messages": "local",
   "GET /v1/integrations/vercel-board/status": "local",

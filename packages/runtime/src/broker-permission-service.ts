@@ -36,6 +36,8 @@ export class BrokerPermissionService {
     transition: (invocationId: string, state: "waiting" | "running", requestId: string | null) => Promise<unknown>;
     notify: (invocation: InvocationRequest, record: QuestionRecord, prompt: ManagedPermissionPrompt) => void;
     supervisor?: (prompt: ManagedPermissionPrompt) => PermissionSupervisorVerdict;
+    /** Told once per supervisor answer, after delivery succeeds or fails. */
+    audit?: (input: { requestId: string; prompt: ManagedPermissionPrompt; verdict: PermissionSupervisorVerdict; delivered: boolean }) => void;
     sleep?: (ms: number) => Promise<void>;
   }) {}
 
@@ -59,7 +61,9 @@ export class BrokerPermissionService {
     this.pending.set(id, pending);
     try {
       await this.deps.record(record);
-      const automatic = this.deps.supervisor?.(prompt);
+      const automatic = prompt.supervisorVerdict === undefined
+        ? this.deps.supervisor?.(prompt)
+        : prompt.supervisorVerdict;
       while (pending.busy && !pending.done) await this.sleep(500);
       if (pending.error) throw pending.error;
       if (!pending.done && automatic?.act === "continue") {
@@ -140,6 +144,10 @@ export class BrokerPermissionService {
     if (record?.state === "open") await this.close(id, answer, "closed");
   }
 
+  private auditAutomatic(requestId: string, prompt: ManagedPermissionPrompt, verdict: PermissionSupervisorVerdict, delivered: boolean): void {
+    try { this.deps.audit?.({ requestId, prompt, verdict, delivered }); } catch { /* The record already carries the actuation. */ }
+  }
+
   async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict, operatorAttribution?: ScoutAttribution): Promise<void> {
     const opened = this.deps.read(id);
     if (!opened || opened.state !== "open") throw new PermissionRequestEndedError("Permission request is already settled.", false);
@@ -179,7 +187,9 @@ export class BrokerPermissionService {
       await pending.prompt.answer(decision);
       await this.close(id, decision, "closed", automatic ? PERMISSION_SUPERVISOR_ACTOR_ID : undefined);
       pending.done = true;
+      if (automatic) this.auditAutomatic(id, pending.prompt, automatic, true);
     } catch (error) {
+      if (automatic && actuated) this.auditAutomatic(id, pending.prompt, automatic, false);
       pending.error = actuated
         ? new PermissionDeliveryUnconfirmedError(error instanceof Error ? error.message : String(error))
         : error instanceof Error ? error : new Error(String(error));

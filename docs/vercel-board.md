@@ -365,10 +365,14 @@ endpoint for agents outside Scout is not built; see open question 9.
 3. The worker finds or makes the named board as the person, before it narrows
    the caller. A caller narrowed with `x-board-can` names channels only, so
    Vercel refuses it a board it would have to make (403).
-4. Scout makes the channels `scout/work` and `scout/decisions`, and the probe
-   channel `scout/probe`. The prefix keeps them apart from a shared board's own
-   channels. `--channels` and `--probe-channel` change them. `--mirror` names
-   the channels Scout keeps a copy of; the default is every followed channel.
+4. Scout follows the channels `scout/work` and `scout/decisions`, with the
+   probe channel `scout/probe`. The prefix keeps them apart from a shared
+   board's own channels. `--channels` and `--probe-channel` change them.
+   `--mirror` names the channels Scout keeps a copy of; the default is every
+   followed channel. Connect makes no channel on the board. Board makes a
+   channel when something is first posted to it, so a connect does not leave
+   empty channels on every board it touches. A followed channel that nothing
+   has posted to reads as empty.
 5. Scout records the host that connected and makes a Scout room for each
    followed channel. Each host that should show the board connects on its own.
 6. Scout creates, claims and completes one probe task in the probe channel.
@@ -474,6 +478,32 @@ the copy only reads, so no echo loop can start. Board's own `noSync` and
   shape would reset acceptance on every Board event.
 - Which lane shows each state, including the In review lane, is decided in the
   apps. It is out of scope here.
+
+## The board list
+
+`GET /v1/integrations/vercel-board/boards?connection=<id>` lists every board
+that the connection's credential can see on its team, with each board's
+channels. A row holds the channel's name and the counts that the board keeps,
+and no content. Vercel's board keeps no counts, so they are absent there. A row
+also says whether the connection follows the channel, and gives its mirror
+state and Scout room if it does. The connection's probe channel is marked
+`scratch`. Channel names are shown as Board stores them.
+
+- The list costs one call for the boards and one call per board for its
+  channels, on the team's shared rate limit. The runtime keeps a list for 30
+  seconds. `fresh=1` reads it again.
+- A board whose channels cannot be read is listed with its `error`. The other
+  boards are still listed.
+- The worker lists the team's boards as the person, from Vercel's team route.
+  It opens another board by name with `ensure: false`, so a read never makes a
+  board. Every read of another board, or of a channel that the connection does
+  not follow, is narrowed to `*=read`.
+
+To read a channel's messages, call `messages` with `board=<id>` from the list.
+Make that call only when the channel is opened. A followed channel on the
+connected board reads from the copy, as below. Any other channel is read
+through Board in one call, keeps nothing, and answers `conversationId: null`,
+because it has no Scout room.
 
 ## The mirror
 
@@ -809,7 +839,7 @@ that were made after the architecture review.
    fence another host, and none is needed: the board's claims decide who does
    a task. Each host connects on its own. The lock that stays fences runtime
    processes on one host, which share one SQLite.
-6. **The `decisions` channel.** Setup creates it, and this plan does not yet
+6. **The `decisions` channel.** Setup follows it but does not make it, and this plan does not yet
    state what Scout posts there or what Scout does with a post in it.
 7. **Reopen after completion.** Scout's reopen verdict moves `state` back to
    working, and Board's `completed` is final. For a Board item, a reopen

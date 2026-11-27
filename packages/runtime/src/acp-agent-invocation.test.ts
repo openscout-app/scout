@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,9 @@ import {
   shutdownAllAcpAgentSessions,
 } from "./acp-agent-invocation.js";
 
+import type { InvocationRequest, QuestionRecord } from "@openscout/protocol";
+import { BrokerPermissionService } from "./broker-permission-service.js";
+import { configureManagedPermissionHandler, withManagedPermissionContext } from "./managed-permission.js";
 import { warmWorkerContinuation } from "./host-launch-admission.js";
 
 const tempPaths = new Set<string>();
@@ -241,3 +244,104 @@ for await (const line of rl) {
   expect(result.sessionId).toBe("grok-native-7");
   expect(result.output).toBe("done");
 }, 15_000);
+
+test("routes interactive ACP permissions through policy before notifying the operator", async () => {
+  const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), "openscout-acp-policy-")));
+  tempPaths.add(tempRoot);
+  const executable = join(tempRoot, "fake-acp");
+  const project = join(tempRoot, "project");
+  const path = join(project, "README.md");
+  const outside = join(tempRoot, "outside.md");
+  mkdirSync(project);
+  writeFileSync(path, "inside");
+  writeFileSync(outside, "outside");
+  symlinkSync(outside, join(project, "alias.md"));
+  writeFileSync(executable, `#!/usr/bin/env bun
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let prompt;
+function send(payload) { console.log(JSON.stringify({ jsonrpc: "2.0", ...payload })); }
+for await (const line of rl) {
+  const { id, method, params, result } = JSON.parse(line);
+  if (method === "initialize") send({ id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  if (method === "session/new") send({ id, result: { sessionId: "provider-session" } });
+  if (method === "session/prompt") {
+    prompt = id;
+    const toolCall = JSON.parse(params.prompt[0].text);
+    send({ id: "permission", method: "session/request_permission", params: {
+      sessionId: params.sessionId, toolCall: { ...toolCall, toolCallId: String(id) },
+      options: [{ kind: "allow_once", optionId: "allow" }, { kind: "reject_once", optionId: "deny" }],
+    } });
+  }
+  if (id === "permission") {
+    send({ method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: result.outcome.optionId ?? "cancelled" } } } });
+    send({ id: prompt, result: { stopReason: "end_turn" } });
+  }
+}
+`);
+  chmodSync(executable, 0o755);
+
+  const records = new Map<string, QuestionRecord>();
+  const notifications: string[] = [];
+  const service = new BrokerPermissionService({
+    operatorId: "operator", nodeId: "node", createId: () => `permission-${records.size}`,
+    record: async record => { records.set(record.id, record); },
+    read: id => records.get(id), requests: () => [...records.values()], flight: () => undefined,
+    localInvocation: () => true, reattach: async () => ({ sessionOpen: false }),
+    transition: async () => {},
+    // Deliberately permissive: a non-matching ACP request must not fall back
+    // to interpreting the card text as a separate permission dialog.
+    supervisor: () => ({ act: "continue", reason: "dialog", risk: "workspace", grant: "dialog" }),
+    notify: (_, record, prompt) => {
+      notifications.push(record.id);
+      void service.decide(record.id, prompt.version, "deny");
+    },
+    sleep: () => Bun.sleep(1),
+  });
+  const previousHome = process.env.OPENSCOUT_HOME;
+  process.env.OPENSCOUT_HOME = tempRoot;
+  configureManagedPermissionHandler((invocation, prompt) => service.wait(invocation, prompt));
+  const run = (toolCall: object, permissionMode = "interactive") => withManagedPermissionContext(
+    { id: "inv", targetAgentId: "agent", conversationId: "chn-test" } as InvocationRequest,
+    () => invokeAcpAgent({
+      adapterType: "cursor-acp", label: "ACP test", sessionId: "scout-acp-policy", cwd: project,
+      prompt: JSON.stringify(toolCall),
+      adapterOptions: { command: executable, args: [], requireAuth: false, permissionMode, requestTimeoutMs: 2_000 },
+    }),
+  );
+  const read = { kind: "read", title: "view_file", rawInput: { TargetFile: path }, locations: [{ path }] };
+  const setGrants = (grants: unknown[]) => writeFileSync(join(tempRoot, "continuation-policy.json"),
+    JSON.stringify({ version: 1, grants }));
+  try {
+    setGrants([{ scope: "project", path: tempRoot, level: "workspace" }]);
+    expect((await run(read)).output).toBe("allow");
+    expect((await run({ kind: "read", locations: [{ path }] })).output).toBe("allow");
+    expect(notifications).toEqual([]);
+    expect(records.get("permission-0")).toMatchObject({
+      state: "closed", answer: "once", answeredById: "permission-supervisor",
+      metadata: { permissionActuation: {
+        reason: "workspace continues workspace", grant: `project:${tempRoot}`, risk: "workspace",
+      } },
+    });
+    for (const call of [
+      { ...read, rawInput: { TargetFile: outside }, locations: [{ path: outside }] },
+      { ...read, locations: [{ path }, { path: outside }] },
+      { ...read, rawInput: { TargetFile: "alias.md" }, locations: [] },
+      { ...read, title: "unknown_tool" },
+      { kind: "read", title: "view_file" },
+      { kind: "execute", title: "run_command", rawInput: { CommandLine: "rm -rf dist" } },
+    ]) expect((await run(call)).output).toBe("deny");
+    setGrants([]);
+    expect((await run(read)).output).toBe("deny");
+    expect(notifications).toHaveLength(7);
+
+    expect((await run(read, "auto_approve")).output).toBe("allow");
+    expect((await run(read, "safe_reject")).output).toBe("deny");
+    expect(records.size).toBe(9);
+  } finally {
+    configureManagedPermissionHandler(undefined);
+    if (previousHome === undefined) delete process.env.OPENSCOUT_HOME;
+    else process.env.OPENSCOUT_HOME = previousHome;
+  }
+});

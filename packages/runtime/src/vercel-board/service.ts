@@ -9,6 +9,7 @@ import {
   type VercelBoardConnectionConfig, type VercelBoardConnectionState, type VercelBoardConnectionStatus, type VercelBoardPlanRequest, type VercelBoardPlanResponse,
   type CollaborationRecord, type FlightRecord, type ScoutDeliverRequest, type ScoutDeliverResponse, type WorkItemRecord,
   type ConversationDefinition, type VercelBoardChannelMirrorStatus, type VercelBoardHandoff, type VercelBoardHandoffEvent, type VercelBoardHandoffsResponse,
+  type VercelBoardBoardsResponse, type VercelBoardListing,
   type VercelBoardMessagesResponse, type VercelBoardMirrorState, type VercelBoardMirroredMessage, type VercelBoardPromoteRequest, type VercelBoardPromoteResponse, type VercelBoardRoleRequest, type VercelBoardRoleResponse,
   type VercelBoardClaimStatus, type VercelBoardDispatchConfig, type VercelBoardDispatcherStatus, type VercelBoardDispatchRunRequest, type VercelBoardDispatchRunResponse, type VercelBoardDispatchSetRequest,
   stableChannelId,
@@ -98,7 +99,18 @@ interface LiveConnection {
   /** Claims ready tasks by each channel's policy. One pass at a time. */
   dispatcher: VercelBoardDispatcher;
   lead: VercelBoardLead;
+  /** The last board list, held briefly: the list costs one call per board on a shared rate limit. */
+  boardList?: { at: number; value: Promise<VercelBoardBoardsResponse> };
+  /** The connected board's ID, once a board list has named it. */
+  boardId?: string;
 }
+
+/** How long a board list is reused. */
+const BOARD_LIST_TTL_MS = 30_000;
+/** Channels listed per board. A board with more says `more`. */
+const BOARD_LIST_CHANNELS = 500;
+/** Boards whose channels are read at once. */
+const BOARD_LIST_CONCURRENCY = 4;
 
 /** Board holds a feed read open up to 300 seconds; an event answers it at once. */
 const FOLLOW_WAIT_SECONDS = 300;
@@ -873,10 +885,21 @@ export class BrokerVercelBoardService {
    * answers from the copy and confirmed local claim renewals; any other channel reads the board in
    * one call and keeps nothing.
    */
-  async messages(request: { connectionId: string; channel: string; limit?: number }): Promise<VercelBoardMessagesResponse> {
+  async messages(request: { connectionId: string; channel: string; limit?: number; board?: string }): Promise<VercelBoardMessagesResponse> {
     const live = this.requireLive(request.connectionId);
-    if (!live.config.channels.includes(request.channel)) throw new VercelBoardServiceError(400, "channel_not_followed", `Channel ${request.channel} is not one of this connection's: ${live.config.channels.join(", ")}.`);
     const limit = Math.max(1, Math.min(Math.floor(request.limit ?? 100), 500));
+    const followed = live.config.channels.includes(request.channel);
+    // A board the list has not named as the connected one reads through: correct either way, only the copy is faster.
+    const otherBoard = request.board !== undefined && request.board !== live.boardId;
+    if (request.board !== undefined && (otherBoard || !followed)) {
+      // Any channel of any board the list showed: read through, narrowed to read, and keep nothing.
+      if (!isVercelBoardChannelPath(request.channel)) throw new VercelBoardServiceError(400, "invalid_request", "channel must be a Board channel path.");
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(request.board)) throw new VercelBoardServiceError(400, "invalid_request", "board must be a board ID from the board list.");
+      const page = await live.transport.boardMessages({ board: request.board, channel: request.channel, limit });
+      return { connectionId: live.config.id, board: request.board, channel: request.channel, conversationId: null, state: "not_mirrored", cursor: page.cursor,
+        messages: page.messages.map(message => readThrough(live.config, message)) };
+    }
+    if (!followed) throw new VercelBoardServiceError(400, "channel_not_followed", `Channel ${request.channel} is not one of this connection's: ${live.config.channels.join(", ")}.`, "Name the board (board=<id> from the board list) to read any channel.");
     const conversationId = vercelBoardRoomId(live.config.id, request.channel);
     const state = this.mirrorState(live, request.channel);
     if (state !== "not_mirrored") {
@@ -899,6 +922,61 @@ export class BrokerVercelBoardService {
     const page = await live.transport.channelMessages({ channel: request.channel, limit });
     return { connectionId: live.config.id, channel: request.channel, conversationId, state, cursor: page.cursor,
       messages: page.messages.map(message => readThrough(live.config, message)) };
+  }
+
+  /**
+   * Every board the connection's credential can see on its team, and each
+   * board's channels: names and the counts the board keeps, never content.
+   * One call for the list and one per board, held for `BOARD_LIST_TTL_MS`.
+   * A board whose channels cannot be read is listed with its error.
+   */
+  async boards(request: { connectionId: string; fresh?: boolean }): Promise<VercelBoardBoardsResponse> {
+    const live = this.requireLive(request.connectionId);
+    const held = live.boardList;
+    if (held && !request.fresh && this.now() - held.at < BOARD_LIST_TTL_MS) return held.value;
+    const value = this.readBoards(live);
+    live.boardList = { at: this.now(), value };
+    value.catch(() => { if (live.boardList?.value === value) live.boardList = undefined; });
+    return value;
+  }
+
+  private async readBoards(live: LiveConnection): Promise<VercelBoardBoardsResponse> {
+    const refs = await live.transport.boards();
+    const connected = refs.find(ref => ref.connected);
+    if (connected) live.boardId = connected.id;
+    const mirror = new Map(this.mirrorStatus(live).map(row => [row.channel, row]));
+    const boards: VercelBoardListing[] = new Array(refs.length);
+    let next = 0;
+    const work = async () => {
+      while (next < refs.length) {
+        const index = next++;
+        const ref = refs[index]!;
+        const listing: VercelBoardListing = { id: ref.id, name: ref.name, isDefault: ref.isDefault, connected: ref.connected, channels: [], more: false };
+        try {
+          const page = await live.transport.channels({ board: ref.id, limit: BOARD_LIST_CHANNELS });
+          listing.more = page.next !== null;
+          listing.channels = page.channels.map(row => {
+            const followed = ref.connected && live.config.channels.includes(row.channel);
+            const status = followed ? mirror.get(row.channel) : undefined;
+            return { ...row, followed, scratch: row.channel === live.config.probeChannel, ...(status ? { mirror: status.state, conversationId: status.conversationId } : {}) };
+          });
+          // A followed channel nothing has posted to yet is not on the board, but it has a Scout room.
+          if (ref.connected && !listing.more) {
+            const listed = new Set(listing.channels.map(row => row.channel));
+            for (const channel of live.config.channels) {
+              if (listed.has(channel)) continue;
+              const status = mirror.get(channel);
+              listing.channels.push({ channel, followed: true, scratch: false, ...(status ? { mirror: status.state, conversationId: status.conversationId } : {}) });
+            }
+          }
+        } catch (error) {
+          listing.error = { code: error instanceof VercelBoardHttpError ? error.code : "channels_failed", message: error instanceof Error ? error.message.slice(0, 300) : "The board's channels could not be read." };
+        }
+        boards[index] = listing;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(BOARD_LIST_CONCURRENCY, refs.length) }, work));
+    return { connectionId: live.config.id, boards, readAt: this.now() };
   }
 
   /** Hand-offs: one task's chain when `taskId` is given, else the newest. Each joined to Scout's claim. */
@@ -1096,15 +1174,9 @@ export class BrokerVercelBoardService {
     const config: VercelBoardConnectionConfig = { ...draft, principal, ownerAllowlist };
     // The worker's narrowing depends only on the channels, which have not changed.
     const ready: VercelBoardTransport = worker ? transport : new VercelBoardHttpTransport(config, () => credential.token(), this.options.fetch);
-    // On a team board, the first of these makes or finds the board by name.
-    const { channels, probeChannel } = config;
-    for (const channel of [...channels, probeChannel]) {
-      await ready.ensureChannel(channel).catch(error => {
-        if (error instanceof VercelBoardHttpError && (error.status === 409 || error.code === "channel_exists")) return;
-        const code = error instanceof VercelBoardHttpError ? error.code : "channel_failed";
-        throw new VercelBoardServiceError(error instanceof VercelBoardHttpError && error.status === 404 ? 404 : 502, code, `Could not make channel ${channel}: ${error instanceof Error ? error.message : code}`, error instanceof VercelBoardHttpError ? error.hint : undefined);
-      });
-    }
+    // Connect makes no channel. Board makes one when something is first posted
+    // to it, so a connect leaves no empty channel on the board; a followed
+    // channel reads as empty until then. The worker found or made the board itself.
     let probe: VercelBoardConnectResponse["probe"];
     if (request.probe !== false) {
       probe = await this.probe(ready, config);
