@@ -9,12 +9,24 @@ function fakeComputerClient(): ScoutComputerClient {
   return {
     async status() {
       return {
+        source: "scout-computer",
         available: true,
         binaryPath: "/Applications/ScoutComputer.app/Contents/MacOS/ScoutComputer",
         agentUrl: "ws://127.0.0.1:4319",
         agentConnected: true,
+        driveState: "idle",
+        activeLeaseId: null,
         permissions: { accessibility: "granted", screenRecording: "granted" },
       };
+    },
+    async driveStatus() {
+      return { connected: true, state: "idle", leases: [] };
+    },
+    async driveBegin(opts) {
+      return { source: "scout-computer", ok: true, action: "drive_begin", leaseId: "lease-1", data: opts, at: 1000 };
+    },
+    async driveRelease(opts) {
+      return { source: "scout-computer", ok: true, action: "drive_release", leaseId: opts.leaseId, at: 1000 };
     },
     async listWindows(opts) {
       return { ok: true, action: "windows", data: { query: opts ?? {}, windows: [{ id: 1, title: "Scout" }] }, at: 1000 };

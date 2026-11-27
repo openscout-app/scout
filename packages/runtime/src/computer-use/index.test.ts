@@ -43,6 +43,7 @@ describe("scout computer runtime client", () => {
       const client = createScoutComputerClient({
         binaryPath,
         agentPort: 1, // guaranteed unreachable port for fast probe
+        agentRpcImpl: async () => ({ ok: false, error: "disconnected" }),
         execImpl: async (file, args) => {
           calls.push({ file, args });
           if (args[0] === "status") {
@@ -107,6 +108,64 @@ describe("scout computer runtime client", () => {
       const badClick = await client.act({ kind: "click" });
       expect(badClick.ok).toBe(false);
       expect(badClick.error).toContain("x and y");
+
+      // Un-targeted type/key must be refused so keystrokes cannot land in the wrong window.
+      const untargetedType = await client.act({ kind: "type", text: "oops" });
+      expect(untargetedType.ok).toBe(false);
+      expect(untargetedType.error).toContain("pass target");
+
+      // Typing into a non-frontmost app must be refused (Chrome pid 101 is frontmost, Finder pid 202 is not).
+      const wrongWindow = await client.act({ kind: "type", text: "hi", target: { pid: 202 } });
+      expect(wrongWindow.ok).toBe(false);
+      expect(wrongWindow.error).toContain("not frontmost");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("enforces an approved Scout Computer attention lease when the agent is connected", async () => {
+    if (process.platform !== "darwin") return;
+    const { binaryPath, cleanup } = makeFakeBundle();
+    const rpcCalls: Array<{ method: string; params?: Record<string, string> }> = [];
+    let hasLease = false;
+    try {
+      const client = createScoutComputerClient({
+        binaryPath,
+        agentRpcImpl: async (method, params) => {
+          rpcCalls.push({ method, params });
+          if (method === "drive.status") {
+            const leases = hasLease
+              ? [{ leaseId: "lease-42", agent: "scout", mode: "attention", status: "driving" }]
+              : [];
+            return { ok: true, result: { snapshot: JSON.stringify({ state: hasLease ? "driving" : "idle", leases }) } };
+          }
+          return { ok: true, result: { status: "driving" } };
+        },
+        execImpl: async (_file, args) => {
+          if (args[0] === "window-order") {
+            return {
+              stdout: JSON.stringify({
+                windows: [{ owner: "Google Chrome", bundleId: "com.google.Chrome", pid: 101, title: "Scout" }],
+              }),
+              stderr: "",
+            };
+          }
+          return { stdout: JSON.stringify({ ok: true, subcommand: args[0] }), stderr: "" };
+        },
+      });
+
+      // Without an approved lease, live input is blocked by Scout Computer.
+      const blocked = await client.act({ kind: "type", text: "hello", target: { pid: 101 } });
+      expect(blocked.ok).toBe(false);
+      expect(blocked.source).toBe("scout-computer");
+      expect(blocked.error).toContain("approved Scout Computer attention lease");
+
+      // With an approved lease, input succeeds and touches the supervision HUD lease.
+      hasLease = true;
+      const allowed = await client.act({ kind: "type", text: "hello", target: { pid: 101 } });
+      expect(allowed.ok).toBe(true);
+      expect(allowed.leaseId).toBe("lease-42");
+      expect(rpcCalls.some((c) => c.method === "drive.touch" && c.params?.leaseId === "lease-42")).toBe(true);
     } finally {
       cleanup();
     }

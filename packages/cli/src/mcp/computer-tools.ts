@@ -20,7 +20,8 @@ export function registerComputerTools(
   server.registerTool(
     "computer_status",
     {
-      description: "Check Scout Computer availability, background agent connection, and macOS Accessibility and Screen Recording permissions.",
+      title: "Scout Computer · Status",
+      description: "Check Scout Computer availability, active drive lease state, background agent connection, and macOS Accessibility and Screen Recording permissions.",
       inputSchema: {},
     },
     async () => {
@@ -35,7 +36,8 @@ export function registerComputerTools(
   server.registerTool(
     "computer_windows",
     {
-      description: "List on-screen macOS windows for an app (by bundleId, app name, or pid), or list top-level window order when omitted.",
+      title: "Scout Computer · Windows",
+      description: "List on-screen macOS windows via Scout Computer for an app (by bundleId, app name, or pid), or list top-level window order when omitted.",
       inputSchema: {
         bundleId: z.string().optional(),
         app: z.string().optional(),
@@ -49,6 +51,7 @@ export function registerComputerTools(
   server.registerTool(
     "computer_screenshot",
     {
+      title: "Scout Computer · Screenshot",
       description: "Capture a native macOS screenshot of an app window, a screen region, or the whole screen via Scout Computer and return the saved PNG path.",
       inputSchema: {
         bundleId: z.string().optional(),
@@ -70,6 +73,7 @@ export function registerComputerTools(
   server.registerTool(
     "computer_focus",
     {
+      title: "Scout Computer · Focus",
       description: "Launch or activate a macOS app, or raise and focus a specific window by title via Scout Computer.",
       inputSchema: {
         bundleId: z.string().optional(),
@@ -85,6 +89,7 @@ export function registerComputerTools(
   server.registerTool(
     "computer_inspect",
     {
+      title: "Scout Computer · Inspect",
       description: "Inspect a macOS app's Accessibility UI tree via Scout Computer before acting.",
       inputSchema: {
         bundleId: z.string().optional(),
@@ -98,9 +103,11 @@ export function registerComputerTools(
   server.registerTool(
     "computer_act",
     {
-      description: "Perform a native desktop action via Scout Computer: click, type, key, scroll, drag, ax_press, ax_set, or ocr.",
+      title: "Scout Computer · Act",
+      description: "Perform a native macOS desktop action via Scout Computer (click, type, key, scroll, drag, ax_press, ax_set, or ocr). Live keyboard/pointer input requires an approved Scout Computer drive lease and frontmost target app verification (pass app, bundleId, or pid for type/key).",
       inputSchema: {
         kind: z.enum(["click", "type", "key", "scroll", "drag", "ax_press", "ax_set", "ocr"]),
+        leaseId: z.string().optional(),
         bundleId: z.string().optional(),
         app: z.string().optional(),
         pid: z.number().int().positive().optional(),
