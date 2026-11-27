@@ -1,9 +1,9 @@
 # Scout skills
 
-A skill is a folder you can open in any editor. Its `SKILL.md` starts with
-standard `name` and `description` frontmatter. The body gives the agent its
-instructions; scripts and other resources stay beside it. Scout keeps no skill
-library in its database. It does not need a project repository or extra fields.
+A Scout skill is a folder you own, with a standard `SKILL.md` and optional
+scripts and assets. Its home is `~/.scout/skills/<name>/`, outside the
+harnesses' skill directories. Creating a skill does not make it available
+to every agent session. Someone must name it in an ask.
 
 ## Set up and personalize
 
@@ -15,59 +15,52 @@ scout skills
 scout run handoff-note "Summarize the changed files without modifying them."
 ```
 
-`new` writes a minimal `~/.agents/skills/<name>/SKILL.md` and prints the
-path. `edit` opens the selected file in `$EDITOR`; `path` prints that file's
-absolute path. The folder name is the reference. Changing the description or
-steps does not change it.
+`new` creates a file with `name`, `description`, and steps. `edit` opens
+a personal copy in `$EDITOR`; `path` prints the real path to its instructions.
+The name Scout uses is the folder or link name, not a new frontmatter field.
 
-`scout skills add <path>` links a local folder into `~/.agents/skills`.
-Edits through a link affect the source. `scout skills add <git-url>` clones
-one repository with a root `SKILL.md`; its folder name is the repository name
-without `.git`. It does not run install scripts or fetch submodules.
-`scout skills fork <name>` copies a skill and its resources into the personal
-root. It detaches a linked folder without changing the source. A folder that
-is already personal needs no second copy. Forks omit Git history and refuse
-external resource links rather than leave an edit pointing outside the copy.
+`scout skills add <path>` registers an existing folder by making a link **in
+the Scout directory**. It copies nothing. Use `--as <name>` to give the link a
+different name. A Git URL instead clones a repository with one root skill.
+`scout skills fork <name>` replaces a registered link with a personal copy,
+including its resources. Fork before editing a link: the original is not
+changed. A later add cannot overwrite that copy.
 
-On **new, add and fork**, Scout links the personal folder into Claude's
-`~/.claude/skills`, Codex's `~/.codex/skills`, and Cursor's `~/.cursor/skills`.
-It reports each link. An existing link to the same folder is fine. A different
-file stays untouched: Scout reports the conflict so you can reconcile it if
-you also want that harness's own picker to use the personal copy.
+`scout skills` lists only registered names, their one-line descriptions and
+real paths on the selected machine. `--all` also shows unregistered skills from
+the user’s Agents, Claude, Codex and Cursor directories, read-only. Seeing one
+there does not register it. Scout never writes to these directories or links a
+Scout skill back into them. A skill already installed in a harness remains
+subject to that harness's own discovery.
 
-## Find and run
+## Load one skill for one ask
 
-`scout skills` lists the folder name, one-line description, status and path.
-Links to the same folder appear once. A personal copy is **active**; other files
-of that name remain visible as **shadowed**. Without a personal copy, distinct
-files of the same name are **ambiguous**. Choose a listed path or narrow the
-list with `--harness`. With a harness selected, Scout reads the personal root
-and that harness's root, if any. `--on <host>` reads that host's catalog,
-never the caller's as a substitute.
+`scout run <name> "brief"` and `scout ask --to <agent> --skill <name> "brief"`
+use the same native task field. The broker resolves just that registered name
+on the **target machine**. It gives the worker the real `SKILL.md` path, the
+real skill directory for relative scripts and assets, and the brief. It does
+not inline instructions, install files, or preload a catalog in another
+session. An ask without a skill gets no reference.
 
-A run is an ordinary ask. The agent receives the plain brief and a reference
-to the skill **on its machine**, not a copy of the instructions. Use
-`scout ask --to <agent> --skill handoff-note "Summarize the changes."` to
-name one in an agent ask. A local run defaults to the current project.
-For a remote run, give `--on <host> --project <path-on-that-host>`. Quote a
-listed `~/…` path when selecting it so the shell does not expand it.
-`--dry-run` previews a run without sending it. The receipt means accepted,
-not completed; follow the link for the result. Retry an uncertain acceptance
-with the same `--request-id`.
+For a remote run use `--on <host> --project <path-on-that-host>`. A missing
+registration on that host is an error; Scout does not substitute a local file
+or a harness skill. `--dry-run` previews the ask without sending it. A run
+returns the ordinary ask receipt and follow link. Acceptance is not completion.
 
 [Untrack a folder](../../examples/skills/untrack-folder/SKILL.md) is an
-example, not an installed skill. To try it: `scout skills add ./examples/skills/untrack-folder`,
-then `scout run untrack-folder "Untrack assets/renders." --dry-run`.
+example, not an installed skill. Register it with
+`scout skills add ./examples/skills/untrack-folder`, then try
+`scout run untrack-folder "Untrack assets/renders." --dry-run`.
 
 ## Surfaces
 
-CLI and MCP (`skills_list`, `skills_run`) use `GET /v1/skills`
-(`harness`, `host`; returns `{skills: [{name, description, status, path}]}`)
-and `POST /v1/skills/run` (`name`, `brief`, optional target, current directory
-and request ID; returns HTTP 202 with `{receipt, followUrl}`). An ordinary
-delivery takes `task.skill`; the MCP `ask` tool takes `skill`.
+CLI and MCP (`skills_list`, `skills_run`) use `GET /v1/skills` and
+`POST /v1/skills/run`. Listing returns names, descriptions, source types,
+instruction paths and resource directories. Running takes a name, brief and
+optional target and returns `{receipt, followUrl}`. The ordinary delivery API
+takes `task.skill`; the MCP `ask` tool takes `skill`.
 
-**Next, not built:** search and pick a skill by name and description in Desk's
-drop pop-up or ask box, enter one brief, then see the receipt and result in a
-notification. Turning a finished ask into a skill in Desk is also future work.
-No schedules, automatic edits, distribution service or UI in this version.
+**Next, not built:** Desk's drop pop-up and ask box search the registered
+names, show descriptions, and take one brief. Desk can show the receipt and
+then the result in a notification. Turning a finished ask into a skill in Desk
+is also future work. No scheduler, automatic edits, or UI in this version.
