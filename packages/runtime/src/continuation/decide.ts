@@ -68,8 +68,56 @@ export function classifyContinuationRisk(command: string | null | undefined): Co
   if (OUTSIDE_PATH.test(value.replace(/\bhttps?:\/\/\S+/giu, ""))) return "unknown";
   if (NETWORK.test(value)) return "network";
   if (IDENTITY.test(value)) return "identity";
+  if (/^gh(?:\s|$)/.test(value)) return classifyGh(value.split(/\s+/));
   if (WORKSPACE_COMMAND.test(value)) return "workspace";
   return "unknown";
+}
+
+/**
+ * `gh` subcommands that read, or change a pull request in ways the operator can
+ * undo (a comment, an edit, ready for review). `workspace` continues these.
+ */
+const GH_WORKSPACE: Readonly<Record<string, readonly string[]>> = {
+  pr: ["list", "view", "diff", "checks", "status", "comment", "edit", "ready"],
+  run: ["list", "view"],
+  issue: ["list", "view"],
+};
+/** `gh api` options that keep the request a plain GET. Any other option escalates. */
+const GH_API_GET_OPTIONS = new Set(["--paginate", "--slurp", "-i", "--include", "--silent", "--verbose"]);
+const GH_API_GET_VALUE_OPTIONS = new Set(["--jq", "-q", "--template", "-t", "--cache", "--hostname"]);
+
+/**
+ * `gh pr create` is `publish` (matched above). Merging or closing a pull
+ * request, hosted CI triggers (`gh workflow run`, `gh run rerun`), any
+ * `gh api` call other than a GET, and every subcommand not listed stay
+ * `unknown`, which no level continues.
+ */
+function classifyGh(words: readonly string[]): ContinuationRisk {
+  const [, group = "", action = ""] = words;
+  if (GH_WORKSPACE[group]?.includes(action)) return "workspace";
+  if (group !== "api") return "unknown";
+  let endpoint: string | null = null;
+  for (let index = 2; index < words.length; index++) {
+    const word = words[index] ?? "";
+    const [name, inline] = word.startsWith("--") && word.includes("=")
+      ? [word.slice(0, word.indexOf("=")), word.slice(word.indexOf("=") + 1)]
+      : [word, undefined];
+    if (name === "-X" || name === "--method") {
+      const method = inline ?? words[++index];
+      if (method?.toUpperCase() !== "GET") return "unknown";
+      continue;
+    }
+    if (GH_API_GET_OPTIONS.has(name) && inline === undefined) continue;
+    if (GH_API_GET_VALUE_OPTIONS.has(name)) {
+      if (inline === undefined) index++;
+      continue;
+    }
+    if (word.startsWith("-") || endpoint !== null) return "unknown";
+    endpoint = word;
+  }
+  // GraphQL is always a POST and may carry a mutation.
+  if (!endpoint || endpoint === "graphql") return "unknown";
+  return "workspace";
 }
 
 /** An Edit/Write target is workspace only as a plain relative path. */
