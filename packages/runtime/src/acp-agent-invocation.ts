@@ -9,6 +9,9 @@ import {
 import type { RuntimeTimer } from "./portable-types.js";
 import { buildManagedAgentEnvironment } from "./managed-agent-environment.js";
 import { bindManagedPermissionRequester } from "./managed-permission.js";
+import { describeNativePermission } from "./native-permission.js";
+import { decideNativeToolSupervisor } from "./permission-supervisor.js";
+import { acpPermissionTool } from "./acp-permission-tool.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
 export interface AcpAgentInvocationOptions {
@@ -133,7 +136,10 @@ function sessionFingerprint(options: AcpAgentInvocationOptions): string {
   // Reusing the same pool entry after the requested model changes would keep
   // prompting the old model while reporting the new request as resolved. The
   // same holds for reasoning effort, which rides on that one set_model call.
-  return [options.adapterType, options.sessionId, options.cwd, requestedModel, requestedEffort, requestedRole].join("\u0000");
+  const permissionMode = typeof options.adapterOptions?.permissionMode === "string"
+    ? options.adapterOptions.permissionMode
+    : "";
+  return [options.adapterType, options.sessionId, options.cwd, requestedModel, requestedEffort, requestedRole, permissionMode].join("\u0000");
 }
 
 async function createPoolEntry(options: AcpAgentInvocationOptions): Promise<AcpPoolEntry> {
@@ -224,12 +230,18 @@ export async function invokeAcpAgent(
     input: options.prompt,
     timeoutMs: acpTurnCeilingMs(options),
     onPermission: async (request) => {
+      const tool = await acpPermissionTool(options.cwd, request.acpToolCall);
+      const verdict = tool ? decideNativeToolSupervisor(tool) : null;
+      const description = verdict?.act === "continue" && tool
+        ? describeNativePermission(tool)
+        : request.description;
       let open = true;
       let decision: "approve" | "deny" = "deny";
       const accepted = await requestPermission({
         sessionId: options.sessionId,
         projectRoot: options.cwd,
-        text: `${options.label} asks permission: ${request.description}`,
+        text: `${options.label} asks permission: ${description}`,
+        supervisorVerdict: verdict,
         version: `${request.turnId}:${request.blockId}:${request.version}`,
         decisions: ["once", "deny"],
         decisionLabels: { once: "Allow once", deny: "Deny" },

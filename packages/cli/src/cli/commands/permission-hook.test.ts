@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { readAntigravitySessionRecords } from "@openscout/runtime";
 
-import { handleAntigravityPermissionHook, handleClaudePermissionHook } from "./permission-hook.ts";
+import { handleAntigravityPermissionHook, handleClaudePermissionHook, resolvePermissionHookBrokerUrl } from "./permission-hook.ts";
 
 const hook = JSON.stringify({
   hook_event_name: "PermissionRequest", session_id: "0f10496b", cwd: "/tmp/project", permission_mode: "default",
@@ -192,5 +192,62 @@ describe("scout permission-hook antigravity", () => {
     } finally {
       rmSync(recordsDirectory, { recursive: true, force: true });
     }
+  });
+
+  test("never escalates an Antigravity file read outside the workspace, but still escalates a write there", async () => {
+    const recordsDirectory = mkdtempSync(join(tmpdir(), "scout-agy-read-"));
+    const sessionId = "4b213f37-7348-47d7-bf30-7263a39ffbbf";
+    const now = 1_800_000_000_000;
+    const outside = "/Users/someone/.gemini/antigravity/builtin/skills/native_swarm/SKILL.md";
+    try {
+      for (const name of ["read_file", "view_file"]) {
+        const read = runtime([{ skipped: "no_escalation" }]);
+        await handleAntigravityPermissionHook(JSON.stringify({
+          hookEventName: "PreToolUse",
+          conversationId: sessionId,
+          cwd: "/tmp/workspace",
+          workspacePaths: ["/tmp/workspace"],
+          toolCall: { id: `r-${name}`, name, args: { Path: outside } },
+        }), { ...read.deps, recordsDirectory, now: () => now });
+        expect(read.posts[0]).toMatchObject({ body: { toolName: name, escalate: false } });
+        expect(read.out).toEqual(['{"decision":"ask"}\n']);
+        expect(await readAntigravitySessionRecords({ directory: recordsDirectory, now })).toEqual([]);
+      }
+
+      const write = runtime([{ requestId: "perm-agy-w" }, { state: "decided", decision: "allow" }]);
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse",
+        conversationId: sessionId,
+        cwd: "/tmp/workspace",
+        workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "w1", name: "write_file", args: { Path: outside } },
+      }), { ...write.deps, recordsDirectory, now: () => now });
+      expect(write.posts[0]).toMatchObject({ body: { toolName: "write_file", escalate: true } });
+    } finally {
+      rmSync(recordsDirectory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("permission hook broker URL", () => {
+  const local = { controlUrl: () => "http://127.0.0.1:43110", hostNames: () => new Set(["192.168.18.22", "arts-mini", "arts-mini.local"]) };
+
+  test("uses the local control URL when no broker URL is inherited", () => {
+    expect(resolvePermissionHookBrokerUrl({}, local)).toBe("http://127.0.0.1:43110");
+  });
+
+  test("replaces this machine's mesh URL with the local control URL", () => {
+    for (const inherited of ["https://192.168.18.22:43110", "https://arts-mini.local:43110", "http://0.0.0.0:43110"]) {
+      expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: inherited }, local), inherited).toBe("http://127.0.0.1:43110");
+    }
+  });
+
+  test("keeps another instance's port on loopback", () => {
+    expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: "https://192.168.18.22:24400" }, local)).toBe("http://127.0.0.1:24400");
+  });
+
+  test("keeps an explicit loopback URL and a URL for another host", () => {
+    expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: "http://127.0.0.1:24400" }, local)).toBe("http://127.0.0.1:24400");
+    expect(resolvePermissionHookBrokerUrl({ OPENSCOUT_BROKER_URL: "https://192.168.18.40:43110" }, local)).toBe("https://192.168.18.40:43110");
   });
 });

@@ -363,6 +363,15 @@ export interface BlockActionStatusDelta {
   meta?: Record<string, unknown>;
 }
 
+/** Structured ACP request data, not inferred from the approval card text. */
+export type AcpPermissionToolCall = {
+  title?: unknown;
+  kind?: unknown;
+  rawInput?: unknown;
+  locations?: unknown;
+  offersAllowOnce: boolean;
+};
+
 /** Action transitioned to awaiting_approval — client renders approve/deny UI. */
 export interface BlockActionApprovalDelta {
   event: "block:action:approval";
@@ -373,6 +382,7 @@ export interface BlockActionApprovalDelta {
     version: number;
     description?: string;
     risk?: "low" | "medium" | "high";
+    acpToolCall?: AcpPermissionToolCall;
   };
 }
 
