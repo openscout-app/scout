@@ -147,6 +147,12 @@ describe("mesh route matrix", () => {
     expect(grantSatisfiesRouteTier("control", "public")).toBe(true);
   });
 
+  test("only the read-only skill catalog crosses the mesh, with a control grant", () => {
+    expect(meshRouteTierFor("GET", "/v1/skills")).toBe("local");
+    expect(meshRouteTierFor("POST", "/v1/skills/run")).toBe("local");
+    expect(meshRouteTierFor("GET", "/v1/mesh/skills")).toBe("control");
+  });
+
   test("tier counts reflect the P1 posture: almost everything local", () => {
     const counts = new Map<MeshRouteTier, number>();
     for (const tier of Object.values(meshRouteMatrixEntries())) {
@@ -154,9 +160,9 @@ describe("mesh route matrix", () => {
     }
     expect(counts.get("public")).toBe(4);
     expect(counts.get("observe")).toBe(4); // nodes, node-state, snapshot and invocation-stream
-    expect(counts.get("control")).toBe(16); // 12 mesh POST routes + the /trpc upgrade + approvals stream/decide + knowledge search
+    expect(counts.get("control")).toBe(17); // 12 mesh POST routes + /trpc + approvals stream/decide + knowledge search + skill catalog
     expect(counts.get("guest")).toBe(9); // discovery, asks, and five mailbox routes
     expect(counts.get("scoped")).toBe(1);
-    expect(counts.get("local")).toBe(Object.keys(meshRouteMatrixEntries()).length - 34);
+    expect(counts.get("local")).toBe(Object.keys(meshRouteMatrixEntries()).length - 35);
   });
 });
