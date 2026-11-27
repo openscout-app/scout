@@ -210,7 +210,7 @@ describe("permission request notifications", () => {
       project: "web", host: "host-a", createdAt: 1, conversationId: "dm", messageId: "msg-ask", sessionId: "session-abc123",
     });
     const collapsed = collapseAgentNotification(n);
-    expect(collapsed).toMatchObject({ title: "web-schumann-15 wants to use a tool", subtitle: "web · host-a", body: "" });
+    expect(collapsed).toMatchObject({ title: "Allow a tool", subtitle: "web-schumann-15 · web", body: "" });
     expect(JSON.stringify(n)).not.toContain("observed evidence");
     expect(n).toMatchObject({
       level: "active",
@@ -219,10 +219,18 @@ describe("permission request notifications", () => {
     });
   });
 
-  test("a Bash permission shows its source, request and purpose", () => {
+  test("a Bash permission shows its action, source, purpose and command, plus canAlwaysAllow when offered", () => {
     const text = dialog([" Bash command", "", "   gh pr list --state open", "   List open pull requests", "", " Permission rule Bash requires confirmation for this command."]);
-    const n = agentNotificationForPermissionRequest({ requestId: "p", text, agentName: "pike", agentId: "agent.pike", project: "scout", host: "studio", createdAt: 1 });
-    expect(collapseAgentNotification(n)).toMatchObject({ title: "pike wants to run a command", subtitle: "scout · studio", body: "gh pr list --state open\nList open pull requests", level: "active" });
+    const n = agentNotificationForPermissionRequest({
+      requestId: "p", text, agentName: "pike", agentId: "agent.pike", project: "scout", host: "studio", createdAt: 1, canAlwaysAllow: true,
+    });
+    expect(n).toMatchObject({ view: "turn.approve.command", canAlwaysAllow: true });
+    expect(collapseAgentNotification(n)).toMatchObject({
+      title: "Run gh pr list",
+      subtitle: "pike · scout",
+      body: "List open pull requests\ngh pr list --state open",
+      level: "active",
+    });
   });
 });
 

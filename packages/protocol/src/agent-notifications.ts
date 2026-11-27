@@ -43,9 +43,9 @@ export type AgentNotificationArtifact = {
 
 /** Risk is left out when the harness did not state it. It is never guessed. */
 export type AgentNotificationView =
-  | { view: "turn.approve.command"; command: string; cwd?: string; risk?: AgentNotificationRisk; why?: string }
-  | { view: "turn.approve.edit"; summary?: string; files: AgentNotificationFileChange[]; risk?: AgentNotificationRisk }
-  | { view: "turn.approve.tool"; tool: string; why?: string; summary?: string; risk?: AgentNotificationRisk }
+  | { view: "turn.approve.command"; command: string; cwd?: string; risk?: AgentNotificationRisk; why?: string; canAlwaysAllow?: boolean }
+  | { view: "turn.approve.edit"; summary?: string; files: AgentNotificationFileChange[]; risk?: AgentNotificationRisk; canAlwaysAllow?: boolean }
+  | { view: "turn.approve.tool"; tool: string; why?: string; summary?: string; risk?: AgentNotificationRisk; canAlwaysAllow?: boolean }
   | { view: "turn.question.choice"; question: string; context?: string; options: string[]; multiSelect?: boolean }
   | { view: "turn.question.open"; question: string; context?: string }
   | { view: "turn.failed"; error: string; excerpt?: string[]; elapsed?: string }
@@ -122,19 +122,20 @@ export type AgentNotification = AgentNotificationView & {
 
 export type AgentNotificationCollapse = {
   /**
-   * Lock-screen title: Scout and the originating host, when known. An
-   * approval names the agent and what it wants: "Antigravity wants to push".
+   * Lock-screen / Watch Short Look title: Scout and the originating host, when
+   * known. An approval leads with the compact action and target so it fits on
+   * one glanceable line: "Open PR · owner/repo", "Edit a.ts", "Run bun test".
    */
   title: string;
   /**
-   * Empty so the OS does not add a second emphasized line. An approval
-   * carries its project and host here.
+   * Empty for general alerts so the OS does not add a second emphasized line.
+   * An approval carries sender and project (or host) here: "Antigravity 0f6d · scout".
    */
   subtitle: string;
   /**
    * Regular-weight body: sender and project, followed by the request and
-   * context. An approval carries the command (or files, or tool target) and
-   * why.
+   * context. An approval puts human intent first, then compact structured
+   * details or the cleaned command.
    */
   body: string;
   /** Row headline in the app: what is wanted, without who. */
@@ -334,34 +335,307 @@ export function notificationSenderLabel(sender: AgentNotification["sender"]): st
   return tail ? `${name} ${tail}` : name;
 }
 
+type ParsedCommand =
+  | { kind: "open_pr"; repo?: string; title?: string; head?: string; base?: string; draft: boolean }
+  | { kind: "merge_pr"; repo?: string; number?: string; method?: string; deleteBranch: boolean }
+  | { kind: "git_push"; remote?: string; branch?: string; force: boolean; deleteRemote: boolean }
+  | { kind: "git_commit"; message?: string }
+  | { kind: "git_reset" }
+  | { kind: "delete_files"; targets: string[] }
+  | { kind: "shell"; label?: string };
+
+function splitChainSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let escaped = false;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote === "'") {
+      current += ch;
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (ch === "\\") {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if (quote === '"') {
+      current += ch;
+      if (ch === '"') quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "\n" || ch === ";") {
+      const trimmed = current.trim();
+      if (trimmed) segments.push(trimmed);
+      current = "";
+      continue;
+    }
+    const next = command[i + 1];
+    if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
+      const trimmed = current.trim();
+      if (trimmed) segments.push(trimmed);
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  const tail = current.trim();
+  if (tail) segments.push(tail);
+  return segments;
+}
+
+function stripLeadingEnv(segment: string): string {
+  return segment.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/u, "");
+}
+
+function tokenizeShell(input: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let escaped = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i]!;
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (/\s/u.test(ch)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function flagValue(tokens: readonly string[], names: readonly string[]): string | undefined {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i]!;
+    for (const name of names) {
+      if (tok === name && i + 1 < tokens.length) return tokens[i + 1];
+      if (tok.startsWith(`${name}=`)) return tok.slice(name.length + 1);
+    }
+  }
+  return undefined;
+}
+
+function positionalAfter(tokens: readonly string[], startIndex: number, flagsWithValues: ReadonlySet<string>): string | undefined {
+  let i = startIndex;
+  while (i < tokens.length) {
+    const tok = tokens[i]!;
+    if (tok.startsWith("-")) {
+      const eq = tok.indexOf("=");
+      if (eq < 0 && flagsWithValues.has(tok)) i += 2;
+      else i += 1;
+      continue;
+    }
+    return tok;
+  }
+  return undefined;
+}
+
+function stripGitGlobalFlags(args: readonly string[]): string[] {
+  const out: string[] = [];
+  const withValue = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+  let i = 0;
+  let seenSubcommand = false;
+  while (i < args.length) {
+    const tok = args[i]!;
+    if (!seenSubcommand) {
+      if (withValue.has(tok)) {
+        i += 2;
+        continue;
+      }
+      if (tok.startsWith("--git-dir=") || tok.startsWith("--work-tree=") || tok.startsWith("-C")) {
+        i += 1;
+        continue;
+      }
+      if (tok.startsWith("-")) {
+        i += 1;
+        continue;
+      }
+      seenSubcommand = true;
+    }
+    out.push(tok);
+    i += 1;
+  }
+  return out;
+}
+
+function shellCommandLabel(tokens: readonly string[]): string | undefined {
+  const first = tokens[0];
+  if (!first) return undefined;
+  const bin = fileName(first);
+  if (!bin) return undefined;
+  if ((bin === "bash" || bin === "sh" || bin === "zsh") && tokens[1] && !tokens[1].startsWith("-")) {
+    return cutLine(fileName(tokens[1]), 22);
+  }
+  const subcommands = new Set(["git", "gh", "bun", "npm", "pnpm", "yarn", "cargo", "swift", "docker", "kubectl", "xcodebuild", "scout", "python", "python3", "node"]);
+  if (subcommands.has(bin)) {
+    const parts = [bin];
+    const args = bin === "git" ? stripGitGlobalFlags(tokens.slice(1)) : tokens.slice(1);
+    for (const arg of args) {
+      if (arg.startsWith("-")) break;
+      parts.push(arg.includes("/") ? fileName(arg) : arg);
+      if (parts.length >= 3 || (bin !== "gh" && bin !== "npm" && parts.length >= 2)) break;
+    }
+    return cutLine(parts.join(" "), 24);
+  }
+  return cutLine(bin, 22);
+}
+
+function parseCommandAction(command: string): ParsedCommand {
+  const segments = splitChainSegments(command.replace(/\r/gu, "").trim());
+  let fallbackLabel: string | undefined;
+
+  for (const segment of segments) {
+    const tokens = tokenizeShell(stripLeadingEnv(segment));
+    const first = tokens[0];
+    if (!first) continue;
+    if (first === "cd") continue;
+
+    if (first === "gh" && tokens[1] === "pr" && tokens[2] === "create") {
+      return {
+        kind: "open_pr",
+        repo: flagValue(tokens, ["--repo", "-R"]),
+        title: flagValue(tokens, ["--title", "-t"]),
+        head: flagValue(tokens, ["--head", "-H"]),
+        base: flagValue(tokens, ["--base", "-B"]),
+        draft: tokens.includes("--draft") || tokens.includes("-d"),
+      };
+    }
+
+    if (first === "gh" && tokens[1] === "pr" && tokens[2] === "merge") {
+      const num = positionalAfter(tokens, 3, new Set(["--repo", "-R", "--subject", "-t", "--body", "-b", "--body-file", "-F", "--match-head-commit"]));
+      const method = tokens.includes("--squash") || tokens.includes("-s")
+        ? "squash"
+        : tokens.includes("--rebase") || tokens.includes("-r")
+          ? "rebase"
+          : tokens.includes("--merge") || tokens.includes("-m")
+            ? "merge"
+            : undefined;
+      return {
+        kind: "merge_pr",
+        repo: flagValue(tokens, ["--repo", "-R"]),
+        number: num ? (num.startsWith("#") ? num : `#${num}`) : undefined,
+        method,
+        deleteBranch: tokens.includes("--delete-branch") || tokens.includes("-d"),
+      };
+    }
+
+    if (first === "git") {
+      const gitArgs = stripGitGlobalFlags(tokens.slice(1));
+      const sub = gitArgs[0];
+      if (sub === "push") {
+        const rest = gitArgs.slice(1);
+        const force = rest.some((t) => t === "--force" || t === "-f" || t.startsWith("--force-with-lease") || t.startsWith("+"));
+        const deleteRemote = rest.includes("--delete") || rest.includes("-d");
+        const positionals = rest.filter((t) => !t.startsWith("-"));
+        return {
+          kind: "git_push",
+          remote: positionals[0],
+          branch: positionals[1],
+          force,
+          deleteRemote,
+        };
+      }
+      if (sub === "commit") {
+        return {
+          kind: "git_commit",
+          message: flagValue(gitArgs.slice(1), ["-m", "--message"]),
+        };
+      }
+      if (sub === "reset" && gitArgs.includes("--hard")) {
+        return { kind: "git_reset" };
+      }
+    }
+
+    if (first === "rm") {
+      const targets = tokens.slice(1).filter((t) => !t.startsWith("-"));
+      return { kind: "delete_files", targets };
+    }
+
+    fallbackLabel ??= shellCommandLabel(tokens);
+  }
+
+  return { kind: "shell", ...(fallbackLabel ? { label: fallbackLabel } : {}) };
+}
+
 /**
  * The verb phrase for a command, named for what it does when the command is
  * one the operator decides on often: a push, a pull request, a merge. A
  * command chained after `cd` or `&&` is read segment by segment.
  */
 function commandWant(command: string): string {
-  const segments = command.split(/&&|\|\||;|\n/u).map((part) => part.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/u, ""));
-  for (const segment of segments) {
-    if (/^git\s+push\b/u.test(segment)) return "wants to push";
-    if (/^gh\s+pr\s+create\b/u.test(segment)) return "wants to open a pull request";
-    if (/^gh\s+pr\s+merge\b/u.test(segment)) return "wants to merge a pull request";
-    if (/^git\s+commit\b/u.test(segment)) return "wants to commit";
-    if (/^git\s+reset\s+--hard\b/u.test(segment)) return "wants to reset the branch";
-    if (/^rm\s/u.test(segment)) return "wants to delete files";
+  switch (parseCommandAction(command).kind) {
+    case "git_push": return "wants to push";
+    case "open_pr": return "wants to open a pull request";
+    case "merge_pr": return "wants to merge a pull request";
+    case "git_commit": return "wants to commit";
+    case "git_reset": return "wants to reset the branch";
+    case "delete_files": return "wants to delete files";
+    case "shell": return "wants to run a command";
   }
-  return "wants to run a command";
 }
 
-const COMMAND_LINE_MAX = 200;
+const COMMAND_LINE_MAX = 160;
 
 /**
- * A command as one line for the lock screen: its lines joined with "; " (what
- * a newline means to the shell), whitespace collapsed, nothing stripped from
- * it (markdown rules would eat its quotes and stars), and cut at a word with
- * an ellipsis.
+ * A command as one clean line for the lock screen & Watch: drops boilerplate
+ * `cd <dir> &&`, `git -C <dir>`, and `--body-file <path>`, shortens home paths
+ * to `~/`, joins newlines with "; ", keeps markdown-looking tokens intact, and
+ * cuts cleanly at a word boundary.
  */
 function commandLine(command: string): string {
-  const line = command.replace(/\r/gu, "").split("\n").map((part) => part.replace(/\s+/gu, " ").trim()).filter(Boolean).join("; ");
+  let line = command
+    .replace(/\r/gu, "")
+    .split("\n")
+    .map((part) => part.replace(/\s+/gu, " ").trim())
+    .filter(Boolean)
+    .join("; ");
+  line = line
+    .replace(/^cd\s+(?:"[^"]+"|'[^']+'|\S+)\s*&&\s*/u, "")
+    .replace(/\bgit\s+-C\s+(?:"[^"]+"|'[^']+'|\S+)\s+/gu, "git ")
+    .replace(/\s+(?:--body-file|-F)(?:=|\s+)(?:"[^"]+"|'[^']+'|\S+)/gu, "")
+    .replace(/\/(?:Users|home)\/[^/\s"']+\//gu, "~/")
+    .replace(/\s+/gu, " ")
+    .trim();
   if (line.length <= COMMAND_LINE_MAX) return line;
   const head = line.slice(0, COMMAND_LINE_MAX - 1);
   const space = head.lastIndexOf(" ");
@@ -372,25 +646,106 @@ function isApprovalView(n: AgentNotification): n is AgentNotification & { view: 
   return n.view === "turn.approve.command" || n.view === "turn.approve.edit" || n.view === "turn.approve.tool";
 }
 
-/** What an approval asks for, then why, each on its own line, never repeated. */
-function approvalBody(n: AgentNotification & { view: "turn.approve.command" | "turn.approve.edit" | "turn.approve.tool" }): string {
-  let what = "";
-  let why = "";
+function uniqueLines(lines: readonly string[]): string {
+  return lines.filter((line, index, all) => Boolean(line) && all.indexOf(line) === index).join("\n");
+}
+
+function approvalTitle(
+  n: AgentNotification & { view: "turn.approve.command" | "turn.approve.edit" | "turn.approve.tool" },
+  project?: string,
+): string {
   switch (n.view) {
-    case "turn.approve.command":
-      what = commandLine(n.command);
-      why = notificationPlainLine(n.why);
-      break;
+    case "turn.approve.command": {
+      const parsed = parseCommandAction(n.command);
+      switch (parsed.kind) {
+        case "open_pr": {
+          const verb = parsed.draft ? "Draft PR" : "Open PR";
+          const target = parsed.repo || project;
+          return target ? `${verb} · ${target}` : verb;
+        }
+        case "merge_pr": {
+          const verb = parsed.number ? `Merge PR ${parsed.number}` : "Merge PR";
+          const target = parsed.repo || project;
+          return target ? `${verb} · ${target}` : verb;
+        }
+        case "git_push": {
+          const verb = parsed.force ? "Force push" : parsed.deleteRemote ? "Delete branch" : "Push";
+          const target = parsed.branch || parsed.remote || project;
+          return target ? `${verb} · ${target}` : verb;
+        }
+        case "git_commit":
+          return project ? `Commit · ${project}` : "Commit";
+        case "git_reset":
+          return project ? `Reset branch · ${project}` : "Reset branch";
+        case "delete_files":
+          return project ? `Delete files · ${project}` : "Delete files";
+        case "shell":
+          return parsed.label ? `Run ${parsed.label}` : "Run command";
+      }
+    }
     case "turn.approve.edit":
-      what = notificationPlainLine(n.files.map((f) => f.path).join(", "));
-      why = notificationPlainLine(n.summary);
-      break;
+      return `Edit ${editTarget(n.files)}`;
     case "turn.approve.tool":
-      what = notificationPlainLine(n.summary);
-      why = notificationPlainLine(n.why);
-      break;
+      return `Allow ${notificationPlainLine(n.tool, 28) || "tool"}`;
   }
-  return [what, why].filter((line, index, all) => line && all.indexOf(line) === index).join("\n");
+}
+
+/** What an approval asks for: human intent first, then compact structured details. */
+function approvalBody(n: AgentNotification & { view: "turn.approve.command" | "turn.approve.edit" | "turn.approve.tool" }): string {
+  switch (n.view) {
+    case "turn.approve.command": {
+      const parsed = parseCommandAction(n.command);
+      const why = notificationPlainLine(n.why);
+      switch (parsed.kind) {
+        case "open_pr": {
+          const prTitle = notificationPlainLine(parsed.title);
+          const flow = parsed.head && parsed.base
+            ? `${parsed.head} → ${parsed.base}`
+            : parsed.head
+              ? `from ${parsed.head}`
+              : parsed.base
+                ? `into ${parsed.base}`
+                : "";
+          const primary = prTitle || why;
+          const secondary = flow || (prTitle && why && why !== prTitle ? why : "");
+          if (primary || secondary) return uniqueLines([primary, secondary]);
+          return commandLine(n.command);
+        }
+        case "merge_pr": {
+          const detail = [parsed.method, parsed.deleteBranch ? "delete branch" : ""].filter(Boolean).join(" · ");
+          if (why || detail) return uniqueLines([why, detail]);
+          return commandLine(n.command);
+        }
+        case "git_commit": {
+          const msg = notificationPlainLine(parsed.message);
+          const primary = msg || why;
+          const secondary = msg && why && why !== msg ? why : "";
+          if (primary || secondary) return uniqueLines([primary, secondary]);
+          return commandLine(n.command);
+        }
+        case "git_push":
+        case "git_reset":
+        case "delete_files":
+        case "shell":
+          return uniqueLines([why, commandLine(n.command)]);
+      }
+    }
+    case "turn.approve.edit": {
+      const summary = notificationPlainLine(n.summary);
+      const shown = n.files.slice(0, 4).map((f) => {
+        const stats = f.added > 0 || f.removed > 0 ? ` (+${f.added} -${f.removed})` : "";
+        return `${f.path}${stats}`;
+      });
+      if (n.files.length > 4) shown.push(`+${n.files.length - 4} more`);
+      const files = notificationPlainLine(shown.join(", "));
+      return uniqueLines([summary, files]);
+    }
+    case "turn.approve.tool": {
+      const why = notificationPlainLine(n.why);
+      const summary = notificationPlainLine(n.summary);
+      return uniqueLines([why, summary]);
+    }
+  }
 }
 
 export function collapseAgentNotification(n: AgentNotification): AgentNotificationCollapse {
@@ -398,11 +753,12 @@ export function collapseAgentNotification(n: AgentNotification): AgentNotificati
   const project = n.project?.trim().replace(/\s+/gu, " ");
   const sender = notificationSenderLabel(n.sender).replace(/\s+/gu, " ");
   if (isApprovalView(n)) {
-    // A decision the operator makes from the lock screen: who wants what as
-    // the title, where as the subtitle, and the command itself as the body.
+    // Watch-first decision layout: compact action + target in the bold title
+    // (Short Look), sender + project/host in the subtitle, human intent first
+    // in the body.
     return {
-      title: `${sender} ${wantPhrase(n)}`,
-      subtitle: [project, host].filter(Boolean).join(" · "),
+      title: approvalTitle(n, project),
+      subtitle: [sender, project || host].filter(Boolean).join(" · "),
       body: approvalBody(n),
       headline: agentNotificationHeadline(n),
       category: agentNotificationCategory(n),
