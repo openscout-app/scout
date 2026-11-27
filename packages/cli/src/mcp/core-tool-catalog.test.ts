@@ -220,14 +220,19 @@ test("Scoutbot's configured stdio server reads a turn attachment from its own Sc
 test("default, additive groups and full partition the actual local registrations", async () => {
   const names = (env: NodeJS.ProcessEnv) => withClient({ env }, async c => (await c.listTools()).tools.map(t => t.name).sort());
   const defaults = await names({});
-  expect(defaults).toHaveLength(31);
+  expect(defaults).toHaveLength(40);
   expect(defaults).toEqual([
     "agents_resolve", "agents_search", "ask", "attachments_read", "broker_feed",
     "browser_click", "browser_close", "browser_fill", "browser_open", "browser_profiles",
     "browser_resize", "browser_screenshot", "browser_snapshot", "browser_status", "browser_tabs",
-    "computer_act", "computer_focus", "computer_inspect", "computer_screenshot", "computer_status", "computer_windows",
     "current_reply_context",
-    "hosts_list", "invocations_get", "invocations_wait", "messages_channel", "messages_inbox", "reply", "session_attach_current", "show", "whoami",
+    "hosts_list", "invocations_get", "invocations_wait", "messages_channel", "messages_inbox", "reply",
+    "scout_computer_act", "scout_computer_drive_begin", "scout_computer_drive_note",
+    "scout_computer_drive_release", "scout_computer_drive_status", "scout_computer_focus",
+    "scout_computer_inspect", "scout_computer_layer_close", "scout_computer_layer_open",
+    "scout_computer_layer_pip", "scout_computer_layer_snapshot", "scout_computer_layer_status",
+    "scout_computer_screenshot", "scout_computer_status", "scout_computer_windows",
+    "session_attach_current", "show", "whoami",
   ]);
   const legacyFlag = { OPENSCOUT_EXPOSE_DEPRECATED_INVOCATIONS_ASK: "1" };
   expect(await names(legacyFlag)).toEqual(defaults);
