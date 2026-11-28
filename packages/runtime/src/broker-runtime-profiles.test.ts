@@ -12,6 +12,16 @@ describe("broker runtime profiles", () => {
       model: "fable",
       session: "new",
     });
+    expect(resolveBrokerRuntimeProfile("Carbon")?.execution).toEqual({
+      harness: "antigravity",
+      model: "gemini-4-carbon",
+      session: "new",
+    });
+    expect(resolveBrokerRuntimeProfile("Neon")?.execution).toEqual({
+      harness: "antigravity",
+      model: "gemini-4-neon",
+      session: "new",
+    });
     expect(resolveBrokerRuntimeProfile("Kimi")?.execution).toEqual({
       harness: "kimi",
       session: "new",
@@ -43,6 +53,24 @@ describe("broker runtime profiles", () => {
       harness: "claude",
       model: "opus",
       reasoningEffort: "high",
+      session: "new",
+    });
+    expect(executionForBrokerRuntimeProfile({
+      profileId: "carbon",
+      reasoningEffort: "HIGH",
+    })).toEqual({
+      harness: "antigravity",
+      model: "gemini-4-carbon",
+      reasoningEffort: "high",
+      session: "new",
+    });
+    expect(executionForBrokerRuntimeProfile({
+      profileId: "neon",
+      reasoningEffort: "XHIGH",
+    })).toEqual({
+      harness: "antigravity",
+      model: "gemini-4-neon",
+      reasoningEffort: "xhigh",
       session: "new",
     });
     expect(executionForBrokerRuntimeProfile({
