@@ -1,9 +1,10 @@
+import { realpathSync } from "node:fs";
 import { BrokerAssistantClaims, protectAssistantService, ASSISTANT_CLAIM_HEADER } from "./broker-assistant-claims.js";
 import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsConfig } from "./mesh-approvals.js";
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { NativePermissionAskError } from "./native-permission.js";
 import { HarnessHooksError } from "./harness-hooks.js";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrokerRequestReceipts, canonicalRequest } from "./broker-request-receipts.js";
@@ -246,14 +247,14 @@ async function requestRouter(
     beforeBody?: () => Promise<void>;
     rawBody?: string;
     headers?: Record<string, string>;
-    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean };
+    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean | { keyId: string; tier: "observe" | "control" } };
   } = {},
 ): Promise<{ body: unknown; rawBody: string; response: FakeResponse }> {
   const request = new PassThrough() as PassThrough & {
     headers: Record<string, string>;
     method: string;
     url: string;
-    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean };
+    transportContext?: { transport: "unix-socket" | "loopback" | "remote"; remoteAddress?: string; guest?: boolean; scoped?: boolean; operator?: true; peer?: boolean | { keyId: string; tier: "observe" | "control" } };
   };
   request.headers = { host: "broker.test", ...options.headers };
   request.method = method;
@@ -317,6 +318,73 @@ describe("createBrokerHttpRouter", () => {
     expect(inputs).toHaveLength(1);
     const absent = await requestRouter(createHarness(), "GET", "/v1/mesh/knowledge/search?q=x");
     expect(absent.response.status).toBe(404);
+  });
+
+  test("Desk lists skills and sends a single attributed ask with the selected path and plain brief", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "runtime-skills-"));
+    const original = process.env.HOME;
+    process.env.HOME = dir;
+    const local = { transport: "loopback" as const };
+    const calls: unknown[] = [], forwards: unknown[] = [];
+    const remote = { name: "remote-review", description: "Review there.", source: "linked", directory: "/worker/shared/review", path: "/worker/shared/review/SKILL.md" };
+    const h = createHarness({
+      requestReceipts: new BrokerRequestReceipts(join(dir, "receipts")),
+      forwardRouteAliasRequest: async input => { forwards.push(input); return input.nodeSelector === "worker"
+        ? { status: 200, body: { skills: [remote] } } : { status: 404, body: {} }; },
+      brokerService: { ...createHarness().deps.brokerService, deliver: async payload => {
+        calls.push(payload);
+        return { kind: "delivery", accepted: true, receipt: { requestId: payload.requestId, conversationId: "dm.test",
+          messageId: "msg-test", flightId: "flt-test" }, flight: { id: "flt-test", invocationId: "inv-test" }, workItem: { id: "work-test" } } as never;
+      } },
+    });
+    try {
+      const make = (root: string) => {
+        const path = join(dir, root, "skills", "review");
+        mkdirSync(path, { recursive: true });
+        writeFileSync(join(path, "SKILL.md"), "---\nname: review\ndescription: Review here.\n---\nPrivate instructions.");
+      };
+      make(".scout");
+      const get = (path: string) => requestRouter(h, "GET", path, { transportContext: local });
+      const run = (body: unknown) => requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local });
+      const folder = realpathSync(join(dir, ".scout", "skills", "review"));
+      const shared = { name: "review", description: "Review here.", source: "personal", directory: folder, path: join(folder, "SKILL.md") };
+      expect((await get("/v1/skills")).body).toEqual({ skills: [shared] });
+      expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "control" } } })).body).toEqual({ skills: [shared] });
+      expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
+      expect((await requestRouter(h, "GET", "/v1/mesh/skills", { transportContext: { transport: "remote", peer: { keyId: "k", tier: "observe" } } })).response.status).toBe(403);
+      expect((await get("/v1/skills?host=worker&name=remote-review")).body).toEqual({ skills: [remote] });
+      expect(forwards[0]).toEqual({ nodeSelector: "worker", method: "GET", path: "/v1/mesh/skills?name=remote-review" });
+      expect((await get("/v1/skills?host=worker&name=other")).response.status).toBe(503); // A peer must return the named registration.
+      expect((await get("/v1/skills?host=worker&name=..")).response.status).toBe(400);
+      expect(forwards).toHaveLength(2);
+      make(".claude");
+      const body = { name: "review", brief: "Review this release.", currentDirectory: "/code" };
+      expect((await get("/v1/skills")).body).toEqual({ skills: [shared] });
+      expect((await get("/v1/skills?all=true")).body).toMatchObject({ skills: [shared, { name: "review", source: "unregistered" }] });
+      expect((await get("/v1/skills?name=missing")).response.status).toBe(404);
+      expect((await get("/v1/skills?name=remote-review&all=true")).response.status).toBe(400);
+      expect((await run({ ...body, brief: "" })).response.status).toBe(400);
+      expect((await get("/v1/skills?host=offline")).response.status).toBe(503);
+      expect((await requestRouter(h, "POST", "/v1/skills/run", { body, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);
+      const native = { requestId: "named-ask", intent: "task_ask", body: body.brief, task: { version: 1, skill: "review" },
+        target: { kind: "project_path", projectPath: "/code" } };
+      expect((await requestRouter(h, "POST", "/v1/deliver", { body: native, transportContext: { transport: "remote", guest: true } })).response.status).toBe(403);
+      expect((await requestRouter(h, "POST", "/v1/deliver", { body: native, transportContext: local, headers: { origin: "https://other.test" } })).response.status).toBe(403);
+      expect(calls).toHaveLength(0);
+      const task = { ...body, name: remote.name, requestId: "desk-1", target: { host: "worker", harness: "claude", project: "/reports" } };
+      const first = await run(task);
+      expect(first.response.status).toBe(202);
+      expect(first.body).toMatchObject({ receipt: { requestId: "desk-1", flightId: "flt-test", invocationId: "inv-test", workId: "work-test" },
+        followUrl: expect.stringMatching(/\/work\/work-test$/) });
+      expect((await run(task)).body).toEqual(first.body);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ task: { version: 1, skill: remote.name }, intent: "consult", caller: { actorId: "local-unverified" },
+        target: { kind: "project_path", projectPath: "/reports", host: "worker" }, body: "Review this release.",
+        invocationMetadata: { attribution: { source: "unverified" } } });
+    } finally {
+      if (original === undefined) delete process.env.HOME; else process.env.HOME = original;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("requestId dedupes ask/send acceptance at the broker and exposes the original receipt", async () => {

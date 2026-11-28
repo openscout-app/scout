@@ -32,6 +32,9 @@ describe("CLI broker update check", () => {
     expect(shouldEnsureBrokerUptodateForCommand("report")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("feedback")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("ask")).toBe(true);
+    expect(shouldEnsureBrokerUptodateForCommand("run")).toBe(true);
+    expect(shouldEnsureBrokerUptodateForCommand("run", ["review", "--dry-run"])).toBe(false);
+    expect(shouldEnsureBrokerUptodateForCommand("skills")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand(null)).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("doctor")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("ask", ["--help"])).toBe(false);

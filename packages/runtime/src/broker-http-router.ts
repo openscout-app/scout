@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { SkillLookupError } from "./skills.js";
+import { skillAsk, skillRunSchema, skillRunResult, targetSkills } from "./broker-skills.js";
 import { HostLaunchDeferred } from "./host-launch-admission.js";
 import { readRexStatus, rexBindings, type RexStartInput, type RexStatusInput } from "./rex-terminal.js";
 import { TaskReadyError, type BrokerTaskReadyService } from "./broker-task-ready.js";
@@ -3771,10 +3774,44 @@ export function createBrokerHttpRouter(
     return;
   }
 
-  if (method === "POST" && url.pathname === "/v1/deliver") {
+  const skillHome = () => process.env.HOME || homedir();
+  const listLocalSkills = method === "GET" && url.pathname === "/v1/skills";
+  const listPeerSkills = method === "GET" && url.pathname === "/v1/mesh/skills";
+  const runSkill = method === "POST" && url.pathname === "/v1/skills/run";
+  const mayReadSkills = (peer: boolean) => {
+    const ctx = request.transportContext;
+    if (!ctx || ctx.guest || ctx.scoped || request.headers.origin !== undefined) return false;
+    return peer ? ctx.peer?.tier === "control"
+      : ["unix-socket", "loopback"].includes(ctx.transport) && !ctx.peer && !forwardedNodeId;
+  };
+  if (listLocalSkills || listPeerSkills || runSkill) {
+    if (!mayReadSkills(listPeerSkills)) {
+      json(response, 403, { error: "forbidden" }); return;
+    }
+    if (!runSkill) {
+      try {
+        const rawAll = url.searchParams.get("all");
+        if (rawAll !== null && rawAll !== "true" && rawAll !== "false") throw new Error("all must be true or false.");
+        const skills = await targetSkills(skillHome(), { name: url.searchParams.get("name") ?? undefined, all: rawAll === "true",
+          host: listPeerSkills ? undefined : url.searchParams.get("host") ?? undefined }, forwardRouteAliasRequest);
+        json(response, 200, { skills });
+      } catch (error) {
+        if (error instanceof SkillLookupError) json(response, error.status, { error: error.code, detail: error.message });
+        else badRequest(response, error);
+      }
+      return;
+    }
+  }
+
+  if (method === "POST" && (url.pathname === "/v1/deliver" || runSkill)) {
     const signal = requestAbortSignal(request, response);
     try {
-      const payload = await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      const skillInput = runSkill ? await readValidatedRequestBody(request, skillRunSchema) : undefined;
+      const payload = skillInput
+        ? brokerDeliverRequestSchema.parse(skillAsk(skillInput))
+        : await readValidatedRequestBody(request, brokerDeliverRequestSchema);
+      // Naming a skill on /v1/deliver must not widen access to the host's catalog.
+      if (payload.task?.skill && !mayReadSkills(false)) { json(response, 403, { error: "forbidden" }); return; }
       const snapshot = currentAttributionSnapshot();
       const parentFlight = payload.relation?.parentFlightId ? snapshot.flights?.[payload.relation.parentFlightId] : undefined;
       const parent = brokerAttributionFromMetadata(parentFlight ? snapshot.invocations?.[parentFlight.invocationId]?.metadata : undefined)
@@ -3836,7 +3873,7 @@ export function createBrokerHttpRouter(
         json(
           response,
           result.kind === "delivery" ? 202 : result.kind === "question" ? 409 : 422,
-          result,
+          runSkill && result.kind === "delivery" ? skillRunResult(result) : result,
         );
       };
       const claims = brokerService.assistantClaims;
@@ -3846,7 +3883,10 @@ export function createBrokerHttpRouter(
       if (signal.aborted || response.destroyed || response.writableEnded) {
         return;
       }
-      badRequest(response, error);
+      const lookup = error instanceof Error && error.cause instanceof SkillLookupError ? error.cause : error;
+      if (lookup instanceof SkillLookupError) {
+        json(response, lookup.status, { error: lookup.code, detail: lookup.message });
+      } else badRequest(response, error);
     }
     return;
   }

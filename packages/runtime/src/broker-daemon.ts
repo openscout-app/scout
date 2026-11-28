@@ -319,7 +319,8 @@ import { locateHarnessSession } from "./session-locator.js";
 import { findHarnessEntry } from "./harness-catalog.js";
 import { BrokerControlStreamService } from "./broker-control-stream-service.js";
 import { json } from "./broker-http-helpers.js";
-import { createBrokerHttpRouter } from "./broker-http-router.js";
+import { targetSkills } from "./broker-skills.js";
+import { createBrokerHttpRouter, type BrokerHttpRouterDeps } from "./broker-http-router.js";
 import { BrokerRequestReceipts, ProvenRequestFailure, RetryablePreEffectFailure } from "./broker-request-receipts.js";
 import { resolveSessionWorkspace } from "./agent-workspace.js";
 import { WorktreeRetirementService } from "./agent-workspace-retirement.js";
@@ -3872,8 +3873,70 @@ const operatorTaskExpiryTimer = setInterval(() => {
 }, 1_000);
 operatorTaskExpiryTimer.unref();
 
+const forwardOwnerRequest: NonNullable<BrokerHttpRouterDeps["forwardRouteAliasRequest"]> = async ({ nodeSelector, path, method, body }) => {
+  const matches = Object.values(runtime.snapshot().nodes).filter((candidate) =>
+    candidate.id === nodeSelector || candidate.name === nodeSelector || candidate.hostName === nodeSelector
+  );
+  if (matches.length !== 1) {
+    return {
+      status: 400,
+      body: {
+        error: "ambiguous_alias_scope",
+        detail: `host ${nodeSelector} is ${matches.length ? "ambiguous" : "unknown"}; use an exact node id`,
+        candidates: matches.map((candidate) => candidate.id),
+      },
+    };
+  }
+  const authority = matches[0]!;
+  if (authority.id === nodeId) return null;
+  if (authority.meshId !== meshId) {
+    return { status: 403, body: { error: "not_authorized", detail: "alias authority is outside the local owner realm" } };
+  }
+  if (!authority.brokerUrl) {
+    return { status: 503, body: { error: "alias_target_unavailable", detail: `authoritative broker ${authority.id} is not reachable` } };
+  }
+  try {
+    // Signed via the mesh peer client. Alias resolution is served to peers
+    // at the remote tier (/v1/mesh/aliases/resolve, §4); other forwarded
+    // paths (alias mutations, /v1/deliver) stay local-tier by design and
+    // are unreachable to remote peers in enforce mode. Pre-trust-cone
+    // peers lack the mesh route — fall back to the original path on 404.
+    const peerPath = path === "/v1/aliases/resolve" ? "/v1/mesh/aliases/resolve" : path;
+    const requestInit = {
+      method,
+      headers: {
+        "content-type": "application/json",
+        "x-openscout-mesh-id": meshId,
+        "x-openscout-forwarded-node-id": nodeId,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(30_000),
+    };
+    let forwarded = await daemonMeshPeerFetch(authority.brokerUrl, peerPath, requestInit);
+    if (forwarded.status === 404 && peerPath !== path) {
+      forwarded = await daemonMeshPeerFetch(authority.brokerUrl, path, requestInit);
+    }
+    return {
+      status: forwarded.status,
+      body: await forwarded.json().catch(() => ({
+        error: "alias_target_unavailable",
+        detail: `authoritative broker ${authority.id} returned a non-JSON response`,
+      })),
+    };
+  } catch (error) {
+    return {
+      status: 503,
+      body: {
+        error: "alias_target_unavailable",
+        detail: `failed to forward alias request to ${authority.id}: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    };
+  }
+};
+
 const deliveryAcceptanceService: BrokerDeliveryAcceptanceService = new BrokerDeliveryAcceptanceService({
   workPageAvailable: () => projection.statusSnapshot().state === "ready",
+  resolveTaskSkill: async (name, host) => (await targetSkills(homedir(), { name, host }, forwardOwnerRequest))[0]!,
   taskAsk: payload => taskService.ask(payload),
   recoverTaskFollowup: (actor, requestId) => taskService.recoverFollowup(actor, requestId),
   withTaskImage: (message, image, commit) => {
@@ -4411,66 +4474,7 @@ const routeRequest = createBrokerHttpRouter({
     },
   },
   forwardHostWebRequest: forwardAttachmentHostRead,
-  forwardRouteAliasRequest: async ({ nodeSelector, path, method, body }) => {
-    const matches = Object.values(runtime.snapshot().nodes).filter((candidate) =>
-      candidate.id === nodeSelector || candidate.name === nodeSelector || candidate.hostName === nodeSelector
-    );
-    if (matches.length !== 1) {
-      return {
-        status: 400,
-        body: {
-          error: "ambiguous_alias_scope",
-          detail: `host ${nodeSelector} is ${matches.length ? "ambiguous" : "unknown"}; use an exact node id`,
-          candidates: matches.map((candidate) => candidate.id),
-        },
-      };
-    }
-    const authority = matches[0]!;
-    if (authority.id === nodeId) return null;
-    if (authority.meshId !== meshId) {
-      return { status: 403, body: { error: "not_authorized", detail: "alias authority is outside the local owner realm" } };
-    }
-    if (!authority.brokerUrl) {
-      return { status: 503, body: { error: "alias_target_unavailable", detail: `authoritative broker ${authority.id} is not reachable` } };
-    }
-    try {
-      // Signed via the mesh peer client. Alias resolution is served to peers
-      // at the remote tier (/v1/mesh/aliases/resolve, §4); other forwarded
-      // paths (alias mutations, /v1/deliver) stay local-tier by design and
-      // are unreachable to remote peers in enforce mode. Pre-trust-cone
-      // peers lack the mesh route — fall back to the original path on 404.
-      const peerPath = path === "/v1/aliases/resolve" ? "/v1/mesh/aliases/resolve" : path;
-      const requestInit = {
-        method,
-        headers: {
-          "content-type": "application/json",
-          "x-openscout-mesh-id": meshId,
-          "x-openscout-forwarded-node-id": nodeId,
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(30_000),
-      };
-      let forwarded = await daemonMeshPeerFetch(authority.brokerUrl, peerPath, requestInit);
-      if (forwarded.status === 404 && peerPath !== path) {
-        forwarded = await daemonMeshPeerFetch(authority.brokerUrl, path, requestInit);
-      }
-      return {
-        status: forwarded.status,
-        body: await forwarded.json().catch(() => ({
-          error: "alias_target_unavailable",
-          detail: `authoritative broker ${authority.id} returned a non-JSON response`,
-        })),
-      };
-    } catch (error) {
-      return {
-        status: 503,
-        body: {
-          error: "alias_target_unavailable",
-          detail: `failed to forward alias request to ${authority.id}: ${error instanceof Error ? error.message : String(error)}`,
-        },
-      };
-    }
-  },
+  forwardRouteAliasRequest: forwardOwnerRequest,
   openRolesDb: openRolesControlPlaneDb,
   publishEphemeralEvent: publishEphemeralRuntimeEvent,
   runningRolePass: (assignmentId) => rolePasses?.runningPass(assignmentId) ?? null,

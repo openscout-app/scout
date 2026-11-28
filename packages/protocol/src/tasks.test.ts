@@ -10,6 +10,8 @@ test.each([
   [{ operator: true, fyi: true, options: ["yes"] }, {}, "--option"],
   [{ permission: true }, { to: "worker" }, "--permission requires --operator"],
   [{ permission: true, because: "needs a deploy" }, { capability: true }, "--permission requires --operator"],
+  [{ skill: "../secret" }, { to: "worker" }, "--skill takes a registered skill folder name"],
+  [{ operator: true, skill: "review" }, {}, "--skill requires a new agent ask"],
   [{ because: "  " }, { to: "worker" }, "--because cannot be empty"],
   [{ fyi: true, ref: "task" }, {}, "--fyi"],
   [{ fyi: true, continue: "task" }, {}, "--fyi"],

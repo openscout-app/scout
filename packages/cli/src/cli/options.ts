@@ -935,7 +935,7 @@ export function parseAskCommandOptions(
     if (current === "--") { messageParts.push(...parsed.args.slice(index + 1)); break; }
     const taskBoolean = ({ "--operator": "operator", "--fyi": "fyi", "--notify": "notify", "--cancel": "cancel", "--permission": "permission" } as const)[current as "--operator"];
     if (taskBoolean) { task[taskBoolean] = true; continue; }
-    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--callback", "--image", "--decision"].find(flag => current === flag || current.startsWith(`${flag}=`));
+    const taskValue = ["--continue", "--default-action", "--window", "--option", "--because", "--skill", "--callback", "--image", "--decision"].find(flag => current === flag || current.startsWith(`${flag}=`));
     if (taskValue) {
       const value = parseAskFlagValue(parsed.args, index, taskValue);
       if (!value.value.trim() || value.value.startsWith("--")) missingFlagValue(taskValue);
@@ -943,6 +943,10 @@ export function parseAskCommandOptions(
       if (taskValue === "--default-action") task.defaultAction = value.value;
       if (taskValue === "--window") task.window = Number(value.value);
       if (taskValue === "--option") (task.options ??= []).push(value.value);
+      if (taskValue === "--skill") {
+        if (task.skill) throw new ScoutCliError("--skill may appear only once");
+        task.skill = value.value;
+      }
       if (taskValue === "--because") task.because = value.value;
       if (taskValue === "--callback") {
         if (callbackFile) throw new ScoutCliError("--callback may appear only once");

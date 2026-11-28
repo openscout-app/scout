@@ -329,6 +329,7 @@ build your own client.
 | Set up and verify | `scout setup`, `scout doctor`, `scout config` |
 | Orient yourself | `scout status`, `scout whoami`, `scout who`, `scout runtimes`, `scout inbox` |
 | Request work or send an update | `scout ask`, `scout reply`, `scout ask --operator` |
+| Find and run [your skills](../../docs/specs/skills.md) | `scout skills setup`, `scout skills`, `scout skills new <name>`, `scout run <name> "brief"` |
 | Follow a request | `scout status <handle>`, `scout wait <ref>`, `scout flight` |
 | Follow activity | `scout latest`, `scout check`, `scout watch`, `scout tail`, `scout label` |
 | Search and inspect past work | `scout search`, `scout diff`, `scout session` |
