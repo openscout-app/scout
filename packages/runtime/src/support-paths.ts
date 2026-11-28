@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { deriveOpenScoutInstanceLayout } from "./instance.js";
+import { deriveOpenScoutInstanceLayout, isProdOpenScoutInstance, resolveOpenScoutInstanceName } from "./instance.js";
+import { resolveOpenScoutToolDir, scoutHomeReadPath } from "./scout-home.js";
 
 export type OpenScoutSupportPaths = {
   supportDirectory: string;
@@ -42,16 +43,40 @@ export function isTestRunnerProcess(): boolean {
   return /[._](test|spec)\.[cm]?[jt]sx?$/.test(entry);
 }
 
+function envPathFrom(env: Record<string, string | undefined>, key: string): string | undefined {
+  const value = env[key]?.trim();
+  return value ? value : undefined;
+}
+
+function hasEffectiveTestIsolation(isolationEnvKey: string, env: Record<string, string | undefined> = process.env): boolean {
+  if (envPathFrom(env, isolationEnvKey)) return true;
+  if (!isProdOpenScoutInstance(resolveOpenScoutInstanceName(env))) return true;
+  if (isolationEnvKey === "OPENSCOUT_SUPPORT_DIRECTORY") {
+    return Boolean(
+      envPathFrom(env, "OPENSCOUT_STATE_DIR")
+      || envPathFrom(env, "OPENSCOUT_HOME")
+      || envPathFrom(env, "SCOUT_HOME"),
+    );
+  }
+  if (isolationEnvKey === "OPENSCOUT_HOME") {
+    return Boolean(
+      envPathFrom(env, "SCOUT_HOME")
+      || envPathFrom(env, "OPENSCOUT_SCOUT_HOME"),
+    );
+  }
+  return false;
+}
+
 /**
  * Tests must never touch real user data. Every writer of OpenScout user state
- * calls this first: under a test runner the write is refused unless the
- * isolation env var redirects it to a temp directory. This exists because an
- * unisolated test once persisted its fake temp-home workspaceRoots into the
- * operator's real settings.json.
+ * calls this first: under a test runner the write is refused unless an
+ * isolation env var (or non-prod OPENSCOUT_INSTANCE) redirects it to a temp
+ * directory. This exists because an unisolated test once persisted its fake
+ * temp-home workspaceRoots into the operator's real settings.json.
  */
 export function assertTestIsolatedUserData(operation: string, isolationEnvKey: string): void {
   if (!isTestRunnerProcess()) return;
-  if (process.env[isolationEnvKey]?.trim()) return;
+  if (hasEffectiveTestIsolation(isolationEnvKey)) return;
   throw new Error(
     `Refusing to ${operation} under a test runner without ${isolationEnvKey} set. `
       + "Tests must isolate OpenScout user data in a temp directory (see prepareHome in onboarding.test.ts).",
@@ -80,15 +105,65 @@ function envPath(key: string): string | undefined {
 }
 
 /**
- * OPENSCOUT_HOME (config.json, user.json, run/ sockets, zellij sockets, chat):
+ * OPENSCOUT_HOME (config.json, user.json, skills/, artifacts/, reports/, .<tool>/):
  * ~/.openscout for prod, the instance root otherwise.
+ * Accepts deprecated aliases SCOUT_HOME and OPENSCOUT_SCOUT_HOME.
  */
 export function resolveOpenScoutHome(): string {
-  return envPath("OPENSCOUT_HOME") ?? deriveOpenScoutInstanceLayout().openscoutHome;
+  return envPath("OPENSCOUT_HOME")
+    ?? envPath("SCOUT_HOME")
+    ?? envPath("OPENSCOUT_SCOUT_HOME")
+    ?? deriveOpenScoutInstanceLayout().openscoutHome;
 }
 
 /**
- * OPENSCOUT_SCOUT_HOME: the `~/.scout` class of state (local edge, CLI logs,
+ * OPENSCOUT_STATE_DIR (alias OPENSCOUT_SUPPORT_DIRECTORY): Scout-owned state.
+ * When OPENSCOUT_HOME (or SCOUT_HOME) is explicitly set on prod without a
+ * separate support override, state resolves to <home>/state; otherwise it keeps
+ * the instance layout default until `scout home migrate` runs.
+ */
+export function resolveOpenScoutStateDirectory(env: Record<string, string | undefined> = process.env): string {
+  const explicitState = envPathFrom(env, "OPENSCOUT_STATE_DIR")
+    ?? envPathFrom(env, "OPENSCOUT_SUPPORT_DIRECTORY");
+  if (explicitState) return explicitState;
+  const layout = deriveOpenScoutInstanceLayout({ env, home: env.HOME?.trim() || homedir() });
+  if (layout.isProd) {
+    const explicitHome = envPathFrom(env, "OPENSCOUT_HOME") ?? envPathFrom(env, "SCOUT_HOME");
+    if (explicitHome) return join(explicitHome, "state");
+  }
+  return layout.supportDirectory;
+}
+
+/** Rebuildable cache directory: OPENSCOUT_CACHE_DIR, default <home>/cache. */
+export function resolveOpenScoutCacheDirectory(env: Record<string, string | undefined> = process.env): string {
+  return envPathFrom(env, "OPENSCOUT_CACHE_DIR") ?? join(resolveOpenScoutHomeForEnv(env), "cache");
+}
+
+/** Sibling tool dot-folder under the resolved home (<home>/.<tool>). */
+export function resolveOpenScoutToolDirectory(tool: string, env: Record<string, string | undefined> = process.env): string {
+  const home = resolveOpenScoutHomeForEnv(env);
+  return resolveOpenScoutToolDir(tool, { env: { ...env, OPENSCOUT_HOME: home } });
+}
+
+/**
+ * Dual-location read resolver for operator config files (config.json, user.json, etc.):
+ * checks <home>/<name> first, falling back to legacy ~/.scout/<name> only when
+ * no explicit home override is set on prod.
+ */
+export function resolveOpenScoutConfigReadPath(
+  filename: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const home = env.HOME?.trim() || homedir();
+  const layout = deriveOpenScoutInstanceLayout({ env, home });
+  if (!layout.isProd) {
+    return join(layout.openscoutHome, filename);
+  }
+  return scoutHomeReadPath(filename, { home, env });
+}
+
+/**
+ * OPENSCOUT_SCOUT_HOME: legacy `~/.scout` class of state (local edge, CLI logs,
  * CLI mtime cache). ~/.scout for prod, the instance root otherwise.
  */
 export function resolveOpenScoutScoutHome(): string {
@@ -98,50 +173,63 @@ export function resolveOpenScoutScoutHome(): string {
 /**
  * Pairing bridge state (Noise static key, trusted peers, runtime.json, logs,
  * attachments). OPENSCOUT_PAIRING_HOME wins, then the legacy SCOUT_PAIRING_HOME
- * and OPENSCOUT_PAIRING_DIR spellings, then <scout home>/pairing for an
- * explicit OPENSCOUT_SCOUT_HOME, then the instance default (~/.scout/pairing
+ * and OPENSCOUT_PAIRING_DIR spellings, then <OPENSCOUT_STATE_DIR>/pairing, then
+ * <scout home>/pairing for an explicit OPENSCOUT_SCOUT_HOME, then migrated
+ * ~/.openscout/state/pairing if present, then the instance default (~/.scout/pairing
  * for prod).
  */
 export function resolveOpenScoutPairingHome(): string {
-  const explicit = envPath("OPENSCOUT_PAIRING_HOME")
-    ?? envPath("SCOUT_PAIRING_HOME")
-    ?? envPath("OPENSCOUT_PAIRING_DIR");
-  if (explicit) return explicit;
-  const scoutHome = envPath("OPENSCOUT_SCOUT_HOME");
-  if (scoutHome) return join(scoutHome, "pairing");
-  return deriveOpenScoutInstanceLayout().pairingHome;
+  return resolveOpenScoutPairingHomeForEnv(process.env);
 }
 
 /** resolveOpenScoutHome for an explicit env (HOME honoured from that env). */
 export function resolveOpenScoutHomeForEnv(env: Record<string, string | undefined>): string {
-  const explicit = env.OPENSCOUT_HOME?.trim();
+  const explicit = envPathFrom(env, "OPENSCOUT_HOME")
+    ?? envPathFrom(env, "SCOUT_HOME")
+    ?? envPathFrom(env, "OPENSCOUT_SCOUT_HOME");
   if (explicit) return explicit;
   return deriveOpenScoutInstanceLayout({ env, home: env.HOME?.trim() || homedir() }).openscoutHome;
 }
 
 /** resolveOpenScoutPairingHome for an explicit env (HOME honoured from that env). */
 export function resolveOpenScoutPairingHomeForEnv(env: Record<string, string | undefined>): string {
-  const explicit = env.OPENSCOUT_PAIRING_HOME?.trim()
-    || env.SCOUT_PAIRING_HOME?.trim()
-    || env.OPENSCOUT_PAIRING_DIR?.trim();
+  const explicit = envPathFrom(env, "OPENSCOUT_PAIRING_HOME")
+    ?? envPathFrom(env, "SCOUT_PAIRING_HOME")
+    ?? envPathFrom(env, "OPENSCOUT_PAIRING_DIR");
   if (explicit) return explicit;
-  const scoutHome = env.OPENSCOUT_SCOUT_HOME?.trim();
+  const explicitState = envPathFrom(env, "OPENSCOUT_STATE_DIR");
+  if (explicitState) return join(explicitState, "pairing");
+  const scoutHome = envPathFrom(env, "OPENSCOUT_SCOUT_HOME");
   if (scoutHome) return join(scoutHome, "pairing");
-  return deriveOpenScoutInstanceLayout({ env, home: env.HOME?.trim() || homedir() }).pairingHome;
+  const layout = deriveOpenScoutInstanceLayout({ env, home: env.HOME?.trim() || homedir() });
+  if (layout.isProd) {
+    const explicitHome = envPathFrom(env, "OPENSCOUT_HOME") ?? envPathFrom(env, "SCOUT_HOME");
+    const migratedPairing = join(explicitHome ?? layout.openscoutHome, "state", "pairing");
+    if (existsSync(migratedPairing)) return migratedPairing;
+  }
+  return layout.pairingHome;
 }
 
-/** Local edge (Caddy) state: <scout home>/local-edge. */
+/** Local edge (Caddy) state: <scout home>/local-edge (prefers migrated ~/.openscout/state/local-edge if present). */
 export function resolveOpenScoutLocalEdgeDirectory(): string {
+  if (!envPath("OPENSCOUT_SCOUT_HOME") && isProdOpenScoutInstance(resolveOpenScoutInstanceName())) {
+    const migrated = join(resolveOpenScoutStateDirectory(), "local-edge");
+    if (existsSync(migrated)) return migrated;
+  }
   return join(resolveOpenScoutScoutHome(), "local-edge");
 }
 
 export function resolveOpenScoutSupportPaths(): OpenScoutSupportPaths {
   const layout = deriveOpenScoutInstanceLayout();
-  const supportDirectory = envPath("OPENSCOUT_SUPPORT_DIRECTORY") ?? layout.supportDirectory;
+  const supportDirectory = resolveOpenScoutStateDirectory();
   const logsDirectory = join(supportDirectory, "logs");
   const runtimeDirectory = join(supportDirectory, "runtime");
   const catalogDirectory = join(supportDirectory, "catalog");
-  const controlHome = envPath("OPENSCOUT_CONTROL_HOME") ?? layout.controlHome;
+  const explicitControlHome = envPath("OPENSCOUT_CONTROL_HOME");
+  const controlHome = explicitControlHome
+    ?? (layout.isProd && (envPath("OPENSCOUT_STATE_DIR") || envPath("OPENSCOUT_HOME") || envPath("SCOUT_HOME"))
+      ? join(supportDirectory, "control-plane")
+      : layout.controlHome);
   const knowledgeDirectory = join(controlHome, "knowledge");
 
   return {

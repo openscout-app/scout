@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   LOCAL_CONFIG_VERSION,
+  loadLocalConfig,
   normalizeLocalHostname,
   normalizeLocalHostnameLabel,
   resolveBrokerControlUrl,
@@ -89,6 +90,21 @@ describe("broker control config", () => {
     process.env.OPENSCOUT_BROKER_INTERNAL_URL = "http://127.0.0.1:4321";
 
     expect(resolveBrokerControlUrl()).toBe("http://127.0.0.1:4321");
+  });
+
+  test("reads config.json from ~/.openscout first and falls back to legacy ~/.scout", () => {
+    const home = mkdtempSync(join(tmpdir(), "openscout-dual-local-config-"));
+    tempHomes.add(home);
+    process.env.HOME = home;
+    delete process.env.OPENSCOUT_HOME;
+
+    mkdirSync(join(home, ".scout"), { recursive: true });
+    writeFileSync(join(home, ".scout", "config.json"), JSON.stringify({ version: 1, ports: { broker: 44110 } }));
+    expect(loadLocalConfig().ports?.broker).toBe(44110);
+
+    mkdirSync(join(home, ".openscout"), { recursive: true });
+    writeFileSync(join(home, ".openscout", "config.json"), JSON.stringify({ version: 1, ports: { broker: 45110 } }));
+    expect(loadLocalConfig().ports?.broker).toBe(45110);
   });
 });
 
