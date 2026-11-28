@@ -215,7 +215,7 @@ const ALLOWED_IMAGE_MIMES: Record<string, string> = {
 
 const RATE_LIMITS: Record<MobileRemoteRateBucket, { max: number; windowMs: number }> = {
   state: { max: 8, windowMs: 3_000 },
-  trackpad: { max: 180, windowMs: 2_000 },
+  trackpad: { max: 240, windowMs: 2_000 },
   input: { max: 60, windowMs: 2_000 },
   screen: { max: 4, windowMs: 2_000 },
   paste: { max: 4, windowMs: 10_000 },
@@ -664,75 +664,252 @@ if (!front) {
   }
 }
 
-// MARK: - Native macOS HID & Lock Helper (compiled once in ~/.openscout/bin)
+// MARK: - Native macOS HID & Lock Helper (compiled once in ~/.openscout/bin,
+// runs as a resident 120Hz synthetic smoother daemon over private stdin/stdout)
 
 const HID_HELPER_SWIFT = `
 import ApplicationServices
 import CoreGraphics
+import Dispatch
 import Foundation
+
+setbuf(stdout, nil)
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data((message + "\\n").utf8))
     exit(code)
 }
 
-let args = CommandLine.arguments
-guard args.count >= 2 else { fail("Usage: scout-hid <locked|move|click|rightClick|doubleClick|scroll> [dx] [dy]") }
-let action = args[1]
-
-if action == "locked" {
+func checkScreenLocked() -> String {
     guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
-        print("unknown")
-        exit(2)
+        return "unknown"
     }
     let onConsole = (dict["kCGSSessionOnConsoleKey"] as? Bool)
         ?? ((dict["kCGSSessionOnConsoleKey"] as? Int) == 1)
-    if !onConsole {
-        print("1")
-        exit(0)
-    }
+    if !onConsole { return "1" }
     if let lockedBool = dict["CGSSessionScreenIsLocked"] as? Bool {
-        print(lockedBool ? "1" : "0")
-    } else if let lockedInt = dict["CGSSessionScreenIsLocked"] as? Int {
-        print(lockedInt == 1 ? "1" : "0")
-    } else {
-        // On macOS GUI console sessions, CGSSessionScreenIsLocked is omitted when unlocked.
-        print("0")
+        return lockedBool ? "1" : "0"
     }
-    exit(0)
-}
-
-guard AXIsProcessTrusted() else {
-    fail("Grant Accessibility permission to Scout in System Settings > Privacy & Security > Accessibility.")
+    if let lockedInt = dict["CGSSessionScreenIsLocked"] as? Int {
+        return lockedInt == 1 ? "1" : "0"
+    }
+    return "0"
 }
 
 func currentPoint() -> CGPoint {
     CGEvent(source: nil)?.location ?? CGPoint(x: 400, y: 400)
 }
 
+var cachedDisplayUnion: CGRect = .null
+var cachedDisplayAt: CFAbsoluteTime = 0
+
 func clampToDisplays(_ point: CGPoint) -> CGPoint {
-    var count: UInt32 = 0
-    CGGetActiveDisplayList(0, nil, &count)
-    guard count > 0 else { return point }
-    var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
-    CGGetActiveDisplayList(count, &displays, &count)
-    var union = CGRect.null
-    for id in displays {
-        union = union.union(CGDisplayBounds(id))
+    let now = CFAbsoluteTimeGetCurrent()
+    if cachedDisplayUnion.isNull || now - cachedDisplayAt > 2.0 {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        if count > 0 {
+            var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+            CGGetActiveDisplayList(count, &displays, &count)
+            var union = CGRect.null
+            for id in displays {
+                union = union.union(CGDisplayBounds(id))
+            }
+            cachedDisplayUnion = union
+            cachedDisplayAt = now
+        }
     }
-    guard !union.isNull else { return point }
+    guard !cachedDisplayUnion.isNull else { return point }
     return CGPoint(
-        x: min(max(point.x, union.minX), union.maxX - 1),
-        y: min(max(point.y, union.minY), union.maxY - 1)
+        x: min(max(point.x, cachedDisplayUnion.minX), cachedDisplayUnion.maxX - 1),
+        y: min(max(point.y, cachedDisplayUnion.minY), cachedDisplayUnion.maxY - 1)
     )
 }
 
-func postMouse(_ type: CGEventType, _ button: CGMouseButton, at point: CGPoint, clickState: Int64 = 1) {
+func postMouse(_ type: CGEventType, _ button: CGMouseButton, at point: CGPoint, clickState: Int64 = 1) -> Bool {
     guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
-        fail("Failed to create mouse event")
+        return false
     }
     event.setIntegerValueField(.mouseEventClickState, value: clickState)
     event.post(tap: .cghidEventTap)
+    return true
+}
+
+func postScroll(dx: Int32, dy: Int32) -> Bool {
+    guard dx != 0 || dy != 0 else { return true }
+    guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else {
+        return false
+    }
+    event.post(tap: .cghidEventTap)
+    return true
+}
+
+let args = CommandLine.arguments
+guard args.count >= 2 else { fail("Usage: scout-hid <daemon|locked|move|click|rightClick|doubleClick|scroll> [dx] [dy]") }
+let action = args[1]
+
+if action == "locked" {
+    let status = checkScreenLocked()
+    print(status)
+    exit(status == "unknown" ? 2 : 0)
+}
+
+if action == "daemon" {
+    // 120Hz synthetic micro-interpolator for liquid-smooth remote cursor & scroll motion.
+    let smootherQueue = DispatchQueue(label: "scout.hid.smoother", qos: .userInteractive)
+    var pendingMoveX: Double = 0
+    var pendingMoveY: Double = 0
+    var remMoveX: Double = 0
+    var remMoveY: Double = 0
+    var pendingScrollX: Double = 0
+    var pendingScrollY: Double = 0
+    var remScrollX: Double = 0
+    var remScrollY: Double = 0
+
+    func flushPendingMoveNow() {
+        let totalX = pendingMoveX + remMoveX
+        let totalY = pendingMoveY + remMoveY
+        pendingMoveX = 0
+        pendingMoveY = 0
+        remMoveX = 0
+        remMoveY = 0
+        if abs(totalX) >= 0.25 || abs(totalY) >= 0.25 {
+            let cur = currentPoint()
+            let next = clampToDisplays(CGPoint(x: cur.x + totalX, y: cur.y + totalY))
+            _ = postMouse(.mouseMoved, .left, at: next)
+        }
+    }
+
+    let timer = DispatchSource.makeTimerSource(queue: smootherQueue)
+    timer.schedule(deadline: .now(), repeating: .nanoseconds(8_333_333), leeway: .milliseconds(1))
+    timer.setEventHandler {
+        // Synthetic exponential smoothing at 120Hz (responsive <8ms feel, zero overshoot)
+        let moveDist = hypot(pendingMoveX, pendingMoveY)
+        if moveDist > 0.05 {
+            let stepX: Double
+            let stepY: Double
+            if moveDist < 0.45 {
+                stepX = pendingMoveX
+                stepY = pendingMoveY
+                pendingMoveX = 0
+                pendingMoveY = 0
+            } else {
+                let alpha = 0.38
+                stepX = pendingMoveX * alpha
+                stepY = pendingMoveY * alpha
+                pendingMoveX -= stepX
+                pendingMoveY -= stepY
+            }
+            let totalX = stepX + remMoveX
+            let totalY = stepY + remMoveY
+            let postX = totalX.rounded(.towardZero)
+            let postY = totalY.rounded(.towardZero)
+            remMoveX = totalX - postX
+            remMoveY = totalY - postY
+            if postX != 0 || postY != 0 {
+                let cur = currentPoint()
+                let next = clampToDisplays(CGPoint(x: cur.x + postX, y: cur.y + postY))
+                _ = postMouse(.mouseMoved, .left, at: next)
+            }
+        }
+
+        let scrollDist = hypot(pendingScrollX, pendingScrollY)
+        if scrollDist > 0.1 {
+            let stepX: Double
+            let stepY: Double
+            if scrollDist < 0.6 {
+                stepX = pendingScrollX
+                stepY = pendingScrollY
+                pendingScrollX = 0
+                pendingScrollY = 0
+            } else {
+                let alpha = 0.34
+                stepX = pendingScrollX * alpha
+                stepY = pendingScrollY * alpha
+                pendingScrollX -= stepX
+                pendingScrollY -= stepY
+            }
+            let totalX = stepX + remScrollX
+            let totalY = stepY + remScrollY
+            let ix = Int32(totalX.rounded(.towardZero))
+            let iy = Int32(totalY.rounded(.towardZero))
+            remScrollX = totalX - Double(ix)
+            remScrollY = totalY - Double(iy)
+            if ix != 0 || iy != 0 {
+                _ = postScroll(dx: ix, dy: iy)
+            }
+        }
+    }
+    timer.resume()
+
+    while let line = readLine(strippingNewline: true) {
+        let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+        guard let cmd = parts.first.map(String.init) else {
+            print("err empty")
+            continue
+        }
+        if cmd == "locked" {
+            print("ok " + checkScreenLocked())
+            continue
+        }
+        guard AXIsProcessTrusted() else {
+            print("err accessibility")
+            continue
+        }
+        switch cmd {
+        case "move":
+            let dx = parts.count > 1 ? min(max(Double(parts[1]) ?? 0, -2400), 2400) : 0
+            let dy = parts.count > 2 ? min(max(Double(parts[2]) ?? 0, -2400), 2400) : 0
+            smootherQueue.sync {
+                pendingMoveX = min(max(pendingMoveX + dx, -2400), 2400)
+                pendingMoveY = min(max(pendingMoveY + dy, -2400), 2400)
+            }
+            print("ok")
+        case "scroll":
+            let dx = parts.count > 1 ? min(max(Double(parts[1]) ?? 0, -2400), 2400) : 0
+            let dy = parts.count > 2 ? min(max(Double(parts[2]) ?? 0, -2400), 2400) : 0
+            smootherQueue.sync {
+                pendingScrollX = min(max(pendingScrollX + dx, -2400), 2400)
+                pendingScrollY = min(max(pendingScrollY + dy, -2400), 2400)
+            }
+            print("ok")
+        case "click":
+            smootherQueue.sync {
+                flushPendingMoveNow()
+                let pt = currentPoint()
+                _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
+                _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
+            }
+            print("ok")
+        case "doubleClick":
+            smootherQueue.sync {
+                flushPendingMoveNow()
+                let pt = currentPoint()
+                _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
+                _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
+                usleep(35_000)
+                _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 2)
+                _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 2)
+            }
+            print("ok")
+        case "rightClick":
+            smootherQueue.sync {
+                flushPendingMoveNow()
+                let pt = currentPoint()
+                _ = postMouse(.rightMouseDown, .right, at: pt, clickState: 1)
+                _ = postMouse(.rightMouseUp, .right, at: pt, clickState: 1)
+            }
+            print("ok")
+        default:
+            print("err unknown")
+        }
+    }
+    timer.cancel()
+    exit(0)
+}
+
+guard AXIsProcessTrusted() else {
+    fail("Grant Accessibility permission to Scout in System Settings > Privacy & Security > Accessibility.")
 }
 
 switch action {
@@ -741,29 +918,26 @@ case "move":
     let dy = args.count > 3 ? (Double(args[3]) ?? 0) : 0
     let cur = currentPoint()
     let next = clampToDisplays(CGPoint(x: cur.x + dx, y: cur.y + dy))
-    postMouse(.mouseMoved, .left, at: next)
+    _ = postMouse(.mouseMoved, .left, at: next)
 case "click":
     let pt = currentPoint()
-    postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
-    postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
+    _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
+    _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
 case "doubleClick":
     let pt = currentPoint()
-    postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
-    postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
+    _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
+    _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
     usleep(35_000)
-    postMouse(.leftMouseDown, .left, at: pt, clickState: 2)
-    postMouse(.leftMouseUp, .left, at: pt, clickState: 2)
+    _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 2)
+    _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 2)
 case "rightClick":
     let pt = currentPoint()
-    postMouse(.rightMouseDown, .right, at: pt, clickState: 1)
-    postMouse(.rightMouseUp, .right, at: pt, clickState: 1)
+    _ = postMouse(.rightMouseDown, .right, at: pt, clickState: 1)
+    _ = postMouse(.rightMouseUp, .right, at: pt, clickState: 1)
 case "scroll":
     let dx = Int32(args.count > 2 ? (Double(args[2]) ?? 0) : 0)
     let dy = Int32(args.count > 3 ? (Double(args[3]) ?? 0) : 0)
-    guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else {
-        fail("Failed to create scroll event")
-    }
-    event.post(tap: .cghidEventTap)
+    _ = postScroll(dx: dx, dy: dy)
 default:
     fail("Unknown action: \\(action)")
 }
@@ -809,6 +983,121 @@ async function ensureHidHelperBinary(): Promise<string> {
   return await hidHelperCompilePromise;
 }
 
+// Persistent resident HID smoother child (zero per-move fork/exec overhead,
+// auto-exits after 60s idle so no stray process lingers).
+class HidSmootherDaemon {
+  private proc: ReturnType<typeof Bun.spawn> | null = null;
+  private buffer = "";
+  private queue: Array<{
+    resolve: (line: string) => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly idleMs = 60_000;
+
+  private resetIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.stop(), this.idleMs);
+  }
+
+  private failAll(reason: string): void {
+    const pending = this.queue;
+    this.queue = [];
+    for (const item of pending) {
+      clearTimeout(item.timer);
+      item.reject(new Error(reason));
+    }
+  }
+
+  private async ensureStarted(): Promise<ReturnType<typeof Bun.spawn>> {
+    if (this.proc && this.proc.exitCode === null) {
+      this.resetIdleTimer();
+      return this.proc;
+    }
+    const binPath = await ensureHidHelperBinary();
+    const proc = Bun.spawn([binPath, "daemon"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    this.proc = proc;
+    this.buffer = "";
+    this.resetIdleTimer();
+
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    void (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          this.buffer += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = this.buffer.indexOf("\n")) !== -1) {
+            const line = this.buffer.slice(0, idx).trim();
+            this.buffer = this.buffer.slice(idx + 1);
+            const next = this.queue.shift();
+            if (next) {
+              clearTimeout(next.timer);
+              next.resolve(line);
+            }
+          }
+        }
+      } catch {
+        // Handled on exit below.
+      } finally {
+        if (this.proc === proc) {
+          this.proc = null;
+        }
+        this.failAll("HID daemon closed");
+      }
+    })();
+
+    return proc;
+  }
+
+  async send(commandLine: string, timeoutMs = 1_500): Promise<string> {
+    const proc = await this.ensureStarted();
+    this.resetIdleTimer();
+    return await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.queue.findIndex((q) => q.timer === timer);
+        if (idx !== -1) this.queue.splice(idx, 1);
+        this.stop();
+        reject(new Error("HID daemon timed out"));
+      }, timeoutMs);
+      this.queue.push({ resolve, reject, timer });
+      try {
+        const sink = proc.stdin as { write: (data: string) => void; flush?: () => void };
+        sink.write(commandLine + "\n");
+        sink.flush?.();
+      } catch (err) {
+        const idx = this.queue.findIndex((q) => q.timer === timer);
+        if (idx !== -1) this.queue.splice(idx, 1);
+        clearTimeout(timer);
+        this.stop();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  stop(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    const proc = this.proc;
+    this.proc = null;
+    if (proc) {
+      try { proc.kill(); } catch {}
+    }
+    this.failAll("HID daemon stopped");
+  }
+}
+
+const hidSmootherDaemon = new HidSmootherDaemon();
+
 let cachedTrackpadLock: { status: ScreenLockStatus; at: number } | null = null;
 
 /**
@@ -827,9 +1116,9 @@ async function checkMacScreenLockStatus(options?: { allowCache?: boolean }): Pro
     return "unlocked";
   }
   try {
-    const helper = await ensureHidHelperBinary();
-    const { stdout } = await execFileAsync(helper, ["locked"], { timeout: 2_000, maxBuffer: 1024 });
-    const status = parseScreenLockOutput(stdout);
+    const reply = await hidSmootherDaemon.send("locked", 1_500);
+    const raw = reply.startsWith("ok ") ? reply.slice(3) : "";
+    const status = parseScreenLockOutput(raw);
     cachedTrackpadLock = { status, at: Date.now() };
     return status;
   } catch {
@@ -1095,17 +1384,25 @@ export async function runMobileRemoteTrackpad(
   if (denied) return { ok: false, error: denied };
 
   try {
-    const helper = await ensureHidHelperBinary();
     const revokedBeforeExec = verifyAdmitted("remoteTrackpad", ctx);
     if (revokedBeforeExec) return { ok: false, error: revokedBeforeExec };
 
     const dx = clampTrackpadDelta(input.dx);
     const dy = clampTrackpadDelta(input.dy);
-    const args =
+    const cmd =
       input.event === "move" || input.event === "scroll"
-        ? [input.event, String(dx), String(dy)]
-        : [input.event];
-    await execFileAsync(helper, args, { timeout: 2_500, maxBuffer: 64 * 1024 });
+        ? `${input.event} ${dx.toFixed(2)} ${dy.toFixed(2)}`
+        : input.event;
+    const reply = await hidSmootherDaemon.send(cmd, 1_500);
+    if (reply === "err accessibility") {
+      return {
+        ok: false,
+        error: "Grant Accessibility permission to Scout's runtime in System Settings > Privacy & Security > Accessibility.",
+      };
+    }
+    if (!reply.startsWith("ok")) {
+      return { ok: false, error: "Trackpad gesture failed on Mac." };
+    }
     return { ok: true, detail: input.event };
   } catch (error) {
     return { ok: false, error: sanitizeRemoteError(error, "Trackpad gesture failed on Mac.") };
