@@ -266,7 +266,8 @@ export function queryFleetAskRows(requesterIds: string[], limit: number): FleetA
        SELECT id FROM invocations
        WHERE requester_id IN (${requesterClause})
          AND NOT (COALESCE(state, '') = 'failed'
-           AND COALESCE(error, '') LIKE 'Stale running flight reconciled:%')
+           AND (COALESCE(error, '') LIKE 'Stale running flight reconciled:%'
+             OR COALESCE(error, '') LIKE 'Didn''t finish:%'))
        ORDER BY COALESCE(completed_at, started_at, created_at) DESC
        LIMIT ?
      )

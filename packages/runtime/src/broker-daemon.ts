@@ -35,7 +35,7 @@ import { MeshBridgeManagement } from "./mesh-bridge-management.js";
 import { meshDiagnostics } from "./mesh-diagnostics.js";
 import { tailscaleStatusProbe } from "./system-probes/tailscale-status.js";
 import { createMeshPing } from "./mesh-ping.js";
-import { flightCompletion, nativeActorName, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
+import { DEFAULT_SUPERVISOR_DEADLINES, flightCompletion, nativeActorName, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
@@ -1797,6 +1797,8 @@ const flightLifecycleService = new BrokerFlightLifecycleService({
   deliverTerminalReport: (flightId) => terminalReportDeliveryService.deliver(flightId),
   maybeForwardFlightToAuthority: (flight) => meshForwardingService.maybeForwardFlightToAuthority(flight),
   bootedAt: brokerBootedAt,
+  localNodeId: () => nodeId,
+  sessionActivity: () => observedSessionReducer?.lastActivityBySession() ?? new Map(),
   isInvocationActive: (invocationId) => flightCompletion(runtime.flightForInvocation(invocationId))?.awaitingFinal === true
     || replyCompletionRecovery.isPending(invocationId)
     || localInvocationService.hasActiveInvocation(invocationId) || externalSessionService.hasPendingInvocation(invocationId)
@@ -5042,6 +5044,14 @@ function startBrokerCoordination(): void {
   }
 
   setInterval(() => reconcilePermissionRequests("periodic"), 60_000).unref();
+
+  // The flight supervisor: each node watches the flights it runs on a fixed
+  // clock (docs/specs/flight-supervisor.md).
+  setInterval(() => {
+    flightLifecycleService.superviseFlights().catch((error) => {
+      console.error("[openscout-runtime] flight supervisor tick failed:", error);
+    });
+  }, DEFAULT_SUPERVISOR_DEADLINES.tickIntervalMs).unref();
 
   // Periodic mesh node compaction sweep to prune Bonjour collision sediments
   setInterval(() => {

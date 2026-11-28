@@ -736,7 +736,7 @@ function flightTerminalReason(flight: FlightRecord): string {
 
 function isStaleReconciledFlight(flight: FlightRecord): boolean {
   const text = [flight.error, flight.summary].filter(Boolean).join("\n");
-  return /Stale running flight reconciled:/i.test(text);
+  return /Stale running flight reconciled:|Didn't finish:/i.test(text);
 }
 
 function flightAttentionDismissed(flight: FlightRecord, at: number | null): boolean {

@@ -220,6 +220,7 @@ export function transientBrokerWorkingStatusPredicate(alias: string): string {
 export function staleFlightActivityPredicate(alias: string): string {
   return `NOT (
     ${alias}.kind = 'flight_updated'
-    AND COALESCE(${alias}.summary, '') LIKE 'Stale running flight reconciled:%'
+    AND (COALESCE(${alias}.summary, '') LIKE 'Stale running flight reconciled:%'
+      OR COALESCE(${alias}.summary, '') LIKE 'Didn''t finish:%')
   )`;
 }

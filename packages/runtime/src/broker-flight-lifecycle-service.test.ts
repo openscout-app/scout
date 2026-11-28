@@ -160,6 +160,9 @@ function createHarness(input: {
   activeInvocationIds?: string[];
   now?: number;
   bootedAt?: number;
+  localNodeId?: string;
+  sessionActivity?: Map<string, number>;
+  deadAfterMs?: number | null;
   onTerminalFlight?: (input: {
     flight: FlightRecord;
     invocation?: InvocationRequest;
@@ -231,6 +234,9 @@ function createHarness(input: {
     },
     isInvocationActive: (invocationId) => activeInvocationIds.has(invocationId),
     bootedAt: input.bootedAt,
+    localNodeId: () => input.localNodeId,
+    sessionActivity: () => input.sessionActivity ?? new Map(),
+    ...(input.deadAfterMs !== undefined ? { deadlines: { deadAfterMs: input.deadAfterMs } } : {}),
     onTerminalFlight: input.onTerminalFlight,
     prepareTerminalReport: input.prepareTerminalReport,
     warn: (message) => warnings.push(message),
@@ -712,12 +718,13 @@ describe("broker flight lifecycle helpers", () => {
       expect.objectContaining({
         id: "flight-1",
         state: "failed",
-        summary: "Agent One did not finish cleanly.",
-        error: "Stale running flight reconciled: target agent agent-1 has no registered endpoint after 120s",
+        summary: "Agent One didn't finish.",
+        error: "Didn't finish: target agent agent-1 has no registered endpoint after 120s",
         completedAt: 130_000,
         metadata: expect.objectContaining({
-          failureCause: "endpoint_lost",
-          reconciledStaleFlight: true,
+          outcome: "dead",
+          deathCause: "session_gone",
+          declaredDeadAt: 130_000,
           reconciledReason: "target agent agent-1 has no registered endpoint after 120s",
           reconciledAt: 130_000,
         }),
@@ -903,13 +910,14 @@ describe("flights superseded by a finished twin", () => {
   });
 });
 
-test("stale supersession records a typed cause and the successor without prose matching", async () => {
+test("a session that finished a later turn closes the earlier one with a typed cause and the later flight", async () => {
   const ack = { endpointId: "endpoint-1", nodeId: "node-1", harness: "codex", sessionId: "one-session" };
-  const older = testFlight({ startedAt: 10, metadata: { dispatchAck: ack } });
-  const newer = testFlight({ id: "newer", invocationId: "newer-ask", startedAt: 20, completedAt: 30, state: "completed", output: "Done", metadata: { dispatchAck: ack } });
-  const h = createHarness({ snapshot: testSnapshot({ flights: { older, newer } }), now: 40 });
+  const endpoint = testEndpoint({ state: "active" });
+  const older = testFlight({ state: "running", startedAt: 10, metadata: { dispatchAck: { ...ack, acknowledgedAt: 10 } } });
+  const newer = testFlight({ id: "newer", invocationId: "newer-ask", startedAt: 20, completedAt: 30, state: "completed", output: "Done", metadata: { dispatchAck: { ...ack, acknowledgedAt: 20 } } });
+  const h = createHarness({ snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint }, flights: { older, newer } }), now: 40 });
   await h.service.reconcileStaleWorkingFlights();
-  expect(h.committedFlights[0]).toMatchObject({ state: "failed", metadata: { failureCause: "superseded", supersededByFlightId: "newer" } });
+  expect(h.committedFlights[0]).toMatchObject({ state: "failed", metadata: { outcome: "dead", deathCause: "session_moved_on", movedOnToFlightId: "newer" } });
 });
 
 
@@ -945,4 +953,99 @@ test.each([
     expect(current.metadata).toEqual(flight.metadata);
     expect(h.committedFlights).toHaveLength(1);
   }
+});
+
+describe("flight supervisor", () => {
+  const ack = { endpointId: "endpoint-1", nodeId: "node-1", harness: "claude", transport: "tmux", sessionId: "native-1" };
+
+  test("a node never closes a flight another node owns", async () => {
+    // The endpoint is unknown here, which would close a local flight.
+    const remote = testFlight({ state: "running", startedAt: 10, metadata: { dispatchAck: { ...ack, nodeId: "arts-mini", acknowledgedAt: 10 } } });
+    const h = createHarness({ snapshot: testSnapshot({ flights: { [remote.id]: remote } }), localNodeId: "air", now: 10_000_000 });
+    await h.service.superviseFlights();
+    expect(h.committedFlights).toEqual([]);
+    expect(h.service.isMirroredFlight(remote)).toBe(true);
+  });
+
+  test("an older flight closed late does not end live work on the same session (2026-11-28)", async () => {
+    const endpoint = testEndpoint({ state: "active", metadata: {} });
+    // A: dispatched first, closed by the supervisor long after B started.
+    const closedLate = testFlight({
+      id: "a", invocationId: "a-ask", state: "failed", startedAt: 100, completedAt: 9_000,
+      metadata: { dispatchAck: { ...ack, acknowledgedAt: 100 }, outcome: "dead", deathCause: "session_gone", declaredDeadAt: 9_000 },
+    });
+    const live = testFlight({ id: "b", invocationId: "b-ask", state: "running", startedAt: 200, metadata: { dispatchAck: { ...ack, acknowledgedAt: 200 } } });
+    const h = createHarness({
+      snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint }, flights: { a: closedLate, b: live } }),
+      localNodeId: "node-1", activeInvocationIds: [], now: 9_500, sessionActivity: new Map([["native-1", 9_400]]),
+    });
+    await h.service.superviseFlights();
+    expect(h.snapshot.flights.b.error ?? null).toBeNull();
+    expect(h.snapshot.flights.b.state).toBe("running");
+  });
+
+  test("a late finish corrects a dead flight", async () => {
+    const dead = testFlight({
+      state: "failed", startedAt: 100, completedAt: 5_000, error: "Didn't finish: gone",
+      metadata: { outcome: "dead", deathCause: "session_gone", declaredDeadAt: 5_000, reconciledReason: "gone" },
+    });
+    const invocation = testInvocation();
+    const h = createHarness({ snapshot: testSnapshot({ invocations: { [invocation.id]: invocation }, flights: { [dead.id]: dead } }), now: 6_000 });
+    await h.service.recordFlight({ ...dead, state: "completed", output: "Done", error: undefined });
+    const corrected = h.snapshot.flights[dead.id];
+    expect(corrected.state).toBe("completed");
+    expect(corrected.output).toBe("Done");
+    expect(corrected.completedAt).toBe(6_000);
+    expect(corrected.metadata).toMatchObject({ correctedFrom: "dead", correctedAt: 6_000 });
+    expect(corrected.metadata?.outcome).toBeUndefined();
+    expect(h.promoted.map((entry) => entry.flight.state)).toEqual(["completed"]);
+  });
+
+  test("finished outcomes never change", async () => {
+    const failed = testFlight({ state: "failed", completedAt: 5_000, error: "harness error" });
+    const h = createHarness({ snapshot: testSnapshot({ flights: { [failed.id]: failed } }), now: 6_000 });
+    await h.service.recordFlight({ ...failed, state: "completed", output: "Done", error: undefined });
+    expect(h.snapshot.flights[failed.id].state).toBe("failed");
+  });
+
+  test("liveness moves active, idle, stalled on evidence, with one write per level", async () => {
+    const endpoint = testEndpoint({ state: "active", metadata: { lastInvocationId: "invocation-1", lastStartedAt: 1_000 } });
+    const running = testFlight({ state: "running", startedAt: 1_000, metadata: { dispatchAck: { ...ack, acknowledgedAt: 1_000 } } });
+    const activity = new Map([["native-1", 1_000]]);
+    const at = (now: number) => createHarness({
+      snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint }, flights: { [running.id]: structuredClone(running) } }),
+      localNodeId: "node-1", activeInvocationIds: ["invocation-1"], now, sessionActivity: activity,
+    });
+    const idle = at(1_000 + 3 * 60_000);
+    await idle.service.superviseFlights();
+    await idle.service.superviseFlights();
+    expect(idle.committedFlights.map((flight) => flight.metadata?.liveness)).toEqual(["idle"]);
+    const stalled = at(1_000 + 11 * 60_000);
+    await stalled.service.superviseFlights();
+    expect(stalled.snapshot.flights[running.id].metadata?.liveness).toBe("stalled");
+    // Silence alone never ends it.
+    expect(stalled.snapshot.flights[running.id].state).toBe("running");
+  });
+
+  test("silence ends a flight only when deadAfter is configured", async () => {
+    const endpoint = testEndpoint({ state: "active", metadata: { lastInvocationId: "invocation-1", lastStartedAt: 1_000 } });
+    const running = testFlight({ state: "running", startedAt: 1_000, metadata: { dispatchAck: { ...ack, acknowledgedAt: 1_000 } } });
+    const h = createHarness({
+      snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint }, flights: { [running.id]: running } }),
+      localNodeId: "node-1", now: 1_000 + 61 * 60_000, deadAfterMs: 60 * 60_000,
+    });
+    await h.service.superviseFlights();
+    expect(h.snapshot.flights[running.id].metadata).toMatchObject({ outcome: "dead", deathCause: "no_progress" });
+  });
+
+  test("a waiting flight has no deadlines", async () => {
+    const endpoint = testEndpoint({ state: "active", metadata: {} });
+    const waiting = testFlight({ state: "waiting", startedAt: 1_000, metadata: { dispatchAck: { ...ack, acknowledgedAt: 1_000 } } });
+    const h = createHarness({
+      snapshot: testSnapshot({ endpoints: { [endpoint.id]: endpoint }, flights: { [waiting.id]: waiting } }),
+      localNodeId: "node-1", activeInvocationIds: ["invocation-1"], now: 1_000 + 24 * 60 * 60_000, deadAfterMs: 60_000,
+    });
+    await h.service.superviseFlights();
+    expect(h.committedFlights).toEqual([]);
+  });
 });

@@ -106,6 +106,7 @@ export * from "./tasks.js";
 export * from "./reply-points.js";
 export * from "./decision-cards.js";
 export * from "./failed-runs.js";
+export * from "./flight-outcome.js";
 export * from "./task-ready.js";
 
 export * from "./shows.js";

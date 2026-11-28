@@ -488,6 +488,19 @@ export class ObservedSessionReducer {
     this.queueUpdate(next, Math.max(activity.priority, pendingPriorityFor(next)));
   }
 
+  /**
+   * Newest transcript activity per source session id, for the flight
+   * supervisor's liveness evidence. Bounded by `maxTrackedKeys`.
+   */
+  lastActivityBySession(): Map<string, number> {
+    const latest = new Map<string, number>();
+    for (const { update } of this.tracked.values()) {
+      const prior = latest.get(update.sourceSessionId) ?? 0;
+      if (update.lastActivityAt > prior) latest.set(update.sourceSessionId, update.lastActivityAt);
+    }
+    return latest;
+  }
+
   diagnostics(): ObservedSessionReducerDiagnostics {
     return {
       trackedKeys: this.tracked.size,

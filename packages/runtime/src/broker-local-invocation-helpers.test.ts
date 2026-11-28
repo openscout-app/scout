@@ -465,7 +465,7 @@ describe("broker local invocation helpers", () => {
           targetAgentId: "agent-1",
           state: "running",
           startedAt: 500,
-          metadata: { dispatchAck: { endpointId: "older-owner", sessionId: "older-session" } },
+          metadata: { dispatchAck: { endpointId: "older-owner", sessionId: "older-session", acknowledgedAt: 500 } },
         }),
         newer: testFlight({
           id: "newer",
@@ -473,7 +473,7 @@ describe("broker local invocation helpers", () => {
           targetAgentId: "agent-1",
           state: "completed",
           completedAt: 700,
-          metadata: { dispatchAck: { endpointId: "older-owner", sessionId: "older-session" } },
+          metadata: { dispatchAck: { endpointId: "older-owner", sessionId: "older-session", acknowledgedAt: 600 } },
         }),
         retired: testFlight({
           id: "retired",
@@ -491,7 +491,7 @@ describe("broker local invocation helpers", () => {
     })).toBeNull();
     expect(staleWorkingFlightReason(snapshot, snapshot.flights.old!, {
       isInvocationActive: () => false,
-    })).toBe("superseded by newer completed flight newer");
+    })).toBe("the session finished later turn newer without replying to this one");
     expect(staleWorkingFlightReason(snapshot, snapshot.flights.retired!, {
       isInvocationActive: () => false,
     })).toBe("target agent retired was retired from the fleet");
@@ -630,7 +630,7 @@ describe("broker local invocation helpers", () => {
     const active = testFlight({
       state: "running",
       startedAt: 1_000,
-      metadata: { requesterTimedOut: true, dispatchAck: { endpointId: "endpoint-1", ...tmux } },
+      metadata: { requesterTimedOut: true, dispatchAck: { endpointId: "endpoint-1", ...tmux, acknowledgedAt: 1_000 } },
     });
     const run = (dispatchAck: Record<string, unknown>) => {
       const snapshot = createInMemoryControlRuntime({
@@ -643,14 +643,14 @@ describe("broker local invocation helpers", () => {
           active,
           newer: testFlight({
             id: "newer", invocationId: "newer", targetAgentId: "agent-1.branch.node-1",
-            state: "completed", completedAt: 2_000, metadata: { dispatchAck },
+            state: "completed", completedAt: 2_000, metadata: { dispatchAck: { acknowledgedAt: 1_500, ...dispatchAck } },
           }),
         },
       }, { localNodeId: "node-1" }).snapshot();
       return staleWorkingFlightReason(snapshot, active, { isInvocationActive: () => false, now: 2_000 });
     };
 
-    expect(run({ endpointId: "endpoint-2", ...tmux })).toBe("superseded by newer completed flight newer");
+    expect(run({ endpointId: "endpoint-2", ...tmux })).toBe("the session finished later turn newer without replying to this one");
     // Any part of the session's address that differs, or is missing, keeps them apart.
     expect(run({ endpointId: "endpoint-2", ...tmux, sessionId: "native-2" })).toBeNull();
     expect(run({ endpointId: "endpoint-2", ...tmux, nodeId: "node-2" })).toBeNull();
@@ -658,18 +658,18 @@ describe("broker local invocation helpers", () => {
   });
 
   test("a provider identity refinement still identifies the same execution owner", () => {
-    const active = testFlight({ state: "running", metadata: { dispatchAck: { endpointId: "endpoint-1", sessionId: "pending-1" } } });
+    const active = testFlight({ state: "running", metadata: { dispatchAck: { endpointId: "endpoint-1", sessionId: "pending-1", acknowledgedAt: 1_000 } } });
     const snapshot = createInMemoryControlRuntime({
       flights: {
         active,
         newer: testFlight({
           id: "newer", invocationId: "newer", state: "completed", completedAt: 2_000,
-          metadata: { dispatchAck: { endpointId: "endpoint-1", sessionId: "native-1", refinesSessionId: "pending-1" } },
+          metadata: { dispatchAck: { endpointId: "endpoint-1", sessionId: "native-1", refinesSessionId: "pending-1", acknowledgedAt: 1_500 } },
         }),
       },
     }, { localNodeId: "node-1" }).snapshot();
     expect(staleWorkingFlightReason(snapshot, active, { isInvocationActive: () => false }))
-      .toBe("superseded by newer completed flight newer");
+      .toBe("the session finished later turn newer without replying to this one");
   });
 
   test("unattributed flights do not inherit another session's endpoint lifecycle", () => {
