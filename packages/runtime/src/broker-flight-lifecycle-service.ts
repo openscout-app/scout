@@ -1,4 +1,14 @@
-import { flightCompletion, hasExplicitCompletion } from "@openscout/protocol";
+import {
+  DEFAULT_SUPERVISOR_DEADLINES,
+  flightCompletion,
+  flightLastEvidenceAt,
+  flightLiveness,
+  flightOwnerNodeId,
+  hasExplicitCompletion,
+  isDeadFlight,
+  recordedFlightLiveness,
+  type SupervisorDeadlines,
+} from "@openscout/protocol";
 import { explicitReplyMatchesFlight } from "./broker-explicit-completion.js";
 import { isFinalReplyForInvocation } from "./broker-conversation-helpers.js";
 import { holdBlockedFlight } from "./broker-blocked-reply.js";
@@ -25,6 +35,7 @@ import {
 } from "./broker-endpoint-selection.js";
 import {
   closedAsSupersededTwin,
+  deadFlightCorrectionMetadata,
   isSupersededTwinCopy,
   interruptedCodexFlight,
   isTerminalFlightState,
@@ -88,6 +99,14 @@ export type BrokerFlightLifecycleServiceOptions = {
   isInvocationActive: (invocationId: string) => boolean;
   /** When this runtime process started; see `staleWorkingFlightFailure`. */
   bootedAt?: number;
+  /**
+   * This node's id. A flight owned by another node is a mirror here: this
+   * node's supervisor never closes it (docs/specs/flight-supervisor.md).
+   */
+  localNodeId?: () => string | null | undefined;
+  /** Newest transcript activity per harness session id, as liveness evidence. */
+  sessionActivity?: () => ReadonlyMap<string, number>;
+  deadlines?: Partial<SupervisorDeadlines>;
   /** Runs inside the writer; the report intent commits with terminal truth. */
   prepareTerminalReport?: (flight: FlightRecord, invocation: InvocationRequest | undefined) => FlightRecord;
   deliverTerminalReport?: (flightId: string) => Promise<unknown>;
@@ -105,6 +124,10 @@ export type BrokerFlightLifecycleServiceOptions = {
 };
 
 export function shouldIgnoreFlightUpdate(previous: FlightRecord, next: FlightRecord): boolean {
+  // The session's own late finish or error replaces the supervisor's guess.
+  if (isDeadFlight(previous) && !isDeadFlight(next) && (next.state === "completed" || next.state === "failed")) {
+    return false;
+  }
   if (isTerminalFlightState(previous.state)) {
     // An invocation has one terminal outcome. Late adapter failures, stale
     // reconciliation and cancellation cannot replace captured work. Metadata
@@ -284,6 +307,13 @@ function normalizeRecordedFlight(
     },
   };
 }
+function flightSessionId(flight: FlightRecord): string | null {
+  const ack = flight.metadata?.dispatchAck;
+  if (!ack || typeof ack !== "object" || Array.isArray(ack)) return flight.sessionId ?? null;
+  const sessionId = (ack as Record<string, unknown>).sessionId;
+  return typeof sessionId === "string" && sessionId ? sessionId : flight.sessionId ?? null;
+}
+
 export class BrokerFlightLifecycleService {
   constructor(private readonly options: BrokerFlightLifecycleServiceOptions) {}
 
@@ -342,6 +372,21 @@ export class BrokerFlightLifecycleService {
           }
         }
       }
+      // A late finish for a dead flight: the report wins over the guess. A
+      // writer that rebuilt the record from the dead one still carries its
+      // markers, so a finish clears them here.
+      const correcting = Boolean(previous && isDeadFlight(previous)
+        && (flightToRecord.state === "completed" || (flightToRecord.state === "failed" && !isDeadFlight(flightToRecord))));
+      if (correcting && previous) {
+        const now = this.now();
+        flightToRecord = {
+          ...flightToRecord,
+          completedAt: flightToRecord.completedAt && flightToRecord.completedAt !== previous.completedAt
+            ? flightToRecord.completedAt
+            : now,
+          metadata: { ...flightToRecord.metadata, ...deadFlightCorrectionMetadata(now) },
+        };
+      }
       flightToRecord = holdBlockedFlight(previous, flightToRecord);
       flightToRecord = normalizeRecordedFlight(flightToRecord, invocation, this.now());
       // A delayed adapter/status update cannot erase an acknowledged reply
@@ -356,7 +401,7 @@ export class BrokerFlightLifecycleService {
         // Only the result outbox's compare-and-write marks it delivered.
         flightToRecord = { ...flightToRecord,
           // Preserve the first report's human-readable terminal payload.
-          ...(previous.metadata?.terminalReport ? { summary: previous.summary } : {}),
+          ...(previous.metadata?.terminalReport && !correcting ? { summary: previous.summary } : {}),
           metadata: {
           ...previous.metadata, ...flightToRecord.metadata,
           ...(previous.metadata?.resultReply ? { resultReply: previous.metadata.resultReply } : {}),
@@ -539,12 +584,45 @@ export class BrokerFlightLifecycleService {
     }
   }
 
-  readonly reconcileStaleWorkingFlights = async (): Promise<void> => {
+  private supervising: Promise<void> | null = null;
+
+  /**
+   * The flight supervisor's tick (docs/specs/flight-supervisor.md). It runs on
+   * a timer, at startup and after local agent sync. Runs never overlap: a
+   * caller during a tick waits for that tick.
+   */
+  readonly superviseFlights = (): Promise<void> => {
+    if (this.supervising) return this.supervising;
+    this.supervising = this.superviseOnce().finally(() => {
+      this.supervising = null;
+    });
+    return this.supervising;
+  };
+
+  /** Former name of {@link superviseFlights}. */
+  readonly reconcileStaleWorkingFlights = (): Promise<void> => this.superviseFlights();
+
+  /** True when another node owns this flight, so this node holds a mirror. */
+  isMirroredFlight(flight: FlightRecord): boolean {
+    const owner = flightOwnerNodeId(flight);
+    const local = this.options.localNodeId?.()?.trim();
+    return Boolean(owner && local && owner !== local);
+  }
+
+  private deadlines(): SupervisorDeadlines {
+    return { ...DEFAULT_SUPERVISOR_DEADLINES, ...(this.options.deadlines ?? {}) };
+  }
+
+  private async superviseOnce(): Promise<void> {
     const snapshot = this.options.runtime.snapshot();
     const now = this.now();
+    const deadlines = this.deadlines();
+    let activity: ReadonlyMap<string, number> | null = null;
 
     for (const flight of Object.values(snapshot.flights)) {
       if (snapshot.invocations[flight.invocationId]?.metadata?.humanOwned === true) continue;
+      if (isTerminalFlightState(flight.state)) continue;
+      if (this.isMirroredFlight(flight)) continue;
       const twin = supersedingTwinFlight(snapshot, flight);
       if (twin && !this.options.isInvocationActive(flight.invocationId)) {
         if (await this.recordFlight(closedAsSupersededTwin(flight, twin, now))) {
@@ -566,32 +644,74 @@ export class BrokerFlightLifecycleService {
         now,
         bootedAt: this.options.bootedAt,
       });
-      if (!failure) {
+      if (failure) {
+        await this.declareDead(flight, failure, now);
         continue;
       }
+      if (flight.state !== "running") continue;
 
-      const agent = snapshot.agents[flight.targetAgentId] as AgentDefinition | undefined;
-      const unrepliedOutput = flight.metadata?.awaitingFinalOutput;
-      const reconciledFlight: FlightRecord = {
+      activity ??= this.options.sessionActivity?.() ?? new Map();
+      const sessionId = flightSessionId(flight);
+      const observedAt = sessionId ? activity.get(sessionId) ?? 0 : 0;
+      const lastEvidenceAt = Math.max(flightLastEvidenceAt(flight), observedAt);
+      if (deadlines.deadAfterMs !== null && lastEvidenceAt > 0 && now - lastEvidenceAt >= deadlines.deadAfterMs
+        && !this.options.isInvocationActive(flight.invocationId)) {
+        await this.declareDead(flight, {
+          cause: "no_progress",
+          detail: `no progress for ${Math.floor((now - lastEvidenceAt) / 60_000)} min`,
+        }, now);
+        continue;
+      }
+      const liveness = flightLiveness({ lastEvidenceAt, now, deadlines });
+      if (liveness === recordedFlightLiveness(flight)) continue;
+      // Only a change of level is written, so a quiet flight costs one write
+      // per level, not one per tick.
+      await this.recordFlight({
         ...flight,
-        ...(typeof unrepliedOutput === "string" && unrepliedOutput ? { output: unrepliedOutput } : {}),
-        state: "failed",
-        summary: `${agent?.displayName ?? flight.targetAgentId} did not finish cleanly.`,
-        error: `Stale running flight reconciled: ${failure.detail}`,
-        completedAt: now,
-        metadata: {
-          ...(flight.metadata ?? {}),
-          failureCause: failure.cause,
-          supersededByFlightId: failure.supersededByFlightId,
-          reconciledStaleFlight: true,
-          reconciledReason: failure.detail,
-          reconciledAt: now,
-        },
-      };
-      await this.recordFlight(reconciledFlight);
-      this.options.warn?.(`[openscout-runtime] reconciled stale running flight ${flight.id}: ${failure.detail}`);
+        metadata: { ...(flight.metadata ?? {}), liveness, lastEvidenceAt },
+      }, () => {
+        const current = this.options.journal.getFlight?.(flight.id)
+          ?? this.options.runtime.snapshot().flights[flight.id];
+        return current?.state === "running" && recordedFlightLiveness(current) !== liveness;
+      });
     }
-  };
+  }
+
+  private async declareDead(
+    flight: FlightRecord,
+    failure: { cause: string; detail: string; movedOnToFlightId?: string },
+    now: number,
+  ): Promise<void> {
+    const snapshot = this.options.runtime.snapshot();
+    const agent = snapshot.agents[flight.targetAgentId] as AgentDefinition | undefined;
+    const unrepliedOutput = flight.metadata?.awaitingFinalOutput;
+    const local = this.options.localNodeId?.()?.trim();
+    const deadFlight: FlightRecord = {
+      ...flight,
+      ...(typeof unrepliedOutput === "string" && unrepliedOutput ? { output: unrepliedOutput } : {}),
+      // On the wire a dead flight is `failed` with outcome "dead", so peers
+      // that know only the seven states still treat it as terminal.
+      state: "failed",
+      summary: `${agent?.displayName ?? flight.targetAgentId} didn't finish.`,
+      error: `Didn't finish: ${failure.detail}`,
+      // Kept for storage and older readers. `flightFinishedAt` never reads
+      // it for a dead flight.
+      completedAt: now,
+      metadata: {
+        ...(flight.metadata ?? {}),
+        outcome: "dead",
+        deathCause: failure.cause,
+        declaredDeadAt: now,
+        liveness: "stalled",
+        ...(failure.movedOnToFlightId ? { movedOnToFlightId: failure.movedOnToFlightId } : {}),
+        ...(local ? { supervisor: { nodeId: flightOwnerNodeId(flight) ?? local } } : {}),
+        reconciledReason: failure.detail,
+        reconciledAt: now,
+      },
+    };
+    await this.recordFlight(deadFlight);
+    this.options.warn?.(`[openscout-runtime] flight ${flight.id} didn't finish (${failure.cause}): ${failure.detail}`);
+  }
 
   private async reconcileMessageDeliveriesForFlight(
     flight: FlightRecord,

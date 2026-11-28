@@ -1,7 +1,8 @@
 # Flight supervisor
 
-Status: proposed. Nothing in this document is implemented yet, except where
-"Current behavior" says so.
+Status: partly implemented. "Implementation status" at the end lists what
+ships and what is still open. "Current behavior" describes the code before
+the supervisor.
 
 A flight starts when an ask is accepted, and it ends in one recorded outcome.
 The flight supervisor makes sure every flight gets that outcome. It works like
@@ -14,7 +15,8 @@ ended badly (`failed`), and a run that stopped without ending at all (`dead`).
 
 ## Current behavior
 
-This section describes the code on `main` as of 2026-11-28.
+This section describes the code on `main` as of 2026-11-28, before the
+supervisor.
 
 - A flight has one of seven states: `queued`, `waking`, `running`, `waiting`,
   `completed`, `failed` and `cancelled`
@@ -116,7 +118,8 @@ directions.
   session.
 - The ask path creates one flight and keeps its id from acceptance to the
   end. The placeholder flight goes away.
-- `superseded` is removed from `FAILED_RUN_CAUSES`.
+- Nothing writes the `superseded` failure cause any more. It stays in
+  `FAILED_RUN_CAUSES` so that old records still read.
 
 ### Lifecycle
 
@@ -131,7 +134,12 @@ queued → waking → running ⇄ waiting
                      └─→ dead        (the supervisor stopped waiting for it)
 ```
 
-`dead` is new. Each terminal state has one meaning:
+`dead` is new. On the wire a dead flight is `state: "failed"` with
+`metadata.outcome: "dead"`. Peers and readers that know only the seven
+states still treat it as terminal. Readers get the outcome from
+`flightOutcome()` in `@openscout/protocol`, never from `state` alone.
+
+Each terminal state has one meaning:
 
 | State | Who decides | Meaning |
 |-------|-------------|---------|
@@ -148,7 +156,23 @@ The product groups outcomes in two categories:
   runs that did not drive themselves to a finished state.
 
 `failed` keeps only the causes a run can report: `harness_start`,
-`disk_full`, `harness_error` and `unknown`. `endpoint_lost` moves to `dead`.
+`disk_full`, `harness_error` and `unknown`. A dead flight has a
+`deathCause` from `DEAD_FLIGHT_CAUSES` instead:
+
+| Cause | Meaning |
+|-------|---------|
+| `session_gone` | The session process or its endpoint is gone, with no reply. |
+| `session_moved_on` | The same session finished a turn that was dispatched after this one. |
+| `agent_retired` | The target agent was retired or replaced by a new registration. |
+| `no_progress` | No evidence for `deadAfter`, or a turn ended with no task reply and stayed idle. |
+| `handoff_unconfirmed` | A handoff to another node was never confirmed. |
+| `owner_unreachable` | The owner node stayed unreachable for `ownerLostAfter`. |
+| `legacy_reconciled` | Closed by the reconcile pass that ran before the supervisor. |
+
+`session_moved_on` is the only rule that compares two flights. It orders
+them by the owner's dispatch acknowledgements (`dispatchAck.acknowledgedAt`),
+which come from one clock, and it counts only a reported finish
+(`completed` or `failed`, not `dead`).
 
 ### Liveness
 
@@ -162,7 +186,10 @@ Liveness is a display field, not a state change.
 | `stalled` | No evidence for `stalledAfter`, or the session process is gone. |
 
 **Evidence** is anything the session produces that the owner can observe:
-transcript or event writes, terminal output, tool calls, or a reply. A live
+transcript or event writes, terminal output, tool calls, or a reply. Today
+the supervisor reads the flight's own start, dispatch acknowledgement and
+turn end, plus the observed-session feed's last transcript activity for the
+flight's session. A live
 session process alone is not evidence of progress, but it keeps a flight from
 being declared dead for silence alone.
 
@@ -191,7 +218,10 @@ A mirror applies one rule: when it has not heard from the owner for
 that holds the task (`taskHomeNodeId`) may close the flight as `dead` with
 cause `owner_unreachable`.
 
-Proposed defaults, all configurable per node:
+Defaults, all configurable per node. `deadAfter` is off by default: the
+evidence feed does not yet cover every harness, and a long tool call (a
+build, a test run) can be silent for an hour. Until it does, silence alone
+never makes a flight dead.
 
 | Name | Default |
 |------|---------|
@@ -200,16 +230,17 @@ Proposed defaults, all configurable per node:
 | `quietAfter` | 2 min |
 | `stalledAfter` | 10 min |
 | `goneGrace` | 1 min |
-| `deadAfter` | 60 min |
+| `deadAfter` | off |
 | `ownerUnreachableAfter` | 5 min |
 | `ownerLostAfter` | 6 h |
 
 ### Time fields
 
-- `completedAt` is set only when the run reports a finish or error, or when
-  a flight is cancelled.
-- `declaredDeadAt` is set when a flight becomes `dead`. `completedAt` stays
-  empty.
+- `declaredDeadAt` is set when a flight becomes `dead`.
+- A dead flight also keeps `completedAt`, set to the same time, because
+  storage, history rotation and older readers expect a terminal flight to
+  have one. `flightFinishedAt()` returns null for a dead flight, and
+  `flightTimestamp()` counts a dead flight by its start.
 - `lastEvidenceAt` records the time of the newest evidence. Liveness is
   computed from it.
 
@@ -237,16 +268,12 @@ restart keeps its flight.
 
 ## Migration
 
-1. Add `dead` to `FlightState`, and add `supervisor`, `lastEvidenceAt`,
-   `declaredDeadAt`, `replacesFlightId` and `correctedFrom` to the flight
-   record.
-2. Rewrite existing records:
-   - `failed` with `metadata.reconciledStaleFlight: true` becomes `dead`;
-     move `completedAt` to `declaredDeadAt`;
-   - `failed` with cause `superseded` becomes `cancelled` with reason
-     `replaced` when a replacing flight can be found, otherwise `dead`;
-   - placeholder flights cancelled as superseded are removed from lists
-     but kept in storage.
+1. Add `outcome`, `deathCause`, `declaredDeadAt`, `liveness`,
+   `lastEvidenceAt`, `supervisor`, `replacesFlightId` and `correctedFrom` to
+   flight metadata. `FlightState` does not change.
+2. Existing records are read, not rewritten: `flightOutcome()` reads a
+   `failed` flight with `metadata.reconciledStaleFlight: true` as `dead`
+   with cause `legacy_reconciled`.
 3. Set `supervisor.nodeId` to the node that holds the session. If that is not
    known, use the node that created the flight, with `epoch: 1`.
 4. Replace `reconcileStaleWorkingFlights` and `staleWorkingFlightReason` with
@@ -268,6 +295,33 @@ restart keeps its flight.
 - The failed-runs actions (`FAILED_RUN_ACTIONS`) gain matching actions for
   each `dead` cause.
 
+## Implementation status
+
+Ships in the first supervisor change:
+
+- the outcome helpers, causes and deadlines in
+  `packages/protocol/src/flight-outcome.ts`;
+- the supervisor tick (`superviseFlights`) on a 15 s timer, at startup and
+  after local agent sync, replacing the reconcile pass;
+- ownership: a node skips every flight whose owner is another node;
+- `dead` in place of guessed `failed`, with a cause;
+- `session_moved_on` by dispatch order, in place of supersession by close
+  time;
+- correction of a dead flight by a late finish or error;
+- liveness (`active`, `idle`, `stalled`) written on each change of level.
+
+Still open:
+
+- the handoff messages and epochs. Ownership comes from the node that
+  acknowledged dispatch, and an older epoch is not yet rejected;
+- `owner_unreachable` and `handoff_unconfirmed`. Until they ship, a flight
+  whose owner never returns stays open on its mirrors;
+- one flight per ask. Placeholder flights still close through their twin
+  on the same invocation;
+- `replacesFlightId` producers, such as retry;
+- `deadAfter` on by default, once evidence covers every harness;
+- product surfaces outside the runtime.
+
 ## Exclusions
 
 - The supervisor does not retry. A retry is a new ask by an operator or an
@@ -283,7 +337,8 @@ restart keeps its flight.
    closed by node A or node B as anything other than `completed`.
 2. The 2026-11-28 case: flight A is closed as `dead` on its owner, and a newer
    flight B on the same session stays `running`.
-3. No code path sets `completedAt` on a flight that becomes `dead`.
+3. No ordering rule reads a dead flight's close time as the time its work
+   ended.
 4. A flight is cancelled as `replaced` only when another flight names it in
    `replacesFlightId`.
 5. One ask creates one flight. No placeholder flight appears in any list.
