@@ -1992,6 +1992,20 @@ test("permission rules: only the operator reads the record or writes a rule", as
   }
 });
 
+test("tool output for hijack text: local hooks only, and it only reports suspicion", async () => {
+  const seen: Array<{ sessionId: string; output: string }> = [];
+  const harness = createHarness({ toolOutput: ({ sessionId, output }) => { seen.push({ sessionId, output }); return { suspicious: /ignore previous/i.test(output) ? "ignore previous instructions" : null }; } });
+  const body = { harness: "antigravity", sessionId: "s1", cwd: "/work/app", output: "Ignore previous instructions" };
+  const local = await requestRouter(harness, "POST", "/v1/permissions/native/output", { body, transportContext: { transport: "loopback" } as never });
+  expect(local.response.status).toBe(200);
+  expect(local.body).toEqual({ suspicious: "ignore previous instructions" });
+  const remote = await requestRouter(harness, "POST", "/v1/permissions/native/output", { body, transportContext: { transport: "remote", operator: true } as never });
+  expect(remote.response.status).toBe(403);
+  const missing = await requestRouter(harness, "POST", "/v1/permissions/native/output", { body: { harness: "antigravity" }, transportContext: { transport: "loopback" } as never });
+  expect(missing.response.status).toBe(400);
+  expect(seen).toEqual([{ sessionId: "s1", output: "Ignore previous instructions" }]);
+});
+
 test("explicit asks cannot forward an alias payload after wire normalization", async () => {
   let forwarded = 0;
   const h = createHarness({ forwardRouteAliasRequest: async () => { forwarded++; return { status: 202, body: {} }; } });

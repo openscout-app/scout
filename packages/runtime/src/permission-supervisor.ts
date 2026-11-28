@@ -11,6 +11,7 @@ import type { ContinuationLevel } from "./continuation/policy.js";
 import {
   continuationPermissionScopes,
   continuationPolicyPath,
+  continuationSignalSettings,
   loadContinuationPolicy,
   resolveContinuationGrant,
   type ContinuationPolicyFile,
@@ -24,6 +25,7 @@ import {
   parsePermissionRule,
 } from "./continuation/rules.js";
 import { absolutePath, agentConfigTarget, autoProjectRoot, readFiles, scoutPolicyTarget, secretTarget, shellSegments, writtenFiles } from "./continuation/shell.js";
+import type { PermissionSignalName, PermissionSignals } from "./continuation/signals.js";
 
 export const PERMISSION_SUPERVISOR_ACTOR_ID = "permission-supervisor";
 
@@ -43,7 +45,21 @@ export type PermissionSupervisorVerdict = {
   ruleScope?: string;
   /** The built-in deny rules an operator allow lifted for this call. */
   overrides?: string[];
+  /** The escalation signal this call raised, if any. */
+  signal?: PermissionSignalName;
+  /** The signal's one plain line for the phone. */
+  signalLine?: string;
+  /** Where the untrusted input behind the signal came from, when known. */
+  signalSource?: string;
+  /** True when the signal turned an automatic approval into this ask. */
+  held?: boolean;
 };
+
+/** The session a call comes from, and the signals that read its history. */
+export type PermissionSignalContext = { signals: PermissionSignals; sessionId?: string };
+
+/** Signals that judge the call alone: an operator allow naming the call settles them. */
+const CALL_SIGNALS: ReadonlySet<PermissionSignalName> = new Set(["download-execute", "agent-config", "push-scope"]);
 
 type Grant = ReturnType<typeof resolveContinuationGrant>;
 
@@ -59,6 +75,42 @@ export function permissionRuleLabel(match: { list: string; rule: string; overrid
 }
 
 function withRules(
+  policy: ContinuationPolicyFile,
+  resolved: Grant,
+  call: Omit<PermissionCall, "root"> | null,
+  root: string,
+  offered: { once: boolean; deny: boolean },
+  judge: (grant: Grant) => PermissionSupervisorVerdict,
+  context?: PermissionSignalContext,
+  project?: string,
+): PermissionSupervisorVerdict {
+  const decided = ruleVerdict(policy, resolved, call, root, offered, judge);
+  if (!context || !call) return decided;
+  const signalCall = { tool: call.tool, command: call.command ?? null, path: call.path ?? null, url: call.url ?? null, project: project ?? root, cwd: root };
+  let verdict = decided;
+  if (decided.act !== "deny") {
+    const hit = context.signals.assess(context.sessionId, signalCall, continuationSignalSettings(policy, resolved.source));
+    // Only an operator allow that names this exact call settles a call signal.
+    // A download run later is never settled by an allow of the run step alone:
+    // the allow has to name the whole command that holds the download.
+    const settled = hit && CALL_SIGNALS.has(hit.signal) && decided.act === "continue" && decided.list === "allow" && decided.rule
+      && !decided.rule.startsWith("mode:") && decided.reason.startsWith("allow ") && namesExactly(decided.rule, call, root)
+      && (hit.signal !== "download-execute" || hit.inCall === true);
+    if (hit && !settled) {
+      const named = { signal: hit.signal, signalLine: hit.line, ...(hit.source ? { signalSource: hit.source } : {}) };
+      verdict = decided.act === "continue"
+        ? { ...decided, act: "notify", level: undefined, reason: `signal ${hit.signal}: ${hit.line}`, held: true, ...named }
+        : { ...decided, ...named };
+      if (verdict.level === undefined) delete verdict.level;
+    }
+  }
+  if (context.sessionId) {
+    context.signals.observe(context.sessionId, signalCall, verdict.act === "deny" ? "denied" : verdict.act === "continue" ? "approved" : "asked");
+  }
+  return verdict;
+}
+
+function ruleVerdict(
   policy: ContinuationPolicyFile,
   resolved: Grant,
   call: Omit<PermissionCall, "root"> | null,
@@ -162,8 +214,9 @@ function dialogCall(dialog: ReturnType<typeof parseContinuationDialog>): Omit<Pe
 }
 
 export function decidePermissionSupervisor(
-  prompt: Pick<ManagedPermissionPrompt, "projectRoot" | "cwd" | "text" | "decisions">,
+  prompt: Pick<ManagedPermissionPrompt, "projectRoot" | "cwd" | "text" | "decisions"> & { sessionId?: string },
   policy: ContinuationPolicyFile = loadContinuationPolicy(),
+  signals?: PermissionSignals,
 ): PermissionSupervisorVerdict {
   const codex = codexCommand(prompt.text);
   const commandCwd = codex && !("invalid" in codex) ? codex.cwd : prompt.cwd;
@@ -178,6 +231,7 @@ export function decidePermissionSupervisor(
     ? ("invalid" in codex ? null : { tool: "Bash", command: codex.command })
     : dialogCall(dialog!);
   const offered = { once: prompt.decisions.includes("once"), deny: prompt.decisions.includes("deny") };
+  const context = signals ? { signals, ...(prompt.sessionId ? { sessionId: prompt.sessionId } : {}) } : undefined;
   return withRules(policy, resolved, call, commandCwd ?? prompt.projectRoot, offered, (grant) => {
     const notify = (reason: string, risk: ContinuationRisk = "unknown"): PermissionSupervisorVerdict => ({
       act: "notify", reason, risk, grant: grant.source,
@@ -208,7 +262,7 @@ export function decidePermissionSupervisor(
       : verdict.risk;
     if (!continuationAllowsRisk(grant.level, risk)) return notify(`${grant.level} does not auto-continue ${risk}`, risk);
     return { act: "continue", level: grant.level, reason: `${grant.level} continues ${risk}`, risk, grant: grant.source };
-  });
+  }, context, prompt.projectRoot);
 }
 
 /** The command or path a managed prompt asks about, for the record: Codex's command, or the dialog's exact one. */
@@ -261,9 +315,12 @@ export function decideNativeToolSupervisor(
     cwd?: string;
     toolName: string;
     toolInput: unknown;
+    sessionId?: string;
   },
   policy: ContinuationPolicyFile = loadContinuationPolicy(),
+  signals?: PermissionSignals,
 ): PermissionSupervisorVerdict {
+  const context = signals ? { signals, ...(input.sessionId ? { sessionId: input.sessionId } : {}) } : undefined;
   const resolved = resolveContinuationGrant(policy, {
     herdrSession: "",
     paneId: "",
@@ -324,7 +381,7 @@ export function decideNativeToolSupervisor(
     }
 
     return notify(`${input.toolName} requires operator approval`);
-  });
+  }, context, input.projectRoot);
 }
 
 /** Answers whether an absolute path lies inside the project under the same grant that covers the request. */

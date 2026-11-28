@@ -51,6 +51,12 @@ export type PermissionRecordRow = {
   ruleScope?: string;
   /** The built-in deny rules the allow rule lifted. */
   overrides?: string[];
+  /** The escalation signal the call raised, its plain line, and the untrusted source behind it. */
+  signal?: string;
+  signalLine?: string;
+  signalSource?: string;
+  /** True when the signal, not the rules, made this an ask. */
+  held?: boolean;
   /** The rule as the page shows it: `allow Bash(rm -rf ./dist:*) (overrides default deny Bash(rm -rf:*))`. */
   label: string;
   risk: string;
@@ -76,6 +82,8 @@ export type PermissionLogQuery = {
   tool?: string;
   project?: string;
   via?: string;
+  /** An escalation signal's name. */
+  signal?: string;
   /** Newest first; default 200, at most 5000. */
   limit?: number;
 };
@@ -90,6 +98,11 @@ export type PermissionStats = {
   byAgent: Array<{ agentId: string | null; agentName: string | null; total: number; byDecision: Counts }>;
   byVia: Array<{ via: string; total: number }>;
   byTool: Array<{ tool: string; total: number }>;
+  /**
+   * Per escalation signal: how often it fired, how many of those asks it
+   * caused itself (`held`), and what the operator answered.
+   */
+  bySignal: Array<{ signal: string; total: number; held: number; byDecision: Counts; yes: number; no: number }>;
 };
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -146,6 +159,10 @@ export function permissionRecordRow(entry: ContinuationAuditEntry): PermissionRe
     list: entry.list ?? (decision === "answered" ? "operator" : "mode"),
     ...(entry.ruleScope ? { ruleScope: entry.ruleScope } : {}),
     ...(entry.overrides?.length ? { overrides: entry.overrides } : {}),
+    ...(entry.signal ? { signal: entry.signal } : {}),
+    ...(entry.signalLine ? { signalLine: entry.signalLine } : {}),
+    ...(entry.signalSource ? { signalSource: entry.signalSource } : {}),
+    ...(entry.held ? { held: true } : {}),
     label: ruleLabel(entry.list ?? (decision === "answered" ? "operator" : "mode"), entry.rule ?? (decision === "answered" ? "operator" : "mode:auto"), entry.overrides),
     risk: entry.risk,
     reason: redactSecrets(entry.reason),
@@ -167,6 +184,7 @@ function rowMatches(row: PermissionRecordRow, query: PermissionLogQuery): boolea
   if (query.decision && row.decision !== query.decision) return false;
   if (query.rule && row.rule !== query.rule) return false;
   if (query.via && row.via !== query.via) return false;
+  if (query.signal && row.signal !== query.signal) return false;
   if (query.tool && permissionToolName(row.tool ?? "") !== permissionToolName(query.tool)) return false;
   if (query.project && !(row.project && within(row.project, query.project))) return false;
   if (query.agent) {
@@ -205,6 +223,7 @@ export function permissionStats(
   const agents = new Map<string, { agentId: string | null; agentName: string | null; total: number; byDecision: Counts }>();
   const vias = new Map<string, number>();
   const tools = new Map<string, number>();
+  const signals = new Map<string, PermissionStats["bySignal"][number]>();
   let total = 0;
   for (const entry of readContinuationAudit(path, since)) {
     const row = permissionRecordRow(entry);
@@ -224,6 +243,17 @@ export function permissionStats(
     if (row.via) vias.set(row.via, (vias.get(row.via) ?? 0) + 1);
     const tool = permissionToolName(row.tool ?? "unknown");
     tools.set(tool, (tools.get(tool) ?? 0) + 1);
+    if (row.signal) {
+      const signal = signals.get(row.signal) ?? { signal: row.signal, total: 0, held: 0, byDecision: emptyCounts(), yes: 0, no: 0 };
+      if (row.decision === "asked" || row.decision === "approved" || row.decision === "denied") {
+        signal.total++;
+        if (row.held) signal.held++;
+      }
+      signal.byDecision[row.decision]++;
+      if (row.decision === "answered" && row.answer === "deny") signal.no++;
+      else if (row.decision === "answered") signal.yes++;
+      signals.set(row.signal, signal);
+    }
   }
   const byTotal = <T extends { total: number }>(items: Iterable<T>) => [...items].sort((a, b) => b.total - a.total);
   return {
@@ -232,6 +262,7 @@ export function permissionStats(
     byAgent: byTotal(agents.values()),
     byVia: byTotal([...vias].map(([via, count]) => ({ via, total: count }))),
     byTool: byTotal([...tools].map(([tool, count]) => ({ tool, total: count }))),
+    bySignal: byTotal(signals.values()),
   };
 }
 

@@ -8,7 +8,7 @@ export function renderPermissionsCommandHelp(): string {
   return [
     "Usage:",
     "  scout permissions log [--since 7d] [--decision approved|asked|denied|closed|answered]",
-    "                        [--agent <id or name>] [--rule <rule>] [--tool <tool>] [--project <path>] [--limit N] [--json]",
+    "                        [--agent <id or name>] [--rule <rule>] [--tool <tool>] [--project <path>] [--signal <name>] [--limit N] [--json]",
     "  scout permissions stats [--since 7d] [--agent <id or name>] [--project <path>] [--json]",
     "  scout permissions rules [--json]",
     "  scout permissions dry-run <allow|ask|deny> '<rule>' [--project <path>] [--since 30d] [--json]",
@@ -20,6 +20,10 @@ export function renderPermissionsCommandHelp(): string {
     "",
     "dry-run lists the past records a new rule would have matched, and the deny or ask rule",
     "that would still win over it. It writes nothing. Only the operator adds rules.",
+    "",
+    "Escalation signals (download-execute, agent-config, secret-egress, trifecta,",
+    "encoded-egress, push-scope, denial-burst) turn an automatic approval into a question;",
+    "they never deny. A held call shows \"signal <name> (held)\" in the log.",
   ].join("\n");
 }
 
@@ -28,7 +32,7 @@ type Options = {
   query: URLSearchParams;
 };
 
-const VALUE_FLAGS = new Set(["--since", "--until", "--decision", "--agent", "--rule", "--tool", "--project", "--limit", "--via"]);
+const VALUE_FLAGS = new Set(["--since", "--until", "--decision", "--agent", "--rule", "--tool", "--project", "--limit", "--via", "--signal"]);
 
 /** `7d`, `12h`, `30m`, or an epoch in milliseconds. */
 export function parseSince(value: string, now = Date.now()): number {
@@ -78,13 +82,14 @@ function parse(args: string[]): Options | "help" {
   return { command, query };
 }
 
-type Row = { at: number; decision: string; via?: string; answer?: string; rule: string; list: string; label?: string; agentName?: string; agentId?: string; tool?: string; command: string | null; reason: string };
+type Row = { at: number; decision: string; via?: string; answer?: string; rule: string; list: string; label?: string; signal?: string; signalLine?: string; held?: boolean; agentName?: string; agentId?: string; tool?: string; command: string | null; reason: string };
 type Counts = Record<string, number>;
 type Stats = {
   since: number; until: number; total: number; byDecision: Counts;
   byRule: Array<{ rule: string; list: string; total: number }>;
   byAgent: Array<{ agentId: string | null; agentName: string | null; total: number; byDecision: Counts }>;
   byVia: Array<{ via: string; total: number }>;
+  bySignal?: Array<{ signal: string; total: number; held: number; yes: number; no: number }>;
 };
 type RulesView = { path: string; defaultMode: string; precedence: string; scopes: Array<{ scope: string; mode: string; lists: Record<string, Array<{ rule: string; builtin: boolean }>> }> };
 type DryRun = { rule: string; list: string; scope: string; total: number; matches: Array<Row & { wouldBe: string; wouldBeLabel?: string; shadowedBy?: { rule: string; list: string } }> };
@@ -96,7 +101,9 @@ function when(at: number): string {
 function renderRow(row: Row): string {
   const who = row.agentName ?? row.agentId ?? "unknown agent";
   const how = row.decision === "answered" ? `answered ${row.answer ?? ""}${row.via ? ` via ${row.via}` : ""}` : row.decision;
-  return `${when(row.at)}  ${how.padEnd(18)} ${(row.label ?? row.rule).padEnd(28)} ${who} · ${row.tool ?? "?"} ${row.command ?? ""}`.trimEnd();
+  const line = `${when(row.at)}  ${how.padEnd(18)} ${(row.label ?? row.rule).padEnd(28)} ${who} · ${row.tool ?? "?"} ${row.command ?? ""}`.trimEnd();
+  if (!row.signal) return line;
+  return `${line}\n${" ".repeat(18)}signal ${row.signal}${row.held ? " (held)" : ""}: ${row.signalLine ?? ""}`.trimEnd();
 }
 
 function renderStats(stats: Stats): string {
@@ -104,6 +111,10 @@ function renderStats(stats: Stats): string {
   lines.push(`  ${Object.entries(stats.byDecision).map(([key, value]) => `${key} ${value}`).join(" · ")}`);
   if (stats.byRule.length) lines.push("by rule:", ...stats.byRule.slice(0, 15).map((rule) => `  ${String(rule.total).padStart(5)}  ${rule.list.padEnd(8)} ${rule.rule}`));
   if (stats.byAgent.length) lines.push("by agent:", ...stats.byAgent.slice(0, 15).map((agent) => `  ${String(agent.total).padStart(5)}  ${agent.agentName ?? agent.agentId ?? "unknown"}`));
+  if (stats.bySignal?.length) {
+    lines.push("by signal (fired · asks it caused · operator yes/no):", ...stats.bySignal.map((signal) =>
+      `  ${String(signal.total).padStart(5)}  ${signal.signal.padEnd(18)} held ${signal.held} · yes ${signal.yes} · no ${signal.no}`));
+  }
   if (stats.byVia.length) lines.push(`by surface: ${stats.byVia.map((via) => `${via.via} ${via.total}`).join(" · ")}`);
   return lines.join("\n");
 }

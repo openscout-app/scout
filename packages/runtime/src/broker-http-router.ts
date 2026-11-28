@@ -328,6 +328,8 @@ export type BrokerHttpRouterDeps = {
   taskReady?: Pick<BrokerTaskReadyService, "setNotify" | "decide">;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
+  /** Tool output from a post-tool hook: hijack text raises the session's suspicion. It never decides anything. */
+  toolOutput?: (input: { harness: string; sessionId: string; cwd: string; toolName?: string; output: string }) => { suspicious: string | null };
   /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
   harnessHooks?: Pick<HarnessHooks, "status" | "apply" | "remove">;
   journal: BrokerHttpJournal;
@@ -836,7 +838,7 @@ export function createBrokerHttpRouter(
         const query = {
           since: number("since"), until: number("until"), limit: number("limit"),
           decision: decision as PermissionLogQuery["decision"], agent: text("agent"), rule: text("rule"),
-          tool: text("tool"), project: text("project"), via: text("via"),
+          tool: text("tool"), project: text("project"), via: text("via"), signal: text("signal"),
         };
         json(response, 200, { records: readPermissionLog(query, files.auditPath) });
         return;
@@ -890,6 +892,21 @@ export function createBrokerHttpRouter(
       if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended", sessionOpen: error.sessionOpen });
       else json(response, error instanceof PermissionDeliveryUnconfirmedError ? 502 : 409, { error: message, outcome: error instanceof PermissionDeliveryUnconfirmedError ? "unconfirmed" : "refused" });
     }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/permissions/native/output") {
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest || request.headers.origin || request.headers["x-openscout-forwarded-node-id"]) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    if (!deps.toolOutput) { json(response, 404, { error: "tool_output_unsupported" }); return; }
+    const body = await readRequestBody<{ harness?: unknown; sessionId?: unknown; cwd?: unknown; toolName?: unknown; output?: unknown }>(request, { maxBytes: 512 * 1024 });
+    if (typeof body.harness !== "string" || typeof body.sessionId !== "string" || !body.sessionId || typeof body.cwd !== "string" || typeof body.output !== "string") {
+      json(response, 400, { error: "harness, sessionId, cwd and output are required" }); return;
+    }
+    json(response, 200, deps.toolOutput({
+      harness: body.harness, sessionId: body.sessionId, cwd: body.cwd, output: body.output.slice(0, 256 * 1024),
+      ...(typeof body.toolName === "string" ? { toolName: body.toolName } : {}),
+    }));
     return;
   }
   if (method === "POST" && (url.pathname === "/v1/permissions/native" || url.pathname === "/v1/permissions/native/wait")) {

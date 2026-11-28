@@ -415,5 +415,9 @@ export function verdictSummary(verdict: PermissionSupervisorVerdict): Record<str
     ...(verdict.rule ? { rule: verdict.rule } : {}), ...(verdict.list ? { list: verdict.list } : {}),
     ...(verdict.ruleScope ? { ruleScope: verdict.ruleScope } : {}),
     ...(verdict.overrides?.length ? { overrides: verdict.overrides.join(", ") } : {}),
+    ...(verdict.signal ? { signal: verdict.signal } : {}),
+    ...(verdict.signalLine ? { signalLine: verdict.signalLine } : {}),
+    ...(verdict.signalSource ? { signalSource: verdict.signalSource } : {}),
+    ...(verdict.held ? { held: "true" } : {}),
   };
 }

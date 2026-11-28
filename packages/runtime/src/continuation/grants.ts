@@ -23,6 +23,7 @@
  * `rules.ts`). A project grant may carry its own `permissions` lists too.
  */
 
+import { parsePermissionSignalSettings, type PermissionSignalSettings } from "./signals.js";
 import {
   appendFileSync,
   closeSync,
@@ -55,7 +56,7 @@ import {
 import { resolveOpenScoutHome } from "../support-paths.js";
 
 export type ContinuationGrant =
-  | { scope: "project"; path: string; level: ContinuationLevel; permissions?: Partial<PermissionRuleSet> }
+  | { scope: "project"; path: string; level: ContinuationLevel; permissions?: Partial<PermissionRuleSet>; signals?: PermissionSignalSettings }
   | { scope: "session"; herdrSession: string; paneId: string; level: ContinuationLevel };
 
 export type ContinuationPolicyFile = {
@@ -66,6 +67,8 @@ export type ContinuationPolicyFile = {
   permissions?: Partial<PermissionRuleSet>;
   /** The mode outside every grant. Only an explicit `auto` changes `default`. */
   defaultMode?: PermissionMode;
+  /** Escalation signals turned off, everywhere or for some projects. Every one is on by default. */
+  signals?: PermissionSignalSettings;
 };
 
 export type ContinuationPaneScope = {
@@ -116,7 +119,8 @@ export function parseContinuationPolicy(raw: unknown): ContinuationPolicyFile {
       // Only absolute, non-root paths. `/` would grant the whole machine.
       if (!path || !isAbsolute(path) || resolve(path) === resolve(sep)) continue;
       const permissions = parsePermissionLists(grant.permissions);
-      grants.push({ scope: "project", path: resolve(path), level, ...(permissions ? { permissions } : {}) });
+      const signals = parsePermissionSignalSettings(grant.signals);
+      grants.push({ scope: "project", path: resolve(path), level, ...(permissions ? { permissions } : {}), ...(signals ? { signals } : {}) });
     } else if (grant.scope === "session") {
       const herdrSession = typeof grant.herdrSession === "string" ? grant.herdrSession.trim() : "";
       const paneId = typeof grant.paneId === "string" ? grant.paneId.trim() : "";
@@ -125,6 +129,7 @@ export function parseContinuationPolicy(raw: unknown): ContinuationPolicyFile {
     }
   }
   const permissions = parsePermissionLists(record.permissions);
+  const signals = parsePermissionSignalSettings(record.signals);
   const defaultMode = record.permissions && typeof record.permissions === "object"
     ? normalizePermissionMode((record.permissions as Record<string, unknown>).defaultMode)
     : undefined;
@@ -133,7 +138,17 @@ export function parseContinuationPolicy(raw: unknown): ContinuationPolicyFile {
     grants,
     ...(permissions ? { permissions } : {}),
     ...(defaultMode ? { defaultMode } : {}),
+    ...(signals ? { signals } : {}),
   };
+}
+
+/**
+ * The signal settings for a call: the grant's own settings over the file's.
+ * A signal is on unless one of them turns it off.
+ */
+export function continuationSignalSettings(policy: ContinuationPolicyFile, grantSource: string): PermissionSignalSettings {
+  const grant = policy.grants.find((entry) => entry.scope === "project" && `project:${entry.path}` === grantSource);
+  return { ...(policy.signals ?? {}), ...(grant?.scope === "project" ? grant.signals ?? {} : {}) };
 }
 
 /** The lists a `permissions` object names. Malformed rules are dropped, never widened. */
@@ -253,6 +268,12 @@ export type ContinuationAuditEntry = {
   ruleScope?: string;
   /** The built-in deny rules this operator allow rule lifted. */
   overrides?: string[];
+  /** The escalation signal the call raised, its line for the phone, and the untrusted source behind it. */
+  signal?: string;
+  signalLine?: string;
+  signalSource?: string;
+  /** True when the signal turned an automatic approval into an ask. */
+  held?: boolean;
   agentId?: string;
   agentName?: string;
   /** Where the answer went: a tmux/Herdr pane, a native harness hook, or a Scout-managed session. */

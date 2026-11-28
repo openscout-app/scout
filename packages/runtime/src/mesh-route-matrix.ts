@@ -302,6 +302,7 @@ const MESH_ROUTE_MATRIX: Record<string, MeshRouteTier> = {
   // Operator authorization; the handler also refuses remote transport.
   "POST /v1/permissions/decide": "local",
   "POST /v1/permissions/native": "local",
+  "POST /v1/permissions/native/output": "local",
   "POST /v1/permissions/native/wait": "local",
   "POST /v1/permissions/rules": "local",
   "POST /v1/rendezvous/match": "local",

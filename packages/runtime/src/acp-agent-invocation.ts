@@ -10,7 +10,28 @@ import type { RuntimeTimer } from "./portable-types.js";
 import { buildManagedAgentEnvironment } from "./managed-agent-environment.js";
 import { bindManagedPermissionRequester } from "./managed-permission.js";
 import { describeNativePermission } from "./native-permission.js";
-import { decideNativeToolSupervisor } from "./permission-supervisor.js";
+import { decideNativeToolSupervisor, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
+import type { PermissionSignals } from "./continuation/signals.js";
+
+/** The runtime's escalation signals, so ACP calls are read like native ones. */
+let acpPermissionSignals: PermissionSignals | undefined;
+export function configureAcpPermissionSignals(signals: PermissionSignals | undefined): void {
+  acpPermissionSignals = signals;
+}
+
+/** The watcher's verdict on an ACP call. One that throws never approves: the call waits for the operator. */
+export function acpSupervisorVerdict(
+  tool: Parameters<typeof decideNativeToolSupervisor>[0],
+  sessionId: string,
+  signals: PermissionSignals | undefined = acpPermissionSignals,
+  policy?: Parameters<typeof decideNativeToolSupervisor>[1],
+): PermissionSupervisorVerdict {
+  try {
+    return decideNativeToolSupervisor({ ...tool, sessionId }, policy, signals);
+  } catch {
+    return { act: "notify", reason: "watcher error", risk: "unknown", grant: "error" };
+  }
+}
 import { acpPermissionTool } from "./acp-permission-tool.js";
 import { RequesterWaitTimeoutError } from "./requester-timeout.js";
 
@@ -231,7 +252,7 @@ export async function invokeAcpAgent(
     timeoutMs: acpTurnCeilingMs(options),
     onPermission: async (request) => {
       const tool = await acpPermissionTool(options.cwd, request.acpToolCall);
-      const verdict = tool ? decideNativeToolSupervisor(tool) : null;
+      const verdict = tool ? acpSupervisorVerdict(tool, options.sessionId) : null;
       const description = verdict?.act === "continue" && tool
         ? describeNativePermission(tool)
         : request.description;

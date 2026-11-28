@@ -337,6 +337,56 @@ rule copies between it and `~/.claude/settings.json`:
   (`Read(./.env.example)` names `Read(//**/.env.*)`). A deny the operator wrote
   always wins, and an ask rule still holds a lifted call.
 
+### Escalation signals
+
+Signals read what a session has done so far. A signal can turn an automatic
+approval into a question for the operator. It never denies: only rules refuse
+a call. Routine work stays approved. `packages/runtime/src/continuation/signals.ts`
+holds the detectors. Each reads a compound command one segment at a time,
+including `$(…)`, `sh -c` and `eval` bodies.
+
+| Signal | Fires on |
+| --- | --- |
+| `download-execute` | A download piped into a shell, or a file fetched in the session that is then run, sourced or made executable. |
+| `agent-config` | A write to `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.agents/`, `.vscode/`, `.mcp.json`, `.git/hooks`, `.git/config`, a virtualenv interpreter, a shell rc file, git's global config, or Scout's policy file. |
+| `secret-egress` | A secret read (`.env`, `~/.aws`, `~/.ssh`, the keychain, the cloud metadata endpoint), then a call to a host this project has not used. |
+| `trifecta` | Untrusted input (a fetched page, a clone, a download from an unknown host, hijack text in tool output), a secret read, and a push, publish, deploy or send, in one session. |
+| `encoded-egress` | A secret pattern, or a long base64, hex, URL-encoded or DNS-label run, sent to an unfamiliar host. |
+| `push-scope` | A push from another repo, to an unfamiliar remote, of every branch, or straight to `main`/`master`/`production`/`deploy`, or a first publish from a project. |
+| `denial-burst` | A denied target retried in another form, or three denied calls in ten minutes. |
+
+Hijack text in tool output ("ignore previous instructions", invisible Unicode)
+only raises suspicion. It counts as untrusted input for the trifecta and never
+holds a call alone. The Antigravity post-tool hook forwards tool output to
+`POST /v1/permissions/native/output`. Claude Code does not send it yet.
+
+- Session state lives in the runtime's memory and is seeded at startup from the
+  last week of the decision record.
+- A held call's card names the signal in one line, says where the untrusted
+  input came from, and shows the raw command. Allow once covers that call only.
+  The agent sees the usual generic hold.
+- Every call that raises a signal writes `signal`, `signalLine`, and `held` (true
+  when the signal caused the ask) to the decision record.
+  `scout permissions log --signal <name>` and `scout permissions stats` read them back.
+- An allow rule the operator wrote settles `agent-config` and `push-scope` only
+  when it names the exact command or path, with no wildcard: `Bash(git push:*)`
+  or a bare `Edit` settles nothing. `download-execute` is settled only by an exact
+  allow of the whole command that holds the download; after `curl -o x.sh …`, an
+  allow of `Bash(sh x.sh)` still holds the call. Allow rules never match chained
+  commands, so today no allow settles `download-execute`.
+- Native hooks, the tmux watcher and the permission requests that reach the
+  runtime's ACP invocation (`invokeAcpAgent`) all read the same signals. Turning a signal off does not
+  lift the rules' own hold on agent config, secrets or Scout's policy file.
+- The operator can turn a signal off, or scope it out of some projects, at the top
+  level or in a project grant. A grant's setting wins over the top level:
+
+```json
+{
+  "signals": { "agent-config": { "except": ["/Users/me/dev/scout"] } },
+  "grants": [{ "scope": "project", "path": "/Users/me/dev/dotfiles", "level": "workspace", "signals": { "agent-config": false } }]
+}
+```
+
 ### The decision record
 
 `$OPENSCOUT_HOME/logs/continuation-audit.jsonl` gets one line for each decision:

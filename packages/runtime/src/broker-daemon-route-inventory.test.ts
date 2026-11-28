@@ -269,6 +269,7 @@ const expectedRouteInventory = [
   "POST /v1/pairing/detach",
   "POST /v1/permissions/decide",
   "POST /v1/permissions/native",
+  "POST /v1/permissions/native/output",
   "POST /v1/permissions/native/wait",
   "POST /v1/permissions/rules",
   "POST /v1/posts",

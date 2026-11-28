@@ -45,6 +45,23 @@ describe("the record", () => {
     expect(permissionRecordRow(line({ outcome: "claimed-elsewhere" }))).toBeNull();
   });
 
+  test("carries the escalation signal, filters by it, and counts the asks it caused and how they were answered", () => {
+    const { audit } = scratch();
+    const signal = { signal: "agent-config", signalLine: "Changes .claude/ (.claude/settings.json)" };
+    appendContinuationAudit(line({ at: 1, outcome: "asked", decision: "asked", ...signal, held: true }), audit);
+    appendContinuationAudit(line({ at: 2, decision: "answered", answer: "once", grant: "operator:ios", ...signal, held: true }), audit);
+    appendContinuationAudit(line({ at: 3, outcome: "asked", decision: "asked", signal: "push-scope", signalLine: "Pushes straight to main on origin" }), audit);
+    appendContinuationAudit(line({ at: 4, decision: "answered", answer: "deny", grant: "operator:ios", signal: "push-scope" }), audit);
+    appendContinuationAudit(line({ at: 5, decision: "approved" }), audit);
+    expect(readPermissionLog({ signal: "agent-config" }, audit).map((row) => [row.at, row.held, row.signalLine])).toEqual([
+      [2, true, signal.signalLine], [1, true, signal.signalLine],
+    ]);
+    expect(permissionStats({ since: 0, until: 10 }, audit).bySignal.map(({ signal, total, held, yes, no }) => ({ signal, total, held, yes, no }))).toEqual([
+      { signal: "agent-config", total: 1, held: 1, yes: 1, no: 0 },
+      { signal: "push-scope", total: 1, held: 0, yes: 0, no: 1 },
+    ]);
+  });
+
   test("filters by decision, agent, rule and window, newest first", () => {
     const { audit } = scratch();
     appendContinuationAudit(line({ at: 1, decision: "approved", rule: "Bash(bun test:*)", list: "allow", agentId: "a1", agentName: "Pixel" }), audit);
