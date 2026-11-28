@@ -9,7 +9,12 @@ import { randomBytes } from "node:crypto";
 import { homedir, hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
 
-import { assertTestIsolatedUserData, defaultOpenScoutSupportDirectory, resolveOpenScoutHome } from "./support-paths.js";
+import {
+  assertTestIsolatedUserData,
+  resolveOpenScoutConfigReadPath,
+  resolveOpenScoutHome,
+  resolveOpenScoutStateDirectory,
+} from "./support-paths.js";
 import { deriveOpenScoutInstanceLayout } from "./instance.js";
 import { stripBonjourCollisionSuffix } from "./node-identity.js";
 
@@ -151,8 +156,12 @@ export function localConfigPath(): string {
   return join(localConfigHome(), "config.json");
 }
 
+export function localConfigReadPath(): string {
+  return resolveOpenScoutConfigReadPath("config.json");
+}
+
 export function loadLocalConfig(): LocalConfig {
-  const configPath = localConfigPath();
+  const configPath = localConfigReadPath();
   if (!existsSync(configPath)) return { version: LOCAL_CONFIG_VERSION };
   try {
     return validateLocalConfig(JSON.parse(readFileSync(configPath, "utf8")));
@@ -285,15 +294,14 @@ export function writeLocalConfig(config: LocalConfig): void {
 }
 
 export function localConfigExists(): boolean {
-  return existsSync(localConfigPath());
+  return existsSync(localConfigReadPath());
 }
 
 export function resolveWebAuthToken(env: NodeJS.ProcessEnv = process.env): string {
   const envToken = env.OPENSCOUT_WEB_AUTH_TOKEN?.trim();
   if (envToken) return envToken;
 
-  const supportDir = env.OPENSCOUT_SUPPORT_DIRECTORY
-    ?? defaultOpenScoutSupportDirectory();
+  const supportDir = resolveOpenScoutStateDirectory(env);
   const tokenPath = join(supportDir, "runtime", "web-auth-token");
 
   try {
@@ -307,7 +315,13 @@ export function resolveWebAuthToken(env: NodeJS.ProcessEnv = process.env): strin
 
   const generated = randomBytes(32).toString("base64url");
   try {
-    if (process.env.NODE_ENV === "test" && !env.OPENSCOUT_SUPPORT_DIRECTORY) {
+    const isolated = Boolean(
+      env.OPENSCOUT_STATE_DIR?.trim()
+      || env.OPENSCOUT_SUPPORT_DIRECTORY?.trim()
+      || env.OPENSCOUT_HOME?.trim()
+      || env.SCOUT_HOME?.trim(),
+    );
+    if (process.env.NODE_ENV === "test" && !isolated) {
       return generated;
     }
     mkdirSync(dirname(tokenPath), { recursive: true });

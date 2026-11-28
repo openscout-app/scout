@@ -54,13 +54,13 @@ type Env = NodeJS.ProcessEnv;
 
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 
-/** Where extensions are installed: `extensions` in the Scout home (~/.scout). */
+/** Where extensions are installed: `extensions` in the Scout home (~/.openscout). */
 export function scoutExtensionsHome(env: Env = process.env): string {
   const configured = env.OPENSCOUT_EXTENSIONS_HOME?.trim();
   return configured ? resolve(configured) : join(resolveScoutHome({ env }), "extensions");
 }
 
-/** Where extensions are read from: ~/.scout first, then the legacy ~/.openscout. */
+/** Where extensions are read from: ~/.openscout first, then the legacy ~/.scout. */
 export function scoutExtensionRoots(env: Env = process.env): string[] {
   const configured = env.OPENSCOUT_EXTENSIONS_HOME?.trim();
   return configured ? [resolve(configured)] : scoutHomeReadRoots({ env }).map((root) => join(root, "extensions"));

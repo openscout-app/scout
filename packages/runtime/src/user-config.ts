@@ -1,8 +1,12 @@
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assertTestIsolatedUserData, resolveOpenScoutSupportPaths } from "./support-paths.js";
-import { resolveOpenScoutHome } from "./support-paths.js";
+import {
+  assertTestIsolatedUserData,
+  resolveOpenScoutConfigReadPath,
+  resolveOpenScoutHome,
+  resolveOpenScoutSupportPaths,
+} from "./support-paths.js";
 
 export type InterruptThreshold = "always" | "blocking-only" | "batched" | "never";
 
@@ -76,6 +80,10 @@ function userConfigPath(): string {
   return join(resolveOpenScoutHome(), "user.json");
 }
 
+function userConfigReadPath(): string {
+  return resolveOpenScoutConfigReadPath("user.json");
+}
+
 /**
  * Memoized against the file's stat identity: hot request paths resolve the
  * operator name/handle tens of thousands of times per request, and each
@@ -121,7 +129,7 @@ function readUserConfigFromDisk(configPath: string, now: number): OpenScoutUserC
 }
 
 export function loadUserConfig(now = Date.now()): OpenScoutUserConfig {
-  const configPath = userConfigPath();
+  const configPath = userConfigReadPath();
   if (userConfigCache && userConfigCache.path === configPath) {
     if (now - userConfigCache.statCheckedAt < USER_CONFIG_STAT_INTERVAL_MS) {
       // Shallow copy: callers mutate the returned object before saving it back.
@@ -141,7 +149,7 @@ export function loadUserConfig(now = Date.now()): OpenScoutUserConfig {
  * overwrite a concurrent writer's update when saving the mutated result.
  */
 export function loadUserConfigFresh(): OpenScoutUserConfig {
-  return readUserConfigFromDisk(userConfigPath(), Date.now());
+  return readUserConfigFromDisk(userConfigReadPath(), Date.now());
 }
 
 export function saveUserConfig(config: OpenScoutUserConfig): void {
