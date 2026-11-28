@@ -326,6 +326,7 @@ import { WorktreeRetirementService } from "./agent-workspace-retirement.js";
 import { BrokerMachineService } from "./broker-machine-service.js";
 import {
   closeServer,
+  createUnixSocketRebindGuard,
   isAddressInUse,
   listenTcp,
   listenUnixSocket,
@@ -4684,11 +4685,23 @@ async function restoreStartupProjection(): Promise<void> {
   }
 }
 
+const brokerSocketRebindGuard = createUnixSocketRebindGuard({
+  socketPath: brokerSocketPath,
+  getServer: () => socketServer,
+  isStopping: () => shuttingDown,
+  rebind: async () => {
+    await closeServer(socketServer, 1_000);
+    await listenUnixSocket(socketServer, brokerSocketPath);
+  },
+  log: (message) => console.warn(`[openscout-runtime] ${message}`),
+});
+
 try {
   // §11.3: plaintext always on loopback; mesh TLS listeners are added by the
   // bind controller (never a 0.0.0.0 plaintext default).
   await listenTcp(server, { host: isLoopbackHost(host) || host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host, port });
   await listenUnixSocket(socketServer, brokerSocketPath);
+  brokerSocketRebindGuard.start();
   // Started only after the TCP bind proved this process owns the instance, so
   // a second runtime can never replace the live one's health socket.
   await healthResponder.start().then(
@@ -5087,6 +5100,7 @@ async function shutdownBroker(exitCode = 0): Promise<void> {
   await jetStreamService?.stop().catch((error) => {
     console.warn("[openscout-runtime] jetstream shutdown failed:", error);
   });
+  brokerSocketRebindGuard.stop();
   peerDelivery.stop();
   await healthResponder.stop();
   meshRendezvousPublisher?.stop();
