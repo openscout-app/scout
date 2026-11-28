@@ -369,9 +369,16 @@ export function agentNotificationForPermissionRequest(input: {
   sessionId?: string | null;
   /** Known as data (a native hook): used as is, and `text` is not parsed. */
   view?: AgentNotificationView;
+  /** True when the live prompt supports project-scoped "Always allow". */
+  canAlwaysAllow?: boolean;
 }): AgentNotification {
+  const baseView = input.view ?? permissionDialogView(input.text);
+  const view: AgentNotificationView = input.canAlwaysAllow
+    && (baseView.view === "turn.approve.command" || baseView.view === "turn.approve.edit" || baseView.view === "turn.approve.tool")
+    ? { ...baseView, canAlwaysAllow: true }
+    : baseView;
   return {
-    ...(input.view ?? permissionDialogView(input.text)),
+    ...view,
     v: AGENT_NOTIFICATION_VERSION,
     itemId: input.requestId,
     sender: notificationSender(input),

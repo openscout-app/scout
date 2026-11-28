@@ -106,7 +106,7 @@ describe("queryPermissionInboxItems", () => {
       title: "Permission request",
       description: "Allow edits to src/a.ts?",
       detail: "proj",
-      permission: { decisions: ["approve", "deny"] },
+      permission: { decisions: ["approve", "always", "deny"] },
     });
     expect(items[0]!.permission).not.toHaveProperty("display");
   });
@@ -167,6 +167,7 @@ describe("decideMobilePermission", () => {
 
   test.each([
     { decision: "approve" as const, sent: "once" },
+    { decision: "always" as const, sent: "project" },
     { decision: "deny" as const, sent: "deny" },
   ])("$decision sends $sent with the request's version", async ({ decision, sent }) => {
     reply = { status: 200, body: { ok: true } };

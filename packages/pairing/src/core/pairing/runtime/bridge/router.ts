@@ -708,7 +708,7 @@ export type MobileInboxItem = {
   /** Discrete answers a declared ask offers; the phone sends one as a reply. */
   options?: string[];
   /** A runtime permission request: what it asks, laid out, and the answers it takes. */
-  permission?: { display?: NativePermissionDisplay; decisions: Array<"approve" | "deny"> };
+  permission?: { display?: NativePermissionDisplay; decisions: Array<"approve" | "always" | "deny"> };
 };
 
 function approvalInboxItemId(
@@ -1540,13 +1540,13 @@ const mobileRouter = t.router({
       return answerHerdrPermission(input);
     }),
 
-  // Approve / Deny a permission request the runtime holds (an inbox item of
-  // kind "permission"). Approve is allow-once. Expected refusals return
-  // { ok: false, code }, not errors.
+  // Approve / Always allow / Deny a permission request the runtime holds (an
+  // inbox item of kind "permission"). Approve is allow-once; always is
+  // project-scoped allow-always. Expected refusals return { ok: false, code }.
   decidePermission: procedure
     .input(z.object({
       requestId: z.string(),
-      decision: z.enum(["approve", "deny"]),
+      decision: z.enum(["approve", "always", "deny"]),
     }))
     .mutation(async ({ input }) => {
       return decideMobilePermission(input);

@@ -52,6 +52,8 @@ export type PermissionRequestInput = {
   text: string;
   /** What the dialog asks, when it is known as data (a native hook); `text` is not parsed then. */
   view?: AgentNotificationView;
+  /** True when the live prompt supports project-scoped "Always allow". */
+  canAlwaysAllow?: boolean;
   /** The agent whose session shows the dialog. */
   agentId: string;
   requesterNodeId: string;
@@ -202,6 +204,7 @@ export class BrokerOperatorAttentionService {
       requestId: input.requestId,
       text: input.text,
       ...(input.view ? { view: input.view } : {}),
+      ...(input.canAlwaysAllow ? { canAlwaysAllow: true } : {}),
       agentName: this.agentName(input.agentId),
       agentId: input.agentId,
       ...this.agentShorthand(input.agentId),

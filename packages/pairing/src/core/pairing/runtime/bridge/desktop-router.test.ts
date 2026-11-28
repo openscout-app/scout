@@ -285,7 +285,14 @@ describe("bridgeRouter runtime permission decisions", () => {
       .toEqual({ ok: false, code: "unreachable", message: "Couldn't reach the runtime." });
   });
 
-  test("rejects a decision outside approve and deny", async () => {
+  test("accepts always allow and returns unreachable when the runtime cannot be read", async () => {
+    const caller = createCaller(createBridgeStub().bridge);
+
+    expect(await caller.mobile.decidePermission({ requestId: "perm-1", decision: "always" }))
+      .toEqual({ ok: false, code: "unreachable", message: "Couldn't reach the runtime." });
+  });
+
+  test("rejects a decision outside approve, always, and deny", async () => {
     const caller = createCaller(createBridgeStub().bridge);
 
     await expect(caller.mobile.decidePermission(
