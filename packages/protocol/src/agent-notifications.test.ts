@@ -22,23 +22,25 @@ const base = {
 };
 
 describe("agent notifications", () => {
-  test("a command approval names the agent and its want, the project and host, then the command", () => {
+  test("a command approval leads with the action and target, sender and project, then intent before command", () => {
     const n: AgentNotification = {
       ...base,
       view: "turn.approve.command",
       command: "bash apps/ios/scripts/release.sh",
       why: "Ship the iOS build",
       risk: "high",
+      canAlwaysAllow: true,
     };
     expect(collapseAgentNotification(n)).toEqual({
-      title: "machiavelli wants to run a command",
-      subtitle: "openscout · studio",
-      body: "bash apps/ios/scripts/release.sh\nShip the iOS build",
+      title: "Run release.sh",
+      subtitle: "machiavelli · openscout",
+      body: "Ship the iOS build\nbash apps/ios/scripts/release.sh",
       headline: "Wants to run a command",
       category: "scout.approval",
       threadId: "scout.agent.agent.machiavelli",
       level: "active",
     });
+    expect(sealedAgentNotification(n).canAlwaysAllow).toBe(true);
     expect(agentNotificationActions(n)).toEqual(["approve", "deny"]);
   });
 
@@ -49,7 +51,11 @@ describe("agent notifications", () => {
       view: "turn.approve.command",
       command: "rm -rf dist",
     };
-    expect(collapseAgentNotification(n).title).toBe("Claude 3d4e wants to delete files");
+    expect(collapseAgentNotification(n)).toMatchObject({
+      title: "Delete files · openscout",
+      subtitle: "Claude 3d4e · openscout",
+      body: "rm -rf dist",
+    });
     expect(nativeActorName("native:codex:abc")).toBe("Codex");
     expect(nativeActorName("agent.machiavelli")).toBeNull();
   });
@@ -79,37 +85,74 @@ describe("agent notifications", () => {
       why: "Show working tree status",
     };
     expect(collapseAgentNotification(n)).toMatchObject({
-      title: "Codex 012 wants to run a command",
-      subtitle: "webshop · studio",
-      body: "git status\nShow working tree status",
+      title: "Run git status",
+      subtitle: "Codex 012 · webshop",
+      body: "Show working tree status\ngit status",
     });
   });
 
-  test("missing host or project leaves a clean title and sender line", () => {
+  test("missing host or project leaves a clean title and subtitle", () => {
     const n: AgentNotification = { ...base, view: "turn.approve.command", command: "ls" };
-    expect(collapseAgentNotification({ ...n, host: undefined })).toMatchObject({ title: "machiavelli wants to run a command", subtitle: "openscout", body: "ls" });
-    expect(collapseAgentNotification({ ...n, project: undefined }).subtitle).toBe("studio");
-    expect(collapseAgentNotification({ ...n, host: "  ", project: "  " })).toMatchObject({ subtitle: "", body: "ls" });
+    expect(collapseAgentNotification({ ...n, host: undefined })).toMatchObject({ title: "Run ls", subtitle: "machiavelli · openscout", body: "ls" });
+    expect(collapseAgentNotification({ ...n, project: undefined }).subtitle).toBe("machiavelli · studio");
+    expect(collapseAgentNotification({ ...n, host: "  ", project: "  " })).toMatchObject({ subtitle: "machiavelli", body: "ls" });
   });
 
   test("a command without a description shows the command", () => {
     const n: AgentNotification = { ...base, view: "turn.approve.command", command: "git push origin main" };
-    expect(collapseAgentNotification(n)).toMatchObject({ title: "machiavelli wants to push", headline: "Wants to push", body: "git push origin main" });
+    expect(collapseAgentNotification(n)).toMatchObject({ title: "Push · main", headline: "Wants to push", body: "git push origin main" });
   });
 
-  test("a command's want is named for the decisions that reach the phone", () => {
-    const want = (command: string) => collapseAgentNotification({ ...base, view: "turn.approve.command", command }).title;
-    expect(want("cd ~/dev/scout && git push -u origin fix/x")).toBe("machiavelli wants to push");
-    expect(want("gh pr create --draft --title 'Fix'")).toBe("machiavelli wants to open a pull request");
-    expect(want("gh pr merge 12 --squash")).toBe("machiavelli wants to merge a pull request");
-    expect(want("GIT_TRACE=1 git commit -m 'x'")).toBe("machiavelli wants to commit");
-    expect(want("bun test")).toBe("machiavelli wants to run a command");
+  test("a command's title and body stay compact and structured for Watch and lock screen", () => {
+    const collapse = (command: string, why?: string) =>
+      collapseAgentNotification({ ...base, view: "turn.approve.command", command, ...(why ? { why } : {}) });
+
+    expect(collapse("cd ~/dev/scout && git push -u origin fix/x")).toMatchObject({
+      title: "Push · fix/x",
+      body: "git push -u origin fix/x",
+      headline: "Wants to push",
+    });
+    expect(collapse("git -C /Users/demo/dev/scout push --force-with-lease origin feat/x")).toMatchObject({
+      title: "Force push · feat/x",
+      body: "git push --force-with-lease origin feat/x",
+      headline: "Wants to push",
+    });
+    expect(
+      collapse(
+        `gh pr create --repo owner/scout --title "Add always-allow" --head feat/mobile-always --base main --body-file /tmp/pr-body.md`,
+        "Open PR for review",
+      ),
+    ).toMatchObject({
+      title: "Open PR · owner/scout",
+      body: "Add always-allow\nfeat/mobile-always → main",
+      headline: "Wants to open a pull request",
+    });
+    expect(collapse("gh pr create --draft --title 'Fix'")).toMatchObject({
+      title: "Draft PR · openscout",
+      body: "Fix",
+      headline: "Wants to open a pull request",
+    });
+    expect(collapse("gh pr merge 12 --squash --delete-branch")).toMatchObject({
+      title: "Merge PR #12 · openscout",
+      body: "squash · delete branch",
+      headline: "Wants to merge a pull request",
+    });
+    expect(collapse("GIT_TRACE=1 git commit -m 'Ship watch cards'")).toMatchObject({
+      title: "Commit · openscout",
+      body: "Ship watch cards",
+      headline: "Wants to commit",
+    });
+    expect(collapse("bun test")).toMatchObject({
+      title: "Run bun test",
+      body: "bun test",
+      headline: "Wants to run a command",
+    });
   });
 
   test("a long command is cut at a word, and its markdown-looking text is kept", () => {
     const long = `git push origin ${"feature/branch-name ".repeat(20)}`;
     const body = collapseAgentNotification({ ...base, view: "turn.approve.command", command: long }).body;
-    expect(body.length).toBeLessThanOrEqual(200);
+    expect(body.length).toBeLessThanOrEqual(160);
     expect(body.endsWith("…")).toBe(true);
     expect(body.startsWith("git push origin feature/branch-name")).toBe(true);
     const starred = collapseAgentNotification({ ...base, view: "turn.approve.command", command: "rm -rf *_tmp_*" }).body;
@@ -118,16 +161,24 @@ describe("agent notifications", () => {
     expect(multi).toBe("git add .; git push");
   });
 
-  test("an edit names the one file it touches", () => {
+  test("an edit names the one file it touches and puts summary before files", () => {
     const one: AgentNotification = { ...base, view: "turn.approve.edit", files: [{ path: "src/a.ts", added: 3, removed: 1 }] };
-    expect(collapseAgentNotification(one)).toMatchObject({ title: "machiavelli wants to edit a.ts", headline: "Wants to edit a.ts", body: "src/a.ts" });
+    expect(collapseAgentNotification(one)).toMatchObject({
+      title: "Edit a.ts",
+      subtitle: "machiavelli · openscout",
+      headline: "Wants to edit a.ts",
+      body: "src/a.ts (+3 -1)",
+    });
     const two: AgentNotification = {
       ...base,
       view: "turn.approve.edit",
       summary: "Rename the client",
       files: [{ path: "a.ts", added: 3, removed: 1 }, { path: "b.ts", added: 2, removed: 0 }],
     };
-    expect(collapseAgentNotification(two)).toMatchObject({ title: "machiavelli wants to edit 2 files", body: "a.ts, b.ts\nRename the client" });
+    expect(collapseAgentNotification(two)).toMatchObject({
+      title: "Edit 2 files",
+      body: "Rename the client\na.ts (+3 -1), b.ts (+2 -0)",
+    });
   });
 
   test("a choice question puts the question in the body and takes a reply", () => {
@@ -204,7 +255,7 @@ describe("agent notifications", () => {
     const ask: AgentNotification = { ...base, level: "time-sensitive", view: "ask", note: "Deploy?" };
     const approval: AgentNotification = { ...base, view: "turn.approve.tool", tool: "Read" };
     expect(sealedAgentNotification(ask)).toMatchObject({ urgent: true, lockScreen: { level: "time-sensitive" } });
-    expect(sealedAgentNotification(approval)).toMatchObject({ urgent: false, lockScreen: { level: "active", title: "machiavelli wants to use Read", subtitle: "openscout · studio", body: "" } });
+    expect(sealedAgentNotification(approval)).toMatchObject({ urgent: false, lockScreen: { level: "active", title: "Allow Read", subtitle: "machiavelli · openscout", body: "" } });
   });
 
   test("clamp bounds long fields and lists", () => {
@@ -244,10 +295,10 @@ describe("notificationPlainLine", () => {
   });
 });
 
-test("a tool approval puts its reason beneath the agent and tool, with a summary fallback", () => {
+test("a tool approval puts its reason before its summary, with a summary fallback", () => {
   const notification: AgentNotification = { ...base, sender: { name: "Claude" }, view: "turn.approve.tool", tool: "EnterWorktree", summary: "target", why: "Creating an isolated workspace." };
   expect(sealedAgentNotification(notification).lockScreen).toMatchObject({
-    title: "Claude wants to use EnterWorktree", subtitle: "openscout · studio", body: "target\nCreating an isolated workspace.",
+    title: "Allow EnterWorktree", subtitle: "Claude · openscout", body: "Creating an isolated workspace.\ntarget",
   });
   expect(collapseAgentNotification({ ...notification, why: undefined }).body).toBe("target");
   expect((clampAgentNotification({ ...notification, why: "x".repeat(1000) }) as typeof notification).why!.length).toBeLessThanOrEqual(240);
