@@ -45,6 +45,7 @@ export function renderAskCommandHelp(): string {
     "  --default-action <X>  proceed with X at the answer deadline unless answered",
     "  --window <seconds>    default-action answer window (default 1800 seconds)",
     "  --permission          blocking operator permission request (needs --operator)",
+    "  --skill <name>        ask the agent to use this skill on its machine",
     "  --because <reason>    why you ask; rides on any ask (operator: the blocked reason)",
     "  --notify              operator FYI: push. Agent task: tell the operator when it is done",
     "                        (Ready, with Continue or Hold). Use it only for work the operator",
@@ -97,6 +98,7 @@ export function renderScoutAskReceipt(value: {
   links?: ReturnType<typeof buildFlightLinks>;
   /** The machine named with `--on`, said first so the asker sees where the work landed. */
   onHost?: string;
+  followUrl?: string;
 }): string {
   const { ids } = value.receipt;
   const bindingRef = renderBindingRef(ids.bindingRef);
@@ -117,7 +119,7 @@ export function renderScoutAskReceipt(value: {
     delivery,
     value.replyMode === "notify" && !terminal ? "Scout will surface the completion when it arrives." : null,
     value.receipt.workPageUnavailable ? "Work was recorded, but its page is unavailable on this broker." : null,
-    value.links?.work ? `Follow the task: ${value.links.work}` : null,
+    (value.followUrl || value.links?.work) ? `Follow the task: ${value.followUrl || value.links?.work}` : null,
     waitRef ? `Follow: scout wait ${quoteWaitReference(waitRef)} --timeout 600` : "No wait reference returned; inspect the ask receipt.",
   ].filter((line): line is string => Boolean(line)).join("\n");
 }

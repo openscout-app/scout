@@ -53,6 +53,8 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "permission-hook", hidden: true, summary: "Harness permission and session-attention hook for Claude Code and Antigravity" },
   { name: "speak", hidden: true, summary: "Removed; use ask or reply" },
   { name: "voice", summary: "Codex voice chat in the ChatGPT app: status, talk, mic, speakers, stop" },
+  { name: "skills", summary: "Find, create, install and personalize your skills" },
+  { name: "run", summary: "Run a skill with a brief as an ordinary ask" },
   { name: "ask", summary: "Create or follow up on a task; return on acceptance" },
   { name: "reply", summary: "Answer a task or send task progress" },
 

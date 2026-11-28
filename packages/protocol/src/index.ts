@@ -115,3 +115,6 @@ export * from "./access-evaluator.js";
 export * from "./access-evaluator-cases.js";
 export * from "./turn-credentials.js";
 export * from "./crew.js";
+
+export { isSkillFolderName } from "./skills.js";
+export type { ScoutSkillSummary, ScoutSkillTarget, ScoutSkillRunRequest, ScoutSkillRunResult } from "./skills.js";

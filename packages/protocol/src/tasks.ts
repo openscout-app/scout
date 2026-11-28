@@ -1,4 +1,5 @@
 import { FLIGHT_WAITING_ON_SUMMARY_MAX_LENGTH, parseReplyWaitingOn } from "./invocations.js";
+import { isSkillFolderName } from "./skills.js";
 import { replyPointProblems, type ReplyPointInput } from "./reply-points.js";
 import { applyDecisionToTask, normalizeDecisionCard, validateDecisionCard, type DecisionCardSubmission } from "./decision-cards.js";
 /** Versioned ask/reply semantics. Old peers must be refused before dispatch. */
@@ -23,6 +24,8 @@ export type ScoutTaskAsk = {
    * reason; for an agent task it rides to the worker as context.
    */
   because?: string;
+  /** Registered Scout skill name on the worker's machine. */
+  skill?: string;
   /**
    * JavaScript that the runtime on the worker's host runs when the task ends.
    * It is not part of the worker's prompt. See {@link ScoutTaskCallback}.
@@ -88,6 +91,10 @@ export function validateTaskAsk(task: ScoutTaskAsk, route: {
   // A permission request is an approval only the operator can grant. A reason
   // (--because) is context the receiver reads, so it rides on any ask.
   if (task.permission && !task.operator) throw new Error("--permission requires --operator: only the operator can grant a permission request");
+  if (task.skill !== undefined) {
+    if (!isSkillFolderName(task.skill)) throw new Error("--skill takes a registered skill folder name");
+    if (task.operator || task.fyi || task.ref || task.continue || task.cancel || route.channel) throw new Error("--skill requires a new agent ask");
+  }
   if (task.because !== undefined && !task.because.trim()) throw new Error("--because cannot be empty");
   if (route.channel && !task.fyi) throw new Error("--channel requires --fyi until task ownership for channels is defined");
   if (task.window !== undefined && (!task.defaultAction || !task.operator || task.fyi || !Number.isFinite(task.window) || task.window <= 0)) throw new Error("--window requires --default-action and a positive number of seconds");

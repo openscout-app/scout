@@ -12,7 +12,7 @@ export const LOCAL_MCP_TOOL_GROUPS = {
   chat: ["chat_status", "chat_catch_up", "chat_ack"],
   terminals: ["herdr_workspaces", "rex_start_agent", "rex_status", "session_send"],
   git: ["worktrees_changes", "diff_read"],
-  work: ["flight_cancel", "labels_brief", "labels_feed", "work_update", "work_retry", "work_move",
+  work: ["skills_list", "skills_run", "flight_cancel", "labels_brief", "labels_feed", "work_update", "work_retry", "work_move",
     "work_review", "work_lifecycle", "derived_read", "derived_write", "derived_pending"],
   integrations: ["integrations_setup", "integrations_get", "integrations_verify", "integrations_manifest",
     "integrations_start", "integrations_pause", "integrations_disconnect", "integrations_resume",

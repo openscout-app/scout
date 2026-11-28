@@ -61,8 +61,12 @@
   "engines": {
     "bun": ">=1.4.4"
   },
+  "imports": {
+    "#scout-skills-entry": "./skills/scout-skills/SKILL.md"
+  },
   "files": [
     "bin",
+    "skills/scout-skills/SKILL.md",
     "dist",
     "README.md",
     "NOTICE"

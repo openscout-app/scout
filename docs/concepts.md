@@ -325,6 +325,13 @@ shows and session materials (`ObservedSessionMaterials`,
   observed on demand, never imported into Scout records. See
   [`observed-surfaces.md`](./observed-surfaces.md).
 
+**Scout skill.** A personal folder or link under `~/.openscout/skills` (with
+legacy `~/.scout/skills` read as a fallback) names a
+standard `SKILL.md`. Only `scout-skills`, the catalog entry point, is visible
+to the harness at startup. It looks up a name or matches a request on demand.
+A tracked run is an ordinary ask with a receipt. See
+[Scout skills](./specs/skills.md).
+
 **Helper.** A helper is a session-bound assistant acting on behalf of a person
 inside Scout's actor model. It is a Scout-local role, not a required interop
 concept: it lets Scout attribute actions to a person's helper in a given session
