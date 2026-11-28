@@ -172,4 +172,45 @@ describe("scout home CLI", () => {
       runHomeCommand(createScoutCommandContext({ env, stdout: () => {} }), ["status", "--dry-run"]),
     ).rejects.toThrow("unexpected argument");
   });
+
+  test("scout home status and migrate report planned and applied host config updates", async () => {
+    const { home, env } = createSandboxHome();
+    const legacySupport = process.platform === "darwin"
+      ? join(home, "Library", "Application Support", "OpenScout")
+      : join(home, ".local", "share", "openscout");
+    const hooksPath = join(home, ".gemini", "config", "hooks.json");
+    mkdirSync(join(home, ".gemini", "config"), { recursive: true });
+    writeFileSync(
+      hooksPath,
+      `${JSON.stringify({
+        openscout: {
+          Stop: [{ type: "command", command: `'${join(legacySupport, "runtime", "hooks", "openscout-antigravity-permission-hook.sh")}'` }],
+        },
+      }, null, 2)}\n`,
+    );
+
+    const statusLines: string[] = [];
+    await runHomeCommand(
+      createScoutCommandContext({ env, stdout: (line) => statusLines.push(line) }),
+      ["status"],
+    );
+    expect(statusLines.join("\n")).toContain("1 host config update(s)");
+
+    const dryLines: string[] = [];
+    await runHomeCommand(
+      createScoutCommandContext({ env, stdout: (line) => dryLines.push(line) }),
+      ["migrate", "--dry-run"],
+    );
+    expect(dryLines.join("\n")).toContain(`[update] ${hooksPath} (antigravity-hooks, 1 reference(s))`);
+
+    const migrateLines: string[] = [];
+    await runHomeCommand(
+      createScoutCommandContext({ env, stdout: (line) => migrateLines.push(line) }),
+      ["migrate"],
+      { assertWritersStopped: () => {} },
+    );
+    expect(migrateLines.join("\n")).toContain("host configs updated:");
+    expect(migrateLines.join("\n")).toContain(`${hooksPath} (antigravity-hooks, 1 reference(s))`);
+    expect(readFileSync(hooksPath, "utf8")).toContain(join(home, ".openscout", "state", "runtime", "hooks"));
+  });
 });

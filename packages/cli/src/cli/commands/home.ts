@@ -139,6 +139,9 @@ export function renderHomeCommandHelp(): string {
 }
 
 function renderHomeStatus(status: HomeLayoutStatus): string {
+  const hostUpdatesSuffix = status.pendingHostUpdates > 0
+    ? `, ${status.pendingHostUpdates} host config update(s)`
+    : "";
   const lines: string[] = [
     `OpenScout home: ${status.paths.openscoutHome}${status.openscoutHomeExists ? "" : " (not created yet)"}`,
     `  state:  ${status.paths.stateDir}${status.stateDirExists ? "" : " (not created yet)"}`,
@@ -150,7 +153,7 @@ function renderHomeStatus(status: HomeLayoutStatus): string {
     `  legacy support:  ${status.legacy.support.path} (${describeLegacyRoot(status.legacy.support)})`,
     `  ~/.scout-desk:   ${status.legacy.desk.path} (${describeLegacyRoot(status.legacy.desk)})`,
     "",
-    `Pending migration: ${status.pendingMoves} move(s), ${status.conflicts} conflict(s), ${status.refused} refused, ${status.skipped} skipped`,
+    `Pending migration: ${status.pendingMoves} move(s), ${status.conflicts} conflict(s), ${status.refused} refused, ${status.skipped} skipped${hostUpdatesSuffix}`,
   ];
 
   if (status.lock.held) {
@@ -181,13 +184,19 @@ function describeLegacyRoot(root: HomeLayoutStatus["legacy"]["scout"]): string {
 
 function renderHomeMigrationResult(result: HomeMigrationResult): string {
   if (result.dryRun) {
+    const hostSuffix = result.plan.hostUpdates.length > 0
+      ? `, ${result.plan.hostUpdates.length} host config update(s)`
+      : "";
     const lines: string[] = [
-      `Dry run: ${result.plan.moves.length} move(s), ${result.plan.conflicts.length} conflict(s), ${result.plan.refused.length} refused, ${result.plan.skipped.length} skipped (no files changed).`,
+      `Dry run: ${result.plan.moves.length} move(s), ${result.plan.conflicts.length} conflict(s), ${result.plan.refused.length} refused, ${result.plan.skipped.length} skipped${hostSuffix} (no files changed).`,
     ];
     for (const entry of result.plan.entries) {
       const target = entry.target ? ` -> ${entry.target}` : "";
       const note = entry.reason ? ` (${entry.reason})` : "";
       lines.push(`  [${entry.action}] ${entry.source}${target}${note}`);
+    }
+    for (const update of result.plan.hostUpdates) {
+      lines.push(`  [update] ${update.path} (${update.kind}, ${update.replacements} reference(s))`);
     }
     return lines.join("\n");
   }
@@ -208,6 +217,15 @@ function renderHomeMigrationResult(result: HomeMigrationResult): string {
     `  SQLite databases checkpointed: ${result.checkpointedDatabases.length}`,
     `  journal: ${result.journalPath}`,
   ];
+  if (result.updatedHostFiles.length > 0) {
+    lines.push("  host configs updated:");
+    for (const update of result.updatedHostFiles) {
+      lines.push(`    ${update.path} (${update.kind}, ${update.replacements} reference(s))`);
+    }
+    if (result.updatedHostFiles.some((update) => update.kind === "launch-agent" || update.kind === "systemd-unit")) {
+      lines.push("  note: reload the service definition when starting Scout back up.");
+    }
+  }
   if (result.movedMarkers.length > 0) {
     lines.push("  MOVED.md written:");
     for (const marker of result.movedMarkers) {

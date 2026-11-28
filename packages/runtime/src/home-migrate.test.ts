@@ -507,4 +507,158 @@ describe("planHomeMigration & runHomeMigration", () => {
     expect(after.lock.path.endsWith(HOME_MIGRATE_LOCK_FILENAME)).toBe(true);
     expect(after.journal.path.endsWith(HOME_MIGRATE_JOURNAL_FILENAME)).toBe(true);
   });
+
+  test("updates LaunchAgent plists, Antigravity hooks, and Claude settings atomically while leaving backups, symlinks, and unrelated hooks untouched", async () => {
+    const { home, platform, env, paths } = createSandbox("darwin");
+    mkdirSync(join(paths.legacySupportDir, "runtime", "hooks"), { recursive: true });
+    writeFileSync(join(paths.legacySupportDir, "runtime", "hooks", "openscout-antigravity-permission-hook.sh"), "#!/bin/sh\n");
+
+    const launchAgentsDir = join(home, "Library", "LaunchAgents");
+    mkdirSync(launchAgentsDir, { recursive: true });
+    const plistPath = join(launchAgentsDir, "app.openscout.plist");
+    const backupPlistPath = join(launchAgentsDir, "app.openscout.plist.backup");
+    const plistBody = [
+      "<plist><dict>",
+      `  <key>StandardOutPath</key><string>${paths.legacySupportDir}/logs/broker/stdout.log</string>`,
+      `  <key>StandardErrorPath</key><string>${paths.legacySupportDir}/logs/broker/stderr.log</string>`,
+      `  <key>OPENSCOUT_SUPPORT_DIRECTORY</key><string>${paths.legacySupportDir}</string>`,
+      `  <key>OPENSCOUT_CONTROL_HOME</key><string>${join(paths.openscoutHome, "control-plane")}</string>`,
+      "</dict></plist>\n",
+    ].join("\n");
+    writeFileSync(plistPath, plistBody);
+    chmodSync(plistPath, 0o644);
+    writeFileSync(backupPlistPath, plistBody);
+
+    const antigravityHooksPath = join(home, ".gemini", "config", "hooks.json");
+    mkdirSync(join(home, ".gemini", "config"), { recursive: true });
+    writeFileSync(
+      antigravityHooksPath,
+      `${JSON.stringify({
+        openscout: {
+          PreToolUse: [
+            {
+              matcher: "run_command",
+              hooks: [{ type: "command", command: `'${join(paths.legacySupportDir, "runtime", "hooks", "openscout-antigravity-permission-hook.sh")}'` }],
+            },
+          ],
+          Stop: [{ type: "command", command: `'${join(paths.legacySupportDir, "runtime", "hooks", "openscout-antigravity-permission-hook.sh")}'` }],
+        },
+        custom: { Stop: [{ type: "command", command: "/usr/local/bin/other-hook" }] },
+      }, null, 2)}\n`,
+    );
+
+    const claudeSettingsPath = join(home, ".claude", "settings.json");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      claudeSettingsPath,
+      `${JSON.stringify({
+        hooks: {
+          PermissionRequest: [
+            { hooks: [{ type: "command", command: `'${join(paths.legacySupportDir, "runtime", "hooks", "openscout-claude-permission-request.sh")}'` }] },
+            { hooks: [{ type: "command", command: "echo keep-other" }] },
+          ],
+        },
+        statusLine: {
+          type: "command",
+          command: `'${join(paths.legacySupportDir, "runtime", "statusline", "claude-statusline.sh")}'`,
+        },
+        unrelated: `${paths.legacySupportDir}/user-note.txt`,
+      }, null, 2)}\n`,
+    );
+
+    // Dry run previews all three host updates without touching disk.
+    const dry = await runHomeMigration({ home, platform, env, dryRun: true });
+    expect(dry.alreadyMigrated).toBe(false);
+    expect(dry.plan.hostUpdates.map((u) => u.kind)).toEqual([
+      "launch-agent",
+      "antigravity-hooks",
+      "claude-settings",
+    ]);
+    expect(readFileSync(plistPath, "utf8")).toContain(paths.legacySupportDir);
+    expect(readFileSync(antigravityHooksPath, "utf8")).toContain(paths.legacySupportDir);
+
+    // Live migration moves runtime/ AND updates all three host configs.
+    const live = await runHomeMigration({ home, platform, env });
+    expect(live.updatedHostFiles.map((u) => u.kind)).toEqual([
+      "launch-agent",
+      "antigravity-hooks",
+      "claude-settings",
+    ]);
+
+    const updatedPlist = readFileSync(plistPath, "utf8");
+    expect(updatedPlist).not.toContain(paths.legacySupportDir);
+    expect(updatedPlist).not.toContain(join(paths.openscoutHome, "control-plane"));
+    expect(updatedPlist).toContain(`${paths.stateDir}/logs/broker/stdout.log`);
+    expect(updatedPlist).toContain(`<string>${paths.stateDir}</string>`);
+    expect(updatedPlist).toContain(`<string>${join(paths.stateDir, "control-plane")}</string>`);
+    expect(statSync(plistPath).mode & 0o777).toBe(0o644);
+    // Backup plist file must not be touched.
+    expect(readFileSync(backupPlistPath, "utf8")).toContain(paths.legacySupportDir);
+
+    const updatedAg = JSON.parse(readFileSync(antigravityHooksPath, "utf8"));
+    expect(updatedAg.openscout.PreToolUse[0].hooks[0].command).toBe(
+      `'${join(paths.stateDir, "runtime", "hooks", "openscout-antigravity-permission-hook.sh")}'`,
+    );
+    expect(updatedAg.openscout.Stop[0].command).toBe(
+      `'${join(paths.stateDir, "runtime", "hooks", "openscout-antigravity-permission-hook.sh")}'`,
+    );
+    expect(updatedAg.custom.Stop[0].command).toBe("/usr/local/bin/other-hook");
+
+    const updatedClaude = JSON.parse(readFileSync(claudeSettingsPath, "utf8"));
+    expect(updatedClaude.hooks.PermissionRequest[0].hooks[0].command).toBe(
+      `'${join(paths.stateDir, "runtime", "hooks", "openscout-claude-permission-request.sh")}'`,
+    );
+    expect(updatedClaude.hooks.PermissionRequest[1].hooks[0].command).toBe("echo keep-other");
+    expect(updatedClaude.statusLine.command).toBe(
+      `'${join(paths.stateDir, "runtime", "statusline", "claude-statusline.sh")}'`,
+    );
+    // Non-hook/statusline strings in settings.json are left untouched.
+    expect(updatedClaude.unrelated).toBe(`${paths.legacySupportDir}/user-note.txt`);
+
+    // Second run is a complete no-op.
+    const second = await runHomeMigration({ home, platform, env });
+    expect(second.alreadyMigrated).toBe(true);
+    expect(second.updatedHostFiles).toHaveLength(0);
+  });
+
+  test("updates Linux systemd user units and repairs stale host configs even after files were already migrated", async () => {
+    const xdgConfig = mkdtempSync(join(tmpdir(), "openscout-xdg-config-"));
+    sandboxes.push(xdgConfig);
+    const { home, platform, env, paths } = createSandbox("linux", { XDG_CONFIG_HOME: xdgConfig });
+
+    // Simulate an already-migrated state dir with a stale systemd unit left behind.
+    mkdirSync(paths.stateDir, { recursive: true });
+    const unitDir = join(xdgConfig, "systemd", "user");
+    mkdirSync(unitDir, { recursive: true });
+    const unitPath = join(unitDir, "openscout.service");
+    writeFileSync(
+      unitPath,
+      [
+        "[Service]",
+        `Environment="OPENSCOUT_SUPPORT_DIRECTORY=${paths.legacySupportDir}"`,
+        `Environment="OPENSCOUT_CONTROL_HOME=${join(paths.openscoutHome, "control-plane")}"`,
+        "",
+      ].join("\n"),
+    );
+
+    const statusBefore = inspectHomeLayoutStatus({ home, platform, env });
+    expect(statusBefore.pendingMoves).toBe(0);
+    expect(statusBefore.pendingHostUpdates).toBe(1);
+    expect(statusBefore.migrationPending).toBe(true);
+
+    const repaired = await runHomeMigration({ home, platform, env });
+    expect(repaired.alreadyMigrated).toBe(false);
+    expect(repaired.movedCount).toBe(0);
+    expect(repaired.updatedHostFiles).toEqual([
+      { kind: "systemd-unit", path: unitPath, replacements: 2 },
+    ]);
+
+    const updatedUnit = readFileSync(unitPath, "utf8");
+    expect(updatedUnit).toContain(`OPENSCOUT_SUPPORT_DIRECTORY=${paths.stateDir}`);
+    expect(updatedUnit).toContain(`OPENSCOUT_CONTROL_HOME=${join(paths.stateDir, "control-plane")}`);
+
+    const statusAfter = inspectHomeLayoutStatus({ home, platform, env });
+    expect(statusAfter.pendingHostUpdates).toBe(0);
+    expect(statusAfter.migrationPending).toBe(false);
+  });
 });
