@@ -26,8 +26,9 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createConnection } from "node:net";
-import { homedir, hostname as osHostname } from "node:os";
+import { homedir, hostname as osHostname, tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 type Env = Record<string, string | undefined>;
@@ -1028,6 +1029,8 @@ export type OpenScoutInstanceLayout = {
   /** OPENSCOUT_PAIRING_HOME: pairing bridge keys, trusted peers, runtime.json. */
   pairingHome: string;
   localEdgeDirectory: string;
+  /** Short per-user private runtime directory for Unix sockets (mode 0700). */
+  socketDirectory: string;
   brokerSocketPath: string;
   appSocketPath: string;
   probesSocketPath: string;
@@ -1056,6 +1059,65 @@ export type OpenScoutInstanceLayoutOptions = {
   /** This process's parent pid (tests); defaults to process.ppid. */
   parentPid?: number;
 };
+
+let cachedDarwinUserTempDir: string | null | undefined;
+
+function darwinUserTempDir(): string {
+  if (cachedDarwinUserTempDir !== undefined) return cachedDarwinUserTempDir || tmpdir();
+  try {
+    const out = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], {
+      encoding: "utf8",
+      timeout: 1_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim().replace(/\/+$/, "");
+    cachedDarwinUserTempDir = out || null;
+  } catch {
+    cachedDarwinUserTempDir = null;
+  }
+  return cachedDarwinUserTempDir || tmpdir();
+}
+
+function currentNumericUid(): number {
+  if (typeof process.getuid === "function") return process.getuid();
+  try {
+    return userInfo().uid;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Short private per-user runtime directory for Unix sockets (mode 0700):
+ * - OPENSCOUT_SOCKET_DIR override wins when set.
+ * - macOS: `<confstr(_CS_DARWIN_USER_TEMP_DIR)>/scout/<instance>`
+ * - Linux: `$XDG_RUNTIME_DIR/scout/<instance>` (fallback `/tmp/scout-<uid>/<instance>`)
+ */
+export function resolveOpenScoutSocketDirectory(options: {
+  env?: Env;
+  platform?: string;
+  name?: string;
+  userTempDir?: string;
+  uid?: number;
+  ignoreExplicitOverride?: boolean;
+} = {}): string {
+  const env = options.env ?? process.env;
+  const explicit = options.ignoreExplicitOverride ? undefined : env.OPENSCOUT_SOCKET_DIR?.trim();
+  if (explicit) return explicit;
+  const platform = options.platform ?? process.platform;
+  const instance = options.name !== undefined
+    ? normalizeOpenScoutInstanceName(options.name)
+    : resolveOpenScoutInstanceName(env);
+  if (platform === "darwin") {
+    const base = (options.userTempDir ?? darwinUserTempDir()).replace(/\/+$/, "");
+    return join(base, "scout", instance);
+  }
+  const xdgRuntimeDir = env.XDG_RUNTIME_DIR?.trim();
+  if (xdgRuntimeDir) {
+    return join(xdgRuntimeDir.replace(/\/+$/, ""), "scout", instance);
+  }
+  const uid = options.uid ?? currentNumericUid();
+  return join("/tmp", `scout-${uid}`, instance);
+}
 
 /** Prod's support directory: the pre-instance default. */
 export function prodOpenScoutSupportDirectory(home: string, platform: string, env: Env): string {
@@ -1090,6 +1152,11 @@ export function deriveOpenScoutInstanceLayout(options: OpenScoutInstanceLayoutOp
   const ports = deriveOpenScoutInstancePorts(name, env, ledger);
   const meshId = env.OPENSCOUT_MESH_ID?.trim() || "openscout";
 
+  const socketDirectory = resolveOpenScoutSocketDirectory({ env, platform, name, ignoreExplicitOverride: true });
+  const brokerSocketPath = join(socketDirectory, "broker.sock");
+  const appSocketPath = join(socketDirectory, "app.sock");
+  const probesSocketPath = join(socketDirectory, "probes.sock");
+
   if (isProd) {
     const openscoutHome = join(home, ".openscout");
     const supportDirectory = prodOpenScoutSupportDirectory(home, platform, env);
@@ -1107,9 +1174,10 @@ export function deriveOpenScoutInstanceLayout(options: OpenScoutInstanceLayoutOp
       scoutHome,
       pairingHome: join(scoutHome, "pairing"),
       localEdgeDirectory: join(scoutHome, "local-edge"),
-      brokerSocketPath: join(runtimeDirectory, "broker.sock"),
-      appSocketPath: join(openscoutHome, "run", "scout-app.sock"),
-      probesSocketPath: join(openscoutHome, "run", "scoutd-probes.sock"),
+      socketDirectory,
+      brokerSocketPath,
+      appSocketPath,
+      probesSocketPath,
       ports,
       hostLabel,
       nodeName: options.hostname ?? osHostname(),
@@ -1140,9 +1208,10 @@ export function deriveOpenScoutInstanceLayout(options: OpenScoutInstanceLayoutOp
     scoutHome: root,
     pairingHome: join(root, "pairing"),
     localEdgeDirectory: join(root, "local-edge"),
-    brokerSocketPath: join(runtimeDirectory, "broker.sock"),
-    appSocketPath: join(root, "run", "scout-app.sock"),
-    probesSocketPath: join(root, "run", "scoutd-probes.sock"),
+    socketDirectory,
+    brokerSocketPath,
+    appSocketPath,
+    probesSocketPath,
     ports,
     hostLabel,
     nodeName: nodeQualifier,
@@ -1163,6 +1232,7 @@ function instanceEnvDefaults(layout: OpenScoutInstanceLayout): Array<[string, st
     ["OPENSCOUT_RELAY_HUB", layout.relayHub],
     ["OPENSCOUT_SCOUT_HOME", layout.scoutHome],
     ["OPENSCOUT_PAIRING_HOME", layout.pairingHome],
+    ["OPENSCOUT_SOCKET_DIR", layout.socketDirectory],
     ["OPENSCOUT_BROKER_SOCKET_PATH", layout.brokerSocketPath],
     ["OPENSCOUT_APP_SOCKET", layout.appSocketPath],
     ["OPENSCOUT_PROBES_SOCKET", layout.probesSocketPath],
@@ -1362,6 +1432,7 @@ export const OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS: readonly string[] = [
   "OPENSCOUT_PAIRING_HOME",
   "OPENSCOUT_PAIRING_DIR",
   "SCOUT_PAIRING_HOME",
+  "OPENSCOUT_SOCKET_DIR",
   "OPENSCOUT_BROKER_SOCKET_PATH",
   "OPENSCOUT_APP_SOCKET",
   "OPENSCOUT_PROBES_SOCKET",
@@ -1541,6 +1612,7 @@ const PATH_ENV_KEYS = [
   "OPENSCOUT_PAIRING_HOME",
   "OPENSCOUT_PAIRING_DIR",
   "SCOUT_PAIRING_HOME",
+  "OPENSCOUT_SOCKET_DIR",
   "OPENSCOUT_BROKER_SOCKET_PATH",
   "OPENSCOUT_APP_SOCKET",
   "OPENSCOUT_PROBES_SOCKET",
@@ -1589,6 +1661,7 @@ export function findOpenScoutInstanceIsolationViolations(
     prod.controlHome,
     prod.pairingHome,
     prod.relayHub,
+    prod.socketDirectory,
   ].map(canonicalPath);
   // Instance roots live under ~/.openscout/instances; that subtree is the only
   // part of prod's homes an instance may write.

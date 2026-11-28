@@ -15,6 +15,7 @@ import {
   expectedScoutHostExecVerbSchemaVersion,
   expectedScoutHostProbeSchemaVersion,
 } from "./scout-host-catalog.js";
+import { resolveOpenScoutSocketDirectory } from "../instance.js";
 import { resolveOpenScoutHomeForEnv } from "../support-paths.js";
 
 const CAPABILITIES_SCHEMA = "openscout.probe.capabilities/v1";
@@ -153,8 +154,12 @@ export function resolveScoutdProbesSocketPath(env: RuntimeEnv = process.env): st
   if (explicit) {
     return explicit;
   }
+  const preferred = join(resolveOpenScoutSocketDirectory({ env }), "probes.sock");
+  if (existsSync(preferred)) return preferred;
   const openScoutHome = resolveOpenScoutHomeForEnv(env);
-  return join(openScoutHome, "run", "scoutd-probes.sock");
+  const legacy = join(openScoutHome, "run", "scoutd-probes.sock");
+  if (existsSync(legacy)) return legacy;
+  return preferred;
 }
 
 export class ScoutdProbeClient {

@@ -677,7 +677,7 @@ describe("tmp support directory handling", () => {
       expect(persistent.supportDirectory).toBe(supportDirectory);
       expect(persistent.runtimeDirectory).toBe(join(supportDirectory, "runtime"));
       expect(persistent.logsDirectory).toBe(join(supportDirectory, "logs", "broker"));
-      expect(persistent.brokerSocketPath).toBe(join(supportDirectory, "runtime", "broker.sock"));
+      expect(persistent.brokerSocketPath).toMatch(/\/scout\/prod\/broker\.sock$|\/scout-\d+\/prod\/broker\.sock$/);
       expect(persistent.controlHome).toBe(join(homedir(), ".openscout", "control-plane"));
     }));
 
@@ -705,7 +705,7 @@ describe("tmp support directory handling", () => {
       expect(serviceConfig.label).toBe("app.openscout.dev");
       expect(serviceConfig.supportDirectory).toBe(join(root, "support"));
       expect(serviceConfig.controlHome).toBe(join(root, "control-plane"));
-      expect(serviceConfig.brokerSocketPath).toBe(join(root, "support", "runtime", "broker.sock"));
+      expect(serviceConfig.brokerSocketPath).toMatch(/\/scout\/dev\/broker\.sock$|\/scout-\d+\/dev\/broker\.sock$/);
     });
   });
 });
