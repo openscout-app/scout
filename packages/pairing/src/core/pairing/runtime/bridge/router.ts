@@ -92,6 +92,20 @@ import {
   provisionMobileTerminalAccess,
   readMobileTerminalStatus,
 } from "./mobile-terminal-provision.ts";
+import {
+  MAX_PASTE_IMAGE_BASE64_LENGTH,
+  MAX_REMOTE_TEXT_LENGTH,
+  readMobileRemoteApps,
+  readMobileRemoteScreenFrame,
+  readMobileRemoteState,
+  runMobileRemoteActivateApp,
+  runMobileRemoteDictate,
+  runMobileRemoteInsertText,
+  runMobileRemotePasteImage,
+  runMobileRemoteTrackpad,
+  runMobileRemoteType,
+} from "./mobile-remote.ts";
+import { requireCredentialIdentity } from "./credential-binding.ts";
 import { InvalidMobileTerminalSessionError } from "./mobile-terminal-session.ts";
 import { syncMobilePushRegistrationWithRelay } from "@openscout/runtime/mobile-push";
 import {
@@ -176,6 +190,25 @@ const protectedMobileProcedure = procedure.use(({ ctx, next }) => {
     });
   }
   return next({ ctx });
+});
+
+const remoteControlProcedure = procedure.use(({ ctx, next }) => {
+  if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: "Remote control requires a trusted paired device over the encrypted bridge.",
+    });
+  }
+  let identity: ReturnType<typeof requireCredentialIdentity>;
+  try {
+    identity = requireCredentialIdentity(ctx.credentialBinding);
+  } catch {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: "Remote control session expired or was revoked; reconnect the paired device.",
+    });
+  }
+  return next({ ctx: { ...ctx, admitRemote: () => identity.admit() } });
 });
 
 function localServiceHost(): string {
@@ -1507,6 +1540,89 @@ const mobileRouter = t.router({
       };
     }),
 
+  // Fast single-RTT transcript loader for mobile: resolves any harness session
+  // directly through Scout's materialized observe index (no 1,500-file scan)
+  // and returns compacted JSONL step lines or structured observe events plus
+  // metadata (`cwd`, `model`, `threadPath`, `live`) in one bridge round-trip.
+  sessionTranscript: protectedMobileProcedure
+    .input(z.object({
+      sessionId: z.string().min(1).max(256),
+      harness: z.string().max(64).nullable().optional(),
+      limit: z.number().int().min(1).max(240).optional(),
+    }))
+    .query(async ({ input }) => {
+      const limit = input.limit ?? 80;
+      const raw = input.sessionId.trim();
+      const formatted = formatSessionRouteRef(input.harness ?? null, raw);
+      const candidates: string[] = [];
+      if (formatted) candidates.push(formatted);
+      if (!candidates.includes(raw)) candidates.push(raw);
+      const bare = raw.includes(":") ? raw.split(":").pop()!.trim() : "";
+      if (bare && !candidates.includes(bare)) candidates.push(bare);
+
+      let payload: Awaited<ReturnType<typeof loadSessionRefObservePayload>> = null;
+      for (const candidate of candidates) {
+        const hit = await loadSessionRefObservePayload(candidate);
+        if (hit?.data) {
+          payload = hit;
+          break;
+        }
+      }
+
+      const data = payload?.data ?? null;
+      const sessionMeta = data?.metadata?.session ?? null;
+      const threadPath = sessionMeta?.threadPath ?? null;
+
+      let stepLines: string[] | null = null;
+      let start: number | null = null;
+      let hasOlder = false;
+      if (threadPath && threadPath.endsWith(".jsonl")) {
+        try {
+          const content = readFileSync(threadPath, "utf-8");
+          const lines = content.split("\n").filter((l) => l.trim().length > 0);
+          let index = lines.length - 1;
+          const picked: string[] = [];
+          while (index >= 0 && picked.length < limit) {
+            const compact = compactTranscriptStepLine(lines[index]!);
+            if (compact) picked.push(`{"_line":${index},${compact.slice(1)}`);
+            index -= 1;
+          }
+          picked.reverse();
+          stepLines = picked;
+          start = index + 1;
+          hasOlder = start > 0;
+        } catch {
+          stepLines = null;
+        }
+      }
+
+      const allEvents = data?.events ?? [];
+      const tailEvents = allEvents.length > limit ? allEvents.slice(-limit) : allEvents;
+      const events = tailEvents.map((ev) => ({
+        id: ev.id,
+        kind: ev.kind,
+        at: typeof ev.t === "number" ? ev.t : undefined,
+        text: ev.text,
+        tool: ev.tool ?? undefined,
+        arg: ev.arg ?? undefined,
+        detail: ev.detail ?? undefined,
+        live: ev.live ?? undefined,
+      }));
+
+      return {
+        found: Boolean(data || (stepLines && stepLines.length > 0)),
+        threadPath,
+        cwd: sessionMeta?.cwd ?? null,
+        model: sessionMeta?.model ?? null,
+        harness: sessionMeta?.adapterType ?? input.harness ?? null,
+        live: Boolean(allEvents.some((ev) => ev.live)),
+        stepLines,
+        start,
+        hasOlder,
+        events,
+      };
+    }),
+
   // Reply to a harness session Scout did not start (one the phone saw in the
   // tail). The broker reserves a stable request receipt before live input;
   // only an explicit not-live result permits exact-session resume. Expected
@@ -1700,6 +1816,100 @@ const mobileRouter = t.router({
         }
         throw error;
       }
+    }),
+
+  // -- Remote (keyboard, trackpad, screen, apps, dictation over the bridge) -
+  remoteState: remoteControlProcedure
+    .input(z.object({}).optional())
+    .query(async ({ ctx }) => {
+      return await readMobileRemoteState({ deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteType: remoteControlProcedure
+    .input(
+      z.object({
+        text: z.string().max(MAX_REMOTE_TEXT_LENGTH).optional(),
+        key: z.string().max(32).optional(),
+        modifiers: z.array(z.enum(["command", "control", "option", "shift"])).max(4).optional(),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      return await runMobileRemoteType(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteInsertText: remoteControlProcedure
+    .input(
+      z.object({
+        text: z.string().min(1).max(MAX_REMOTE_TEXT_LENGTH),
+        submit: z.boolean().optional(),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      return await runMobileRemoteInsertText(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteTrackpad: remoteControlProcedure
+    .input(
+      z.object({
+        event: z.enum(["move", "click", "rightClick", "doubleClick", "scroll"]),
+        dx: z.number().finite().min(-2400).max(2400).optional(),
+        dy: z.number().finite().min(-2400).max(2400).optional(),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      return await runMobileRemoteTrackpad(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteScreenFrame: remoteControlProcedure
+    .input(
+      z
+        .object({
+          maxWidth: z.number().int().min(320).max(1440).optional(),
+        })
+        .optional(),
+    )
+    .query(async ({ input, ctx }) => {
+      return await readMobileRemoteScreenFrame(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteApps: remoteControlProcedure
+    .input(z.object({}).optional())
+    .query(async ({ ctx }) => {
+      return await readMobileRemoteApps({ deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteActivateApp: remoteControlProcedure
+    .input(
+      z.object({
+        bundleId: z.string().max(256).optional(),
+        pid: z.number().int().positive().optional(),
+        name: z.string().max(256).optional(),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      return await runMobileRemoteActivateApp(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remotePasteImage: remoteControlProcedure
+    .input(
+      z.object({
+        base64: z.string().min(1).max(MAX_PASTE_IMAGE_BASE64_LENGTH),
+        mimeType: z.string().min(1).max(64),
+        paste: z.boolean().optional(),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      return await runMobileRemotePasteImage(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
+    }),
+
+  remoteDictate: remoteControlProcedure
+    .input(
+      z.object({
+        action: z.enum(["start", "stop", "cancel", "toggle", "status"]),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      return await runMobileRemoteDictate(input, { deviceId: ctx.deviceId, admit: ctx.admitRemote });
     }),
 });
 
