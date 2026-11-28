@@ -1,5 +1,6 @@
 export * from "../support-paths.js";
 export * from "../scout-home.js";
+export * from "../home-migrate.js";
 export * from "../local-config.js";
 export * from "../user-config.js";
 export * from "../user-config-fields.js";

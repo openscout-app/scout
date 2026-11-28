@@ -37,6 +37,7 @@ export type ScoutCommandName =
   | "report"
   | "feedback"
   | "env"
+  | "home"
   | "flight"
   | "work-retry"
   | "worktree"
@@ -151,6 +152,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return (await import("./doctor.ts")).runDoctorCommand;
     case "env":
       return (await import("./env.ts")).runEnvCommand;
+    case "home":
+      return (await import("./home.ts")).runHomeCommand;
     case "instance":
       return (await import("./instance.ts")).runInstanceCommand;
     case "flight":

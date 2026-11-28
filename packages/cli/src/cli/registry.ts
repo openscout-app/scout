@@ -36,6 +36,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "crew", summary: "Manage crew role bindings, presets, and live reachability" },
   { name: "role", summary: "Assign roles (orchestrator) and read/write mission logs" },
   { name: "env", summary: "Show executable and agent identity context" },
+  { name: "home", summary: "Inspect or migrate the unified ~/.openscout home layout" },
   { name: "instance", summary: "List or release non-prod OpenScout instances (OPENSCOUT_INSTANCE)" },
   { name: "whoami", summary: "Resolve your current Scout sender identity" },
   { name: "where", summary: "Find the top 3 local projects, agents or sessions by topic" },

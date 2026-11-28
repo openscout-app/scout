@@ -44,6 +44,7 @@ export * from "./provider-telemetry-bootstrap.js";
 export * from "./onboarding.js";
 export * from "./runtime-adapters.js";
 export * from "./support-paths.js";
+export * from "./home-migrate.js";
 export * from "./scout-agent-cards.js";
 export * from "./user-config.js";
 export * from "./user-config-fields.js";
