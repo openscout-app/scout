@@ -3534,6 +3534,7 @@ const permissionService = new BrokerPermissionService({
     }
     operatorAttentionService.queuePermissionRequest({
       view,
+      ...(prompt.decisions.includes("project") ? { canAlwaysAllow: true } : {}),
       requestId: record.id, text: prompt.text, agentId: invocation.targetAgentId, requesterNodeId: nodeId,
       projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: record.createdAt,
       ...(invocation.conversationId ? { conversationId: invocation.conversationId } : {}),
@@ -3569,6 +3570,7 @@ const nativePermissions = new NativePermissionRequests({
   notify: ({ requestId, prompt, actorId, view }) => {
     operatorAttentionService.queuePermissionRequest({
       requestId, text: prompt.text, view, agentId: actorId, requesterNodeId: nodeId,
+      ...(prompt.decisions.includes("project") ? { canAlwaysAllow: true } : {}),
       projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: Date.now(),
     });
   },
