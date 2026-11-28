@@ -93,6 +93,8 @@ import {
   readMobileTerminalStatus,
 } from "./mobile-terminal-provision.ts";
 import {
+  MAX_PASTE_IMAGE_BASE64_LENGTH,
+  MAX_REMOTE_TEXT_LENGTH,
   readMobileRemoteApps,
   readMobileRemoteScreenFrame,
   readMobileRemoteState,
@@ -103,6 +105,7 @@ import {
   runMobileRemoteTrackpad,
   runMobileRemoteType,
 } from "./mobile-remote.ts";
+import { requireCredentialIdentity } from "./credential-binding.ts";
 import { InvalidMobileTerminalSessionError } from "./mobile-terminal-session.ts";
 import { syncMobilePushRegistrationWithRelay } from "@openscout/runtime/mobile-push";
 import {
@@ -184,6 +187,24 @@ const protectedMobileProcedure = procedure.use(({ ctx, next }) => {
     throw new TRPCError({
       code: "UNAUTHORIZED",
       message: "Endpoint discovery requires an encrypted trusted mobile transport",
+    });
+  }
+  return next({ ctx });
+});
+
+const remoteControlProcedure = procedure.use(({ ctx, next }) => {
+  if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: "Remote control requires a trusted paired device over the encrypted bridge.",
+    });
+  }
+  try {
+    requireCredentialIdentity(ctx.credentialBinding);
+  } catch {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: "Remote control session expired or was revoked; reconnect the paired device.",
     });
   }
   return next({ ctx });
@@ -1714,151 +1735,97 @@ const mobileRouter = t.router({
     }),
 
   // -- Remote (keyboard, trackpad, screen, apps, dictation over the bridge) -
-  remoteState: procedure
+  remoteState: remoteControlProcedure
     .input(z.object({}).optional())
-    .query(async ({ ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
+    .query(async () => {
       return await readMobileRemoteState();
     }),
 
-  remoteType: procedure
+  remoteType: remoteControlProcedure
     .input(
       z.object({
-        text: z.string().optional(),
-        key: z.string().optional(),
-        modifiers: z.array(z.enum(["command", "control", "option", "shift"])).optional(),
+        text: z.string().max(MAX_REMOTE_TEXT_LENGTH).optional(),
+        key: z.string().max(32).optional(),
+        modifiers: z.array(z.enum(["command", "control", "option", "shift"])).max(4).optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await runMobileRemoteType(input);
+      return await runMobileRemoteType(input, { deviceId: ctx.deviceId });
     }),
 
-  remoteInsertText: procedure
+  remoteInsertText: remoteControlProcedure
     .input(
       z.object({
-        text: z.string(),
+        text: z.string().min(1).max(MAX_REMOTE_TEXT_LENGTH),
         submit: z.boolean().optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await runMobileRemoteInsertText(input);
+      return await runMobileRemoteInsertText(input, { deviceId: ctx.deviceId });
     }),
 
-  remoteTrackpad: procedure
+  remoteTrackpad: remoteControlProcedure
     .input(
       z.object({
         event: z.enum(["move", "click", "rightClick", "doubleClick", "scroll"]),
-        dx: z.number().optional(),
-        dy: z.number().optional(),
+        dx: z.number().finite().min(-2400).max(2400).optional(),
+        dy: z.number().finite().min(-2400).max(2400).optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await runMobileRemoteTrackpad(input);
+      return await runMobileRemoteTrackpad(input, { deviceId: ctx.deviceId });
     }),
 
-  remoteScreenFrame: procedure
+  remoteScreenFrame: remoteControlProcedure
     .input(
       z
         .object({
-          maxWidth: z.number().int().positive().optional(),
+          maxWidth: z.number().int().min(320).max(1440).optional(),
         })
         .optional(),
     )
     .query(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await readMobileRemoteScreenFrame(input);
+      return await readMobileRemoteScreenFrame(input, { deviceId: ctx.deviceId });
     }),
 
-  remoteApps: procedure
+  remoteApps: remoteControlProcedure
     .input(z.object({}).optional())
     .query(async ({ ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await readMobileRemoteApps();
+      return await readMobileRemoteApps({ deviceId: ctx.deviceId });
     }),
 
-  remoteActivateApp: procedure
+  remoteActivateApp: remoteControlProcedure
     .input(
       z.object({
-        bundleId: z.string().optional(),
+        bundleId: z.string().max(256).optional(),
         pid: z.number().int().positive().optional(),
-        name: z.string().optional(),
+        name: z.string().max(256).optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await runMobileRemoteActivateApp(input);
+      return await runMobileRemoteActivateApp(input, { deviceId: ctx.deviceId });
     }),
 
-  remotePasteImage: procedure
+  remotePasteImage: remoteControlProcedure
     .input(
       z.object({
-        base64: z.string().min(1),
-        mimeType: z.string().min(1),
+        base64: z.string().min(1).max(MAX_PASTE_IMAGE_BASE64_LENGTH),
+        mimeType: z.string().min(1).max(64),
         paste: z.boolean().optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await runMobileRemotePasteImage(input);
+      return await runMobileRemotePasteImage(input, { deviceId: ctx.deviceId });
     }),
 
-  remoteDictate: procedure
+  remoteDictate: remoteControlProcedure
     .input(
       z.object({
         action: z.enum(["start", "stop", "cancel", "toggle", "status"]),
       }),
     )
     .mutation(async ({ input, ctx }) => {
-      if (!ctx.secureTransport || !ctx.trustedPeer || !ctx.deviceId) {
-        throw new TRPCError({
-          code: "UNAUTHORIZED",
-          message: "Remote control requires a trusted paired device over the encrypted bridge.",
-        });
-      }
-      return await runMobileRemoteDictate(input);
+      return await runMobileRemoteDictate(input, { deviceId: ctx.deviceId });
     }),
 });
 
