@@ -8,6 +8,8 @@ import {
   clampTrackpadDelta,
   matchesImageMagicBytes,
   parseJxaJson,
+  parseScreenLockOutput,
+  requiredCapabilitiesAllowed,
   resolveAppleScriptKeySpec,
   resolveMobileRemotePolicy,
   sanitizeRemoteError,
@@ -237,6 +239,30 @@ describe("mobile remote helpers & security", () => {
     expect(clampTrackpadDelta(Number.NaN)).toBe(0);
     expect(clampTrackpadDelta(99999)).toBe(2400);
     expect(clampTrackpadDelta(-99999)).toBe(-2400);
+  });
+
+  test("parseScreenLockOutput fails closed on empty or unexpected output", () => {
+    expect(parseScreenLockOutput("0\n")).toBe("unlocked");
+    expect(parseScreenLockOutput("1\n")).toBe("locked");
+    expect(parseScreenLockOutput("unknown\n")).toBe("unknown");
+    expect(parseScreenLockOutput("")).toBe("unknown");
+    expect(parseScreenLockOutput("error")).toBe("unknown");
+  });
+
+  test("requiredCapabilitiesAllowed enforces compound capability combinations", () => {
+    const noInput = resolveMobileRemotePolicy({
+      env: { SCOUT_MOBILE_REMOTE_INPUT: "0" },
+      policyPath: "/nonexistent/scout-remote-policy.json",
+    });
+    expect(requiredCapabilitiesAllowed(noInput, ["clipboard"])).toBe(true);
+    expect(requiredCapabilitiesAllowed(noInput, ["clipboard", "input"])).toBe(false);
+
+    const noClipboard = resolveMobileRemotePolicy({
+      env: { SCOUT_MOBILE_REMOTE_CLIPBOARD: "0" },
+      policyPath: "/nonexistent/scout-remote-policy.json",
+    });
+    expect(requiredCapabilitiesAllowed(noClipboard, ["input"])).toBe(true);
+    expect(requiredCapabilitiesAllowed(noClipboard, ["input", "clipboard"])).toBe(false);
   });
 
   test("parseJxaJson returns fallback on malformed stdout", () => {

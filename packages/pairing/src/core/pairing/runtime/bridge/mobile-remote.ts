@@ -7,16 +7,19 @@
 //
 // Security posture:
 // - Every RPC is gated by live `credentialBinding` verification in `router.ts`
-//   (Noise key + live socket + current pairing authority stamp, so unpairing
-//   cuts off remote control immediately without restarting the daemon).
+//   (Noise key + live socket + current pairing authority stamp), and mutating
+//   or capture operations re-validate `admit()` immediately before side effects
+//   so unpairing stops remote control promptly.
 // - Host policy (`SCOUT_MOBILE_REMOTE*` env vars or `~/.openscout/remote-policy.json`)
-//   provides a hard kill switch and per-capability toggles.
-// - Screen-lock guard refuses input, clipboard paste, app switching, and screen
-//   capture while the Mac session is locked.
-// - Per-peer sliding-window rate limits bound trackpad, input, paste, and screen
-//   capture rates.
-// - Temp artifacts stay in private `0o700` dirs under `~/.openscout/` (`0o600`
-//   files), never world-writable `/tmp`.
+//   provides a hard kill switch and per-capability toggles; compound actions
+//   (clipboard + Cmd+V) require every capability they exercise.
+// - Screen-lock guard fails CLOSED: locked or unverifiable sessions deny input,
+//   clipboard paste, app switching, dictation, and screen capture.
+// - Per-peer sliding-window rate limits + in-flight state coalescing bound
+//   process and socket fan-out.
+// - Temp artifacts (screen captures, pasted images, HID compile scratch) stay in
+//   private `0o700` dirs under `~/.openscout/` (`0o600` files) and are unlinked
+//   in `finally` — zero permanent disk growth, never `/tmp`.
 // - Image pastes verify pre-decode size limits and magic bytes before touching
 //   disk or NSPasteboard.
 // - High-impact actions and denials emit structured `remote:audit` logs without
@@ -67,12 +70,15 @@ export type MobileRemoteCapability =
   | "dictate";
 
 export type MobileRemoteRateBucket =
+  | "state"
   | "trackpad"
   | "input"
   | "screen"
   | "paste"
   | "apps"
   | "dictate";
+
+export type ScreenLockStatus = "unlocked" | "locked" | "unknown";
 
 export interface MobileRemotePolicy {
   enabled: boolean;
@@ -86,6 +92,8 @@ export interface MobileRemotePolicy {
 
 export interface MobileRemoteContext {
   deviceId?: string;
+  /** Re-validates live credential binding immediately before host side effects. */
+  admit?: () => void;
 }
 
 export interface MobileRemoteApp {
@@ -141,7 +149,6 @@ export interface MobileRemoteAppsResult {
 
 export interface MobileRemotePasteImageResult {
   ok: boolean;
-  path?: string;
   pasted: boolean;
   error?: string;
 }
@@ -168,7 +175,8 @@ const MIN_SCREEN_WIDTH = 320;
 const MAX_SCREEN_WIDTH = 1440;
 const DEFAULT_SCREEN_WIDTH = 960;
 const MAX_TRACKPAD_DELTA = 2_400;
-const LOCK_CACHE_TTL_MS = 1_200;
+const TRACKPAD_LOCK_CACHE_TTL_MS = 250;
+const STATE_CACHE_TTL_MS = 750;
 
 const NAMED_KEY_CODES: Record<string, number> = {
   return: 36,
@@ -206,6 +214,7 @@ const ALLOWED_IMAGE_MIMES: Record<string, string> = {
 };
 
 const RATE_LIMITS: Record<MobileRemoteRateBucket, { max: number; windowMs: number }> = {
+  state: { max: 8, windowMs: 3_000 },
   trackpad: { max: 180, windowMs: 2_000 },
   input: { max: 60, windowMs: 2_000 },
   screen: { max: 4, windowMs: 2_000 },
@@ -271,6 +280,24 @@ export function resolveMobileRemotePolicy(options?: {
   };
 }
 
+export function requiredCapabilitiesAllowed(
+  policy: MobileRemotePolicy,
+  capabilities: readonly MobileRemoteCapability[],
+): boolean {
+  if (!policy.enabled) return false;
+  for (const cap of capabilities) {
+    if (!policy[cap]) return false;
+  }
+  return true;
+}
+
+export function parseScreenLockOutput(stdout: string): ScreenLockStatus {
+  const trimmed = stdout.trim();
+  if (trimmed === "0") return "unlocked";
+  if (trimmed === "1") return "locked";
+  return "unknown";
+}
+
 export class SlidingWindowRateLimiter {
   private readonly windows = new Map<string, number[]>();
 
@@ -307,6 +334,17 @@ function checkRateLimit(deviceId: string | undefined, bucket: MobileRemoteRateBu
   return remoteRateLimiter.consume(key, limit.max, limit.windowMs);
 }
 
+function verifyAdmitted(action: string, ctx?: MobileRemoteContext): string | null {
+  if (!ctx?.admit) return null;
+  try {
+    ctx.admit();
+    return null;
+  } catch {
+    auditRemote(action, ctx.deviceId, "denied", "revoked");
+    return "Remote control session expired or was revoked; reconnect the paired device.";
+  }
+}
+
 function auditRemote(
   action: string,
   deviceId: string | undefined,
@@ -330,7 +368,7 @@ export function sanitizeRemoteError(error: unknown, fallback: string): string {
     || lower.includes("assistive access")
     || lower.includes("not allowed to send keystrokes")
     || lower.includes("1002")
-    || lower.includes("axIsProcessTrusted".toLowerCase())
+    || lower.includes("axisprocesstrusted")
   ) {
     return "Grant Accessibility permission to Scout's runtime in System Settings > Privacy & Security > Accessibility.";
   }
@@ -633,9 +671,9 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-func fail(_ message: String) -> Never {
+func fail(_ message: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data((message + "\\n").utf8))
-    exit(1)
+    exit(code)
 }
 
 let args = CommandLine.arguments
@@ -643,10 +681,24 @@ guard args.count >= 2 else { fail("Usage: scout-hid <locked|move|click|rightClic
 let action = args[1]
 
 if action == "locked" {
-    let dict = CGSessionCopyCurrentDictionary() as? [String: Any]
-    let locked = (dict?["CGSSessionScreenIsLocked"] as? Bool)
-        ?? ((dict?["CGSSessionScreenIsLocked"] as? Int) == 1)
-    print(locked ? "1" : "0")
+    guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+        print("unknown")
+        exit(2)
+    }
+    let onConsole = (dict["kCGSSessionOnConsoleKey"] as? Bool)
+        ?? ((dict["kCGSSessionOnConsoleKey"] as? Int) == 1)
+    if !onConsole {
+        print("1")
+        exit(0)
+    }
+    if let lockedBool = dict["CGSSessionScreenIsLocked"] as? Bool {
+        print(lockedBool ? "1" : "0")
+    } else if let lockedInt = dict["CGSSessionScreenIsLocked"] as? Int {
+        print(lockedInt == 1 ? "1" : "0")
+    } else {
+        // On macOS GUI console sessions, CGSSessionScreenIsLocked is omitted when unlocked.
+        print("0")
+    }
     exit(0)
 }
 
@@ -757,58 +809,86 @@ async function ensureHidHelperBinary(): Promise<string> {
   return await hidHelperCompilePromise;
 }
 
-let cachedLockState: { locked: boolean; at: number } | null = null;
+let cachedTrackpadLock: { status: ScreenLockStatus; at: number } | null = null;
 
-async function isMacScreenLocked(): Promise<boolean> {
-  if (!isMacOS()) return false;
+/**
+ * Checks whether the macOS GUI console session is locked.
+ * Fails CLOSED (`"unknown"`) on helper errors, timeouts, or unexpected output.
+ */
+async function checkMacScreenLockStatus(options?: { allowCache?: boolean }): Promise<ScreenLockStatus> {
+  if (!isMacOS()) return "unlocked";
   const now = Date.now();
-  if (cachedLockState && now - cachedLockState.at < LOCK_CACHE_TTL_MS) {
-    return cachedLockState.locked;
+  if (
+    options?.allowCache
+    && cachedTrackpadLock
+    && cachedTrackpadLock.status === "unlocked"
+    && now - cachedTrackpadLock.at < TRACKPAD_LOCK_CACHE_TTL_MS
+  ) {
+    return "unlocked";
   }
   try {
     const helper = await ensureHidHelperBinary();
     const { stdout } = await execFileAsync(helper, ["locked"], { timeout: 2_000, maxBuffer: 1024 });
-    const locked = stdout.trim() === "1";
-    cachedLockState = { locked, at: now };
-    return locked;
+    const status = parseScreenLockOutput(stdout);
+    cachedTrackpadLock = { status, at: Date.now() };
+    return status;
   } catch {
-    return false;
+    cachedTrackpadLock = null;
+    return "unknown";
   }
 }
 
 async function guardRemoteAction(
   action: string,
-  capability: MobileRemoteCapability,
+  capabilities: readonly MobileRemoteCapability[],
   bucket: MobileRemoteRateBucket,
   ctx?: MobileRemoteContext,
+  options?: { allowLockCache?: boolean },
 ): Promise<string | null> {
+  const revoked = verifyAdmitted(action, ctx);
+  if (revoked) return revoked;
+
   const policy = resolveMobileRemotePolicy();
-  if (!policy.enabled || !policy[capability]) {
-    auditRemote(action, ctx?.deviceId, "denied", `policy:${capability}`);
+  if (!requiredCapabilitiesAllowed(policy, capabilities)) {
+    auditRemote(action, ctx?.deviceId, "denied", `policy:${capabilities.join("+")}`);
     return "Remote control is disabled by host policy.";
   }
   if (!checkRateLimit(ctx?.deviceId, bucket)) {
     auditRemote(action, ctx?.deviceId, "denied", `rate:${bucket}`);
     return "Remote action rate limit exceeded; slow down.";
   }
-  if (!policy.allowWhileLocked && (await isMacScreenLocked())) {
-    auditRemote(action, ctx?.deviceId, "denied", "screen_locked");
-    return "Mac screen is locked.";
+  if (!policy.allowWhileLocked) {
+    const lockStatus = await checkMacScreenLockStatus({ allowCache: options?.allowLockCache });
+    if (lockStatus === "locked") {
+      auditRemote(action, ctx?.deviceId, "denied", "screen_locked");
+      return "Mac screen is locked.";
+    }
+    if (lockStatus !== "unlocked") {
+      auditRemote(action, ctx?.deviceId, "denied", "lock_unknown");
+      return "Mac screen lock state could not be verified.";
+    }
   }
   return null;
 }
 
-// MARK: - Public RPC handlers
+// MARK: - Coalesced State Probe
 
-export async function readMobileRemoteState(): Promise<MobileRemoteState> {
+let cachedStateValue: { state: MobileRemoteState; at: number } | null = null;
+let inFlightStatePromise: Promise<MobileRemoteState> | null = null;
+
+async function computeMobileRemoteState(): Promise<MobileRemoteState> {
   const mac = isMacOS();
   const policy = resolveMobileRemotePolicy();
-  const screenLocked = mac ? await isMacScreenLocked() : false;
-  const unlockedOrAllowed = !screenLocked || policy.allowWhileLocked;
-  const frontmostApp = mac && policy.enabled && unlockedOrAllowed ? await readFrontmostMacApp() : null;
+  const lockStatus: ScreenLockStatus = mac ? await checkMacScreenLockStatus() : "unlocked";
+  const screenLocked = lockStatus !== "unlocked";
+  const unlockedOrAllowed = lockStatus === "unlocked" || policy.allowWhileLocked;
+  // Never probe frontmost app/window titles when `apps` capability is disabled.
+  const frontmostApp = mac && policy.enabled && policy.apps && unlockedOrAllowed
+    ? await readFrontmostMacApp()
+    : null;
   const dictationAvailable = mac && policy.dictate && hostDictationAvailable();
   let dictationState: string | null = null;
-  if (dictationAvailable) {
+  if (dictationAvailable && unlockedOrAllowed) {
     const probe = await queryHostDictationSocket({ cmd: "status" }, 800);
     if (probe.ok && typeof probe.response?.state === "string") {
       dictationState = probe.response.state;
@@ -825,7 +905,7 @@ export async function readMobileRemoteState(): Promise<MobileRemoteState> {
       trackpad: mac && policy.input && unlockedOrAllowed,
       screen: mac && policy.screen && unlockedOrAllowed,
       apps: mac && policy.apps && unlockedOrAllowed,
-      insertText: mac && policy.input && unlockedOrAllowed,
+      insertText: mac && policy.input && policy.clipboard && unlockedOrAllowed,
       pasteImage: mac && policy.clipboard && unlockedOrAllowed,
       hostDictation: dictationAvailable && unlockedOrAllowed,
     },
@@ -834,6 +914,46 @@ export async function readMobileRemoteState(): Promise<MobileRemoteState> {
       state: dictationState,
     },
   };
+}
+
+// MARK: - Public RPC handlers
+
+export async function readMobileRemoteState(ctx?: MobileRemoteContext): Promise<MobileRemoteState> {
+  if (!checkRateLimit(ctx?.deviceId, "state")) {
+    if (cachedStateValue) return cachedStateValue.state;
+    return {
+      ok: false,
+      host: osHostname().replace(/\.local$/i, ""),
+      platform: process.platform,
+      screenLocked: true,
+      frontmostApp: null,
+      capabilities: {
+        keyboard: false,
+        trackpad: false,
+        screen: false,
+        apps: false,
+        insertText: false,
+        pasteImage: false,
+        hostDictation: false,
+      },
+      hostDictation: { available: false, state: null },
+    };
+  }
+  const now = Date.now();
+  if (cachedStateValue && now - cachedStateValue.at < STATE_CACHE_TTL_MS) {
+    return cachedStateValue.state;
+  }
+  if (!inFlightStatePromise) {
+    inFlightStatePromise = computeMobileRemoteState()
+      .then((state) => {
+        cachedStateValue = { state, at: Date.now() };
+        return state;
+      })
+      .finally(() => {
+        inFlightStatePromise = null;
+      });
+  }
+  return await inFlightStatePromise;
 }
 
 export async function runMobileRemoteType(
@@ -847,10 +967,13 @@ export async function runMobileRemoteType(
   if (!isMacOS()) {
     return { ok: false, error: "Remote keyboard is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remoteType", "input", "input", ctx);
+  const denied = await guardRemoteAction("remoteType", ["input"], "input", ctx);
   if (denied) return { ok: false, error: denied };
 
   try {
+    const revokedBeforeExec = verifyAdmitted("remoteType", ctx);
+    if (revokedBeforeExec) return { ok: false, error: revokedBeforeExec };
+
     if (typeof input.key === "string" && input.key.trim().length > 0) {
       const spec = resolveAppleScriptKeySpec(input.key, input.modifiers);
       if (!spec) {
@@ -894,7 +1017,8 @@ export async function runMobileRemoteInsertText(
   if (!isMacOS()) {
     return { ok: false, error: "Remote text insertion is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remoteInsertText", "input", "input", ctx);
+  // InsertText writes NSPasteboard and injects Cmd+V, so require both capabilities.
+  const denied = await guardRemoteAction("remoteInsertText", ["input", "clipboard"], "input", ctx);
   if (denied) return { ok: false, error: denied };
 
   const text = input.text;
@@ -916,6 +1040,9 @@ export async function runMobileRemoteInsertText(
     previousClipboard = null;
   }
 
+  const revokedBeforePaste = verifyAdmitted("remoteInsertText", ctx);
+  if (revokedBeforePaste) return { ok: false, error: revokedBeforePaste };
+
   try {
     await runCommandWithStdin("/usr/bin/pbcopy", [], text, 2_000);
     await runOsascript([
@@ -925,6 +1052,8 @@ export async function runMobileRemoteInsertText(
 
     if (input.submit) {
       await new Promise((resolve) => setTimeout(resolve, 60));
+      const revokedBeforeSubmit = verifyAdmitted("remoteInsertText", ctx);
+      if (revokedBeforeSubmit) return { ok: false, error: revokedBeforeSubmit };
       await runOsascript([
         "-e",
         `tell application "System Events" to key code 36`,
@@ -956,11 +1085,20 @@ export async function runMobileRemoteTrackpad(
   if (!isMacOS()) {
     return { ok: false, error: "Remote trackpad is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remoteTrackpad", "input", "trackpad", ctx);
+  const denied = await guardRemoteAction(
+    "remoteTrackpad",
+    ["input"],
+    "trackpad",
+    ctx,
+    { allowLockCache: input.event === "move" || input.event === "scroll" },
+  );
   if (denied) return { ok: false, error: denied };
 
   try {
     const helper = await ensureHidHelperBinary();
+    const revokedBeforeExec = verifyAdmitted("remoteTrackpad", ctx);
+    if (revokedBeforeExec) return { ok: false, error: revokedBeforeExec };
+
     const dx = clampTrackpadDelta(input.dx);
     const dy = clampTrackpadDelta(input.dy);
     const args =
@@ -994,7 +1132,7 @@ export async function readMobileRemoteScreenFrame(
   if (!isMacOS()) {
     return emptyFrame("Screen preview is only supported on macOS hosts.");
   }
-  const denied = await guardRemoteAction("remoteScreenFrame", "screen", "screen", ctx);
+  const denied = await guardRemoteAction("remoteScreenFrame", ["screen"], "screen", ctx);
   if (denied) return emptyFrame(denied);
 
   const maxWidth = clampScreenMaxWidth(input?.maxWidth);
@@ -1002,6 +1140,9 @@ export async function readMobileRemoteScreenFrame(
   ensurePrivateDir(tmpDir);
   const tmpFile = join(tmpDir, `screen-${randomUUID()}.jpg`);
   try {
+    const revokedBeforeCapture = verifyAdmitted("remoteScreenFrame", ctx);
+    if (revokedBeforeCapture) return emptyFrame(revokedBeforeCapture);
+
     await execFileAsync("/usr/sbin/screencapture", ["-x", "-t", "jpg", tmpFile], {
       timeout: 5_000,
     });
@@ -1016,6 +1157,9 @@ export async function readMobileRemoteScreenFrame(
     const heightMatch = String(dims.stdout).match(/pixelHeight:\s*(\d+)/);
     const width = widthMatch ? Number(widthMatch[1]) : maxWidth;
     const height = heightMatch ? Number(heightMatch[1]) : Math.round((maxWidth * 9) / 16);
+
+    const revokedBeforeReturn = verifyAdmitted("remoteScreenFrame", ctx);
+    if (revokedBeforeReturn) return emptyFrame(revokedBeforeReturn);
 
     const bytes = await Bun.file(tmpFile).arrayBuffer();
     const base64 = Buffer.from(bytes).toString("base64");
@@ -1042,7 +1186,7 @@ export async function readMobileRemoteApps(
   if (!isMacOS()) {
     return { ok: false, apps: [], error: "App switching is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remoteApps", "apps", "apps", ctx);
+  const denied = await guardRemoteAction("remoteApps", ["apps"], "apps", ctx);
   if (denied) return { ok: false, apps: [], error: denied };
 
   const script = `
@@ -1083,7 +1227,7 @@ export async function runMobileRemoteActivateApp(
   if (!isMacOS()) {
     return { ok: false, error: "App switching is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remoteActivateApp", "apps", "apps", ctx);
+  const denied = await guardRemoteAction("remoteActivateApp", ["apps"], "apps", ctx);
   if (denied) return { ok: false, error: denied };
 
   const script = `
@@ -1112,6 +1256,9 @@ function run(argv) {
 }
 `;
   try {
+    const revokedBeforeExec = verifyAdmitted("remoteActivateApp", ctx);
+    if (revokedBeforeExec) return { ok: false, error: revokedBeforeExec };
+
     const { stdout } = await runOsascript(
       [
         "-l",
@@ -1145,7 +1292,9 @@ export async function runMobileRemotePasteImage(
   if (!isMacOS()) {
     return { ok: false, pasted: false, error: "Remote image paste is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remotePasteImage", "clipboard", "paste", ctx);
+  const shouldPaste = input.paste !== false;
+  const requiredCaps: MobileRemoteCapability[] = shouldPaste ? ["clipboard", "input"] : ["clipboard"];
+  const denied = await guardRemoteAction("remotePasteImage", requiredCaps, "paste", ctx);
   if (denied) return { ok: false, pasted: false, error: denied };
 
   const validated = validatePasteImageInput(input);
@@ -1154,18 +1303,22 @@ export async function runMobileRemotePasteImage(
     return { ok: false, pasted: false, error: validated.error };
   }
 
-  const grabsDir = join(homedir(), "Pictures", "Scout Grabs");
-  ensurePrivateDir(grabsDir);
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filePath = join(grabsDir, `scout-grab-${stamp}-${randomUUID().slice(0, 6)}.${validated.ext}`);
-  writeFileSync(filePath, validated.bytes, { mode: 0o600 });
+  // Ephemeral private temp file (0o600), unlinked unconditionally in finally
+  // so repeated uploads cannot accumulate on disk.
+  const tmpDir = join(homedir(), ".openscout", "run", "remote-tmp");
+  ensurePrivateDir(tmpDir);
+  const tmpFile = join(tmpDir, `paste-${randomUUID()}.${validated.ext}`);
+  writeFileSync(tmpFile, validated.bytes, { mode: 0o600 });
 
   const copyScript = `
 ObjC.import('AppKit');
+ObjC.import('Foundation');
 function run(argv) {
   const path = argv[0];
-  const img = $.NSImage.alloc.initWithContentsOfFile(path);
-  if (!img) return JSON.stringify({ ok: false, error: 'Could not read image' });
+  const data = $.NSData.dataWithContentsOfFile(path);
+  if (!data) return JSON.stringify({ ok: false, error: 'Could not read image' });
+  const img = $.NSImage.alloc.initWithData(data);
+  if (!img) return JSON.stringify({ ok: false, error: 'Invalid image payload' });
   const pb = $.NSPasteboard.generalPasteboard;
   pb.clearContents;
   const ok = Boolean(pb.writeObjects($.NSArray.arrayWithObject(img)));
@@ -1174,7 +1327,10 @@ function run(argv) {
 `;
 
   try {
-    const { stdout } = await runOsascript(["-l", "JavaScript", "-e", copyScript, "--", filePath], {
+    const revokedBeforeCopy = verifyAdmitted("remotePasteImage", ctx);
+    if (revokedBeforeCopy) return { ok: false, pasted: false, error: revokedBeforeCopy };
+
+    const { stdout } = await runOsascript(["-l", "JavaScript", "-e", copyScript, "--", tmpFile], {
       timeoutMs: 4_000,
     });
     const copied = parseJxaJson<{ ok: boolean; error?: string }>(stdout, { ok: false, error: "Clipboard write failed" });
@@ -1183,15 +1339,16 @@ function run(argv) {
       return { ok: false, pasted: false, error: copied.error ?? "Clipboard write failed" };
     }
 
-    const shouldPaste = input.paste !== false;
     if (shouldPaste) {
+      const revokedBeforePaste = verifyAdmitted("remotePasteImage", ctx);
+      if (revokedBeforePaste) return { ok: false, pasted: false, error: revokedBeforePaste };
       await runOsascript([
         "-e",
         `tell application "System Events" to keystroke "v" using {command down}`,
       ], { timeoutMs: 3_000 });
     }
     auditRemote("remotePasteImage", ctx?.deviceId, "ok", `${validated.ext} ${validated.bytes.length}B paste=${shouldPaste}`);
-    return { ok: true, path: filePath, pasted: shouldPaste };
+    return { ok: true, pasted: shouldPaste };
   } catch (error) {
     auditRemote("remotePasteImage", ctx?.deviceId, "error");
     return {
@@ -1199,6 +1356,8 @@ function run(argv) {
       pasted: false,
       error: sanitizeRemoteError(error, "Image copied, but Cmd+V paste failed on Mac."),
     };
+  } finally {
+    try { rmSync(tmpFile, { force: true }); } catch {}
   }
 }
 
@@ -1211,7 +1370,7 @@ export async function runMobileRemoteDictate(
   if (!isMacOS()) {
     return { ok: false, available: false, error: "Host dictation is only supported on macOS hosts." };
   }
-  const denied = await guardRemoteAction("remoteDictate", "dictate", "dictate", ctx);
+  const denied = await guardRemoteAction("remoteDictate", ["dictate"], "dictate", ctx);
   if (denied) return { ok: false, available: false, error: denied };
 
   if (!hostDictationAvailable()) {
@@ -1221,6 +1380,9 @@ export async function runMobileRemoteDictate(
       error: "Host microphone dictation is not running; use on-device dictation instead.",
     };
   }
+
+  const revokedBeforeExec = verifyAdmitted("remoteDictate", ctx);
+  if (revokedBeforeExec) return { ok: false, available: true, error: revokedBeforeExec };
 
   const cmd = input.action === "status"
     ? { cmd: "status" }
