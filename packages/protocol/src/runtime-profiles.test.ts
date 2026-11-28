@@ -10,6 +10,8 @@ describe("runtime profile syntax", () => {
   test("publishes only deterministic reserved natural-language names", () => {
     expect(SCOUT_RESERVED_RUNTIME_PROFILE_IDS).toEqual([
       "antigravity",
+      "carbon",
+      "neon",
       "fable",
       "kimi",
       "grok",
@@ -18,6 +20,8 @@ describe("runtime profile syntax", () => {
       "opencode",
     ]);
     expect(normalizeReservedRuntimeProfileId(" FABLE ")).toBe("fable");
+    expect(normalizeReservedRuntimeProfileId(" CARBON ")).toBe("carbon");
+    expect(normalizeReservedRuntimeProfileId(" Neon ")).toBe("neon");
     expect(normalizeReservedRuntimeProfileId(" OC ")).toBe("oc");
     expect(normalizeReservedRuntimeProfileId("Composer Review")).toBeNull();
   });
