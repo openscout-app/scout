@@ -4,9 +4,16 @@ Status: proposal. Nothing in this spec is implemented. "Current behavior"
 describes `main` as of 2026-11-28 (e22da43d).
 
 Scout installs one hook script into every lifecycle point of every harness it
-supports, once. Every hook calls the same core function in Scout,
-`onLifecycle(event)`, whatever the harness and whatever the point. To change
-what Scout does at any point, for any harness, change that one function. Nobody
+supports, once. From there, three layers:
+
+- **Adapters**, one per harness. Each turns that harness's hook input into one
+  common event. Anything special about a harness is handled in its adapter.
+- **Moments**, one Scout function per lifecycle moment (`turnEnd`, `compact`,
+  `subagentEnd` and so on). Each is the same for every harness.
+- **One dispatcher**, `onLifecycle(event)`, which every hook reaches and which
+  calls the function for the event's moment.
+
+To change what Scout does at a moment, change that moment's function. Nobody
 edits Claude Code's settings, Codex's config or Antigravity's `hooks.json`
 again.
 
@@ -54,9 +61,10 @@ behavior is the worked example at the end of this spec.
    Scout lifecycle points.
 2. Install a hook on every point each harness offers, once, with
    `scout hooks apply`.
-3. Route every hook, from every harness and every point, to one core function.
-   Changing behavior means changing that function.
-4. Never slow down or break a harness turn because of Scout.
+3. Give each lifecycle moment one Scout function, shared by every harness.
+   Changing behavior at a moment means changing that function.
+4. Keep everything harness-specific in that harness's adapter.
+5. Never slow down or break a harness turn because of Scout.
 
 ## Exclusions
 
@@ -80,8 +88,8 @@ behavior is the worked example at the end of this spec.
 | `compact` | `PreCompact` | None | None | Harness hook |
 | `sessionEnd` | `SessionEnd` | To verify | None | Broker: session ended |
 
-A point a harness does not offer stays empty for that harness. The core
-function simply never sees that point from that harness.
+A point a harness does not offer stays empty for that harness. That moment's
+function simply never runs for that harness.
 
 ## Design
 
@@ -90,8 +98,9 @@ function simply never sees that point from that harness.
 - Every installed hook runs the same wrapper, `openscout-lifecycle.sh`. The
   wrapper runs `exec <scout> lifecycle <harness> <hook-point>` and reads the
   hook's JSON on stdin.
-- `scout lifecycle` converts the input into a lifecycle event. It posts the
-  event to the broker at `POST /v1/lifecycle`, with a 1 s timeout.
+- `scout lifecycle` passes the input to that harness's adapter, which returns
+  a lifecycle event. It posts the event to the broker at `POST /v1/lifecycle`,
+  with a 1 s timeout.
 - `scout lifecycle` always exits 0 and prints nothing a harness would act on.
   If the broker is down or slow, it drops the event and records the drop in a
   counter, which `scout hooks status` shows.
@@ -100,8 +109,8 @@ function simply never sees that point from that harness.
   they are.
 - `scout hooks status` reports each point per harness as applied, absent or
   stale.
-- The wrapper never changes when Scout's behavior changes. Only the core
-  function changes, so `scout hooks apply` is needed again only when a harness
+- The wrapper never changes when Scout's behavior changes. Only the moment
+  functions change, so `scout hooks apply` is needed again only when a harness
   adds a hook point or changes its format.
 
 ### The lifecycle event
@@ -141,31 +150,80 @@ Payload by point:
   completion, with `harness: "scout"`. The broker drops the same turn from the
   harness hook. The key is the session id plus the reply message id.
 
-### One core function
+### Code layout
 
-Every lifecycle event, from every harness and every point, goes to one
-function in `packages/runtime/src/lifecycle.ts`:
+```text
+packages/runtime/src/lifecycle/
+  adapters/
+    claude.ts        Claude Code hook input -> LifecycleEvent
+    codex.ts         Codex notification -> LifecycleEvent
+    antigravity.ts   Antigravity hook input -> LifecycleEvent
+    scout.ts         broker-launched sessions -> LifecycleEvent
+  moments.ts         one function per moment, shared by every harness
+  index.ts           onLifecycle: the one dispatcher
+```
+
+### Adapters: one per harness
+
+```ts
+type LifecycleAdapter = {
+  harness: "claude" | "codex" | "antigravity" | "scout";
+  /** Which of the harness's hook points map to which moment. */
+  points: Partial<Record<LifecyclePoint, string>>;
+  /** The harness's raw hook input, as a common event; null to ignore it. */
+  toEvent(point: LifecyclePoint, input: unknown): LifecycleEvent | null;
+};
+```
+
+- Everything harness-specific lives here: field names, matchers, how a session
+  id or reply text is found, which tools count, and quirks. For example,
+  Antigravity's adapter applies its tool matcher, and Codex's adapter reads the
+  reply from its turn-complete notification.
+- An adapter returns `null` for input it should ignore, such as an Antigravity
+  `PostToolUse` for a tool outside its matcher.
+- `scout hooks apply` reads each adapter's `points` to know which hook points
+  to install.
+- Adding a harness means adding one adapter. The moments do not change.
+
+### Moments: one function each, shared by every harness
+
+```ts
+export const moments: Record<LifecyclePoint, Moment> = {
+  sessionStart: async (event, scout) => {},
+  promptSubmit: async (event, scout) => {},
+  toolBefore:   async (event, scout) => {},
+  toolAfter:    async (event, scout) => {},
+  turnEnd:      async (event, scout) => {
+    await run(event, scout, [presentDecisions]);
+  },
+  subagentEnd:  async (event, scout) => {},
+  compact:      async (event, scout) => {},
+  sessionEnd:   async (event, scout) => {},
+};
+```
+
+- There is one function per moment, never one per harness. `turnEnd` is the
+  same code whether the turn ended in Claude Code, Codex, Antigravity or a
+  session Scout launched.
+- A moment's function is a list of small named behaviors, run by `run`. `run`
+  catches and records an error in one behavior, and the next one still runs.
+- A moment never checks which harness sent the event. A difference between
+  harnesses belongs in an adapter. When a moment genuinely needs to know, it
+  reads `event.harness`, and the spec for that behavior says why.
+- `scout` is the broker's own services: posting to the feed, notifying the
+  operator, reading a task and, once it exists, building a proposal page.
+
+### The dispatcher
 
 ```ts
 export async function onLifecycle(event: LifecycleEvent, scout: Scout): Promise<void> {
-  await run(event, [
-    presentDecisions,
-    // add a behavior here
-  ], scout);
+  record(event);
+  await moments[event.point](event, scout);
 }
 ```
 
-- There is one entry point, not one per harness and not one per point. The
-  hook script, the broker route and the core function are each written once.
-- Harness differences end at the hook script. By the time an event reaches
-  `onLifecycle`, it has the same shape whichever harness sent it.
-- A behavior is a small named function that receives every event and returns
-  early when the event is not its concern. For example, `presentDecisions`
-  acts only on `turnEnd`.
-- `run` calls every behavior in the list, in order. It catches and records an
-  error in one behavior, and the next behavior still runs.
-- `scout` is the broker's own services: posting to the feed, notifying the
-  operator, reading a task and, once it exists, building a proposal page.
+- Every hook from every harness, and every broker-launched event, reaches
+  `onLifecycle`. There is no other entry point.
 - `onLifecycle` runs after the broker has answered the hook. It can never
   delay a harness turn.
 
@@ -180,18 +238,18 @@ export async function onLifecycle(event: LifecycleEvent, scout: Scout): Promise<
 
 ```ts
 async function presentDecisions(event: LifecycleEvent, scout: Scout) {
-  if (event.point !== "turnEnd") return;
   const { reply, scope } = event.payload;
   if (scope.kind !== "document" || !asksToDecide(reply)) return;
   await scout.present({ taskId: event.taskId, markdown: reply });
 }
 ```
 
-Adding it is one line in `onLifecycle`'s list. It then runs for Claude Code,
-Antigravity, Codex and sessions Scout launched alike.
+Adding it is one entry in `turnEnd`'s list. It then runs for Claude Code,
+Antigravity, Codex and sessions Scout launched alike, because each adapter
+already delivers the reply in the same field.
 
 `asksToDecide` and `scout.present` belong to the proposal page feature, which
-has its own spec. The point here is where the trigger lives: in the one core
+has its own spec. The point here is where the trigger lives: in one moment's
 function, the same for every harness.
 
 ## Failure behavior
@@ -199,7 +257,8 @@ function, the same for every harness.
 | Failure | Behavior | Recovery |
 |---|---|---|
 | Broker down or slower than 1 s | The hook exits 0. The event is dropped and counted. | `scout hooks status` shows the count. Nothing to recover. |
-| A behavior throws | The error is recorded. The next behavior in the list still runs. The harness is unaffected. | Fix the behavior in Scout. |
+| A behavior throws | The error is recorded. The next behavior in the moment's list still runs. The harness is unaffected. | Fix the behavior in Scout. |
+| An adapter cannot read an input | The adapter returns `null`, and the input is counted as unreadable. | `scout hooks status` shows the count per harness. Fix the adapter. |
 | A harness changes its hook format | `scout hooks status` reports `stale`. | `scout hooks apply`. |
 | A harness lacks a point | That point's function never runs for that harness. | None needed. |
 
@@ -211,28 +270,29 @@ function, the same for every harness.
 2. With the broker stopped, a Claude Code turn completes normally, and
    `scout hooks status` shows the dropped events.
 3. A turn in a session Scout launched produces one `turnEnd`, not two.
-4. A behavior added to `onLifecycle`'s list runs for Claude Code, Antigravity
-   and Scout-launched sessions without any change to their settings files.
+4. A behavior added to `turnEnd` runs for Claude Code, Antigravity and
+   Scout-launched sessions without any change to their settings files.
 5. A behavior that throws does not stop the next behavior in the list, and the
    harness turn is not delayed.
 6. Every installed hook, for every harness and point, reaches `onLifecycle`.
    No other entry point exists.
-7. `scout hooks remove` removes every Scout entry and leaves non-Scout hooks in
+7. No code in `moments.ts` branches on harness without a stated reason. A
+   change in how a harness reports something touches only its adapter.
+8. `scout hooks remove` removes every Scout entry and leaves non-Scout hooks in
    each settings file byte-for-byte unchanged.
 
 ## Implementation steps
 
 Each step can ship on its own.
 
-1. The lifecycle module with `onLifecycle` and an empty behavior list,
-   `POST /v1/lifecycle`, the event buffer and `scout lifecycle tail`. The
-   broker sends `turnEnd` and `sessionEnd` to `onLifecycle` for sessions it
-   launched.
-2. The `scout lifecycle` command, the wrapper, and `scout hooks apply` for
-   every Claude Code point in the map.
-3. Antigravity: its existing entry also posts lifecycle events.
+1. The lifecycle module: `onLifecycle`, empty moments, `POST /v1/lifecycle`,
+   the event buffer and `scout lifecycle tail`. The `scout` adapter sends
+   `turnEnd` and `sessionEnd` for sessions the broker launched.
+2. The `scout lifecycle` command, the wrapper, the Claude Code adapter, and
+   `scout hooks apply` for every Claude Code point in the map.
+3. The Antigravity adapter. Its existing entry also posts lifecycle events.
 4. The first behavior, `presentDecisions`, once the proposal page exists.
-5. Codex, after its hook surface is confirmed.
+5. The Codex adapter, after its hook surface is confirmed.
 
 ## Open questions
 
