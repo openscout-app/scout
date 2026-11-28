@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/instance.ts",
+  "symbol": "node:child_process",
+  "category": "boot",
+  "reason": "imports execFileSync to resolve macOS confstr(_CS_DARWIN_USER_TEMP_DIR) once on boot for short per-user Unix socket paths",
+  "owner": "runtime"
+}

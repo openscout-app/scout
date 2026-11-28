@@ -1,0 +1,7 @@
+{
+  "path": "packages/runtime/src/instance.ts",
+  "symbol": "execFileSync",
+  "category": "boot",
+  "reason": "resolves macOS confstr(_CS_DARWIN_USER_TEMP_DIR) once on boot via /usr/bin/getconf for short per-user Unix socket paths",
+  "owner": "runtime"
+}
