@@ -18,7 +18,7 @@ const facadeSources = {
     "pairing-local-socket", "inherited-descriptors", "broker-core-service", "repo-watch",
   ],
   config: [
-    "support-paths", "scout-home", "local-config", "user-config", "user-config-fields",
+    "support-paths", "scout-home", "home-migrate", "local-config", "user-config", "user-config-fields",
     "crew", "instance", "path-trust",
   ],
   setup: ["./setup.js", "onboarding", "diagnostic-report", "core-report", "system-probes"],

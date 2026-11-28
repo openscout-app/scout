@@ -49,6 +49,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "crew": node("--context-root= --fallback= --host= --note= --pool= --project", { "list": node(), "set": node(), "unset": node(), "check": node(), "preset": node("", { "save": node(), "use": node(), "list": node() }) }),
   "role": node("--actor= --agent= --all --allow-multiple --by= --checkpoint= --intent= --kind= --limit= --mission= --note= --project= --role= --standing --status=", { "catalog": node(), "list": node(), "assign": node(), "revoke": node(), "log": node(), "log-append": node() }),
   "env": node("--context-root="),
+  "home": node("--dry-run", { "status": node(), "migrate": node("--dry-run") }),
   "instance": node("--force --purge", { "list": node(), "release": node(), "repair": node() }),
   "whoami": node("--context-root="),
   "where": node("--corrected-to= --explain --full --kind= --machine= --outcome= --target=", { "index": node(), "status": node(), "feedback": node() }),

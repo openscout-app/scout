@@ -16,8 +16,8 @@ export function shouldEnsureBrokerUptodateForCommand(command: string | null, arg
   if (command === "web" || command === "auth") return false;
   // Editing personal files, reading catalogs and previewing a run never dispatch work.
   if (command === "skills" || (command === "run" && args.includes("--dry-run"))) return false;
-  // Settings are local files the CLI reads and writes; the broker is not involved.
-  if (command === "settings") return false;
+  // Settings and home layout commands operate on local files and must never restart the broker.
+  if (command === "settings" || command === "home") return false;
   // Worktree GC only reads the broker to protect running sessions.
   if (command === "worktree") return false;
   return command !== "chat" && command !== "status" && command !== "report" && command !== "feedback" && command !== "mcp" && command !== "statusline" && command !== "permission-hook" && command !== "search";

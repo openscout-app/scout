@@ -403,6 +403,12 @@
       "import": "./dist/scout-home.js",
       "default": "./dist/scout-home.js"
     },
+    "./home-migrate": {
+      "bun": "./src/home-migrate.ts",
+      "types": "./dist/home-migrate.d.ts",
+      "import": "./dist/home-migrate.js",
+      "default": "./dist/home-migrate.js"
+    },
     "./mesh-bridge-config": {
       "bun": "./src/mesh-bridge-config.ts",
       "types": "./dist/mesh-bridge-config.d.ts",
