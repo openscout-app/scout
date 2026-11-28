@@ -18,8 +18,10 @@ edits Claude Code's settings, Codex's config or Antigravity's `hooks.json`
 again.
 
 The first behavior this enables: when a turn ends with a long reply that asks
-the operator to decide something, Scout builds a visual proposal from it. That
-behavior is the worked example at the end of this spec.
+the operator to decide something, Scout builds a visual proposal from it. The
+link reaches the operator where they are reading: a card in the Home feed for
+every harness, and one line at the end of the reply where the harness allows
+it. That behavior is the worked example at the end of this spec.
 
 ## Current behavior
 
@@ -66,6 +68,8 @@ behavior is the worked example at the end of this spec.
    Changing behavior at a moment means changing that function.
 4. Keep everything harness-specific in that harness's adapter.
 5. Never slow down or break a harness turn because of Scout.
+6. Keep continuity: when Scout makes something from a turn, its link appears
+   in the conversation the operator is reading, not only somewhere else.
 
 ## Exclusions
 
@@ -97,32 +101,40 @@ function simply never runs for that harness.
 ### One hook script, one command
 
 Every installed hook runs the same wrapper, `openscout-lifecycle.sh`, with
-two arguments: the harness and the hook point.
+the harness and the hook point as arguments, and `reply` as a third argument
+on a reply point (see "One line back into the reply").
 
 The wrapper must cost almost nothing, because `PreToolUse` and `PostToolUse`
 fire on every tool call, and every hook is installed even while its moment is
-a no-op. So the wrapper does not start the Scout CLI and does not wait for the
-broker:
+a no-op. So the wrapper does not start the Scout CLI, and on every point but a
+reply point it does not wait for the broker:
 
 ```sh
 #!/bin/sh
 # Scout lifecycle hook. `scout hooks remove` takes it out.
 input=$(cat)
-printf '%s' "$input" | curl -s -m 1 --unix-socket "<broker socket>" \
-  -H 'content-type: application/json' --data-binary @- \
-  "http://scout/v1/lifecycle/raw?harness=$1&point=$2" >/dev/null 2>&1 &
+post() {
+  printf '%s' "$input" | curl -sf -m 1 --unix-socket "<broker socket>" \
+    -H 'content-type: application/json' --data-binary @- \
+    "http://scout/v1/lifecycle/raw?harness=$1&point=$2"
+}
+if [ "$3" = "reply" ]; then
+  post "$1" "$2"
+else
+  post "$1" "$2" >/dev/null 2>&1 &
+fi
 exit 0
 ```
 
-- It reads the hook's JSON, starts the post in the background and exits 0 at
+- On an ordinary point it starts the post in the background and exits 0 at
   once. The harness never waits on Scout.
 - It posts the raw input. The broker runs the harness's adapter, so adapters
   live in one process and change without reinstalling anything.
-- It prints nothing a harness would act on.
-- If the broker is down or slow, the background post fails silently and the
-  event is lost. The broker cannot count drops it never saw, so
-  `scout hooks status` instead reports the last event received per harness
-  and point.
+- On an ordinary point it prints nothing. On a reply point it prints only what
+  the broker returns, which is empty unless a behavior added a line.
+- If the broker is down or slow, the post fails silently and the event is
+  lost. The broker cannot count drops it never saw, so `scout hooks status`
+  instead reports the last event received per harness and point.
 - `scout hooks apply` writes the broker's socket path into the wrapper. If the
   socket path changes, `scout hooks status` reports the wrapper as stale.
 - The wrapper never changes when Scout's behavior changes. Only adapters and
@@ -146,6 +158,41 @@ exit 0
   stale, and the time of the last event received.
 - The existing `PermissionRequest` entry stays separate and is unaffected by
   apply and remove of lifecycle hooks.
+
+### One line back into the reply
+
+When a behavior makes something from a turn, such as a proposal page, the
+operator should find its link in the conversation they are reading. Scout does
+this in two ways, and neither rewrites what the agent wrote.
+
+- **Feed card, every harness.** The behavior posts a card to the Home feed with
+  the link. The card names the session and task it came from and opens them.
+  This needs nothing from the harness.
+- **One line in the reply, where the harness allows it.** `turnEnd` is a reply
+  point for a harness whose adapter says so. On a reply point the wrapper waits
+  up to 1 second for the broker's answer and prints it.
+
+For a reply point:
+
+- A behavior calls `say(line)` to add one line. The broker answers when every
+  behavior has returned or after 500 ms, whichever comes first. A behavior that
+  has slow work, such as building the page, calls `say` first and keeps working
+  after the answer is sent.
+- With no lines, the broker answers with an empty body, and the turn ends as it
+  would without Scout.
+- The adapter turns the lines into the harness's own output. For Claude Code,
+  that is a `Stop` result of `{"decision": "block", "reason": "End your reply
+  with this line: …"}`, which makes Claude continue and write the line. The
+  adapter returns nothing when the hook input has `stop_hook_active: true`, so a
+  turn is never held twice.
+- For a session Scout launched, the `scout` adapter posts the line as a message
+  in the task's thread, right after the reply.
+- A harness with no way to continue a turn has no reply point. Its operator gets
+  the feed card only.
+
+The link must work by the time the operator clicks it, so the behavior reserves
+the page's URL before calling `say`, and the page shows "Building" until it is
+ready.
 
 ### The lifecycle event
 
@@ -206,6 +253,10 @@ type LifecycleAdapter = {
   points: Partial<Record<LifecyclePoint, string>>;
   /** The harness's raw hook input, as a common event; null to ignore it. */
   toEvent(point: LifecyclePoint, input: unknown): LifecycleEvent | null;
+  /** Points where the harness lets a hook add to the reply. */
+  replyPoints?: LifecyclePoint[];
+  /** Lines from behaviors, as the harness's hook output; null for none. */
+  toReply?(lines: string[], input: unknown): string | null;
 };
 ```
 
@@ -258,8 +309,9 @@ export async function onLifecycle(event: LifecycleEvent, scout: Scout): Promise<
 
 - Every hook from every harness, and every broker-launched event, reaches
   `onLifecycle`. There is no other entry point.
-- `onLifecycle` runs after the broker has answered the hook. It can never
-  delay a harness turn.
+- On an ordinary point, `onLifecycle` runs after the broker has answered the
+  hook, so it can never delay a harness turn. On a reply point, the broker
+  answers after at most 500 ms, whatever the behaviors are still doing.
 
 ### Visibility
 
@@ -271,16 +323,20 @@ export async function onLifecycle(event: LifecycleEvent, scout: Scout): Promise<
 ## Worked example: present decisions
 
 ```ts
-async function presentDecisions(event: LifecycleEvent, scout: Scout) {
+async function presentDecisions(event: LifecycleEvent, scout: Scout, say: Say) {
   const { reply, scope } = event.payload;
   if (scope.kind !== "document" || !asksToDecide(reply)) return;
-  await scout.present({ taskId: event.taskId, markdown: reply });
+  const page = scout.reservePage({ taskId: event.taskId });
+  say(`Proposal: ${page.url}`);
+  await scout.feed.post({ format: "proposal", url: page.url, event });
+  await page.build({ markdown: reply });
 }
 ```
 
 Adding it is one entry in `turnEnd`'s list. It then runs for Claude Code,
 Antigravity, Codex and sessions Scout launched alike, because each adapter
-already delivers the reply in the same field.
+already delivers the reply in the same field. In Claude Code the operator sees
+the link as the reply's last line. Everywhere, the feed has the card.
 
 `asksToDecide` and `scout.present` belong to the proposal page feature, which
 has its own spec. The point here is where the trigger lives: in one moment's
@@ -290,7 +346,8 @@ function, the same for every harness.
 
 | Failure | Behavior | Recovery |
 |---|---|---|
-| Broker down or slow | The hook has already exited 0. The background post fails and the event is lost. | `scout hooks status` shows the last event received per point, so a gap is visible. Nothing to recover. |
+| Broker down or slow | The hook exits 0 and the event is lost. | `scout hooks status` shows the last event received per point, so a gap is visible. |
+| Broker slow on a reply point | The wrapper gives up after 1 second and prints nothing. The turn ends normally, without the line. | None. The event is lost, so no feed card either. |
 | A behavior throws | The error is recorded. The next behavior in the moment's list still runs. The harness is unaffected. | Fix the behavior in Scout. |
 | An adapter cannot read an input | The adapter returns `null`, and the input is counted as unreadable. | `scout hooks status` shows the count per harness. Fix the adapter. |
 | A harness changes its hook format | `scout hooks status` reports `stale`. | `scout hooks apply`. |
@@ -320,6 +377,12 @@ function, the same for every harness.
 10. `scout hooks remove` removes every Scout entry and the wrapper script, and
     leaves non-Scout hooks in each settings file byte-for-byte unchanged.
     Apply followed by remove restores each settings file exactly.
+11. A Claude Code turn whose `turnEnd` behavior calls `say` ends with that line
+    in the reply, written once. A turn where no behavior calls `say` ends
+    exactly as it would without Scout.
+12. The same turn in Antigravity or Codex, and in a session Scout launched,
+    puts the link in the Home feed. In a session Scout launched, it is also a
+    message in the task's thread.
 
 ## Implementation steps
 
@@ -333,9 +396,11 @@ Each step can ship on its own.
    - the Claude Code, Antigravity and `scout` adapters.
    After this step every hook is in place, and nothing a harness does has
    changed.
-2. The first behavior, `presentDecisions`, once the proposal page exists.
+2. Reply points and `say`, with the Claude Code and `scout` adapters'
+   `toReply`, and the proposal feed card.
+3. The first behavior, `presentDecisions`, once the proposal page exists.
    From here on, new behavior is a change to a moment, never to hooks.
-3. The Codex adapter and its hook points, after its hook surface is confirmed.
+4. The Codex adapter and its hook points, after its hook surface is confirmed.
 
 ## Open questions
 
@@ -345,12 +410,15 @@ Each step can ship on its own.
 2. **Permissions.** Should `PermissionRequest` become a lifecycle point with a
    function that can answer, so permission handling lives in the same module?
    That point blocks the harness, so it needs its own time limit and rules.
-3. **Lost events.** Should the wrapper append an event to a small local file
-   when the post fails, so the broker can read it later? This adds a write to
-   every hook while the broker is down.
-4. **Operator behaviors.** Should the operator be able to add a behavior
+3. **Reply points beyond Claude Code.** Can an Antigravity `Stop` hook, or any
+   Codex hook, make the agent continue a turn? If so, its adapter gets a reply
+   point. Until then, those harnesses get the feed card only.
+4. **Lost events.** While the broker is down, events are lost. If that turns
+   out to matter, the wrapper could write failed posts to a local spool for
+   the broker to replay. Version 1 does without it.
+5. **Operator behaviors.** Should the operator be able to add a behavior
    without changing Scout, for example as a sandboxed file run in the
    task-callback engine? Version 1 keeps behavior in Scout's code.
-5. **Privacy.** `turnEnd` carries up to 20,000 characters of reply text into
+6. **Privacy.** `turnEnd` carries up to 20,000 characters of reply text into
    the broker's memory buffer. That is acceptable on the operator's own node.
    Review it before events leave the node.
