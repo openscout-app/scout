@@ -49,6 +49,7 @@ import {
   type PermissionSupervisorVerdict,
 } from "./permission-supervisor.js";
 import { appendContinuationAudit, continuationPolicyPath, type ContinuationAuditEntry } from "./continuation/grants.js";
+import { FirstSeenPermissionTracker } from "./continuation/first-seen.js";
 import { readContinuationAudit } from "./continuation/permission-log.js";
 import { PermissionSignals, signalCallFor } from "./continuation/signals.js";
 import { configureAcpPermissionSignals } from "./acp-agent-invocation.js";
@@ -3518,9 +3519,12 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
  * last week of the record so a restart keeps its memory.
  */
 const permissionSignals = new PermissionSignals({ policyPath: continuationPolicyPath() });
+const firstSeenPermissions = new FirstSeenPermissionTracker();
 configureAcpPermissionSignals(permissionSignals);
 try {
-  permissionSignals.seed(readContinuationAudit(undefined, Date.now() - 7 * 24 * 3_600_000));
+  const recentAudit = readContinuationAudit(undefined, Date.now() - 30 * 24 * 3_600_000);
+  permissionSignals.seed(recentAudit.filter((entry) => entry.at >= Date.now() - 7 * 24 * 3_600_000));
+  firstSeenPermissions.seed(recentAudit);
 } catch (error) {
   console.warn(`[openscout-runtime] permission signals could not read the record: ${error instanceof Error ? error.message : String(error)}`);
 }
@@ -3699,6 +3703,13 @@ function auditSupervisorAnswer(input: {
   verdict: PermissionSupervisorVerdict;
   agentId?: string;
 }): void {
+  const observed = input.outcome === "sent" && input.verdict.act === "continue"
+    ? firstSeenPermissions.observeAutoAllow({
+      projectRoot: input.projectRoot,
+      tool: input.tool,
+      command: input.command,
+    })
+    : null;
   writeAudit({
     at: Date.now(), outcome: input.outcome, decision: input.verdict.act === "deny" ? "denied" : "approved",
     via: "watcher", backend: input.backend,
@@ -3710,12 +3721,24 @@ function auditSupervisorAnswer(input: {
     ...(input.verdict.ruleScope ? { ruleScope: input.verdict.ruleScope } : {}),
     ...auditOverrides(input.verdict.overrides),
     ...auditSignal(input.verdict),
+    ...(observed?.firstSeen ? { firstSeen: true } : {}),
     ...auditAgent(input.agentId),
     level: input.verdict.level ?? "ask", grant: input.verdict.grant,
     command: input.command ? input.command.slice(0, 500) : null, risk: input.verdict.risk,
     keys: null, source: "rules", reason: input.verdict.reason,
   });
-  if (input.outcome === "sent") countSupervisorAnswer(input.backend, input.tool, input.verdict.reason);
+  if (input.outcome === "sent") {
+    countSupervisorAnswer(input.backend, input.tool, input.verdict.reason);
+    if (observed?.firstSeen) {
+      operatorAttentionService.queueAutoAllowedNotice({
+        agentId: input.agentId,
+        projectRoot: input.projectRoot,
+        label: observed.label,
+        rule: input.verdict.rule ?? input.verdict.reason,
+        sessionId: input.sessionId,
+      });
+    }
+  }
 }
 
 function countSupervisorAnswer(backend: string, tool: string | undefined, reason: string): void {

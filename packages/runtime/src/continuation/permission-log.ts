@@ -57,6 +57,8 @@ export type PermissionRecordRow = {
   signalSource?: string;
   /** True when the signal, not the rules, made this an ask. */
   held?: boolean;
+  /** True when this auto-approval was the first time this shape was allowed in the project. */
+  firstSeen?: boolean;
   /** The rule as the page shows it: `allow Bash(rm -rf ./dist:*) (overrides default deny Bash(rm -rf:*))`. */
   label: string;
   risk: string;
@@ -163,6 +165,7 @@ export function permissionRecordRow(entry: ContinuationAuditEntry): PermissionRe
     ...(entry.signalLine ? { signalLine: entry.signalLine } : {}),
     ...(entry.signalSource ? { signalSource: entry.signalSource } : {}),
     ...(entry.held ? { held: true } : {}),
+    ...(entry.firstSeen ? { firstSeen: true } : {}),
     label: ruleLabel(entry.list ?? (decision === "answered" ? "operator" : "mode"), entry.rule ?? (decision === "answered" ? "operator" : "mode:auto"), entry.overrides),
     risk: entry.risk,
     reason: redactSecrets(entry.reason),
