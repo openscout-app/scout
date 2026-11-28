@@ -200,6 +200,18 @@ import {
   type TrustedPeerGrant,
 } from "./mesh-trust-enrollment.js";
 import { normalizeConversationTitle } from "./conversation-title.js";
+import { continuationAuditPath, continuationPolicyPath, loadContinuationPolicy } from "./continuation/grants.js";
+import {
+  PERMISSION_DECISIONS,
+  PermissionRuleError,
+  appendPermissionRule,
+  dryRunPermissionRule,
+  permissionRulesView,
+  permissionStats,
+  readPermissionLog,
+  type PermissionLogQuery,
+} from "./continuation/permission-log.js";
+import type { PermissionList } from "./continuation/rules.js";
 
 const ACTIVE_FLIGHT_LIST_STATES = new Set(["queued", "waking", "running", "waiting"]);
 
@@ -308,12 +320,16 @@ export type BrokerHttpRouterDeps = {
   /** Cross-machine approvals: share this machine's with chosen peers, watch theirs. */
   meshApprovals?: MeshApprovalsHttpDeps;
   permissionService?: BrokerPermissionService;
+  /** Where the permission rules and their record live; defaults to the operator's own files. */
+  permissionFiles?: { policyPath: string; auditPath: string };
   /** Decision cards on operator asks: reads and answers. */
   decisionCards?: BrokerDecisionCardService;
   /** Ready: set notify on a running task, and the operator's Continue or Hold. */
   taskReady?: Pick<BrokerTaskReadyService, "setNotify" | "decide">;
   /** Permission dialogs of native Claude Code sessions, opened and waited on by their hook. */
   nativePermissions?: Pick<NativePermissionRequests, "open" | "wait">;
+  /** Tool output from a post-tool hook: hijack text raises the session's suspicion. It never decides anything. */
+  toolOutput?: (input: { harness: string; sessionId: string; cwd: string; toolName?: string; output: string }) => { suspicious: string | null };
   /** Scout's entries in harness settings: `scout hooks` reads, applies and removes them. */
   harnessHooks?: Pick<HarnessHooks, "status" | "apply" | "remove">;
   journal: BrokerHttpJournal;
@@ -800,6 +816,64 @@ export function createBrokerHttpRouter(
     }
     return;
   }
+  if (url.pathname === "/v1/permissions/log" || url.pathname === "/v1/permissions/stats"
+    || url.pathname === "/v1/permissions/rules" || url.pathname === "/v1/permissions/rules/dry-run") {
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest) {
+      json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return;
+    }
+    // The record holds every session's commands: only the operator reads it, as only the operator writes rules.
+    if (url.pathname !== "/v1/permissions/rules" && !brokerAttributionRequiresOperator(request.transportContext)) {
+      json(response, 403, { error: "operator_attribution_required" }); return;
+    }
+    const files = deps.permissionFiles ?? { policyPath: continuationPolicyPath(), auditPath: continuationAuditPath() };
+    const number = (name: string) => {
+      const value = Number(url.searchParams.get(name) ?? "");
+      return url.searchParams.has(name) && Number.isFinite(value) ? value : undefined;
+    };
+    const text = (name: string) => url.searchParams.get(name)?.trim() || undefined;
+    try {
+      if (method === "GET" && url.pathname === "/v1/permissions/log") {
+        const decision = text("decision");
+        if (decision && !(PERMISSION_DECISIONS as readonly string[]).includes(decision)) throw new PermissionRuleError("decision must be approved, asked, denied, closed or answered");
+        const query = {
+          since: number("since"), until: number("until"), limit: number("limit"),
+          decision: decision as PermissionLogQuery["decision"], agent: text("agent"), rule: text("rule"),
+          tool: text("tool"), project: text("project"), via: text("via"), signal: text("signal"),
+        };
+        json(response, 200, { records: readPermissionLog(query, files.auditPath) });
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/permissions/stats") {
+        json(response, 200, permissionStats({ since: number("since"), until: number("until"), agent: text("agent"), project: text("project") }, files.auditPath));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/permissions/rules") {
+        json(response, 200, permissionRulesView(loadContinuationPolicy(files.policyPath), files.policyPath));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/permissions/rules/dry-run") {
+        // Reads only: what a rule would have matched, and what would still win over it.
+        json(response, 200, dryRunPermissionRule({
+          list: text("list") as PermissionList, rule: text("rule") as string,
+          ...(text("project") ? { project: text("project") } : {}), ...(number("since") !== undefined ? { since: number("since") } : {}),
+        }, loadContinuationPolicy(files.policyPath), files.auditPath));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/permissions/rules") {
+        // A rule changes what is answered for the operator: only the operator writes one, never an agent.
+        if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
+        const body = await readRequestBody<{ list?: unknown; rule?: unknown; project?: unknown }>(request, { maxBytes: 8 * 1024 });
+        json(response, 200, appendPermissionRule({
+          list: body.list as PermissionList, rule: body.rule as string, ...(body.project !== undefined ? { project: body.project as string } : {}),
+        }, files.policyPath, files.auditPath));
+        return;
+      }
+      json(response, 405, { error: "method_not_allowed" });
+    } catch (error) {
+      json(response, error instanceof PermissionRuleError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
   if (method === "POST" && url.pathname === "/v1/permissions/decide") {
     if (request.transportContext?.transport === "remote") { json(response, 403, { error: "forbidden", detail: "route is machine-local" }); return; }
     if (!brokerAttributionRequiresOperator(request.transportContext)) { json(response, 403, { error: "operator_attribution_required" }); return; }
@@ -818,6 +892,21 @@ export function createBrokerHttpRouter(
       if (error instanceof PermissionRequestEndedError) json(response, 410, { error: message, outcome: "ended", sessionOpen: error.sessionOpen });
       else json(response, error instanceof PermissionDeliveryUnconfirmedError ? 502 : 409, { error: message, outcome: error instanceof PermissionDeliveryUnconfirmedError ? "unconfirmed" : "refused" });
     }
+    return;
+  }
+  if (method === "POST" && url.pathname === "/v1/permissions/native/output") {
+    if (request.transportContext?.transport === "remote" || request.transportContext?.guest || request.headers.origin || request.headers["x-openscout-forwarded-node-id"]) {
+      json(response, 403, { error: "local_only" }); return;
+    }
+    if (!deps.toolOutput) { json(response, 404, { error: "tool_output_unsupported" }); return; }
+    const body = await readRequestBody<{ harness?: unknown; sessionId?: unknown; cwd?: unknown; toolName?: unknown; output?: unknown }>(request, { maxBytes: 512 * 1024 });
+    if (typeof body.harness !== "string" || typeof body.sessionId !== "string" || !body.sessionId || typeof body.cwd !== "string" || typeof body.output !== "string") {
+      json(response, 400, { error: "harness, sessionId, cwd and output are required" }); return;
+    }
+    json(response, 200, deps.toolOutput({
+      harness: body.harness, sessionId: body.sessionId, cwd: body.cwd, output: body.output.slice(0, 256 * 1024),
+      ...(typeof body.toolName === "string" ? { toolName: body.toolName } : {}),
+    }));
     return;
   }
   if (method === "POST" && (url.pathname === "/v1/permissions/native" || url.pathname === "/v1/permissions/native/wait")) {

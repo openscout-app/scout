@@ -16,6 +16,7 @@ export const SCOUT_COMMAND_GRAMMAR: Record<string, ScoutCommandGrammar> = {
   "operator": node("-q --as= --because= --cwd= --image= --message= --option= --question="),
   "notify": node("--as= --cwd= --image= --message="),
   "decision": node("--all --note= --request-id=", { "list": node(), "show": node(), "answer": node() }),
+  "permissions": node("--agent= --decision= --limit= --project= --rule= --signal= --since= --tool= --until= --via=", { "log": node(), "stats": node(), "rules": node(), "dry-run": node() }),
   "diff": node("--all --changed --file= --raw --touched", { "worktree": node(), "session": node() }),
   "browser": node("--adapter= --allow-origin= --height= --label= --mobile --mode= --output= --profile= --reset --scope= --tab= --url= --width=", {
     "status": node(),

@@ -69,7 +69,25 @@ type AntigravityHookInput = {
   toolCall?: unknown;
 };
 
-type Opened = { requestId?: string; skipped?: string; decision?: "allow"; reason?: string; grant?: string };
+/** The tool's output, where the post-tool hook carries one as text. */
+function postToolOutput(input: AntigravityHookInput & Record<string, unknown>): string | null {
+  const call = input.toolCall && typeof input.toolCall === "object" ? input.toolCall as Record<string, unknown> : {};
+  for (const value of [input.toolResult, input.toolOutput, input.output, call.result, call.output]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+type Opened = { requestId?: string; skipped?: string; decision?: "allow" | "deny"; reason?: string; grant?: string; rule?: string };
+
+/**
+ * What the harness tells its agent when one of the operator's deny rules
+ * refused the call. It names no rule: an agent that learns which pattern
+ * matched learns how to step around it. The rule goes to the record.
+ */
+function ruleDeniedMessage(_opened: Opened): string {
+  return "The operator's Scout permission rules deny this call.";
+}
 type Outcome = { state?: "open" | "decided" | "ended"; decision?: "allow" | "deny"; updatedPermissions?: unknown; reason?: string };
 
 export type PermissionHookDeps = {
@@ -121,6 +139,10 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
   }
   if (opened?.decision === "allow") {
     write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } })}\n`);
+    return;
+  }
+  if (opened?.decision === "deny") {
+    write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: ruleDeniedMessage(opened) } } })}\n`);
     return;
   }
   const requestId = opened?.requestId;
@@ -211,7 +233,7 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
   const maxWaitMs = deps.maxWaitMs ?? ANTIGRAVITY_MAX_WAIT_MS;
   let event = "";
   try {
-    const input = JSON.parse(raw) as AntigravityHookInput;
+    const input = JSON.parse(raw) as AntigravityHookInput & Record<string, unknown>;
     const sessionId = typeof input?.conversationId === "string" ? input.conversationId.trim() : "";
     event = typeof input?.hookEventName === "string" ? input.hookEventName.trim() : "";
     if (!isValidAntigravitySessionId(sessionId)) {
@@ -219,6 +241,15 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
       return;
     }
     if (event === "PostToolUse" || event === "Stop") {
+      const output = event === "PostToolUse" ? postToolOutput(input) : null;
+      if (output) {
+        // Scout reads tool output only for hijack text, which raises the session's suspicion; it never decides here.
+        const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : "/";
+        const toolName = input.toolCall && typeof input.toolCall === "object" ? (input.toolCall as { name?: unknown }).name : undefined;
+        await post("/v1/permissions/native/output", {
+          harness: "antigravity", sessionId, cwd, output: output.slice(0, 256 * 1024), ...(typeof toolName === "string" ? { toolName } : {}),
+        }, 1_500).catch(() => undefined);
+      }
       await removeAntigravitySessionRecord(sessionId, { directory });
       write(ANTIGRAVITY_EMPTY);
       return;
@@ -296,6 +327,12 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
         if (opened?.decision === "allow") {
           await removeAntigravitySessionRecord(sessionId, { directory });
           write(`${JSON.stringify({ decision: "allow" })}\n`);
+          return;
+        }
+
+        if (opened?.decision === "deny") {
+          await removeAntigravitySessionRecord(sessionId, { directory });
+          write(`${JSON.stringify({ decision: "deny", reason: ruleDeniedMessage(opened) })}\n`);
           return;
         }
 

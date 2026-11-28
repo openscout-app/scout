@@ -8,7 +8,7 @@ import { ManagedAgentsPuller } from "./hub/managed-agents.js";
 import { BrokerShowStore } from "./broker-show-store.js";
 import { BrokerPostStore } from "./broker-post-store.js";
 import { RoutineRunner } from "./routine-runner.js";
-import type { DurableCheckbackMetadata } from "@openscout/protocol";
+import type { AgentNotificationView, DurableCheckbackMetadata } from "@openscout/protocol";
 import type { PostAuthorNamer } from "./broker-posts-http.js";
 import { queryFeedWork } from "./feed-work.js";
 import { configuredOperatorActorIds } from "./conversations/legacy-ids.js";
@@ -35,16 +35,25 @@ import { MeshBridgeManagement } from "./mesh-bridge-management.js";
 import { meshDiagnostics } from "./mesh-diagnostics.js";
 import { tailscaleStatusProbe } from "./system-probes/tailscale-status.js";
 import { createMeshPing } from "./mesh-ping.js";
-import { flightCompletion, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
+import { flightCompletion, nativeActorName, SCOUT_COMPLETION_CAPABILITY } from "@openscout/protocol";
 import { SCOUT_SESSION_INPUT_RECEIPTS_CAPABILITY, SCOUT_SESSION_SEARCH_CAPABILITY } from "@openscout/protocol";
 import type { WorkItemRecord } from "@openscout/protocol";
 import { deliverInPlace, isScoutBackgroundCopy, probeInPlaceConfirmed } from "./in-place/deliver.js";
 import { NativePermissionRequests } from "./native-permission.js";
 import { isolatedCodexPermissionMetadata } from "./permission-policy.js";
-import { decideNativeToolSupervisor, decidePermissionSupervisor, type PermissionSupervisorVerdict } from "./permission-supervisor.js";
-import { appendContinuationAudit } from "./continuation/grants.js";
+import {
+  decideNativeToolSupervisor,
+  decidePermissionSupervisor,
+  permissionPromptCommand,
+  permissionPromptTool,
+  type PermissionSupervisorVerdict,
+} from "./permission-supervisor.js";
+import { appendContinuationAudit, continuationPolicyPath, type ContinuationAuditEntry } from "./continuation/grants.js";
+import { readContinuationAudit } from "./continuation/permission-log.js";
+import { PermissionSignals, signalCallFor } from "./continuation/signals.js";
+import { configureAcpPermissionSignals } from "./acp-agent-invocation.js";
 import { permissionWaitPatch } from "./broker-blocked-reply.js";
-import { BrokerPermissionService } from "./broker-permission-service.js";
+import { BrokerPermissionService, type PermissionDecisionLog } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler } from "./managed-permission.js";
 import { requireProtectedAccessState, protectAccessDirectories, removeLocalAdminEnvironment } from "./mesh-access-startup.js";
 import { inspectMeshAccessIngressPosture } from "./mesh-access-ingress-posture.js";
@@ -3471,6 +3480,12 @@ const commandService = new BrokerCommandService({
   log: (message) => console.log(message),
 });
 
+function agentDisplayNameFor(actorId: string): string | undefined {
+  const snapshot = runtime.snapshot();
+  const name = brokerActorDisplayName(snapshot, actorId);
+  return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
+}
+
 const operatorAttentionService = new BrokerOperatorAttentionService({
   nodeId,
   systemActorId: systemActor.id,
@@ -3482,11 +3497,7 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
   messageVisibilityForConversation,
   postConversationMessage,
   broadcastApnsAlertToActiveMobileDevices,
-  agentDisplayName: (actorId) => {
-    const snapshot = runtime.snapshot();
-    const name = brokerActorDisplayName(snapshot, actorId);
-    return name !== actorId ? name : snapshot.agents[actorId]?.handle ?? snapshot.actors[actorId]?.handle;
-  },
+  agentDisplayName: (actorId) => agentDisplayNameFor(actorId),
   agentRosterCode: (actorId) => {
     const entry = agentRosterService?.entry(actorId);
     return entry ? rosterNumberText(entry.number) : null;
@@ -3499,16 +3510,37 @@ const operatorAttentionService = new BrokerOperatorAttentionService({
   log: (message) => console.log(message),
 });
 
+/**
+ * Escalation signals: they read each session's history (fetched files,
+ * secret reads, untrusted inputs, hosts, pushes, denials), seeded from the
+ * last week of the record so a restart keeps its memory.
+ */
+const permissionSignals = new PermissionSignals({ policyPath: continuationPolicyPath() });
+configureAcpPermissionSignals(permissionSignals);
+try {
+  permissionSignals.seed(readContinuationAudit(undefined, Date.now() - 7 * 24 * 3_600_000));
+} catch (error) {
+  console.warn(`[openscout-runtime] permission signals could not read the record: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+/** A held call's card names the signal in one line, and where the untrusted input came from. */
+function withSignalLine(view: AgentNotificationView, verdict: Record<string, unknown> | undefined): AgentNotificationView {
+  const line = typeof verdict?.signalLine === "string" ? verdict.signalLine : null;
+  if (!line) return view;
+  const source = typeof verdict?.signalSource === "string" ? verdict.signalSource : null;
+  const why = source && !line.includes(source) ? `${line}. Untrusted input: ${source}.` : line;
+  if (view.view === "turn.approve.command" || view.view === "turn.approve.tool") return { ...view, why };
+  if (view.view === "turn.approve.edit") return { ...view, summary: why };
+  return view;
+}
+
 const permissionService = new BrokerPermissionService({
   conversationForSession: sessionId => conversationIdForSession(runtime.snapshot(), sessionId),
   operatorId: operatorActorId,
   nodeId,
   createId: () => createRuntimeId("permission"),
-  supervisor: decidePermissionSupervisor,
-  audit: ({ requestId, prompt, verdict, delivered }) => auditSupervisorAnswer({
-    backend: "managed", outcome: delivered ? "sent" : "failed", requestId,
-    sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, command: prompt.text, verdict,
-  }),
+  supervisor: (prompt) => decidePermissionSupervisor(prompt, undefined, permissionSignals),
+  log: (entry) => auditPermissionDecision(entry),
   record: recordCollaborationDurably,
   read: id => { const record = runtime.collaborationRecord(id); return record?.kind === "question" ? record : undefined; },
   requests: () => Object.values(runtime.snapshot().collaborationRecords)
@@ -3527,11 +3559,12 @@ const permissionService = new BrokerPermissionService({
   notify: (invocation, record, prompt) => {
     const flightId = runtime.flightForInvocation(invocation.id)?.id;
     const context = shapeAttentionContext(invocation.task, "task");
-    const view = permissionDialogView(prompt.text);
+    let view = permissionDialogView(prompt.text);
     if (context) {
       if (view.view === "turn.approve.command" && !view.why) view.why = context.text;
       if (view.view === "turn.approve.edit") view.summary = context.text;
     }
+    view = withSignalLine(view, record.metadata?.permissionVerdict as Record<string, unknown> | undefined);
     operatorAttentionService.queuePermissionRequest({
       view,
       ...(prompt.decisions.includes("project") ? { canAlwaysAllow: true } : {}),
@@ -3555,12 +3588,13 @@ const nativePermissions = new NativePermissionRequests({
       cwd: ask.cwd,
       toolName: ask.toolName,
       toolInput: ask.toolInput,
-    });
-    // The hook takes the allow straight back; this line is the only trace of it.
-    if (verdict.act === "continue") {
+      sessionId: `native:${ask.harness}:${ask.sessionId}`,
+    }, undefined, permissionSignals);
+    // The hook takes an allow or a deny straight back; this line is the only trace of it.
+    if (verdict.act === "continue" || verdict.act === "deny") {
       auditSupervisorAnswer({
-        backend: `native:${ask.harness}`, outcome: "sent", sessionId: ask.sessionId, projectRoot: ask.cwd,
-        tool: ask.toolName, command: describeNativeToolInput(ask.toolInput), verdict,
+        backend: `native:${ask.harness}`, outcome: verdict.act === "deny" ? "denied" : "sent", sessionId: ask.sessionId, projectRoot: ask.cwd,
+        tool: ask.toolName, command: describeNativeToolInput(ask.toolInput), verdict, agentId: `native:${ask.harness}:${ask.sessionId}`,
       });
     }
     return verdict;
@@ -3568,9 +3602,11 @@ const nativePermissions = new NativePermissionRequests({
   launchedByScout: async (record) => isScoutBackgroundCopy(record)
     || Boolean(record.tmux?.session && (await listScoutLaunchedTmuxSessions()).has(record.tmux.session)),
   notify: ({ requestId, prompt, actorId, view }) => {
+    const verdict = runtime.collaborationRecord(requestId)?.metadata?.permissionVerdict as Record<string, unknown> | undefined;
     operatorAttentionService.queuePermissionRequest({
-      requestId, text: prompt.text, view, agentId: actorId, requesterNodeId: nodeId,
-      ...(prompt.decisions.includes("project") ? { canAlwaysAllow: true } : {}),
+      requestId, text: prompt.text, view: withSignalLine(view, verdict), agentId: actorId, requesterNodeId: nodeId,
+      // A call an escalation signal held gets no always-allow: the next one should reach the operator too.
+      ...(prompt.decisions.includes("project") && typeof verdict?.signal !== "string" ? { canAlwaysAllow: true } : {}),
       projectRoot: prompt.projectRoot, sessionId: prompt.sessionId, createdAt: Date.now(),
     });
   },
@@ -3578,34 +3614,111 @@ const nativePermissions = new NativePermissionRequests({
 
 let supervisorAnswers = 0;
 
+/** The agent a line names: its id and, when the runtime knows one, its display name. */
+function auditAgent(actorId: string | undefined): { agentId?: string; agentName?: string } {
+  if (!actorId) return {};
+  const name = agentDisplayNameFor(actorId)?.trim() || nativeActorName(actorId) || undefined;
+  return { agentId: actorId, ...(name && name !== actorId ? { agentName: name } : {}) };
+}
+
+function writeAudit(entry: ContinuationAuditEntry): void {
+  try {
+    appendContinuationAudit(entry);
+  } catch (error) {
+    console.warn(`[openscout-runtime] continuation audit write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The signal a call raised: its name, its line, its untrusted source, and whether it caused the ask. */
+function auditSignal(verdict: { signal?: unknown; signalLine?: unknown; signalSource?: unknown; held?: unknown } | undefined): Partial<ContinuationAuditEntry> {
+  if (typeof verdict?.signal !== "string") return {};
+  return {
+    signal: verdict.signal,
+    ...(typeof verdict.signalLine === "string" ? { signalLine: verdict.signalLine } : {}),
+    ...(typeof verdict.signalSource === "string" ? { signalSource: verdict.signalSource } : {}),
+    ...(verdict.held === true || verdict.held === "true" ? { held: true } : {}),
+  };
+}
+
+/** The built-in denies an operator allow lifted, and the label the record shows for it. */
+function auditOverrides(overrides: string[] | undefined): Partial<ContinuationAuditEntry> {
+  return overrides?.length ? { overrides } : {};
+}
+
+/** One audit line per decision on a permission record: asked, answered, approved, denied or closed. */
+function auditPermissionDecision(entry: PermissionDecisionLog): void {
+  const request = entry.record.metadata?.permissionRequest as { sessionId?: string; projectRoot?: string; native?: { harness?: string; tool?: string; display?: unknown } } | undefined;
+  const kept = entry.record.metadata?.permissionVerdict as Partial<Record<"rule" | "list" | "ruleScope" | "overrides" | "risk" | "grant" | "reason" | "signal" | "signalLine" | "signalSource" | "held", string>> | undefined;
+  const verdict = entry.verdict;
+  const native = request?.native;
+  const prompt = entry.prompt?.text ?? entry.record.summary ?? "";
+  const display = native?.display as { command?: unknown; target?: unknown } | undefined;
+  const shown = typeof display?.command === "string" ? display.command : typeof display?.target === "string" ? display.target : null;
+  const command = native ? shown : permissionPromptCommand(prompt);
+  const outcome = entry.decision === "asked" ? "asked"
+    : entry.decision === "closed" ? "closed"
+    : entry.delivered === false ? "failed" : "sent";
+  writeAudit({
+    at: Date.now(), outcome, decision: entry.decision, backend: native?.harness ? `native:${native.harness}` : "managed",
+    requestId: entry.requestId,
+    ...(request?.sessionId ? { sessionId: request.sessionId } : {}),
+    ...(request?.projectRoot ? { projectRoot: request.projectRoot } : {}),
+    tool: native?.tool ?? permissionPromptTool(prompt),
+    ...(entry.answer ? { answer: entry.answer } : {}),
+    ...(entry.via ? { via: entry.via } : {}),
+    rule: entry.decision === "answered" ? "operator" : verdict?.rule ?? kept?.rule ?? "mode:default",
+    list: entry.decision === "answered" ? "operator" : verdict?.list ?? kept?.list ?? "mode",
+    ...((verdict?.ruleScope ?? kept?.ruleScope) ? { ruleScope: verdict?.ruleScope ?? kept?.ruleScope } : {}),
+    ...(entry.decision === "answered" ? {} : auditOverrides(verdict?.overrides ?? kept?.overrides?.split(", "))),
+    ...auditSignal(verdict ?? kept),
+    ...auditAgent(entry.record.askedById ?? entry.record.createdById),
+    level: verdict?.level ?? "ask", grant: verdict?.grant ?? kept?.grant ?? "default",
+    command: command ? command.slice(0, 500) : null, risk: verdict?.risk ?? kept?.risk ?? "unknown",
+    keys: null, source: "rules", reason: entry.reason,
+  });
+  if (entry.decision === "approved" && entry.delivered !== false) countSupervisorAnswer("managed", undefined, entry.reason);
+  // The operator's answer is what the session then did: an approval teaches its hosts and pushes, a denial counts toward a burst.
+  if (entry.decision === "answered" && request?.sessionId && request.projectRoot) {
+    const call = signalCallFor({ projectRoot: request.projectRoot, tool: native?.tool ?? permissionPromptTool(prompt), command });
+    const session = native?.harness ? `native:${native.harness}:${request.sessionId}` : request.sessionId;
+    if (call) permissionSignals.observe(session, call, entry.answer === "deny" ? "denied" : "approved");
+  }
+}
+
 /** One audit line per permission the supervisor answered without the operator. */
 function auditSupervisorAnswer(input: {
   backend: string;
-  outcome: "sent" | "failed";
+  outcome: "sent" | "failed" | "denied";
   requestId?: string;
   sessionId: string;
   projectRoot: string;
   tool?: string;
   command: string | null;
   verdict: PermissionSupervisorVerdict;
+  agentId?: string;
 }): void {
-  try {
-    appendContinuationAudit({
-      at: Date.now(), outcome: input.outcome, backend: input.backend,
-      ...(input.requestId ? { requestId: input.requestId } : {}),
-      sessionId: input.sessionId, projectRoot: input.projectRoot,
-      ...(input.tool ? { tool: input.tool } : {}),
-      level: input.verdict.level ?? "ask", grant: input.verdict.grant,
-      command: input.command ? input.command.slice(0, 500) : null, risk: input.verdict.risk,
-      keys: null, source: "rules", reason: input.verdict.reason,
-    });
-  } catch (error) {
-    console.warn(`[openscout-runtime] continuation audit write failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (input.outcome === "sent") {
-    supervisorAnswers += 1;
-    console.log(`[openscout-runtime] permission supervisor answered for you (${supervisorAnswers} since start): ${input.backend} ${input.tool ?? ""} ${input.verdict.reason}`.replace(/\s+/g, " "));
-  }
+  writeAudit({
+    at: Date.now(), outcome: input.outcome, decision: input.verdict.act === "deny" ? "denied" : "approved",
+    via: "watcher", backend: input.backend,
+    ...(input.requestId ? { requestId: input.requestId } : {}),
+    sessionId: input.sessionId, projectRoot: input.projectRoot,
+    ...(input.tool ? { tool: input.tool } : {}),
+    ...(input.verdict.rule ? { rule: input.verdict.rule } : {}),
+    ...(input.verdict.list ? { list: input.verdict.list } : {}),
+    ...(input.verdict.ruleScope ? { ruleScope: input.verdict.ruleScope } : {}),
+    ...auditOverrides(input.verdict.overrides),
+    ...auditSignal(input.verdict),
+    ...auditAgent(input.agentId),
+    level: input.verdict.level ?? "ask", grant: input.verdict.grant,
+    command: input.command ? input.command.slice(0, 500) : null, risk: input.verdict.risk,
+    keys: null, source: "rules", reason: input.verdict.reason,
+  });
+  if (input.outcome === "sent") countSupervisorAnswer(input.backend, input.tool, input.verdict.reason);
+}
+
+function countSupervisorAnswer(backend: string, tool: string | undefined, reason: string): void {
+  supervisorAnswers += 1;
+  console.log(`[openscout-runtime] permission supervisor answered for you (${supervisorAnswers} since start): ${backend} ${tool ?? ""} ${reason}`.replace(/\s+/g, " "));
 }
 
 function describeNativeToolInput(input: unknown): string | null {
@@ -4126,6 +4239,9 @@ const routeRequest = createBrokerHttpRouter({
   decisionCards: decisionCardService,
   taskReady: taskReadyService,
   nativePermissions,
+  toolOutput: ({ harness, sessionId, cwd, toolName, output }) => ({
+    suspicious: permissionSignals.observeOutput(`native:${harness}:${sessionId}`, cwd, output, toolName ? `${toolName} output` : "tool output"),
+  }),
   harnessHooks: new HarnessHooks({ scoutInvocation: resolveRuntimeScoutCliInvocation }),
   meshBridge: new MeshBridgeManagement({
     supportDirectory,

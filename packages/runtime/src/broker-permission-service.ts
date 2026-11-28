@@ -12,6 +12,25 @@ export function permissionAnswerVia(value: unknown): PermissionAnswerVia | undef
     ? value as PermissionAnswerVia : undefined;
 }
 
+/** What became of one permission request: the five outcomes the record keeps. */
+export type PermissionDecisionKind = "approved" | "asked" | "denied" | "closed" | "answered";
+
+/** One decision, told to the audit log once it happens. */
+export type PermissionDecisionLog = {
+  decision: PermissionDecisionKind;
+  requestId: string;
+  record: QuestionRecord;
+  prompt?: ManagedPermissionPrompt;
+  /** The supervisor's verdict: the rule that decided or asked, and the risk. */
+  verdict?: PermissionSupervisorVerdict;
+  /** The decision sent, for an answer or an automatic approve or deny. */
+  answer?: PermissionDecision;
+  via?: PermissionAnswerVia;
+  /** False when keys were sent but delivery was not confirmed. */
+  delivered?: boolean;
+  reason: string;
+};
+
 export class PermissionDeliveryUnconfirmedError extends Error { readonly failureCause = "harness_error" as const; }
 /** Nothing can answer this request any more. Its record is settled. */
 export class PermissionRequestEndedError extends Error {
@@ -45,14 +64,24 @@ export class BrokerPermissionService {
     transition: (invocationId: string, state: "waiting" | "running", requestId: string | null) => Promise<unknown>;
     notify: (invocation: InvocationRequest, record: QuestionRecord, prompt: ManagedPermissionPrompt) => void;
     supervisor?: (prompt: ManagedPermissionPrompt) => PermissionSupervisorVerdict;
-    /** Told once per supervisor answer, after delivery succeeds or fails. */
-    audit?: (input: { requestId: string; prompt: ManagedPermissionPrompt; verdict: PermissionSupervisorVerdict; delivered: boolean }) => void;
+    warn?: (message: string) => void;
+    /** Told once per decision: an ask, an answer, an automatic approve or deny, or a close nobody answered. */
+    log?: (entry: PermissionDecisionLog) => void;
     sleep?: (ms: number) => Promise<void>;
   }) {}
 
   async wait(invocation: InvocationRequest, prompt: ManagedPermissionPrompt): Promise<void> {
     const id = this.deps.createId();
     const flight = this.deps.flight(invocation.id);
+    // A watcher that throws never approves: the call waits for the operator,
+    // with the record and its card made as for any other ask.
+    let automatic: PermissionSupervisorVerdict | null | undefined;
+    try {
+      automatic = prompt.supervisorVerdict === undefined ? this.deps.supervisor?.(prompt) : prompt.supervisorVerdict;
+    } catch (error) {
+      automatic = { act: "notify", reason: "watcher error", risk: "unknown", grant: "error" };
+      this.deps.warn?.(`[openscout-runtime] permission watcher error: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const record: QuestionRecord = {
       id, kind: "question", state: "open", acceptanceState: "none",
       title: "Permission request", summary: prompt.text,
@@ -64,20 +93,21 @@ export class BrokerPermissionService {
         ...(brokerAttributionFromMetadata(invocation.metadata) ? { attribution: brokerAttributionFromMetadata(invocation.metadata) } : {}),
         permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
           invocationId: invocation.id, flightId: flight?.id, version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels },
+        ...(automatic ? { permissionVerdict: verdictSummary(automatic) } : {}),
       },
     };
     const pending: Pending = { invocationId: invocation.id, prompt, busy: false, done: false };
     this.pending.set(id, pending);
     try {
       await this.deps.record(record);
-      const automatic = prompt.supervisorVerdict === undefined
-        ? this.deps.supervisor?.(prompt)
-        : prompt.supervisorVerdict;
       while (pending.busy && !pending.done) await this.sleep(500);
       if (pending.error) throw pending.error;
-      if (!pending.done && automatic?.act === "continue") {
+      // A deny rule answers "no" itself when the harness offers it; otherwise the operator is asked.
+      const automaticDecision = automatic?.act === "continue" ? "once"
+        : automatic?.act === "deny" && prompt.decisions.includes("deny") ? "deny" : null;
+      if (!pending.done && automatic && automaticDecision) {
         try {
-          await this.decide(id, prompt.version, "once", automatic);
+          await this.decide(id, prompt.version, automaticDecision, automatic);
         } catch (error) {
           this.deps.notify(invocation, this.deps.read(id) ?? record, prompt);
           throw error;
@@ -86,6 +116,8 @@ export class BrokerPermissionService {
       if (!pending.done) {
         await this.deps.transition(invocation.id, "waiting", id);
         this.deps.notify(invocation, record, prompt);
+        this.log({ decision: "asked", requestId: id, record, prompt, ...(automatic ? { verdict: automatic } : {}),
+          reason: automatic?.reason ?? "no supervisor" });
       }
       while (!pending.done) {
         await this.sleep(500);
@@ -96,12 +128,16 @@ export class BrokerPermissionService {
         if (!pending.busy && !pending.done && !await prompt.isCurrent()) {
           await this.close(id, "Prompt is no longer present", "closed");
           pending.done = true;
+          this.logClosed(id, "Prompt is no longer present");
         }
       }
       if (pending.error) throw pending.error;
       await this.deps.transition(invocation.id, "running", null);
     } catch (error) {
-      if (!pending.done) await this.close(id, "Permission wait ended without a decision", "declined");
+      if (!pending.done) {
+        await this.close(id, "Permission wait ended without a decision", "declined");
+        this.logClosed(id, "Permission wait ended without a decision");
+      }
       throw error;
     } finally { this.pending.delete(id); }
   }
@@ -112,7 +148,7 @@ export class BrokerPermissionService {
    * request with `withdraw` when the session stops waiting; `decide` answers
    * it through `prompt.answer`, as any other request. Resolves its id.
    */
-  async raise(input: { prompt: ManagedPermissionPrompt; actorId: string; native: Record<string, unknown> }): Promise<string> {
+  async raise(input: { prompt: ManagedPermissionPrompt; actorId: string; native: Record<string, unknown>; verdict?: PermissionSupervisorVerdict }): Promise<string> {
     const { prompt } = input;
     const conversationId = this.deps.conversationForSession?.(prompt.sessionId) ?? null;
     const id = this.deps.createId();
@@ -124,7 +160,8 @@ export class BrokerPermissionService {
       ownerId: this.deps.operatorId, nextMoveOwnerId: this.deps.operatorId,
       createdAt: Date.now(), updatedAt: Date.now(),
       metadata: { permissionRequest: { sessionId: prompt.sessionId, projectRoot: prompt.projectRoot, nodeId: this.deps.nodeId,
-        version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels, native: input.native } },
+        version: prompt.version, decisions: prompt.decisions, decisionLabels: prompt.decisionLabels, native: input.native },
+        ...(input.verdict ? { permissionVerdict: verdictSummary(input.verdict) } : {}) },
     };
     const pending: Pending = { invocationId: "", prompt, busy: false, done: false, adopted: true };
     this.pending.set(id, pending);
@@ -134,6 +171,8 @@ export class BrokerPermissionService {
       this.pending.delete(id);
       throw error;
     }
+    this.log({ decision: "asked", requestId: id, record, prompt, ...(input.verdict ? { verdict: input.verdict } : {}),
+      reason: input.verdict?.reason ?? "no supervisor" });
     return id;
   }
 
@@ -150,11 +189,32 @@ export class BrokerPermissionService {
       this.pending.delete(id);
     }
     const record = this.deps.read(id);
-    if (record?.state === "open") await this.close(id, answer, "closed");
+    if (record?.state === "open") {
+      await this.close(id, answer, "closed");
+      this.logClosed(id, answer);
+    }
   }
 
-  private auditAutomatic(requestId: string, prompt: ManagedPermissionPrompt, verdict: PermissionSupervisorVerdict, delivered: boolean): void {
-    try { this.deps.audit?.({ requestId, prompt, verdict, delivered }); } catch { /* The record already carries the actuation. */ }
+  /** Audit failure never blocks a decision: the record already carries it. */
+  private log(entry: PermissionDecisionLog): void {
+    try { this.deps.log?.(entry); } catch { /* The record already carries the decision. */ }
+  }
+
+  private logClosed(id: string, reason: string, via?: PermissionAnswerVia): void {
+    const record = this.deps.read(id);
+    if (record) this.log({ decision: "closed", requestId: id, record, ...(via ? { via } : {}), reason });
+  }
+
+  private logAnswer(id: string, prompt: ManagedPermissionPrompt, decision: PermissionDecision, delivered: boolean,
+    automatic?: PermissionSupervisorVerdict, via?: PermissionAnswerVia): void {
+    const record = this.deps.read(id);
+    if (!record) return;
+    this.log({
+      decision: automatic ? (decision === "deny" ? "denied" : "approved") : "answered",
+      requestId: id, record, prompt, answer: decision, delivered,
+      ...(automatic ? { verdict: automatic, via: "watcher" as const } : via ? { via } : {}),
+      reason: automatic?.reason ?? (delivered ? `the operator chose ${decision}` : "decision delivery unconfirmed"),
+    });
   }
 
   async decide(id: string, version: string, decision: PermissionDecision, automatic?: PermissionSupervisorVerdict, operatorAttribution?: ScoutAttribution, via?: PermissionAnswerVia): Promise<void> {
@@ -198,9 +258,9 @@ export class BrokerPermissionService {
       await pending.prompt.answer(decision);
       await this.close(id, decision, "closed", automatic ? PERMISSION_SUPERVISOR_ACTOR_ID : undefined);
       pending.done = true;
-      if (automatic) this.auditAutomatic(id, pending.prompt, automatic, true);
+      this.logAnswer(id, pending.prompt, decision, true, automatic, via);
     } catch (error) {
-      if (automatic && actuated) this.auditAutomatic(id, pending.prompt, automatic, false);
+      const sent = actuated;
       pending.error = actuated
         ? new PermissionDeliveryUnconfirmedError(error instanceof Error ? error.message : String(error))
         : error instanceof Error ? error : new Error(String(error));
@@ -209,6 +269,8 @@ export class BrokerPermissionService {
       pending.done = true;
       await this.close(id, `Decision delivery unconfirmed: ${error instanceof Error ? error.message : String(error)}`, "declined", automatic ? PERMISSION_SUPERVISOR_ACTOR_ID : undefined)
         .catch(() => undefined);
+      // Keys that may have reached the harness are a decision; a refusal before any key is not.
+      if (sent) this.logAnswer(id, pending.prompt, decision, false, automatic, via);
       throw pending.error;
     } finally {
       pending.busy = false;
@@ -231,6 +293,7 @@ export class BrokerPermissionService {
     if (pending?.busy) throw new Error("Permission request is already being answered.");
     if (pending && !pending.done) throw new Error("The session is still waiting on this request. Allow or deny it.");
     await this.close(id, "Dismissed by the operator", "declined");
+    this.logClosed(id, "Dismissed by the operator");
   }
 
   /**
@@ -302,6 +365,7 @@ export class BrokerPermissionService {
         if (!await pending.prompt.isCurrent() && !pending.busy && !pending.done) {
           pending.done = true;
           await this.close(id, "Prompt is no longer present", "closed");
+          this.logClosed(id, "Prompt is no longer present");
         }
       }
     } catch {
@@ -313,6 +377,7 @@ export class BrokerPermissionService {
 
   private async settle(id: string, answer: string, sessionOpen: boolean): Promise<never> {
     await this.close(id, answer, "declined");
+    this.logClosed(id, answer);
     throw new PermissionRequestEndedError(answer, sessionOpen);
   }
 
@@ -341,4 +406,18 @@ function permissionRequest(record: QuestionRecord): PermissionRequest | undefine
 
 function actuationAttempted(record: QuestionRecord): boolean {
   return (record.metadata?.permissionActuation as { status?: string } | undefined)?.status === "attempt";
+}
+
+/** The parts of a verdict a record keeps, so the line that closes it can name the rule that asked. */
+export function verdictSummary(verdict: PermissionSupervisorVerdict): Record<string, string> {
+  return {
+    act: verdict.act, reason: verdict.reason, risk: verdict.risk, grant: verdict.grant,
+    ...(verdict.rule ? { rule: verdict.rule } : {}), ...(verdict.list ? { list: verdict.list } : {}),
+    ...(verdict.ruleScope ? { ruleScope: verdict.ruleScope } : {}),
+    ...(verdict.overrides?.length ? { overrides: verdict.overrides.join(", ") } : {}),
+    ...(verdict.signal ? { signal: verdict.signal } : {}),
+    ...(verdict.signalLine ? { signalLine: verdict.signalLine } : {}),
+    ...(verdict.signalSource ? { signalSource: verdict.signalSource } : {}),
+    ...(verdict.held ? { held: "true" } : {}),
+  };
 }

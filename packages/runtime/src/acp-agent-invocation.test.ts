@@ -334,7 +334,8 @@ for await (const line of rl) {
     ]) expect((await run(call)).output).toBe("deny");
     setGrants([]);
     expect((await run(read)).output).toBe("deny");
-    expect(notifications).toHaveLength(7);
+    // `rm -rf dist` meets the default deny rule, which answers it without asking the operator.
+    expect(notifications).toHaveLength(6);
 
     expect((await run(read, "auto_approve")).output).toBe("allow");
     expect((await run(read, "safe_reject")).output).toBe("deny");
