@@ -274,6 +274,8 @@ export type ContinuationAuditEntry = {
   signalSource?: string;
   /** True when the signal turned an automatic approval into an ask. */
   held?: boolean;
+  /** True when this auto-approval was the first time this shape was allowed in the project. */
+  firstSeen?: boolean;
   agentId?: string;
   agentName?: string;
   /** Where the answer went: a tmux/Herdr pane, a native harness hook, or a Scout-managed session. */

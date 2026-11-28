@@ -31,7 +31,10 @@ import {
 } from "@openscout/agent-sessions";
 import {
   conversationIdForSession,
+  loadContinuationPolicy,
+  permissionStats,
   projectSessionAttention,
+  readPermissionLog,
   type NativePermissionDisplay,
   type SessionAttentionItem,
 } from "@openscout/runtime";
@@ -1620,6 +1623,67 @@ const mobileRouter = t.router({
         start,
         hasOlder,
         events,
+      };
+    }),
+
+  // Permission watcher ledger + stats + policy posture for mobile Inbox ("Auto" log & live toasts).
+  permissionLog: protectedMobileProcedure
+    .input(z.object({
+      limit: z.number().int().min(1).max(200).optional(),
+      decision: z.enum(["approved", "asked", "denied", "closed", "answered"]).optional(),
+      since: z.number().int().min(0).optional(),
+    }).optional())
+    .query(({ input }) => {
+      const limit = input?.limit ?? 60;
+      const since = input?.since ?? (Date.now() - 24 * 60 * 60_000);
+      const records = readPermissionLog({
+        limit,
+        ...(input?.decision ? { decision: input.decision } : {}),
+        ...(input?.since !== undefined ? { since: input.since } : {}),
+      });
+      const stats = permissionStats({ since });
+      const policy = loadContinuationPolicy();
+      const topRules = (policy.permissions?.allow?.length ?? 0)
+        + (policy.permissions?.ask?.length ?? 0)
+        + (policy.permissions?.deny?.length ?? 0);
+      const grantRules = policy.grants.reduce((sum, g) => {
+        if (g.scope !== "project" || !g.permissions) return sum;
+        return sum
+          + (g.permissions.allow?.length ?? 0)
+          + (g.permissions.ask?.length ?? 0)
+          + (g.permissions.deny?.length ?? 0);
+      }, 0);
+      return {
+        records: records.map((r) => ({
+          at: r.at,
+          decision: r.decision,
+          outcome: r.outcome,
+          via: r.via ?? null,
+          rule: r.rule,
+          list: r.list,
+          label: r.label,
+          risk: r.risk,
+          reason: r.reason,
+          tool: r.tool ?? null,
+          command: r.command,
+          project: r.project ?? null,
+          agentName: r.agentName ?? r.agentId ?? null,
+          firstSeen: r.firstSeen === true,
+        })),
+        stats: {
+          since: stats.since,
+          total: stats.total,
+          approved: stats.byDecision.approved,
+          asked: stats.byDecision.asked,
+          denied: stats.byDecision.denied,
+          answered: stats.byDecision.answered,
+        },
+        policy: {
+          allowModel: policy.allowModel === true,
+          defaultMode: policy.defaultMode ?? "default",
+          grantCount: policy.grants.length,
+          ruleCount: topRules + grantRules,
+        },
       };
     }),
 

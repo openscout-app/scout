@@ -72,6 +72,12 @@ export {
   type PermissionRuleSet,
 } from "./continuation/rules.js";
 export {
+  FirstSeenPermissionTracker,
+  permissionShape,
+  type PermissionShapeInput,
+  type PermissionShapeObservation,
+} from "./continuation/first-seen.js";
+export {
   PERMISSION_DECISIONS,
   appendPermissionRule,
   dryRunPermissionRule,

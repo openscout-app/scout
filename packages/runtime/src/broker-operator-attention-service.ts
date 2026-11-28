@@ -82,6 +82,15 @@ export type ReadyTaskInput = {
   createdAt?: number;
 };
 
+export type AutoAllowedNoticeInput = {
+  agentId?: string;
+  projectRoot?: string;
+  label: string;
+  rule: string;
+  sessionId?: string;
+  createdAt?: number;
+};
+
 export type BrokerOperatorAttentionServiceOptions = {
   nodeId: string;
   systemActorId: string;
@@ -149,6 +158,59 @@ export class BrokerOperatorAttentionService {
         }`,
       );
     });
+  }
+
+  queueAutoAllowedNotice(input: AutoAllowedNoticeInput): void {
+    void this.sendAutoAllowedNotice(input).catch((error) => {
+      this.options.warn?.(
+        `[openscout-runtime] failed to send first-seen auto-allow notice: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }
+
+  async sendAutoAllowedNotice(input: AutoAllowedNoticeInput): Promise<void> {
+    const project = notificationProjectName(input.projectRoot);
+    const itemId = this.options.createId("auto");
+    const who = input.agentId ? this.agentName(input.agentId) : "Permission watcher";
+    const where = project ? ` in ${project}` : "";
+    const ruleNote = input.rule ? ` (${input.rule})` : "";
+    const notification = {
+      v: 1 as const,
+      view: "text" as const,
+      itemId,
+      sender: {
+        name: who,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.agentId ? this.agentShorthand(input.agentId) : {}),
+      },
+      ...(project ? { project } : {}),
+      level: "passive" as const,
+      createdAt: input.createdAt ?? this.now(),
+      title: `Auto-allowed · ${input.label}`,
+      body: `First time allowed by policy${where}${ruleNote}. Future repeats go quietly to your ledger.`,
+      route: {
+        open: "inbox" as const,
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      },
+    };
+    const result = await this.options.broadcastApnsAlertToActiveMobileDevices({
+      title: "Auto-allowed by policy",
+      body: "Open Scout for details.",
+      ...pushDeliveryForLevel("passive"),
+      threadId: "scout.permission-watcher",
+      payload: {
+        destination: "inbox",
+        itemId,
+        kind: "permission_auto_allowed",
+        ...(input.agentId ? { requesterId: input.agentId } : {}),
+        requesterNodeId: this.options.nodeId,
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      },
+      notification,
+    });
+    this.warnForBroadcastResult(result);
   }
 
   queueReadyTask(input: ReadyTaskInput): void {
@@ -337,6 +399,24 @@ export class BrokerOperatorAttentionService {
       },
     });
 
+    const notification = {
+      v: 1 as const,
+      view: "text" as const,
+      itemId,
+      sender: {
+        name: targetLabel,
+        agentId: input.requesterId,
+      },
+      level: "active" as const,
+      createdAt: this.now(),
+      title: `Delivery issue · ${targetLabel}`,
+      body: detail,
+      route: {
+        open: "inbox" as const,
+        conversationId: conversation.id,
+        messageId,
+      },
+    };
     const result = await this.options.broadcastApnsAlertToActiveMobileDevices({
       title: "Scout delivery needs attention",
       body: "Open Scout for details.",
@@ -355,6 +435,7 @@ export class BrokerOperatorAttentionService {
         targetLabel,
         reason: input.kind,
       },
+      notification,
     });
 
     this.warnForBroadcastResult(result);
