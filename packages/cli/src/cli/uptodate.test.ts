@@ -28,6 +28,8 @@ describe("CLI broker update check", () => {
     expect(shouldEnsureBrokerUptodateForCommand("whoami")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("extensions")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("settings", ["set", "tone", "warm"])).toBe(false);
+    expect(shouldEnsureBrokerUptodateForCommand("home", ["migrate"])).toBe(false);
+    expect(shouldEnsureBrokerUptodateForCommand("home", ["status"])).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("web", ["install"])).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("report")).toBe(false);
     expect(shouldEnsureBrokerUptodateForCommand("feedback")).toBe(false);
