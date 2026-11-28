@@ -106,6 +106,18 @@ export type HomeMigrationPaths = {
   journalPath: string;
 };
 
+export type HomeMigrationHostUpdateKind =
+  | "launch-agent"
+  | "systemd-unit"
+  | "claude-settings"
+  | "antigravity-hooks";
+
+export type HomeMigrationHostUpdate = {
+  kind: HomeMigrationHostUpdateKind;
+  path: string;
+  replacements: number;
+};
+
 export type HomeMigrationPlan = {
   paths: HomeMigrationPaths;
   entries: HomeMigrationPlanEntry[];
@@ -113,6 +125,7 @@ export type HomeMigrationPlan = {
   conflicts: HomeMigrationPlanEntry[];
   skipped: HomeMigrationPlanEntry[];
   refused: HomeMigrationPlanEntry[];
+  hostUpdates: HomeMigrationHostUpdate[];
 };
 
 export type HomeMigrationJournalEntryStatus = "pending" | "done" | "conflict" | "skipped";
@@ -193,6 +206,7 @@ export type HomeMigrationResult = {
   refusedCount: number;
   checkpointedDatabases: string[];
   movedMarkers: string[];
+  updatedHostFiles: HomeMigrationHostUpdate[];
 };
 
 export type HomeLayoutLegacyRootStatus = {
@@ -234,6 +248,7 @@ export type HomeLayoutStatus = {
   conflicts: number;
   refused: number;
   skipped: number;
+  pendingHostUpdates: number;
   migrationPending: boolean;
   plan: HomeMigrationPlan;
 };
@@ -556,6 +571,8 @@ export function planHomeMigration(options: ScoutHomeOptions = {}): HomeMigration
     });
   }
 
+  const hostUpdates = planHostReferenceUpdates(paths, options.env ?? process.env);
+
   return {
     paths,
     entries,
@@ -563,7 +580,261 @@ export function planHomeMigration(options: ScoutHomeOptions = {}): HomeMigration
     conflicts: entries.filter((entry) => entry.action === "conflict"),
     skipped: entries.filter((entry) => entry.action === "skip"),
     refused: entries.filter((entry) => entry.action === "refused"),
+    hostUpdates,
   };
+}
+
+const LAUNCH_AGENT_PLIST_PATTERN = /^app\.openscout(?:\.[^/]+)?\.plist$/;
+const SYSTEMD_UNIT_PATTERN = /^openscout(?:[-.][^/]+)?\.service$/;
+
+type HostTextReplacement = {
+  from: string;
+  to: string;
+};
+
+type PlannedHostFileRewrite = HomeMigrationHostUpdate & {
+  nextContent: string;
+  mode: number;
+};
+
+function replaceAllCount(input: string, from: string, to: string): { output: string; count: number } {
+  if (!from || from === to || !input.includes(from)) {
+    return { output: input, count: 0 };
+  }
+  const parts = input.split(from);
+  return { output: parts.join(to), count: parts.length - 1 };
+}
+
+function applyTextReplacements(
+  input: string,
+  replacements: HostTextReplacement[],
+): { output: string; count: number } {
+  let output = input;
+  let count = 0;
+  for (const rule of replacements) {
+    const applied = replaceAllCount(output, rule.from, rule.to);
+    output = applied.output;
+    count += applied.count;
+  }
+  return { output, count };
+}
+
+function rewriteJsonStrings(
+  value: unknown,
+  replacements: HostTextReplacement[],
+): { value: unknown; count: number } {
+  if (typeof value === "string") {
+    const applied = applyTextReplacements(value, replacements);
+    return { value: applied.output, count: applied.count };
+  }
+  if (Array.isArray(value)) {
+    let total = 0;
+    let changed = false;
+    const next = value.map((item) => {
+      const rewritten = rewriteJsonStrings(item, replacements);
+      if (rewritten.count > 0) {
+        total += rewritten.count;
+        changed = true;
+      }
+      return rewritten.value;
+    });
+    return changed ? { value: next, count: total } : { value, count: 0 };
+  }
+  if (value && typeof value === "object") {
+    let total = 0;
+    let changed = false;
+    const record = value as Record<string, unknown>;
+    const next: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record)) {
+      const rewritten = rewriteJsonStrings(entry, replacements);
+      if (rewritten.count > 0) {
+        total += rewritten.count;
+        changed = true;
+      }
+      next[key] = rewritten.value;
+    }
+    return changed ? { value: next, count: total } : { value, count: 0 };
+  }
+  return { value, count: 0 };
+}
+
+function planTextHostRewrite(
+  kind: HomeMigrationHostUpdateKind,
+  filePath: string,
+  replacements: HostTextReplacement[],
+): PlannedHostFileRewrite | null {
+  const stat = lstatSafe(filePath);
+  if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+    return null;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  const applied = applyTextReplacements(raw, replacements);
+  if (applied.count === 0 || applied.output === raw) {
+    return null;
+  }
+  return {
+    kind,
+    path: filePath,
+    replacements: applied.count,
+    nextContent: applied.output,
+    mode: stat.mode & 0o777,
+  };
+}
+
+function planJsonHostRewrite(
+  kind: HomeMigrationHostUpdateKind,
+  filePath: string,
+  replacements: HostTextReplacement[],
+): PlannedHostFileRewrite | null {
+  const stat = lstatSafe(filePath);
+  if (!stat || stat.isSymbolicLink() || !stat.isFile()) {
+    return null;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+  if (!replacements.some((rule) => rule.from && rule.from !== rule.to && raw.includes(rule.from))) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = raw.trim() ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const rewritten = rewriteJsonStrings(parsed, replacements);
+  if (rewritten.count === 0) {
+    return null;
+  }
+  const trailing = raw.endsWith("\n") ? "\n" : "";
+  return {
+    kind,
+    path: filePath,
+    replacements: rewritten.count,
+    nextContent: `${JSON.stringify(rewritten.value, null, 2)}${trailing}`,
+    mode: stat.mode & 0o777,
+  };
+}
+
+function collectHostReferenceRewrites(
+  paths: HomeMigrationPaths,
+  env: NodeJS.ProcessEnv,
+): PlannedHostFileRewrite[] {
+  const rewrites: PlannedHostFileRewrite[] = [];
+
+  const serviceReplacements: HostTextReplacement[] = [];
+  if (!sameResolvedPath(paths.legacySupportDir, paths.stateDir)) {
+    serviceReplacements.push({ from: paths.legacySupportDir, to: paths.stateDir });
+  }
+  const legacyControlHome = join(paths.openscoutHome, "control-plane");
+  const targetControlHome = join(paths.stateDir, "control-plane");
+  if (!sameResolvedPath(legacyControlHome, targetControlHome)) {
+    serviceReplacements.push({ from: legacyControlHome, to: targetControlHome });
+  }
+
+  // 1. Service definitions (macOS LaunchAgents or Linux systemd user units)
+  if (serviceReplacements.length > 0) {
+    if (paths.platform === "darwin") {
+      const launchAgentsDir = join(paths.home, "Library", "LaunchAgents");
+      const dirStat = lstatSafe(launchAgentsDir);
+      if (dirStat && dirStat.isDirectory() && !dirStat.isSymbolicLink()) {
+        const names = readdirSync(launchAgentsDir)
+          .filter((name) => LAUNCH_AGENT_PLIST_PATTERN.test(name))
+          .sort((a, b) => a.localeCompare(b));
+        for (const name of names) {
+          const planned = planTextHostRewrite("launch-agent", join(launchAgentsDir, name), serviceReplacements);
+          if (planned) {
+            rewrites.push(planned);
+          }
+        }
+      }
+    } else {
+      const xdgConfigHome = env.XDG_CONFIG_HOME?.trim() || join(paths.home, ".config");
+      const systemdDir = join(xdgConfigHome, "systemd", "user");
+      const dirStat = lstatSafe(systemdDir);
+      if (dirStat && dirStat.isDirectory() && !dirStat.isSymbolicLink()) {
+        const names = readdirSync(systemdDir)
+          .filter((name) => SYSTEMD_UNIT_PATTERN.test(name))
+          .sort((a, b) => a.localeCompare(b));
+        for (const name of names) {
+          const planned = planTextHostRewrite("systemd-unit", join(systemdDir, name), serviceReplacements);
+          if (planned) {
+            rewrites.push(planned);
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Harness hook and statusline settings (only Scout's own runtime/hooks & runtime/statusline paths)
+  if (!sameResolvedPath(paths.legacySupportDir, paths.stateDir)) {
+    const legacyHooksDir = join(paths.legacySupportDir, "runtime", "hooks");
+    const targetHooksDir = join(paths.stateDir, "runtime", "hooks");
+    const legacyStatuslineDir = join(paths.legacySupportDir, "runtime", "statusline");
+    const targetStatuslineDir = join(paths.stateDir, "runtime", "statusline");
+
+    const antigravityPlanned = planJsonHostRewrite(
+      "antigravity-hooks",
+      join(paths.home, ".gemini", "config", "hooks.json"),
+      [{ from: legacyHooksDir, to: targetHooksDir }],
+    );
+    if (antigravityPlanned) {
+      rewrites.push(antigravityPlanned);
+    }
+
+    const claudePlanned = planJsonHostRewrite(
+      "claude-settings",
+      join(paths.home, ".claude", "settings.json"),
+      [
+        { from: legacyHooksDir, to: targetHooksDir },
+        { from: legacyStatuslineDir, to: targetStatuslineDir },
+      ],
+    );
+    if (claudePlanned) {
+      rewrites.push(claudePlanned);
+    }
+  }
+
+  return rewrites;
+}
+
+function planHostReferenceUpdates(
+  paths: HomeMigrationPaths,
+  env: NodeJS.ProcessEnv,
+): HomeMigrationHostUpdate[] {
+  return collectHostReferenceRewrites(paths, env).map(({ kind, path, replacements }) => ({
+    kind,
+    path,
+    replacements,
+  }));
+}
+
+function applyHostReferenceUpdates(
+  paths: HomeMigrationPaths,
+  env: NodeJS.ProcessEnv,
+): HomeMigrationHostUpdate[] {
+  const rewrites = collectHostReferenceRewrites(paths, env);
+  const updated: HomeMigrationHostUpdate[] = [];
+  for (const rewrite of rewrites) {
+    writeFileAtomically(rewrite.path, rewrite.nextContent, rewrite.mode || 0o644);
+    updated.push({
+      kind: rewrite.kind,
+      path: rewrite.path,
+      replacements: rewrite.replacements,
+    });
+  }
+  return updated;
 }
 
 function fsyncDirectory(dirPath: string): void {
@@ -837,7 +1108,11 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
     return {
       dryRun: true,
       resumed: false,
-      alreadyMigrated: plan.moves.length === 0 && plan.conflicts.length === 0 && plan.refused.length === 0,
+      alreadyMigrated:
+        plan.moves.length === 0
+        && plan.conflicts.length === 0
+        && plan.refused.length === 0
+        && plan.hostUpdates.length === 0,
       paths,
       plan,
       journalPath: paths.journalPath,
@@ -848,6 +1123,7 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
       refusedCount: plan.refused.length,
       checkpointedDatabases: [],
       movedMarkers: [],
+      updatedHostFiles: [],
     };
   }
 
@@ -873,7 +1149,7 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
       (entry.action === "move" || entry.action === "conflict") && entry.target !== null,
   );
 
-  if (!hasIncompleteJournal && actionableEntries.length === 0) {
+  if (!hasIncompleteJournal && actionableEntries.length === 0 && plan.hostUpdates.length === 0) {
     return {
       dryRun: false,
       resumed: false,
@@ -888,6 +1164,7 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
       refusedCount: 0,
       checkpointedDatabases: [],
       movedMarkers: [],
+      updatedHostFiles: [],
     };
   }
 
@@ -897,6 +1174,25 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
   const movedMarkers: string[] = [];
 
   try {
+    if (!hasIncompleteJournal && actionableEntries.length === 0 && plan.hostUpdates.length > 0) {
+      const updatedHostFiles = applyHostReferenceUpdates(paths, options.env ?? process.env);
+      return {
+        dryRun: false,
+        resumed: false,
+        alreadyMigrated: false,
+        paths,
+        plan,
+        journalPath: paths.journalPath,
+        journal: existingJournalBeforeLock,
+        movedCount: 0,
+        conflictCount: 0,
+        skippedCount: plan.skipped.length,
+        refusedCount: 0,
+        checkpointedDatabases: [],
+        movedMarkers: [],
+        updatedHostFiles,
+      };
+    }
     const timestamp = now().toISOString();
     const dateStamp = formatDateStamp(now());
     const existingJournal = readJournal(paths.journalPath);
@@ -1080,6 +1376,8 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
       }
     }
 
+    const updatedHostFiles = applyHostReferenceUpdates(paths, options.env ?? process.env);
+
     journal.status = "completed";
     journal.completedAt = now().toISOString();
     writeJournal(paths.journalPath, journal, now);
@@ -1102,6 +1400,7 @@ export async function runHomeMigration(options: RunHomeMigrationOptions = {}): P
       refusedCount: 0,
       checkpointedDatabases,
       movedMarkers,
+      updatedHostFiles,
     };
   } finally {
     releaseMigrationLock(paths.lockPath);
@@ -1161,7 +1460,12 @@ export function inspectHomeLayoutStatus(options: ScoutHomeOptions = {}): HomeLay
     conflicts: plan.conflicts.length,
     refused: plan.refused.length,
     skipped: plan.skipped.length,
-    migrationPending: plan.moves.length > 0 || plan.conflicts.length > 0 || (journal !== null && journal.status !== "completed"),
+    pendingHostUpdates: plan.hostUpdates.length,
+    migrationPending:
+      plan.moves.length > 0
+      || plan.conflicts.length > 0
+      || plan.hostUpdates.length > 0
+      || (journal !== null && journal.status !== "completed"),
     plan,
   };
 }
