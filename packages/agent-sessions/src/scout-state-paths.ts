@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -5,22 +6,31 @@ import { join } from "node:path";
 // that runtime entrypoints materialize for the current OPENSCOUT_INSTANCE
 // (see packages/runtime/src/instance.ts). Unset env keeps the prod layout.
 
-/** The `~/.scout` class of state for this instance (OPENSCOUT_SCOUT_HOME). */
+/** The legacy `~/.scout` class of state for this instance (OPENSCOUT_SCOUT_HOME). */
 export function scoutStateHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.OPENSCOUT_SCOUT_HOME?.trim() || join(homedir(), ".scout");
 }
 
-/** Pairing bridge state for this instance (OPENSCOUT_PAIRING_HOME). */
+/** Pairing bridge state for this instance (OPENSCOUT_PAIRING_HOME / OPENSCOUT_STATE_DIR). */
 export function scoutPairingHome(env: NodeJS.ProcessEnv = process.env): string {
-  return env.OPENSCOUT_PAIRING_HOME?.trim()
+  const explicit = env.OPENSCOUT_PAIRING_HOME?.trim()
     || env.SCOUT_PAIRING_HOME?.trim()
-    || env.OPENSCOUT_PAIRING_DIR?.trim()
-    || join(scoutStateHome(env), "pairing");
+    || env.OPENSCOUT_PAIRING_DIR?.trim();
+  if (explicit) return explicit;
+  const stateDir = env.OPENSCOUT_STATE_DIR?.trim();
+  if (stateDir) return join(stateDir, "pairing");
+  const scoutHome = env.OPENSCOUT_SCOUT_HOME?.trim();
+  if (scoutHome) return join(scoutHome, "pairing");
+  const homeRoot = env.OPENSCOUT_HOME?.trim() || env.SCOUT_HOME?.trim() || join(homedir(), ".openscout");
+  const migrated = join(homeRoot, "state", "pairing");
+  if (existsSync(migrated)) return migrated;
+  return join(scoutStateHome(env), "pairing");
 }
 
 /**
  * Root of one adapter's pairing session files for this instance. An explicit
- * pairing home (set per OPENSCOUT_INSTANCE) wins; otherwise `<home>/.scout/pairing`.
+ * pairing home (set per OPENSCOUT_INSTANCE) wins; otherwise migrated
+ * `<home>/.openscout/state/pairing` if present, else legacy `<home>/.scout/pairing`.
  */
 export function scoutPairingAdapterRoot(
   home: string,
@@ -30,12 +40,17 @@ export function scoutPairingAdapterRoot(
   const explicit = env.OPENSCOUT_PAIRING_HOME?.trim()
     || env.SCOUT_PAIRING_HOME?.trim()
     || env.OPENSCOUT_PAIRING_DIR?.trim()
+    || (env.OPENSCOUT_STATE_DIR?.trim() ? join(env.OPENSCOUT_STATE_DIR.trim(), "pairing") : "")
     || (env.OPENSCOUT_SCOUT_HOME?.trim() ? join(env.OPENSCOUT_SCOUT_HOME.trim(), "pairing") : "");
-  return join(explicit || join(home, ".scout", "pairing"), adapter);
+  if (explicit) return join(explicit, adapter);
+  const homeRoot = env.OPENSCOUT_HOME?.trim() || env.SCOUT_HOME?.trim() || join(home, ".openscout");
+  const migrated = join(homeRoot, "state", "pairing");
+  return join(existsSync(migrated) ? migrated : join(home, ".scout", "pairing"), adapter);
 }
 
-/** True for a file under `<prefix>` in prod's pairing tree or this instance's. */
+/** True for a file under `<prefix>` in prod's pairing tree (migrated or legacy) or this instance's. */
 export function isScoutPairingPath(path: string, prefix: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (path.includes(`/.openscout/state/pairing/${prefix}`)) return true;
   if (path.includes(`/.scout/pairing/${prefix}`)) return true;
   const instanceRoot = scoutPairingAdapterRoot(homedir(), prefix, env);
   return path.startsWith(instanceRoot);
@@ -54,6 +69,9 @@ export const SCOUT_USER_SPAWN_STRIPPED_ENV_KEYS: readonly string[] = [
   "OPENSCOUT_INSTANCE_MESH",
   "OPENSCOUT_INSTANCE_HOST_LABEL",
   "OPENSCOUT_HOME",
+  "OPENSCOUT_STATE_DIR",
+  "OPENSCOUT_CACHE_DIR",
+  "SCOUT_HOME",
   "OPENSCOUT_CONTROL_HOME",
   "OPENSCOUT_ATTRIBUTION_KEY_FILE",
   "OPENSCOUT_SUPPORT_DIRECTORY",

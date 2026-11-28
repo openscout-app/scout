@@ -3,10 +3,23 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSy
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 
-import { assertTestIsolatedUserData, ensureOpenScoutCleanSlateSync, resolveOpenScoutSupportPaths } from "./support-paths.js";
+import {
+  assertTestIsolatedUserData,
+  ensureOpenScoutCleanSlateSync,
+  resolveOpenScoutCacheDirectory,
+  resolveOpenScoutConfigReadPath,
+  resolveOpenScoutPairingHomeForEnv,
+  resolveOpenScoutStateDirectory,
+  resolveOpenScoutSupportPaths,
+  resolveOpenScoutToolDirectory,
+} from "./support-paths.js";
 
 const originalEnv = {
   NODE_ENV: process.env.NODE_ENV,
+  OPENSCOUT_HOME: process.env.OPENSCOUT_HOME,
+  OPENSCOUT_STATE_DIR: process.env.OPENSCOUT_STATE_DIR,
+  OPENSCOUT_CACHE_DIR: process.env.OPENSCOUT_CACHE_DIR,
+  SCOUT_HOME: process.env.SCOUT_HOME,
   OPENSCOUT_SUPPORT_DIRECTORY: process.env.OPENSCOUT_SUPPORT_DIRECTORY,
   OPENSCOUT_CONTROL_HOME: process.env.OPENSCOUT_CONTROL_HOME,
   OPENSCOUT_RELAY_HUB: process.env.OPENSCOUT_RELAY_HUB,
@@ -120,7 +133,65 @@ describe("ensureOpenScoutCleanSlateSync", () => {
 
   test("refuses initialization without test isolation", () => {
     delete process.env.OPENSCOUT_SUPPORT_DIRECTORY;
+    delete process.env.OPENSCOUT_STATE_DIR;
+    delete process.env.OPENSCOUT_HOME;
+    delete process.env.SCOUT_HOME;
     expect(() => ensureOpenScoutCleanSlateSync()).toThrow(/without OPENSCOUT_SUPPORT_DIRECTORY set/);
+  });
+
+  test("passes test isolation when only OPENSCOUT_HOME or OPENSCOUT_STATE_DIR is set", () => {
+    delete process.env.OPENSCOUT_SUPPORT_DIRECTORY;
+    delete process.env.OPENSCOUT_CONTROL_HOME;
+    const root = mkdtempSync(join(tmpdir(), "openscout-one-home-"));
+    testDirectories.add(root);
+    process.env.OPENSCOUT_HOME = join(root, ".openscout");
+
+    ensureOpenScoutCleanSlateSync();
+    expect(resolveOpenScoutStateDirectory()).toBe(join(root, ".openscout", "state"));
+    expect(resolveOpenScoutSupportPaths().controlHome).toBe(join(root, ".openscout", "state", "control-plane"));
+    expect(existsSync(resolveOpenScoutSupportPaths().cutoverMarkerPath)).toBe(true);
+
+    delete process.env.OPENSCOUT_HOME;
+    process.env.OPENSCOUT_STATE_DIR = join(root, "explicit-state");
+    ensureOpenScoutCleanSlateSync();
+    expect(resolveOpenScoutStateDirectory()).toBe(join(root, "explicit-state"));
+    expect(existsSync(join(root, "explicit-state", "rpc-runtime-cutover-v1"))).toBe(true);
+  });
+});
+
+describe("one-home dual-location resolvers", () => {
+  test("resolveOpenScoutConfigReadPath reads ~/.openscout first and falls back to legacy ~/.scout", () => {
+    const home = mkdtempSync(join(tmpdir(), "openscout-dual-config-"));
+    testDirectories.add(home);
+    mkdirSync(join(home, ".scout"), { recursive: true });
+    writeFileSync(join(home, ".scout", "config.json"), "{}");
+
+    expect(resolveOpenScoutConfigReadPath("config.json", { HOME: home }))
+      .toBe(join(home, ".scout", "config.json"));
+
+    mkdirSync(join(home, ".openscout"), { recursive: true });
+    writeFileSync(join(home, ".openscout", "config.json"), "{}");
+    expect(resolveOpenScoutConfigReadPath("config.json", { HOME: home }))
+      .toBe(join(home, ".openscout", "config.json"));
+  });
+
+  test("resolveOpenScoutPairingHomeForEnv prefers migrated ~/.openscout/state/pairing over legacy ~/.scout/pairing", () => {
+    const home = mkdtempSync(join(tmpdir(), "openscout-dual-pairing-"));
+    testDirectories.add(home);
+    expect(resolveOpenScoutPairingHomeForEnv({ HOME: home })).toBe(join(home, ".scout", "pairing"));
+
+    mkdirSync(join(home, ".openscout", "state", "pairing"), { recursive: true });
+    expect(resolveOpenScoutPairingHomeForEnv({ HOME: home })).toBe(join(home, ".openscout", "state", "pairing"));
+    expect(resolveOpenScoutPairingHomeForEnv({ HOME: home, OPENSCOUT_STATE_DIR: join(home, "custom-state") }))
+      .toBe(join(home, "custom-state", "pairing"));
+  });
+
+  test("cache and tool directories derive inside OPENSCOUT_HOME", () => {
+    const env = { OPENSCOUT_HOME: "/tmp/one-home" };
+    expect(resolveOpenScoutCacheDirectory(env)).toBe("/tmp/one-home/cache");
+    expect(resolveOpenScoutCacheDirectory({ ...env, OPENSCOUT_CACHE_DIR: "/tmp/custom-cache" })).toBe("/tmp/custom-cache");
+    expect(resolveOpenScoutToolDirectory("desk", env)).toBe("/tmp/one-home/.desk");
+    expect(resolveOpenScoutToolDirectory("studio", env)).toBe("/tmp/one-home/.studio");
   });
 });
 
