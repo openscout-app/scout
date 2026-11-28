@@ -26,6 +26,7 @@ import {
   listOpenScoutInstances,
   OPENSCOUT_USER_SPAWN_STRIPPED_ENV_KEYS,
   releaseOpenScoutInstance,
+  resolveOpenScoutSocketDirectory,
   selectCliOpenScoutInstance,
   buildMultiplexerServerEnvironment,
   repairOpenScoutInstanceRegistry,
@@ -58,8 +59,8 @@ describe("instance names", () => {
 });
 
 describe("derivation table", () => {
-  test("prod is exactly the legacy layout", () => {
-    const layout = deriveOpenScoutInstanceLayout({ ...base, env: {} });
+  test("prod is exactly the legacy layout with short runtime sockets", () => {
+    const layout = deriveOpenScoutInstanceLayout({ ...base, env: { XDG_RUNTIME_DIR: "/run/user/501" } });
     expect(layout).toMatchObject({
       name: "prod",
       isProd: true,
@@ -70,7 +71,10 @@ describe("derivation table", () => {
       relayHub: `${HOME}/.openscout/relay`,
       scoutHome: `${HOME}/.scout`,
       pairingHome: `${HOME}/.scout/pairing`,
-      brokerSocketPath: `${HOME}/.local/share/openscout/runtime/broker.sock`,
+      socketDirectory: "/run/user/501/scout/prod",
+      brokerSocketPath: "/run/user/501/scout/prod/broker.sock",
+      appSocketPath: "/run/user/501/scout/prod/app.sock",
+      probesSocketPath: "/run/user/501/scout/prod/probes.sock",
       serviceLabel: "app.openscout",
       systemdUnitName: "scout.service",
       nodeQualifier: "archie",
@@ -78,6 +82,17 @@ describe("derivation table", () => {
       meshAllowed: true,
     });
     expect(layout.ports).toEqual({ ...OPENSCOUT_PROD_PORTS });
+  });
+
+  test("short runtime socket directory follows confstr on darwin and XDG_RUNTIME_DIR on linux", () => {
+    expect(resolveOpenScoutSocketDirectory({ platform: "darwin", name: "dev", userTempDir: "/var/folders/ab/cd/T/", env: {} }))
+      .toBe("/var/folders/ab/cd/T/scout/dev");
+    expect(resolveOpenScoutSocketDirectory({ platform: "linux", name: "prod", env: { XDG_RUNTIME_DIR: "/run/user/1000/" } }))
+      .toBe("/run/user/1000/scout/prod");
+    expect(resolveOpenScoutSocketDirectory({ platform: "linux", name: "dev", uid: 1000, env: {} }))
+      .toBe("/tmp/scout-1000/dev");
+    expect(resolveOpenScoutSocketDirectory({ platform: "darwin", name: "dev", env: { OPENSCOUT_SOCKET_DIR: "/tmp/custom-sock" } }))
+      .toBe("/tmp/custom-sock");
   });
 
   test("prod on macOS keeps Application Support", () => {
@@ -90,10 +105,11 @@ describe("derivation table", () => {
     expect(layout.supportDirectory).toBe("/data/openscout");
   });
 
-  test("a named instance derives everything under one root, identically on macOS and Linux", () => {
+  test("a named instance derives everything under one root and short runtime sockets, identically on macOS and Linux", () => {
     for (const platform of ["linux", "darwin"]) {
       const layout = deriveOpenScoutInstanceLayout({ ...base, platform, env: { OPENSCOUT_INSTANCE: "dev" } });
       const root = `${HOME}/.openscout/instances/dev`;
+      const socketDir = resolveOpenScoutSocketDirectory({ platform, name: "dev", env: {} });
       expect(layout).toMatchObject({
         name: "dev",
         isProd: false,
@@ -105,9 +121,10 @@ describe("derivation table", () => {
         scoutHome: root,
         pairingHome: `${root}/pairing`,
         localEdgeDirectory: `${root}/local-edge`,
-        brokerSocketPath: `${root}/support/runtime/broker.sock`,
-        appSocketPath: `${root}/run/scout-app.sock`,
-        probesSocketPath: `${root}/run/scoutd-probes.sock`,
+        socketDirectory: socketDir,
+        brokerSocketPath: `${socketDir}/broker.sock`,
+        appSocketPath: `${socketDir}/app.sock`,
+        probesSocketPath: `${socketDir}/probes.sock`,
         nodeName: "archie-dev",
         nodeQualifier: "archie-dev",
         nodeId: "archie-dev-openscout",
@@ -216,7 +233,8 @@ describe("applyOpenScoutInstanceEnvironment", () => {
       OPENSCOUT_SUPPORT_DIRECTORY: `${HOME}/.openscout/instances/dev/support`,
       OPENSCOUT_PAIRING_HOME: `${HOME}/.openscout/instances/dev/pairing`,
       OPENSCOUT_SCOUT_HOME: `${HOME}/.openscout/instances/dev`,
-      OPENSCOUT_BROKER_SOCKET_PATH: `${HOME}/.openscout/instances/dev/support/runtime/broker.sock`,
+      OPENSCOUT_SOCKET_DIR: resolveOpenScoutSocketDirectory({ platform: base.platform, name: "dev", env: {} }),
+      OPENSCOUT_BROKER_SOCKET_PATH: `${resolveOpenScoutSocketDirectory({ platform: base.platform, name: "dev", env: {} })}/broker.sock`,
       OPENSCOUT_BROKER_PORT: "24400",
       OPENSCOUT_WEB_PORT: "24410",
       OPENSCOUT_PAIRING_PORT: "24420",

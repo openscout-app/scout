@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { parentPort, workerData } from "node:worker_threads";
-import { listenUnixSocket } from "./broker-server-lifecycle.js";
+import { closeServer, createUnixSocketRebindGuard, listenUnixSocket } from "./broker-server-lifecycle.js";
 import type { BrokerHealthFlag, BrokerHealthResponderMessage, BrokerHealthResponderWorkerData } from "./broker-health-responder.js";
 
 if (!parentPort) throw new Error("health responder requires a parent port");
@@ -71,8 +71,22 @@ const server = createServer((request, response) => {
     .end(JSON.stringify(read(Date.now())));
 });
 
+const socketRebindGuard = createUnixSocketRebindGuard({
+  socketPath: data.socketPath,
+  getServer: () => server,
+  isStopping: () => state === "stopping",
+  rebind: async () => {
+    await closeServer(server, 1_000);
+    await listenUnixSocket(server, data.socketPath);
+  },
+  log: (message) => console.warn(`[openscout-runtime] health responder: ${message}`),
+});
+
 listenUnixSocket(server, data.socketPath).then(
-  () => port.postMessage({ type: "listening" }),
+  () => {
+    socketRebindGuard.start();
+    port.postMessage({ type: "listening" });
+  },
   (error) => { throw error; },
 );
 

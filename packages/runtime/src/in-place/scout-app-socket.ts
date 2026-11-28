@@ -2,9 +2,11 @@
 // asks of the app because only the app holds the permission. One JSON line
 // in, one out, like scoutd's probe socket beside it in ~/.openscout/run.
 
+import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveOpenScoutSocketDirectory } from "../instance.js";
 
 const REQUEST_SCHEMA = "scout-app.request.v1";
 
@@ -15,7 +17,11 @@ export type ScoutAppReply =
 export function scoutAppSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.OPENSCOUT_APP_SOCKET?.trim();
   if (explicit) return explicit;
-  return join(env.OPENSCOUT_HOME?.trim() || join(homedir(), ".openscout"), "run", "scout-app.sock");
+  const preferred = join(resolveOpenScoutSocketDirectory({ env }), "app.sock");
+  if (existsSync(preferred)) return preferred;
+  const legacy = join(env.OPENSCOUT_HOME?.trim() || join(homedir(), ".openscout"), "run", "scout-app.sock");
+  if (existsSync(legacy)) return legacy;
+  return preferred;
 }
 
 /** Resolves with the app's reply; `scout_app_unavailable` when nothing answers. */

@@ -643,7 +643,9 @@ export function resolveBrokerServiceConfig(): BrokerServiceConfig {
   const brokerPort = Number.parseInt(process.env.OPENSCOUT_BROKER_PORT ?? String(resolveBrokerPort()), 10);
   const brokerUrl = resolveBrokerUrl(brokerHost, brokerPort, advertiseScope);
   const brokerSocketPath = process.env.OPENSCOUT_BROKER_SOCKET_PATH?.trim()
-    || buildDefaultBrokerSocketPath(runtimeDirectory);
+    || (process.env.OPENSCOUT_SUPPORT_DIRECTORY?.trim() && isTmpPath(supportDirectory)
+      ? buildDefaultBrokerSocketPath(runtimeDirectory)
+      : deriveOpenScoutInstanceLayout().brokerSocketPath);
   const launchAgentPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
 
   return {
@@ -695,7 +697,7 @@ export function persistentBrokerServiceConfig(config: BrokerServiceConfig): Brok
     stderrLogPath: join(logsDirectory, "stderr.log"),
     controlHome: controlTransient ? defaultOpenScoutControlHome() : config.controlHome,
     brokerSocketPath: isTmpPath(config.brokerSocketPath)
-      ? buildDefaultBrokerSocketPath(runtimeDirectory)
+      ? deriveOpenScoutInstanceLayout().brokerSocketPath
       : config.brokerSocketPath,
   };
 }
