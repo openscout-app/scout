@@ -59,8 +59,9 @@ behavior is the worked example at the end of this spec.
 
 1. Map the lifecycle of Claude Code, Codex and Antigravity onto one set of
    Scout lifecycle points.
-2. Install a hook on every point each harness offers, once, with
-   `scout hooks apply`.
+2. Install a hook on every point each harness offers, all at once, with
+   `scout hooks apply`, even where Scout does nothing at that point yet.
+   Install and uninstall are clean and exact.
 3. Give each lifecycle moment one Scout function, shared by every harness.
    Changing behavior at a moment means changing that function.
 4. Keep everything harness-specific in that harness's adapter.
@@ -95,23 +96,56 @@ function simply never runs for that harness.
 
 ### One hook script, one command
 
-- Every installed hook runs the same wrapper, `openscout-lifecycle.sh`. The
-  wrapper runs `exec <scout> lifecycle <harness> <hook-point>` and reads the
-  hook's JSON on stdin.
-- `scout lifecycle` passes the input to that harness's adapter, which returns
-  a lifecycle event. It posts the event to the broker at `POST /v1/lifecycle`,
-  with a 1 s timeout.
-- `scout lifecycle` always exits 0 and prints nothing a harness would act on.
-  If the broker is down or slow, it drops the event and records the drop in a
-  counter, which `scout hooks status` shows.
-- `scout hooks apply` adds this wrapper to every hook point in the lifecycle
-  map. It leaves the existing `PermissionRequest` entry and other hooks as
-  they are.
-- `scout hooks status` reports each point per harness as applied, absent or
-  stale.
-- The wrapper never changes when Scout's behavior changes. Only the moment
-  functions change, so `scout hooks apply` is needed again only when a harness
-  adds a hook point or changes its format.
+Every installed hook runs the same wrapper, `openscout-lifecycle.sh`, with
+two arguments: the harness and the hook point.
+
+The wrapper must cost almost nothing, because `PreToolUse` and `PostToolUse`
+fire on every tool call, and every hook is installed even while its moment is
+a no-op. So the wrapper does not start the Scout CLI and does not wait for the
+broker:
+
+```sh
+#!/bin/sh
+# Scout lifecycle hook. `scout hooks remove` takes it out.
+input=$(cat)
+printf '%s' "$input" | curl -s -m 1 --unix-socket "<broker socket>" \
+  -H 'content-type: application/json' --data-binary @- \
+  "http://scout/v1/lifecycle/raw?harness=$1&point=$2" >/dev/null 2>&1 &
+exit 0
+```
+
+- It reads the hook's JSON, starts the post in the background and exits 0 at
+  once. The harness never waits on Scout.
+- It posts the raw input. The broker runs the harness's adapter, so adapters
+  live in one process and change without reinstalling anything.
+- It prints nothing a harness would act on.
+- If the broker is down or slow, the background post fails silently and the
+  event is lost. The broker cannot count drops it never saw, so
+  `scout hooks status` instead reports the last event received per harness
+  and point.
+- `scout hooks apply` writes the broker's socket path into the wrapper. If the
+  socket path changes, `scout hooks status` reports the wrapper as stale.
+- The wrapper never changes when Scout's behavior changes. Only adapters and
+  moment functions change, so `scout hooks apply` is needed again only when a
+  harness adds a hook point or changes its format.
+
+### Install and uninstall
+
+- `scout hooks apply` installs the wrapper on every hook point in the
+  lifecycle map, for every harness it finds, in one run. Every moment starts
+  as a no-op, so installing everything changes nothing a harness does.
+- Apply is idempotent. Running it twice leaves each settings file as one run
+  did.
+- `scout hooks apply --dry-run` prints the exact change to each settings file
+  and writes nothing.
+- `scout hooks remove` takes out every Scout entry and the wrapper script. It
+  leaves every other hook, and the rest of each settings file, byte-for-byte
+  unchanged. This uses the existing exact-removal logic in
+  `harness-hooks.ts`.
+- `scout hooks status` lists every harness and hook point: applied, absent or
+  stale, and the time of the last event received.
+- The existing `PermissionRequest` entry stays separate and is unaffected by
+  apply and remove of lifecycle hooks.
 
 ### The lifecycle event
 
@@ -256,7 +290,7 @@ function, the same for every harness.
 
 | Failure | Behavior | Recovery |
 |---|---|---|
-| Broker down or slower than 1 s | The hook exits 0. The event is dropped and counted. | `scout hooks status` shows the count. Nothing to recover. |
+| Broker down or slow | The hook has already exited 0. The background post fails and the event is lost. | `scout hooks status` shows the last event received per point, so a gap is visible. Nothing to recover. |
 | A behavior throws | The error is recorded. The next behavior in the moment's list still runs. The harness is unaffected. | Fix the behavior in Scout. |
 | An adapter cannot read an input | The adapter returns `null`, and the input is counted as unreadable. | `scout hooks status` shows the count per harness. Fix the adapter. |
 | A harness changes its hook format | `scout hooks status` reports `stale`. | `scout hooks apply`. |
@@ -264,35 +298,44 @@ function, the same for every harness.
 
 ## Acceptance checks
 
-1. After `scout hooks apply`, a Claude Code session started outside Scout
-   produces `sessionStart`, `promptSubmit`, `toolBefore`, `toolAfter` and
-   `turnEnd` in `scout lifecycle tail`.
-2. With the broker stopped, a Claude Code turn completes normally, and
-   `scout hooks status` shows the dropped events.
-3. A turn in a session Scout launched produces one `turnEnd`, not two.
-4. A behavior added to `turnEnd` runs for Claude Code, Antigravity and
+1. One `scout hooks apply` installs the wrapper on every point in the
+   lifecycle map for every harness found. After it, a Claude Code session
+   started outside Scout produces `sessionStart`, `promptSubmit`, `toolBefore`,
+   `toolAfter` and `turnEnd` in `scout lifecycle tail`.
+2. With every moment a no-op, the wrapper adds less than 10 ms to a hook, as
+   measured from the harness's side over 100 `PreToolUse` calls.
+3. With the broker stopped, a Claude Code turn completes normally and is not
+   slower.
+4. Running `scout hooks apply` twice leaves each settings file as one run did.
+   `--dry-run` writes nothing.
+5. A turn in a session Scout launched produces one `turnEnd`, not two.
+6. A behavior added to `turnEnd` runs for Claude Code, Antigravity and
    Scout-launched sessions without any change to their settings files.
-5. A behavior that throws does not stop the next behavior in the list, and the
+7. A behavior that throws does not stop the next behavior in the list, and the
    harness turn is not delayed.
-6. Every installed hook, for every harness and point, reaches `onLifecycle`.
+8. Every installed hook, for every harness and point, reaches `onLifecycle`.
    No other entry point exists.
-7. No code in `moments.ts` branches on harness without a stated reason. A
+9. No code in `moments.ts` branches on harness without a stated reason. A
    change in how a harness reports something touches only its adapter.
-8. `scout hooks remove` removes every Scout entry and leaves non-Scout hooks in
-   each settings file byte-for-byte unchanged.
+10. `scout hooks remove` removes every Scout entry and the wrapper script, and
+    leaves non-Scout hooks in each settings file byte-for-byte unchanged.
+    Apply followed by remove restores each settings file exactly.
 
 ## Implementation steps
 
 Each step can ship on its own.
 
-1. The lifecycle module: `onLifecycle`, empty moments, `POST /v1/lifecycle`,
-   the event buffer and `scout lifecycle tail`. The `scout` adapter sends
-   `turnEnd` and `sessionEnd` for sessions the broker launched.
-2. The `scout lifecycle` command, the wrapper, the Claude Code adapter, and
-   `scout hooks apply` for every Claude Code point in the map.
-3. The Antigravity adapter. Its existing entry also posts lifecycle events.
-4. The first behavior, `presentDecisions`, once the proposal page exists.
-5. The Codex adapter, after its hook surface is confirmed.
+1. All the plumbing, with every moment a no-op:
+   - the lifecycle module, `onLifecycle` and empty moments;
+   - `POST /v1/lifecycle/raw`, the event buffer and `scout lifecycle tail`;
+   - the wrapper, and `scout hooks apply`, `remove`, `status` and
+     `--dry-run` for every point of every harness in the map;
+   - the Claude Code, Antigravity and `scout` adapters.
+   After this step every hook is in place, and nothing a harness does has
+   changed.
+2. The first behavior, `presentDecisions`, once the proposal page exists.
+   From here on, new behavior is a change to a moment, never to hooks.
+3. The Codex adapter and its hook points, after its hook surface is confirmed.
 
 ## Open questions
 
@@ -302,8 +345,9 @@ Each step can ship on its own.
 2. **Permissions.** Should `PermissionRequest` become a lifecycle point with a
    function that can answer, so permission handling lives in the same module?
    That point blocks the harness, so it needs its own time limit and rules.
-3. **Dropped events.** Should the hook write events to a small local file when
-   the broker is down, so the broker can read them later?
+3. **Lost events.** Should the wrapper append an event to a small local file
+   when the post fails, so the broker can read it later? This adds a write to
+   every hook while the broker is down.
 4. **Operator behaviors.** Should the operator be able to add a behavior
    without changing Scout, for example as a sandboxed file run in the
    task-callback engine? Version 1 keeps behavior in Scout's code.
