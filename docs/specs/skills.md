@@ -1,7 +1,8 @@
 # Scout skills
 
 A Scout skill is a folder you own, with a standard `SKILL.md` and optional
-scripts and assets. Its home is `~/.scout/skills/<name>/`, outside the
+scripts and assets. Its home is `~/.openscout/skills/<name>/` (with legacy
+`~/.scout/skills/<name>/` read as a fallback), outside the
 harnesses' skill directories. Creating a skill does not make it available
 to every agent session. The agent reads it only when someone asks for it by
 name or describes the work it does.

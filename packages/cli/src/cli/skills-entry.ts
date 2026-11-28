@@ -9,14 +9,16 @@ const code = (error: unknown) => (error as NodeJS.ErrnoException).code;
 export async function installSkillEntry(home: string) {
   const source = await readFile(new URL(import.meta.resolve("#scout-skills-entry")), "utf8");
   const roots = [".agents", ".claude", ".codex", ".cursor"].map(h => join(home, h, "skills"));
-  const catalog = join(home, ".scout", "skills");
+  const catalogs = [join(home, ".openscout", "skills"), join(home, ".scout", "skills")];
   const resolvedRoots: string[] = [];
   for (const root of roots) {
     await mkdir(root, { recursive: true });
     const actual = await realpath(root);
-    const privateRoot = await realpath(catalog).catch(error => { if (code(error) !== "ENOENT") throw error; });
-    if (actual === privateRoot || (privateRoot && actual.startsWith(privateRoot + sep))) {
-      throw new Error(`Keep the harness folder ${root} separate from the Scout catalog.`);
+    for (const catalog of catalogs) {
+      const privateRoot = await realpath(catalog).catch(error => { if (code(error) !== "ENOENT") throw error; });
+      if (actual === privateRoot || (privateRoot && actual.startsWith(privateRoot + sep))) {
+        throw new Error(`Keep the harness folder ${root} separate from the Scout catalog.`);
+      }
     }
     resolvedRoots.push(actual);
   }

@@ -15,18 +15,27 @@ test("only named Scout registrations can run; optional discovery is read-only", 
   try {
     const shared = await put(".agents", "review");
     expect(await listSkills(home)).toEqual([]);
-    const own = await put(".scout", "review"), root = join(home, ".scout", "skills");
+    const own = await put(".openscout", "review"), root = join(home, ".openscout", "skills");
     await symlink(shared, join(root, "alias"));
     await symlink(shared, join(root, "other-alias"));
     await symlink(join(home, "absent"), join(root, "dangling"));
+    const legacy = await put(".scout", "legacy-only");
+    const shadowed = await put(".scout", "review");
     const native = await put(".claude", "native-only");
     await mkdir(join(home, ".cursor", "skills"), { recursive: true });
     await symlink(native, join(home, ".cursor", "skills", "native-only"));
-    expect((await listSkills(home)).map(s => [s.name, s.source])).toEqual([["alias", "linked"], ["other-alias", "linked"], ["review", "personal"]]);
+    expect((await listSkills(home)).map(s => [s.name, s.source])).toEqual([
+      ["alias", "linked"],
+      ["legacy-only", "personal"],
+      ["other-alias", "linked"],
+      ["review", "personal"],
+    ]);
     expect((await listSkills(home, true)).filter(s => s.source === "unregistered").map(s => s.name)).toEqual(["native-only"]);
     await expect(registeredSkill(home, "native-only")).rejects.toThrow("No skill named native-only");
     await expect(registeredSkill(home, "../review")).rejects.toThrow("not a path");
     expect((await registeredSkill(home, "review")).directory).toBe(await realpath(own));
+    expect((await registeredSkill(home, "review")).directory).not.toBe(await realpath(shadowed));
+    expect((await registeredSkill(home, "legacy-only")).directory).toBe(await realpath(legacy));
     const skill = await registeredSkill(home, "alias");
     expect(skill).toEqual({ name: "alias", description: "Inspect the selected file.", source: "linked",
       directory: await realpath(shared), path: await realpath(join(shared, "SKILL.md")) });

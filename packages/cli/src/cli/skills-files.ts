@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { cp, lstat, mkdir, mkdtemp, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isSkillFolderName } from "@openscout/protocol";
-import { readSkillDescription, registeredSkill, scoutSkillRoot } from "@openscout/runtime/skills";
+import { readSkillDescription, registeredSkill, scoutSkillReadRoots, scoutSkillRoot } from "@openscout/runtime/skills";
 
 function checkName(name: string) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || name.length > 64) {
@@ -135,8 +135,14 @@ export async function addSkill(home: string, input: string, cwd: string, env: No
 
 export async function forkSkill(home: string, selector: string) {
   const skill = await registeredSkill(home, selector);
-  const source = skill.directory, root = await scoutSkillRoot(home), dest = join(root, skill.name);
-  const old = await lstat(dest);
+  const source = skill.directory;
+  let root = await scoutSkillRoot(home), dest = join(root, skill.name), old: Awaited<ReturnType<typeof lstat>> | undefined;
+  for (const candidateRoot of await scoutSkillReadRoots(home)) {
+    const candidateDest = join(candidateRoot, skill.name);
+    const info = await existing(candidateDest);
+    if (info) { root = candidateRoot; dest = candidateDest; old = info; break; }
+  }
+  if (!old) throw new Error(`The registration vanished: ${dest}. No files changed.`);
   if (await realpath(dest) !== source) throw new Error(`The registration changed: ${dest}. No files changed.`);
   if (!old.isSymbolicLink()) return join(dest, "SKILL.md"); // Already personal.
   const tmp = await mkdtemp(join(root, ".fork-")), staged = join(tmp, "copy"), backup = join(tmp, "original");

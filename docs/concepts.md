@@ -325,7 +325,8 @@ shows and session materials (`ObservedSessionMaterials`,
   observed on demand, never imported into Scout records. See
   [`observed-surfaces.md`](./observed-surfaces.md).
 
-**Scout skill.** A personal folder or link under `~/.scout/skills` names a
+**Scout skill.** A personal folder or link under `~/.openscout/skills` (with
+legacy `~/.scout/skills` read as a fallback) names a
 standard `SKILL.md`. Only `scout-skills`, the catalog entry point, is visible
 to the harness at startup. It looks up a name or matches a request on demand.
 A tracked run is an ordinary ask with a receipt. See

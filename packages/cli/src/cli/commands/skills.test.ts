@@ -14,7 +14,7 @@ test("skills and run use the broker catalog, preserve the brief, and print the n
     const url = new URL(req.url);
     calls.push(`${req.method} ${url.pathname}${url.search}`);
     if (url.pathname === "/v1/skills") return Response.json({ skills: [
-      { name: "review", description: "Review a change.", source: "personal", directory: "/remote/.scout/skills/review", path: "/remote/.scout/skills/review/SKILL.md" },
+      { name: "review", description: "Review a change.", source: "personal", directory: "/remote/.openscout/skills/review", path: "/remote/.openscout/skills/review/SKILL.md" },
     ] });
     input = await req.json();
     return Response.json({ receipt: { requestId: "run-1", flightId: "flt-test", targetAgentId: "reviewer" }, followUrl: "http://runtime.test/work/w" });
@@ -22,7 +22,7 @@ test("skills and run use the broker catalog, preserve the brief, and print the n
   try {
     const ctx = createScoutCommandContext({ cwd: "/project", env: { OPENSCOUT_BROKER_URL: broker.url.origin }, stdout: t => output.push(t), stderr: () => {} });
     await runSkillsCommand(ctx, ["--all", "--on", "worker"]);
-    expect(output.pop()).toContain("review  Review a change.  [personal] /remote/.scout/skills/review/SKILL.md");
+    expect(output.pop()).toContain("review  Review a change.  [personal] /remote/.openscout/skills/review/SKILL.md");
     const brief = "Review a.md, not a=b.";
     await runNamedSkillCommand(ctx, ["review", brief, "--harness", "codex", "--on", "worker", "--project", "/code", "--request-id", "run-1"]);
     expect(input).toMatchObject({ name: "review", brief, currentDirectory: "/project", requestId: "run-1",
@@ -35,7 +35,7 @@ test("skills and run use the broker catalog, preserve the brief, and print the n
 
 test("new, edit and path stay in Scout; no harness directory is created or changed", async () => {
   const home = await mkdtemp(join(tmpdir(), "skills user "));
-  const name = "daily-notes", dir = join(home, ".scout", "skills", name), file = join(dir, "SKILL.md");
+  const name = "daily-notes", dir = join(home, ".openscout", "skills", name), file = join(dir, "SKILL.md");
   const conflict = join(home, ".claude", "skills", name);
   const stdout: string[] = [], stderr: string[] = [];
   try {
@@ -68,7 +68,7 @@ test("new, edit and path stay in Scout; no harness directory is created or chang
 
 test("add registers an alias without touching the source; fork makes its editable personal copy", async () => {
   const home = await mkdtemp(join(tmpdir(), "skills-fork-"));
-  const source = join(home, ".agents", "skills", "native"), own = join(home, ".scout", "skills", "review");
+  const source = join(home, ".agents", "skills", "native"), own = join(home, ".openscout", "skills", "review");
   const file = "SKILL.md", text = "---\nname: review\ndescription: Standard copy.\n---\nCheck the file.";
   const ctx = createScoutCommandContext({ cwd: home, env: { HOME: home }, stdout: () => {}, stderr: () => {} });
   try {
@@ -109,7 +109,7 @@ test("add clones one standard skill from Git without modifying its source or ove
     };
     await git("init", "--quiet");
     await git("commit", "-q", "--allow-empty", "-m", "Create the fixture");
-    const url = pathToFileURL(source).href, destination = join(home, ".scout", "skills", "one-skill");
+    const url = pathToFileURL(source).href, destination = join(home, ".openscout", "skills", "one-skill");
     await expect(runSkillsCommand(ctx, ["add", url])).rejects.toThrow("Expected a SKILL.md");
     await expect(realpath(destination)).rejects.toMatchObject({ code: "ENOENT" });
     await writeFile(join(source, file), "---\nname: one-skill\ndescription: Check a file.\n---\nRead one file.");
@@ -125,8 +125,8 @@ test("add clones one standard skill from Git without modifying its source or ove
 test("a linked Scout root cannot redirect creation into a harness", async () => {
   const home = await mkdtemp(join(tmpdir(), "skills-root-")), harness = join(home, ".claude", "skills");
   try {
-    await mkdir(harness, { recursive: true }); await mkdir(join(home, ".scout"));
-    await symlink(harness, join(home, ".scout", "skills"));
+    await mkdir(harness, { recursive: true }); await mkdir(join(home, ".openscout"));
+    await symlink(harness, join(home, ".openscout", "skills"));
     const ctx = createScoutCommandContext({ env: { HOME: home } });
     await expect(runSkillsCommand(ctx, ["new", "notes"])).rejects.toThrow("plain directory");
     expect(await readdir(harness)).toEqual([]);
@@ -155,9 +155,9 @@ test("setup installs one shared entry point and never registers or exposes indiv
     await expect(runSkillsCommand(ctx, ["setup"])).rejects.toThrow("not replaced");
     expect(await readdir(join(native[0]!, "scout-skills"))).toEqual([]);
     await rm(native[0]!, { recursive: true });
-    await symlink(join(home, ".scout", "skills"), native[0]!);
+    await symlink(join(home, ".openscout", "skills"), native[0]!);
     await expect(runSkillsCommand(ctx, ["setup"])).rejects.toThrow("separate");
-    expect(await readdir(join(home, ".scout", "skills"))).toEqual(["notes"]);
+    expect(await readdir(join(home, ".openscout", "skills"))).toEqual(["notes"]);
     await rm(native[0]!);
     await writeFile(entry, installed + "\nMy instructions.\n");
     await expect(runSkillsCommand(ctx, ["setup"])).rejects.toThrow("Compare it");

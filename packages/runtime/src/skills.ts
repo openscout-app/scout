@@ -37,10 +37,8 @@ function absent(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException)?.code ?? "");
 }
 
-// Only individual registrations may be pointers. Refuse to mistake a symlink
-// to a harness root for the user-owned Scout directory, even during authoring.
-export async function scoutSkillRoot(home: string, create = false): Promise<string> {
-  const parent = join(home, ".scout"), root = join(parent, "skills");
+async function checkedSkillRoot(parent: string, create = false): Promise<string> {
+  const root = join(parent, "skills");
   for (const dir of [parent, root]) {
     if (create) {
       try { await mkdir(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
@@ -50,6 +48,21 @@ export async function scoutSkillRoot(home: string, create = false): Promise<stri
     } catch (error) { if (!create && (error as NodeJS.ErrnoException).code === "ENOENT") break; throw error; }
   }
   return root;
+}
+
+// Only individual registrations may be pointers. Refuse to mistake a symlink
+// to a harness root for the user-owned Scout directory, even during authoring.
+export async function scoutSkillRoot(home: string, create = false): Promise<string> {
+  return checkedSkillRoot(join(home, ".openscout"), create);
+}
+
+/** Legacy ~/.scout/skills read fallback until `scout home migrate` runs. */
+export async function legacyScoutSkillRoot(home: string): Promise<string> {
+  return checkedSkillRoot(join(home, ".scout"), false);
+}
+
+export async function scoutSkillReadRoots(home: string): Promise<string[]> {
+  return [await scoutSkillRoot(home), await legacyScoutSkillRoot(home)];
 }
 
 async function summarize(root: string, name: string, registered: boolean): Promise<ScoutSkillSummary | undefined> {
@@ -69,23 +82,33 @@ export class SkillLookupError extends Error {
 
 export async function registeredSkill(home: string, name: string): Promise<ScoutSkillSummary> {
   if (!isSkillFolderName(name)) throw new SkillLookupError(400, "invalid_skill_name", "Use a registered skill folder name, not a path.");
-  const skill = await summarize(await scoutSkillRoot(home), name, true);
-  if (!skill) throw new SkillLookupError(404, "skill_not_found", `No skill named ${name} is registered on this machine. Use scout skills or scout skills add <path>.`);
-  return skill;
+  for (const root of await scoutSkillReadRoots(home)) {
+    const skill = await summarize(root, name, true);
+    if (skill) return skill;
+  }
+  throw new SkillLookupError(404, "skill_not_found", `No skill named ${name} is registered on this machine. Use scout skills or scout skills add <path>.`);
 }
 
 export async function listSkills(home: string, all = false): Promise<ScoutSkillSummary[]> {
-  const out: ScoutSkillSummary[] = [], known = new Set<string>();
-  const roots = [await scoutSkillRoot(home), ...(all ? harnessRoots.map(dir => join(home, dir, "skills")) : [])];
+  const out: ScoutSkillSummary[] = [], known = new Set<string>(), registeredNames = new Set<string>();
+  const registeredRoots = await scoutSkillReadRoots(home);
+  const roots = [...registeredRoots, ...(all ? harnessRoots.map(dir => join(home, dir, "skills")) : [])];
   for (const [index, root] of roots.entries()) {
+    const isRegistered = index < registeredRoots.length;
     let names: string[];
     try { names = await readdir(root); } catch (error) { if (absent(error)) continue; throw error; }
     for (const name of names.sort()) {
       if (!isSkillFolderName(name)) continue;
-      const skill = await summarize(root, name, index === 0);
-      // Two explicitly registered aliases remain usable by their own names.
+      if (isRegistered && registeredNames.has(name)) continue;
+      const skill = await summarize(root, name, isRegistered);
+      // Two explicitly registered aliases remain usable by their own names;
+      // primary ~/.openscout/skills wins over legacy ~/.scout/skills for the same name.
       // Suppress duplicate physical folders only in the read-only inventory.
-      if (skill && (index === 0 || !known.has(skill.directory))) { out.push(skill); known.add(skill.directory); }
+      if (skill && (isRegistered || !known.has(skill.directory))) {
+        out.push(skill);
+        known.add(skill.directory);
+        if (isRegistered) registeredNames.add(name);
+      }
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
