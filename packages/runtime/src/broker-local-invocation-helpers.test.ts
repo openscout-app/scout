@@ -657,6 +657,26 @@ describe("broker local invocation helpers", () => {
     expect(run({ endpointId: "endpoint-2", ...tmux, transport: undefined })).toBeNull();
   });
 
+  test("an older flight reconciled late cannot supersede live work on its session", () => {
+    const tmux = { endpointId: "endpoint-1", sessionId: "native-1", nodeId: "node-1", harness: "claude", transport: "tmux" };
+    const live = testFlight({ id: "live", invocationId: "live", state: "running", startedAt: 2_000, metadata: { dispatchAck: tmux } });
+    const flights = (older: FlightRecord) => createInMemoryControlRuntime({
+      agents: { "agent-1": testAgent() },
+      endpoints: { "endpoint-1": testEndpoint({ state: "active" }) },
+      flights: { live, older },
+    }, { localNodeId: "node-1" }).snapshot();
+    // Started before the live flight; this runtime closed it later, so its completedAt is the reconcile time.
+    const reconciled = testFlight({
+      id: "older", invocationId: "older", state: "failed", startedAt: 1_000, completedAt: 3_000,
+      metadata: { dispatchAck: tmux, reconciledStaleFlight: true },
+    });
+    expect(staleWorkingFlightReason(flights(reconciled), live, { isInvocationActive: () => false, now: 3_000 })).toBeNull();
+    // A turn that really finished later still supersedes it.
+    const finished = testFlight({ id: "older", invocationId: "older", state: "completed", startedAt: 1_000, completedAt: 3_000, metadata: { dispatchAck: tmux } });
+    expect(staleWorkingFlightReason(flights(finished), live, { isInvocationActive: () => false, now: 3_000 }))
+      .toBe("superseded by newer completed flight older");
+  });
+
   test("a provider identity refinement still identifies the same execution owner", () => {
     const active = testFlight({ state: "running", metadata: { dispatchAck: { endpointId: "endpoint-1", sessionId: "pending-1" } } });
     const snapshot = createInMemoryControlRuntime({

@@ -490,6 +490,9 @@ export function staleWorkingFlightFailure(
       candidate.id !== flight.id
       && flightsShareExecutionOwner(flight, candidate)
       && !isWorkingFlightState(candidate.state)
+      // A flight this pass closed carries the time it was closed, not a finish:
+      // an older turn reconciled late must not look newer than live work.
+      && candidate.metadata?.reconciledStaleFlight !== true
       && flightTimestamp(candidate) > startedAt
     ))
     .sort((left, right) => flightTimestamp(right) - flightTimestamp(left))[0] ?? null;
