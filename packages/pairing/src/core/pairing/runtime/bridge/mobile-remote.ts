@@ -735,6 +735,16 @@ func postMouse(_ type: CGEventType, _ button: CGMouseButton, at point: CGPoint, 
     return true
 }
 
+func postMouseMove(to point: CGPoint, dx: Double, dy: Double) -> Bool {
+    guard let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
+        return false
+    }
+    event.setDoubleValueField(.mouseEventDeltaX, value: dx)
+    event.setDoubleValueField(.mouseEventDeltaY, value: dy)
+    event.post(tap: .cghidEventTap)
+    return true
+}
+
 func postScroll(dx: Int32, dy: Int32) -> Bool {
     guard dx != 0 || dy != 0 else { return true }
     guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else {
@@ -755,89 +765,146 @@ if action == "locked" {
 }
 
 if action == "daemon" {
-    // 120Hz synthetic micro-interpolator for liquid-smooth remote cursor & scroll motion.
+    // 120Hz critically-damped spring + directional momentum smoother.
+    // Eliminates network packet sawtooth velocity for liquid-smooth cursor & scroll motion
+    // with C1-continuous velocity, zero overshoot, and instant physical-mouse resync.
     let smootherQueue = DispatchQueue(label: "scout.hid.smoother", qos: .userInteractive)
-    var pendingMoveX: Double = 0
-    var pendingMoveY: Double = 0
-    var remMoveX: Double = 0
-    var remMoveY: Double = 0
-    var pendingScrollX: Double = 0
-    var pendingScrollY: Double = 0
-    var remScrollX: Double = 0
-    var remScrollY: Double = 0
+    var hasCursorState = false
+    var posX: Double = 400
+    var posY: Double = 400
+    var targetX: Double = 400
+    var targetY: Double = 400
+    var velX: Double = 0
+    var velY: Double = 0
+    var lastPostedX: Double = 400
+    var lastPostedY: Double = 400
+    var lastTickTime: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
 
-    func flushPendingMoveNow() {
-        let totalX = pendingMoveX + remMoveX
-        let totalY = pendingMoveY + remMoveY
-        pendingMoveX = 0
-        pendingMoveY = 0
-        remMoveX = 0
-        remMoveY = 0
-        if abs(totalX) >= 0.25 || abs(totalY) >= 0.25 {
-            let cur = currentPoint()
-            let next = clampToDisplays(CGPoint(x: cur.x + totalX, y: cur.y + totalY))
-            _ = postMouse(.mouseMoved, .left, at: next)
+    var scrollPosX: Double = 0
+    var scrollPosY: Double = 0
+    var scrollTargetX: Double = 0
+    var scrollTargetY: Double = 0
+    var scrollVelX: Double = 0
+    var scrollVelY: Double = 0
+    var scrollRemX: Double = 0
+    var scrollRemY: Double = 0
+
+    func syncFromSystemCursorIfNeeded() {
+        let cur = currentPoint()
+        if !hasCursorState || hypot(cur.x - lastPostedX, cur.y - lastPostedY) > 5.0 {
+            hasCursorState = true
+            posX = cur.x
+            posY = cur.y
+            targetX = cur.x
+            targetY = cur.y
+            velX = 0
+            velY = 0
+            lastPostedX = cur.x
+            lastPostedY = cur.y
         }
+    }
+
+    func flushTargetBeforeClick() {
+        syncFromSystemCursorIfNeeded()
+        let err = hypot(targetX - posX, targetY - posY)
+        if err > 0.25 {
+            let dest = clampToDisplays(CGPoint(x: targetX, y: targetY))
+            let dx = dest.x - posX
+            let dy = dest.y - posY
+            posX = dest.x
+            posY = dest.y
+            targetX = dest.x
+            targetY = dest.y
+            lastPostedX = dest.x
+            lastPostedY = dest.y
+            _ = postMouseMove(to: dest, dx: dx, dy: dy)
+        }
+        velX = 0
+        velY = 0
     }
 
     let timer = DispatchSource.makeTimerSource(queue: smootherQueue)
     timer.schedule(deadline: .now(), repeating: .nanoseconds(8_333_333), leeway: .milliseconds(1))
     timer.setEventHandler {
-        // Synthetic exponential smoothing at 120Hz (responsive <8ms feel, zero overshoot)
-        let moveDist = hypot(pendingMoveX, pendingMoveY)
-        if moveDist > 0.05 {
-            let stepX: Double
-            let stepY: Double
-            if moveDist < 0.45 {
-                stepX = pendingMoveX
-                stepY = pendingMoveY
-                pendingMoveX = 0
-                pendingMoveY = 0
-            } else {
-                let alpha = 0.38
-                stepX = pendingMoveX * alpha
-                stepY = pendingMoveY * alpha
-                pendingMoveX -= stepX
-                pendingMoveY -= stepY
-            }
-            let totalX = stepX + remMoveX
-            let totalY = stepY + remMoveY
-            let postX = totalX.rounded(.towardZero)
-            let postY = totalY.rounded(.towardZero)
-            remMoveX = totalX - postX
-            remMoveY = totalY - postY
-            if postX != 0 || postY != 0 {
-                let cur = currentPoint()
-                let next = clampToDisplays(CGPoint(x: cur.x + postX, y: cur.y + postY))
-                _ = postMouse(.mouseMoved, .left, at: next)
+        let now = CFAbsoluteTimeGetCurrent()
+        let dt = min(max(now - lastTickTime, 0.002), 0.025)
+        lastTickTime = now
+
+        if hasCursorState {
+            let ex = posX - targetX
+            let ey = posY - targetY
+            let errDist = hypot(ex, ey)
+            let speed = hypot(velX, velY)
+            if errDist > 0.08 || speed > 3.0 {
+                // Exact analytical critically-damped spring (zeta = 1.0):
+                // C1-continuous velocity across packet gaps, zero sawtooth, zero overshoot.
+                let omega = min(34.0, 23.0 + min(errDist, 180.0) * 0.06)
+                let f = exp(-omega * dt)
+
+                let c1x = ex
+                let c2x = velX + omega * ex
+                let nextX = targetX + (c1x + c2x * dt) * f
+                velX = (c2x - omega * (c1x + c2x * dt)) * f
+
+                let c1y = ey
+                let c2y = velY + omega * ey
+                let nextY = targetY + (c1y + c2y * dt) * f
+                velY = (c2y - omega * (c1y + c2y * dt)) * f
+
+                let clamped = clampToDisplays(CGPoint(x: nextX, y: nextY))
+                let stepDX = clamped.x - posX
+                let stepDY = clamped.y - posY
+                posX = clamped.x
+                posY = clamped.y
+                if abs(stepDX) >= 0.04 || abs(stepDY) >= 0.04 {
+                    _ = postMouseMove(to: clamped, dx: stepDX, dy: stepDY)
+                    lastPostedX = clamped.x
+                    lastPostedY = clamped.y
+                }
+            } else if errDist > 0 {
+                posX = targetX
+                posY = targetY
+                velX = 0
+                velY = 0
             }
         }
 
-        let scrollDist = hypot(pendingScrollX, pendingScrollY)
-        if scrollDist > 0.1 {
-            let stepX: Double
-            let stepY: Double
-            if scrollDist < 0.6 {
-                stepX = pendingScrollX
-                stepY = pendingScrollY
-                pendingScrollX = 0
-                pendingScrollY = 0
-            } else {
-                let alpha = 0.34
-                stepX = pendingScrollX * alpha
-                stepY = pendingScrollY * alpha
-                pendingScrollX -= stepX
-                pendingScrollY -= stepY
-            }
-            let totalX = stepX + remScrollX
-            let totalY = stepY + remScrollY
+        // Critically-damped spring for smooth inertial 2-finger scrolling
+        let sex = scrollPosX - scrollTargetX
+        let sey = scrollPosY - scrollTargetY
+        let sErr = hypot(sex, sey)
+        let sSpeed = hypot(scrollVelX, scrollVelY)
+        if sErr > 0.12 || sSpeed > 4.0 {
+            let omega = 20.0
+            let f = exp(-omega * dt)
+            let c1x = sex
+            let c2x = scrollVelX + omega * sex
+            let nextSX = scrollTargetX + (c1x + c2x * dt) * f
+            scrollVelX = (c2x - omega * (c1x + c2x * dt)) * f
+
+            let c1y = sey
+            let c2y = scrollVelY + omega * sey
+            let nextSY = scrollTargetY + (c1y + c2y * dt) * f
+            scrollVelY = (c2y - omega * (c1y + c2y * dt)) * f
+
+            let totalX = (nextSX - scrollPosX) + scrollRemX
+            let totalY = (nextSY - scrollPosY) + scrollRemY
+            scrollPosX = nextSX
+            scrollPosY = nextSY
             let ix = Int32(totalX.rounded(.towardZero))
             let iy = Int32(totalY.rounded(.towardZero))
-            remScrollX = totalX - Double(ix)
-            remScrollY = totalY - Double(iy)
+            scrollRemX = totalX - Double(ix)
+            scrollRemY = totalY - Double(iy)
             if ix != 0 || iy != 0 {
                 _ = postScroll(dx: ix, dy: iy)
             }
+        } else if sErr > 0 {
+            scrollPosX = scrollTargetX
+            scrollPosY = scrollTargetY
+            scrollVelX = 0
+            scrollVelY = 0
+            scrollRemX = 0
+            scrollRemY = 0
         }
     }
     timer.resume()
@@ -861,21 +928,36 @@ if action == "daemon" {
             let dx = parts.count > 1 ? min(max(Double(parts[1]) ?? 0, -2400), 2400) : 0
             let dy = parts.count > 2 ? min(max(Double(parts[2]) ?? 0, -2400), 2400) : 0
             smootherQueue.sync {
-                pendingMoveX = min(max(pendingMoveX + dx, -2400), 2400)
-                pendingMoveY = min(max(pendingMoveY + dy, -2400), 2400)
+                syncFromSystemCursorIfNeeded()
+                if dx == 0 && dy == 0 {
+                    // Explicit touch-down brake stops any residual flick momentum immediately.
+                    targetX = posX
+                    targetY = posY
+                    velX = 0
+                    velY = 0
+                } else {
+                    let nextTarget = clampToDisplays(CGPoint(x: targetX + dx, y: targetY + dy))
+                    targetX = nextTarget.x
+                    targetY = nextTarget.y
+                    // Gentle directional velocity feed when starting from rest for snappy takeoff
+                    if hypot(velX, velY) < 40 {
+                        velX += dx * 12.0
+                        velY += dy * 12.0
+                    }
+                }
             }
             print("ok")
         case "scroll":
             let dx = parts.count > 1 ? min(max(Double(parts[1]) ?? 0, -2400), 2400) : 0
             let dy = parts.count > 2 ? min(max(Double(parts[2]) ?? 0, -2400), 2400) : 0
             smootherQueue.sync {
-                pendingScrollX = min(max(pendingScrollX + dx, -2400), 2400)
-                pendingScrollY = min(max(pendingScrollY + dy, -2400), 2400)
+                scrollTargetX += dx
+                scrollTargetY += dy
             }
             print("ok")
         case "click":
             smootherQueue.sync {
-                flushPendingMoveNow()
+                flushTargetBeforeClick()
                 let pt = currentPoint()
                 _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
                 _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
@@ -883,7 +965,7 @@ if action == "daemon" {
             print("ok")
         case "doubleClick":
             smootherQueue.sync {
-                flushPendingMoveNow()
+                flushTargetBeforeClick()
                 let pt = currentPoint()
                 _ = postMouse(.leftMouseDown, .left, at: pt, clickState: 1)
                 _ = postMouse(.leftMouseUp, .left, at: pt, clickState: 1)
@@ -894,7 +976,7 @@ if action == "daemon" {
             print("ok")
         case "rightClick":
             smootherQueue.sync {
-                flushPendingMoveNow()
+                flushTargetBeforeClick()
                 let pt = currentPoint()
                 _ = postMouse(.rightMouseDown, .right, at: pt, clickState: 1)
                 _ = postMouse(.rightMouseUp, .right, at: pt, clickState: 1)
