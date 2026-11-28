@@ -3,7 +3,7 @@ import { meshApprovalsConfigPath, readMeshApprovalsConfig, writeMeshApprovalsCon
 import { PermissionDeliveryUnconfirmedError, PermissionRequestEndedError } from "./broker-permission-service.js";
 import { NativePermissionAskError } from "./native-permission.js";
 import { HarnessHooksError } from "./harness-hooks.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrokerRequestReceipts, canonicalRequest } from "./broker-request-receipts.js";
@@ -1940,6 +1940,56 @@ test("answering an operator ask requires operator proof", async () => {
   expect(proven.response.status).toBe(200);
   expect(proven.body).toEqual({ ok: true, decision: { id: "ask-1", state: "answered" } });
   expect(answers).toEqual([body]);
+});
+
+test("permission rules: only the operator reads the record or writes a rule", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "scout-permission-routes-"));
+  try {
+    const permissionFiles = { policyPath: join(dir, "continuation-policy.json"), auditPath: join(dir, "continuation-audit.jsonl") };
+    writeFileSync(permissionFiles.policyPath, JSON.stringify({ version: 1, grants: [] }));
+    writeFileSync(permissionFiles.auditPath, `${JSON.stringify({ at: Date.now(), outcome: "asked", decision: "asked", projectRoot: "/work/app", tool: "Bash",
+      level: "ask", grant: "default", command: "git push", risk: "publish", keys: null, source: "rules", reason: "ask rule Bash(git push:*)", rule: "Bash(git push:*)", list: "ask" })}\n`);
+    const harness = createHarness({ permissionFiles });
+    const body = { list: "ask", rule: "Bash(npm publish:*)" };
+
+    for (const transportContext of [{ transport: "loopback" }, { transport: "unix-socket" }]) {
+      const agent = await requestRouter(harness, "POST", "/v1/permissions/rules", { body, transportContext: transportContext as never });
+      expect(agent.response.status).toBe(403);
+      expect(agent.body).toEqual({ error: "operator_attribution_required" });
+    }
+    const remote = await requestRouter(harness, "GET", "/v1/permissions/log", { transportContext: { transport: "remote", operator: true } as never });
+    expect(remote.response.status).toBe(403);
+    const remoteWrite = await requestRouter(harness, "POST", "/v1/permissions/rules", { body, transportContext: { transport: "remote", operator: true } as never });
+    expect(remoteWrite.response.status).toBe(403);
+    expect(JSON.parse(readFileSync(permissionFiles.policyPath, "utf8")).permissions).toBeUndefined();
+
+    // An agent on this machine reads neither the record nor its stats, nor dry-runs a rule against it.
+    for (const path of ["/v1/permissions/log", "/v1/permissions/stats", `/v1/permissions/rules/dry-run?list=allow&rule=${encodeURIComponent("Bash(x)")}`]) {
+      for (const transportContext of [{ transport: "loopback" }, { transport: "unix-socket" }]) {
+        const agent = await requestRouter(harness, "GET", path, { transportContext: transportContext as never });
+        expect(agent.response.status).toBe(403);
+        expect(agent.body).toEqual({ error: "operator_attribution_required" });
+      }
+    }
+    // The rule view (no commands in it) stays readable locally.
+    expect((await requestRouter(harness, "GET", "/v1/permissions/rules", { transportContext: { transport: "loopback" } as never })).response.status).toBe(200);
+    const operatorRead = { transportContext: { transport: "loopback", operator: true } as never };
+    const log = await requestRouter(harness, "GET", "/v1/permissions/log?decision=asked", operatorRead);
+    expect(log.response.status).toBe(200);
+    expect((log.body as { records: Array<{ rule: string }> }).records.map((row) => row.rule)).toEqual(["Bash(git push:*)"]);
+    const stats = await requestRouter(harness, "GET", "/v1/permissions/stats", operatorRead);
+    expect((stats.body as { byDecision: Record<string, number> }).byDecision.asked).toBe(1);
+    const dryRun = await requestRouter(harness, "GET", `/v1/permissions/rules/dry-run?list=allow&rule=${encodeURIComponent("Bash(git push:*)")}`, operatorRead);
+    expect((dryRun.body as { matches: Array<{ shadowedBy?: { rule: string } }> }).matches[0]?.shadowedBy?.rule).toBe("Bash(git push:*)");
+    const bad = await requestRouter(harness, "GET", "/v1/permissions/log?decision=maybe", operatorRead);
+    expect(bad.response.status).toBe(400);
+
+    const operator = await requestRouter(harness, "POST", "/v1/permissions/rules", { body, transportContext: { transport: "loopback", operator: true } as never });
+    expect(operator.response.status).toBe(200);
+    expect(JSON.parse(readFileSync(permissionFiles.policyPath, "utf8")).permissions.ask).toContain("Bash(npm publish:*)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("explicit asks cannot forward an alias payload after wire normalization", async () => {

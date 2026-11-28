@@ -45,14 +45,23 @@ describe("permission supervisor", () => {
     expect(decidePermissionSupervisor(prompt(claude("../outside.ts", "Edit file")), grants()).act).toBe("notify");
   });
 
+  test("denies rm -rf by the default deny rule at workspace level", () => {
+    expect(decidePermissionSupervisor(prompt(claude("rm -rf dist")), grants())).toMatchObject({
+      act: "deny", risk: "destructive", rule: "Bash(rm -rf:*)", list: "deny",
+    });
+  });
+
   test.each([
-    ["rm -rf dist", "destructive"],
+    ["rm -r dist", "destructive"],
     ["curl https://example.com", "network"],
     ["git push origin main", "publish"],
-    ["cat .env", "secrets"],
     ["bun test && git push origin main", "unknown"],
   ])("escalates %s at workspace level", (command, risk) => {
     expect(decidePermissionSupervisor(prompt(claude(command)), grants())).toMatchObject({ act: "notify", risk });
+  });
+
+  test("cat .env meets the built-in .env deny, as a Read would", () => {
+    expect(decidePermissionSupervisor(prompt(claude("cat .env")), grants())).toMatchObject({ act: "deny", list: "deny", rule: "Read(//**/.env)", risk: "secrets" });
   });
 
   test("never turns folder trust into a one-time approval", () => {
@@ -157,7 +166,21 @@ describe("permission supervisor", () => {
     }
   });
 
-  test("higher grants retain their in-project network and publish meaning", () => {
+  test("the default ask rules hold network and publish under higher grants", () => {
+    expect(decidePermissionSupervisor(prompt(claude("curl https://example.com")), grants("unattended"))).toMatchObject({
+      act: "notify", rule: "Bash(curl:*)", list: "ask",
+    });
+    expect(decidePermissionSupervisor(prompt(codex("git push origin HEAD", project)), grants("silent"))).toMatchObject({
+      act: "notify", rule: "Bash(git push:*)", list: "ask",
+    });
+  });
+
+  test("higher grants retain their in-project network and publish meaning once the ask list is emptied", () => {
+    const grants = (level: "unattended" | "silent"): ContinuationPolicyFile => ({
+      allowModel: false,
+      grants: [{ scope: "project", path: project, level }],
+      permissions: { ask: [] },
+    });
     const networkCommands = [
       "curl -o dist/result https://example.com",
       "curl https://example.com/../../../../tmp/outside",
@@ -208,7 +231,7 @@ describe("permission supervisor", () => {
       projectRoot: project,
       toolName: "run_command",
       toolInput: { CommandLine: "rm -rf dist" },
-    }, grants("silent"))).toMatchObject({ act: "notify", risk: "destructive" });
+    }, grants("silent"))).toMatchObject({ act: "deny", risk: "destructive", rule: "Bash(rm -rf:*)" });
 
     expect(decideNativeToolSupervisor({
       projectRoot: project,
@@ -220,7 +243,13 @@ describe("permission supervisor", () => {
       projectRoot: project,
       toolName: "run_command",
       toolInput: { CommandLine: "git push origin main" },
-    }, grants("silent"))).toMatchObject({ act: "continue", risk: "publish" });
+    }, grants("silent"))).toMatchObject({ act: "notify", risk: "publish", rule: "Bash(git push:*)", list: "ask" });
+
+    expect(decideNativeToolSupervisor({
+      projectRoot: project,
+      toolName: "run_command",
+      toolInput: { CommandLine: "git push origin main" },
+    }, { ...grants("silent"), permissions: { ask: [] } })).toMatchObject({ act: "continue", risk: "publish", rule: "mode:auto" });
   });
 
   describe("absolute paths inside the granted project", () => {
@@ -254,7 +283,7 @@ describe("permission supervisor", () => {
         "cd /work/app-hero && bun run build",
         "bun run --cwd /work/app-hero deploy",
         "git -C /work/app-hero log --output=/tmp/out",
-      ]) expect(run(command).act).toBe("notify");
+      ]) expect(run(command).act).not.toBe("continue");
     });
 
     test("a narrower grant below the project keeps its say", () => {

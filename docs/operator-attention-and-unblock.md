@@ -261,7 +261,112 @@ read or check. Higher grant levels keep their existing risk meaning for in-proje
 operations; outside filesystem effects always escalate. Unknown prompts,
 unrecognized or broader `Yes` choices, sensitive or outside paths, and requests
 without an exact one-time allow choice stay with the operator. The supervisor
-never chooses a session-wide or persistent project grant or a denial.
+never chooses a session-wide or persistent project grant. It denies only when a
+deny rule covers the call.
+
+### Permission rules
+
+The policy file also holds rules in Claude Code's `Tool(pattern)` syntax, so a
+rule copies between it and `~/.claude/settings.json`:
+
+```json
+{
+  "version": 1,
+  "grants": [{ "scope": "project", "path": "/Users/me/dev/app", "level": "workspace",
+               "permissions": { "allow": ["Bash(make preview)"] } }],
+  "permissions": {
+    "allow": [], "ask": ["Bash(git push:*)"], "deny": ["Bash(rm -rf:*)"],
+    "defaultMode": "default"
+  }
+}
+```
+
+- Precedence is deny, then ask, then allow, then the mode. A deny or ask rule in
+  any scope wins over an allow rule in any scope.
+- The mode is `auto` inside a grant above `ask`, where the risk classes above
+  decide what no rule covers. Elsewhere it is `default`, which asks. Only an
+  explicit `"defaultMode": "auto"` judges calls outside every grant, and only in a
+  folder under the home folder that is not inside a dot folder or `~/Library`.
+  Anywhere else (`/`, `/etc`, `/tmp`, the home folder, `~/.config`,
+  `~/Library/LaunchAgents`) the call is asked.
+- A project grant's `permissions` lists apply to calls inside that project.
+- Deny and ask rules read every part of a chained command, split with quotes
+  honoured, including `$(…)`, backtick, `sh -c` and `eval` bodies. They match each
+  part as written and in a normal form: wrappers (`sudo`, `env`, `nohup`, `time`,
+  `timeout`, `xargs`, leading `FOO=` assignments) dropped, `/bin/rm` read as `rm`,
+  rm's recursive and force flags in any spelling read as `rm -rf`, git's global
+  options (`-C`, `-c`) dropped, and `git push -f` or `+ref` read as
+  `git push --force`. The files a command reads (`cat`, `grep`, `head`, `cp`, …)
+  meet the `Read` denies. An allow rule never matches a command with shell
+  operators, quoting or expansion.
+- Not covered by that normal form: file access from interpreters
+  (`python -c 'open(".env")'`, `node -e`), `find -delete`, rm called from a script,
+  and other tools that delete or read files without naming them as operands.
+- A list the file leaves out takes the built-in default
+  (`DEFAULT_PERMISSION_RULES` in `packages/runtime/src/continuation/rules.ts`).
+  Its deny and ask rules only tighten. Its allow rules name what `auto` already
+  passes and never allow anything by themselves, so a file with no `permissions`
+  entry continues nothing that it did before.
+- A deny is sent back to the harness when it offers one. Otherwise the operator
+  is asked. The agent hears only "The operator's Scout permission rules deny this
+  call."; the rule and reason go to the decision record and the operator.
+- Some paths are held for the operator whatever approved the call, rule or mode:
+  writes to Scout's policy file, always; writes to agent config (`.claude/`,
+  `.codex/`, `.cursor/`, `.gemini/`, `.agents/`, `.vscode/`, `.mcp.json`,
+  `.git/hooks`, `.git/config`, venv interpreters, shell rc files, git global
+  config) and reads of secrets (`~/.ssh`, `~/.aws`, cloud and registry
+  credentials, keychains, key files; as any command's operand, not only a
+  reader's), unless an allow rule the operator wrote
+  names that exact path or command, with no wildcard.
+- A watcher that throws holds the call for the operator with the reason
+  `watcher error`. It never approves.
+- A built-in deny gives way to an allow rule the operator wrote that names its
+  command family, for the calls that allow matches.
+  `allow Bash(rm -rf ./dist:*)` on a project lifts the default
+  `deny Bash(rm -rf:*)` for that path in that project, and the record labels it
+  `allow Bash(rm -rf ./dist:*) (overrides default deny Bash(rm -rf:*))`. An allow
+  names a Bash deny when its fixed text, before the first wildcard, starts with
+  the denied command and spells every fixed word of the deny in order. It lifts
+  only a single command whose words match the allow's one for one: an extra
+  argument means no lift, a `*` stands for part of one word and never crosses a
+  space or a `/`, and an operand of `/`, `~`, `$HOME` or the home folder, one with
+  a `.` or `..` segment, or one that is the project root or above it is never
+  lifted. `Bash(rm -rf ./dist:*)` lifts `rm -rf ./dist` and not
+  `rm -rf ./dist /home`. `Bash(*)`, `Bash`, and `Bash(rm:*)` lift nothing. A path allow names a path
+  deny when its last segment starts with the deny's file name
+  (`Read(./.env.example)` names `Read(//**/.env.*)`). A deny the operator wrote
+  always wins, and an ask rule still holds a lifted call.
+
+### The decision record
+
+`$OPENSCOUT_HOME/logs/continuation-audit.jsonl` gets one line for each decision:
+`approved` or `denied` by the watcher, `asked` (a card was raised), `answered` by
+the operator (with `answer` and `via`: ios, mac-companion, web or cli), or
+`closed` with no answer (the session stopped waiting, the prompt went away, or
+the operator dismissed it). Each line names the `rule` and `list` (or
+`mode:auto` / `mode:default`), the agent's `agentId` and `agentName`, the
+project, the tool, the command and the time. The live file rolls over at 1 MiB
+into gzipped segments beside it, which are kept for 45 days. Tokens in the
+command and reason (`*_TOKEN=` and similar assignments, a secret-named word and
+the value after it, `--password` flags, mysql's `-p<value>`, `-u user:pass`,
+`Authorization` headers, URL credentials, and GitHub, OpenAI, Anthropic, Slack,
+AWS, Google, GitLab and npm key shapes) are redacted when the line is written,
+and again when older lines are read.
+
+The broker reads it back for the watcher's page. Every route is machine-local.
+The log, stats and dry-run routes also need operator proof, since the record
+holds every session's commands; the rules view does not:
+
+- `GET /v1/permissions/log`, filtered by `since`, `until`, `decision`, `agent`,
+  `rule`, `tool`, `project` and `via`.
+- `GET /v1/permissions/stats`, with counts by decision, rule, agent, surface and tool.
+- `GET /v1/permissions/rules`, with each scope's lists and the defaults marked.
+- `GET /v1/permissions/rules/dry-run?list=&rule=&project=`, with the past records
+  a rule would match and any deny or ask rule that would still win over it.
+- `POST /v1/permissions/rules {list, rule, project?}` appends a rule. It requires
+  operator proof, so an agent cannot write one.
+
+`scout permissions log|stats|rules|dry-run` prints the read routes.
 
 Grant resolution checks both the recorded project root and the actual working
 directory, including any narrower grant. Codex requests must carry an absolute
@@ -274,8 +379,9 @@ the grant, risk, and reason. Delivery still goes through the same live-prompt
 revalidation and no-replay protection as an operator decision. A failed automatic
 delivery notifies the operator of the uncertain outcome without replaying it. If
 the operator is already answering, the supervisor yields to that decision. This
-slice covers Scout-managed requests through `wait`; native Claude requests through
-`raise` keep their existing human-only path.
+slice covers Scout-managed requests through `wait`. Native Claude Code and
+Antigravity requests consult the supervisor before `raise`; an allow or a deny
+goes straight back to the hook.
 
 A runtime restart loses the live callback. Each record names the node that wrote
 it, and the runtime reconciles the open records of its own node that no process

@@ -69,7 +69,16 @@ type AntigravityHookInput = {
   toolCall?: unknown;
 };
 
-type Opened = { requestId?: string; skipped?: string; decision?: "allow"; reason?: string; grant?: string };
+type Opened = { requestId?: string; skipped?: string; decision?: "allow" | "deny"; reason?: string; grant?: string; rule?: string };
+
+/**
+ * What the harness tells its agent when one of the operator's deny rules
+ * refused the call. It names no rule: an agent that learns which pattern
+ * matched learns how to step around it. The rule goes to the record.
+ */
+function ruleDeniedMessage(_opened: Opened): string {
+  return "The operator's Scout permission rules deny this call.";
+}
 type Outcome = { state?: "open" | "decided" | "ended"; decision?: "allow" | "deny"; updatedPermissions?: unknown; reason?: string };
 
 export type PermissionHookDeps = {
@@ -121,6 +130,10 @@ export async function handleClaudePermissionHook(raw: string, deps: PermissionHo
   }
   if (opened?.decision === "allow") {
     write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } } })}\n`);
+    return;
+  }
+  if (opened?.decision === "deny") {
+    write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message: ruleDeniedMessage(opened) } } })}\n`);
     return;
   }
   const requestId = opened?.requestId;
@@ -296,6 +309,12 @@ export async function handleAntigravityPermissionHook(raw: string, deps: Permiss
         if (opened?.decision === "allow") {
           await removeAntigravitySessionRecord(sessionId, { directory });
           write(`${JSON.stringify({ decision: "allow" })}\n`);
+          return;
+        }
+
+        if (opened?.decision === "deny") {
+          await removeAntigravitySessionRecord(sessionId, { directory });
+          write(`${JSON.stringify({ decision: "deny", reason: ruleDeniedMessage(opened) })}\n`);
           return;
         }
 

@@ -55,6 +55,8 @@ export type NativePermissionAsk = {
 export type NativePermissionOpened =
   | { requestId: string }
   | { decision: "allow"; reason: string; grant: string }
+  /** A deny rule refused the call. The reason is generic; the rule goes to the record only. */
+  | { decision: "deny"; reason: string; grant: string }
   | { skipped: "no_live_session" | "scout_managed" | "no_escalation" };
 
 /** One `addRules` allow entry, in Claude Code's own PermissionUpdate shape. */
@@ -71,6 +73,13 @@ export type NativePermissionOutcome =
   | { state: "ended"; reason: string };
 
 export class NativePermissionAskError extends Error {}
+
+/** What the agent hears when a rule denies its call. */
+export const RULE_DENIED_REASON = "The operator's Scout permission rules deny this call.";
+
+function denied(verdict: PermissionSupervisorVerdict): NativePermissionOpened {
+  return { decision: "deny", reason: RULE_DENIED_REASON, grant: verdict.grant };
+}
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; settled: boolean };
 function deferred<T>(): Deferred<T> {
@@ -132,15 +141,25 @@ export class NativePermissionRequests {
     this.directory = deps.directory ?? resolveClaudeSessionRecordsDirectory();
   }
 
+  /** The watcher's verdict. One that throws never approves: the call goes to the operator. */
+  private verdictFor(ask: NativePermissionAsk): PermissionSupervisorVerdict | undefined {
+    try {
+      return this.deps.supervisor?.(ask);
+    } catch {
+      return { act: "notify", reason: "watcher error", risk: "unknown", grant: "error" };
+    }
+  }
+
   /** The hook saw a permission dialog: open a request for it, unless Scout already handles or auto-allows it. */
   async open(ask: NativePermissionAsk): Promise<NativePermissionOpened> {
     validateAsk(ask);
 
     if (ask.harness === "antigravity") {
-      const verdict = this.deps.supervisor?.(ask);
+      const verdict = this.verdictFor(ask);
       if (verdict?.act === "continue") {
         return { decision: "allow", reason: verdict.reason, grant: verdict.grant };
       }
+      if (verdict?.act === "deny") return denied(verdict);
       if (ask.escalate === false) {
         return { skipped: "no_escalation" };
       }
@@ -182,6 +201,7 @@ export class NativePermissionRequests {
       live.id = await this.deps.permissions.raise({
         prompt,
         actorId,
+        ...(verdict ? { verdict } : {}),
         native: {
           harness: "antigravity",
           tool: ask.toolName,
@@ -201,10 +221,11 @@ export class NativePermissionRequests {
     if (!record) return { skipped: "no_live_session" };
     if (await (this.deps.launchedByScout ?? (async () => false))(record)) return { skipped: "scout_managed" };
 
-    const claudeVerdict = this.deps.supervisor?.(ask);
+    const claudeVerdict = this.verdictFor(ask);
     if (claudeVerdict?.act === "continue") {
       return { decision: "allow", reason: claudeVerdict.reason, grant: claudeVerdict.grant };
     }
+    if (claudeVerdict?.act === "deny") return denied(claudeVerdict);
 
     const now = (this.deps.now ?? Date.now)();
     const always = nativeAllowRuleUpdates(ask.suggestions);
@@ -236,7 +257,7 @@ export class NativePermissionRequests {
     const context = await nativePermissionContext(ask, record);
     const actorId = `native:${ask.harness}:${ask.sessionId}`;
     live.id = await this.deps.permissions.raise({
-      prompt, actorId,
+      prompt, actorId, ...(claudeVerdict ? { verdict: claudeVerdict } : {}),
       native: { context, harness: ask.harness, pid: record.pid, tool: ask.toolName, display: nativePermissionDisplay(ask),
         ...(always.length ? { alwaysRules: nativeAllowRuleLabels(always) } : {}), ...(record.jobId ? { jobId: record.jobId } : {}) },
     });

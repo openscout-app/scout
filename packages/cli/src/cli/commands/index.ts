@@ -26,6 +26,7 @@ export type ScoutCommandName =
   | "crew"
   | "settings"
   | "decision"
+  | "permissions"
   | "diff"
   | "browser"
   | "computer"
@@ -126,6 +127,8 @@ export async function loadScoutCommandHandler(name: ScoutCommandName): Promise<S
       return async (context, args) => (await import("./settings.ts")).runSettingsCommand(context, args);
     case "decision":
       return (await import("./decision.ts")).runDecisionCommand;
+    case "permissions":
+      return (await import("./permissions.ts")).runPermissionsCommand;
     case "diff":
       return (await import("./diff.ts")).runDiffCommand;
     case "browser":

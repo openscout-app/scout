@@ -27,6 +27,7 @@ export const SCOUT_COMMANDS: ScoutCommandRegistration[] = [
   { name: "operator", hidden: true, summary: "Removed; use ask or reply" },
   { name: "notify", hidden: true, summary: "Removed; use ask or reply" },
   { name: "decision", summary: "Read and answer operator asks as decision cards" },
+  { name: "permissions", summary: "Read the permission watcher's rules, record and stats" },
   { name: "diff", summary: "Inspect worktree or session-scoped diffs" },
   { name: "browser", summary: "Drive and introspect real browsers via Scout Computer" },
   { name: "computer", summary: "Inspect and drive native macOS windows and apps via Scout Computer" },

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { assertValidCollaborationRecord, type FlightRecord, type InvocationRequest, type QuestionRecord } from "@openscout/protocol";
-import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, permissionAnswerVia, type PermissionReattachment } from "./broker-permission-service.js";
+import { BrokerPermissionService, PermissionDeliveryUnconfirmedError, PermissionRequestEndedError, permissionAnswerVia, type PermissionDecisionLog, type PermissionReattachment } from "./broker-permission-service.js";
 import { configureManagedPermissionHandler, withManagedPermissionContext } from "./managed-permission.js";
 import { parseTmuxPermission, tmuxPermissionPrompt, waitForTmuxPermission } from "./tmux-permission.js";
 import { waitForReadyComposer } from "./local-agents.js";
@@ -12,6 +12,7 @@ const invocation = { id: "inv", targetAgentId: "agent", conversationId: "chn-tes
 function harness(options: { reattach?: (request: { sessionId: string; projectRoot: string; text: string }) => Promise<PermissionReattachment>; localInvocation?: boolean; supervisor?: () => PermissionSupervisorVerdict } = {}) {
   const records = new Map<string, QuestionRecord>();
   const audits: Array<{ requestId: string; delivered: boolean; reason: string }> = [];
+  const logs: PermissionDecisionLog[] = [];
   const states: string[] = [];
   const notifications: QuestionRecord[] = [];
   const lookups: string[] = [];
@@ -21,12 +22,15 @@ function harness(options: { reattach?: (request: { sessionId: string; projectRoo
     read: id => records.get(id), requests: () => [...records.values()], flight: () => ({ id: "flt", state } as FlightRecord),
     localInvocation: () => options.localInvocation ?? true,
     supervisor: options.supervisor,
-    audit: ({ requestId, delivered, verdict }) => { audits.push({ requestId, delivered, reason: verdict.reason }); },
+    log: entry => {
+      logs.push(entry);
+      if (entry.decision === "approved" || entry.decision === "denied") audits.push({ requestId: entry.requestId, delivered: entry.delivered !== false, reason: entry.reason });
+    },
     reattach: async request => { lookups.push(request.sessionId); return options.reattach ? options.reattach(request) : { sessionOpen: false }; },
     transition: async (_, value) => { states.push(value); state = value; },
     notify: (_, record) => { notifications.push(record); }, sleep: async () => { await new Promise(resolve => setTimeout(resolve, 1)); },
   });
-  return { service, records, states, notifications, lookups, audits, cancel: () => { state = "cancelled"; } };
+  return { service, records, states, notifications, lookups, audits, logs, cancel: () => { state = "cancelled"; } };
 }
 /** An open request as the previous runtime left it: durable record, no waiter. */
 function orphan(h: ReturnType<typeof harness>, text: string, permissionRequest: Record<string, unknown> = {}, metadata: Record<string, unknown> = {}, id = "permission-0"): QuestionRecord {
@@ -590,5 +594,110 @@ describe("permission supervisor lifecycle", () => {
     expect(permissionAnswerVia("watcher")).toBeUndefined();
     expect(permissionAnswerVia("phone")).toBeUndefined();
     expect(permissionAnswerVia(3)).toBeUndefined();
+  });
+});
+
+describe("the decision record", () => {
+  const prompt = (answers: string[] = [], current = { value: true }) => ({
+    sessionId: "pane", projectRoot: "/work/app", text: "bun test", version: "v", decisions: ["once", "deny"] as Array<"once" | "deny">,
+    isCurrent: async () => current.value, answer: async (decision: string) => { answers.push(decision); },
+  });
+  const ask: PermissionSupervisorVerdict = { act: "notify", reason: "ask rule Bash(git push:*)", risk: "publish", grant: "project:/work/app", rule: "Bash(git push:*)", list: "ask", ruleScope: "policy" };
+  const deny: PermissionSupervisorVerdict = { act: "deny", reason: "deny rule Bash(rm -rf:*)", risk: "destructive", grant: "project:/work/app", rule: "Bash(rm -rf:*)", list: "deny", ruleScope: "policy" };
+  const decisions = (h: ReturnType<typeof harness>) => h.logs.map(entry => entry.decision);
+
+  test("an ask, then the operator's answer, each write a line with the rule and the surface", async () => {
+    const h = harness({ supervisor: () => ask });
+    const answers: string[] = [];
+    const waiting = h.service.wait(invocation, prompt(answers));
+    await until(() => h.notifications.length === 1);
+    expect(h.logs[0]).toMatchObject({ decision: "asked", requestId: "permission-1", verdict: { rule: "Bash(git push:*)", list: "ask" } });
+    expect(h.records.get("permission-1")?.metadata?.permissionVerdict).toMatchObject({ rule: "Bash(git push:*)", list: "ask" });
+    await h.service.decide("permission-1", "v", "once", undefined, undefined, "ios");
+    await waiting;
+    expect(answers).toEqual(["once"]);
+    expect(decisions(h)).toEqual(["asked", "answered"]);
+    expect(h.logs[1]).toMatchObject({ answer: "once", via: "ios", delivered: true });
+  });
+
+  test("a watcher that throws holds the call for the operator, with a record and a card, and never approves", async () => {
+    const h = harness({ supervisor: () => { throw new Error("policy file unreadable"); } });
+    const answers: string[] = [];
+    const waiting = h.service.wait(invocation, prompt(answers));
+    await until(() => h.notifications.length === 1);
+    expect(answers).toEqual([]);
+    expect(h.records.get("permission-1")).toMatchObject({ state: "open", metadata: { permissionVerdict: { act: "notify", reason: "watcher error" } } });
+    expect(h.logs[0]).toMatchObject({ decision: "asked", reason: "watcher error" });
+    await h.service.decide("permission-1", "v", "deny", undefined, undefined, "ios");
+    await waiting;
+    expect(answers).toEqual(["deny"]);
+  });
+
+  test("a deny rule answers no itself and writes a denied line", async () => {
+    const h = harness({ supervisor: () => deny });
+    const answers: string[] = [];
+    await h.service.wait(invocation, prompt(answers));
+    expect(answers).toEqual(["deny"]);
+    expect(h.notifications).toHaveLength(0);
+    expect(h.logs).toHaveLength(1);
+    expect(h.logs[0]).toMatchObject({ decision: "denied", answer: "deny", via: "watcher", delivered: true, verdict: { rule: "Bash(rm -rf:*)" } });
+  });
+
+  test("a deny rule asks the operator when the harness offers no deny", async () => {
+    const h = harness({ supervisor: () => deny });
+    const current = { value: true };
+    const waiting = h.service.wait(invocation, { ...prompt([], current), decisions: ["once"] });
+    await until(() => h.notifications.length === 1);
+    current.value = false;
+    await waiting;
+    expect(decisions(h)).toEqual(["asked", "closed"]);
+  });
+
+  test("an automatic approval writes one approved line", async () => {
+    const approve: PermissionSupervisorVerdict = { act: "continue", reason: "workspace continues workspace", risk: "workspace", grant: "project:/work/app", rule: "Bash(bun test:*)", list: "allow" };
+    const h = harness({ supervisor: () => approve });
+    await h.service.wait(invocation, prompt());
+    expect(h.logs).toHaveLength(1);
+    expect(h.logs[0]).toMatchObject({ decision: "approved", answer: "once", via: "watcher", verdict: { rule: "Bash(bun test:*)" } });
+  });
+
+  test("a prompt that goes away writes a closed line", async () => {
+    const h = harness({ supervisor: () => ask });
+    const current = { value: true };
+    const waiting = h.service.wait(invocation, prompt([], current));
+    await until(() => h.notifications.length === 1);
+    current.value = false;
+    await waiting;
+    expect(decisions(h)).toEqual(["asked", "closed"]);
+    expect(h.logs[1]?.reason).toBe("Prompt is no longer present");
+  });
+
+  test("a raised request that its session withdraws writes asked then closed; a dismissal writes closed", async () => {
+    const h = harness();
+    const id = await h.service.raise({ actorId: "native:claude:s", native: { harness: "claude" }, verdict: ask, prompt: prompt() });
+    await h.service.withdraw(id, "The session stopped waiting.");
+    expect(decisions(h)).toEqual(["asked", "closed"]);
+    expect(h.logs[0]?.record.metadata?.permissionVerdict).toMatchObject({ rule: "Bash(git push:*)" });
+    expect(h.logs[1]).toMatchObject({ reason: "The session stopped waiting." });
+
+    const other = harness();
+    orphan(other, "stale", {}, {}, "permission-9");
+    await other.service.dismiss("permission-9");
+    expect(decisions(other)).toEqual(["closed"]);
+    expect(other.logs[0]?.reason).toBe("Dismissed by the operator");
+  });
+
+  test("a log that throws never blocks a decision", async () => {
+    const records = new Map<string, QuestionRecord>();
+    const service = new BrokerPermissionService({
+      operatorId: "operator", nodeId: "node", createId: () => "permission-1", record: async record => { records.set(record.id, record); },
+      read: id => records.get(id), requests: () => [...records.values()], flight: () => ({ id: "flt", state: "running" } as FlightRecord),
+      localInvocation: () => true, supervisor: () => ({ act: "continue", reason: "ok", risk: "workspace", grant: "g" }),
+      log: () => { throw new Error("disk full"); },
+      reattach: async () => ({ sessionOpen: false }), transition: async () => {}, notify: () => {}, sleep: async () => {},
+    });
+    const answers: string[] = [];
+    await service.wait(invocation, prompt(answers));
+    expect(answers).toEqual(["once"]);
   });
 });

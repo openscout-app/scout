@@ -50,6 +50,14 @@ describe("scout permission-hook claude", () => {
       decision: { behavior: "allow", updatedPermissions: [rule] } } });
   });
 
+  test("a deny rule's refusal comes straight back with the rule, without a wait", async () => {
+    const r = runtime([{ decision: "deny", reason: "deny rule Bash(rm -rf:*)", grant: "project:/tmp/project", rule: "Bash(rm -rf:*)" }]);
+    await handleClaudePermissionHook(hook, r.deps);
+    expect(r.posts).toHaveLength(1);
+    expect(JSON.parse(r.out[0]!)).toEqual({ hookSpecificOutput: { hookEventName: "PermissionRequest",
+      decision: { behavior: "deny", message: "The operator's Scout permission rules deny this call." } } });
+  });
+
   test("a denial carries a message for the model", async () => {
     const r = runtime([{ requestId: "permission-1" }, { state: "decided", decision: "deny" }]);
     await handleClaudePermissionHook(hook, r.deps);
@@ -165,6 +173,14 @@ describe("scout permission-hook antigravity", () => {
         },
       }]);
       expect(autoRun.out.map((l) => JSON.parse(l))).toEqual([{ decision: "allow" }]);
+
+      // 1b. A deny rule refuses at once, with the rule as the reason.
+      const ruleDenyRun = runtime([{ decision: "deny", reason: "deny rule Bash(sudo:*)", grant: "project:/tmp/workspace", rule: "Bash(sudo:*)" }]);
+      await handleAntigravityPermissionHook(JSON.stringify({
+        hookEventName: "PreToolUse", conversationId: sessionId, cwd: "/tmp/workspace", workspacePaths: ["/tmp/workspace"],
+        toolCall: { id: "t0", name: "run_command", args: { CommandLine: "sudo ls", BypassSandbox: false } },
+      }), { ...ruleDenyRun.deps, recordsDirectory, now: () => now });
+      expect(ruleDenyRun.out.map((l) => JSON.parse(l))).toEqual([{ decision: "deny", reason: "The operator's Scout permission rules deny this call." }]);
 
       // 2. Escalation approved in Scout returns decision: allow and clears waiting record.
       const allowRun = runtime([{ requestId: "perm-agy-1" }, { state: "open" }, { state: "decided", decision: "allow" }]);
