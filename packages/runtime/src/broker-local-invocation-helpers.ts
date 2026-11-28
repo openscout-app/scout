@@ -196,6 +196,7 @@ export function closedAsSupersededTwin(flight: FlightRecord, twin: FlightRecord,
     metadata: {
       ...(flight.metadata ?? {}),
       supersededByFlightId: twin.id,
+      twinCopy: true,
       reconciledStaleFlight: true,
       reconciledReason: reason,
       reconciledAt: now,
@@ -384,7 +385,7 @@ export function isReconciledStaleFlightActivityItem(item: {
 }): boolean {
   return item.kind === "flight_updated"
     && typeof item.summary === "string"
-    && item.summary.startsWith("Stale running flight reconciled:");
+    && (item.summary.startsWith("Stale running flight reconciled:") || item.summary.startsWith("Didn't finish:"));
 }
 
 export function invocationTargetSessionId(invocation: InvocationRequest): string | undefined {

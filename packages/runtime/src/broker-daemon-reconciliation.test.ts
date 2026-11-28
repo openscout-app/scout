@@ -102,7 +102,8 @@ describe("broker daemon reconciliation", () => {
 
     expect(flight).toBeDefined();
     expect(flight?.state).toBe("failed");
-    expect(flight?.error).toContain("Stale running flight reconciled");
+    expect(flight?.error).toContain("Didn't finish:");
+    expect(flight?.metadata?.outcome).toBe("dead");
     expect(typeof flight?.completedAt).toBe("number");
   }, 15_000);
 
@@ -432,7 +433,7 @@ describe("broker daemon reconciliation", () => {
     );
     const flight = snapshot.flights["flt-ranger-already-queued"];
     expect(flight?.error).toContain("superseded local registration replaced by current setup");
-    expect(flight?.metadata?.reconciledStaleFlight).toBe(true);
+    expect(flight?.metadata).toMatchObject({ outcome: "dead", deathCause: "agent_retired" });
   }, 15_000);
 
   test("reconciles pending message deliveries that target stale local endpoints", async () => {

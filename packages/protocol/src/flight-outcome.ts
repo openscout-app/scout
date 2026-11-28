@@ -76,7 +76,9 @@ export function isDeadFlight(flight: FlightLike): boolean {
   if (flight.state !== "failed") return false;
   if (metadataString(flight, "outcome") === "dead") return true;
   // Records closed by the old reconcile pass are guesses, not reported errors.
-  return flight.metadata?.reconciledStaleFlight === true;
+  // A twin copy repeats its twin's reported outcome, so it is not a guess.
+  if (flight.metadata?.reconciledStaleFlight !== true || flight.metadata?.twinCopy === true) return false;
+  return !metadataString(flight, "reconciledReason")?.endsWith("for the same invocation");
 }
 
 export function flightOutcome(flight: FlightLike): FlightOutcome | null {

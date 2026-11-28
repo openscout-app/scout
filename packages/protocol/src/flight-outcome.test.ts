@@ -49,3 +49,10 @@ describe("flight outcomes", () => {
     expect(flightLiveness({ lastEvidenceAt: 1, now: 2, sessionGone: true })).toBe("stalled");
   });
 });
+
+test("a twin copy keeps its twin's reported outcome", () => {
+  const copy = { state: "failed" as const, metadata: { reconciledStaleFlight: true, twinCopy: true, supersededByFlightId: "t" } };
+  const legacyCopy = { state: "failed" as const, metadata: { reconciledStaleFlight: true, reconciledReason: "superseded by failed flight t for the same invocation" } };
+  expect(flightOutcome(copy)).toBe("failed");
+  expect(flightOutcome(legacyCopy)).toBe("failed");
+});
